@@ -453,7 +453,7 @@ pub fn compile_physical_asap_workload_with_node_ids(
         // Children come before their parents, so every producer is already in `nodes`.
         for (producer, role) in edge_roles(&flat_node.operator) {
             let producer_state = nodes[producer].output_state;
-            let maintenance_dependency = producer_state.timing == ExecutionTiming::IngestionTime
+            let ingestion_dependency = producer_state.timing == ExecutionTiming::IngestionTime
                 && output_state.timing == ExecutionTiming::IngestionTime;
             edges.push(PhysicalASAPDAGEdge {
                 producer,
@@ -462,7 +462,7 @@ pub fn compile_physical_asap_workload_with_node_ids(
                 intermediate_schema: nodes[producer].output_schema.clone(),
                 data_state: producer_state,
                 grouping: grouping_compatibility(&nodes[producer].payload, &flat_node.operator),
-                window: if maintenance_dependency {
+                window: if ingestion_dependency {
                     WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactWindowEdgeResidual
                 } else {
                     WindowEdgeCompatibility::NotApplicable

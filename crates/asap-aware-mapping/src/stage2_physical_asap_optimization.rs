@@ -29,7 +29,7 @@
 //! other combination of options is one physical candidate, the
 //! all-`NotMaterialized` one first: nothing is capped. A node that one
 //! query reads at ingestion time and another at query time is copied, one
-//! copy per phase ([`split_shared_by_phase`]).
+//! copy per timing ([`split_shared_by_timing`]).
 //!
 //! A build may run at ingestion time (S4) only when:
 //!
@@ -76,7 +76,7 @@ use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPNodeId,
 };
 use asap_types::ir::{
-    apply_materialization_timings, is_filtered_build, split_shared_by_phase, ASAPOp,
+    apply_materialization_timings, is_filtered_build, split_shared_by_timing, ASAPOp,
     MaterializationAssignment, Medium, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot,
     ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
 };
@@ -301,7 +301,7 @@ pub fn optimize_physical_asap(
             .iter()
             .flat_map(|root| root_operators(root).into_iter().cloned())
             .collect();
-        let (split, options) = split_shared_by_phase(&operators, &options);
+        let (split, options) = split_shared_by_timing(&operators, &options);
         let replaced: HashMap<_, _> = operators
             .iter()
             .map(Rc::as_ptr)
@@ -1047,11 +1047,12 @@ mod tests {
     /// `root` with its summary build in 1-min tumbling panes.
     fn in_panes(root: QueryRoot) -> QueryRoot {
         let roots = [root];
-        let sites = crate::asap_aware_cse::pane_candidates(&roots, &[Some(MINUTE)]);
-        assert_eq!(sites.len(), 1, "{sites:?}");
-        let mut variants =
-            crate::asap_aware_cse::window_composition_pass2_candidates(&roots, &sites).unwrap();
-        variants.pop().unwrap().roots.unwrap().remove(0)
+        let rule_candidates = crate::asap_aware_cse::pane_candidates(&roots, &[Some(MINUTE)]);
+        assert_eq!(rule_candidates.len(), 1, "{rule_candidates:?}");
+        let mut pass2_candidates =
+            crate::asap_aware_cse::window_composition_pass2_candidates(&roots, &rule_candidates)
+                .unwrap();
+        pass2_candidates.pop().unwrap().roots.unwrap().remove(0)
     }
 
     const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
@@ -1399,9 +1400,9 @@ mod tests {
 
     /// Two queries share one scan: one reads it through panes maintained at
     /// ingestion time, the other at query time. The scan is split, one copy
-    /// per phase; with nothing materialized it stays one node.
+    /// per timing; with nothing materialized it stays one node.
     #[test]
-    fn a_scan_two_queries_read_at_two_phases_is_split() {
+    fn a_scan_two_queries_read_at_two_timings_is_split() {
         let QueryRoot::Operator(panes) = in_panes(summary_root("quantile_over_time(0.99, m[5m])"))
         else {
             unreachable!()

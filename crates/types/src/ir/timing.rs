@@ -36,7 +36,7 @@
 //! error ([`ExecutionDataStateError::UnstoredIngestionRoot`]).
 //!
 //! A node reached from two consumers that need different timings cannot be
-//! executed once for both; [`split_shared_by_phase`] copies such a sub-DAG
+//! executed once for both; [`split_shared_by_timing`] copies such a sub-DAG
 //! for one side before the assignment is applied, and the pass itself
 //! rejects a conflict it still finds.
 //!
@@ -45,11 +45,11 @@
 //! | Consumer | Accepts from an input |
 //! |---|---|
 //! | `SummaryAgg.child`, `PaneChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained |
-//! | `SummaryEstimate.summary_input` | Summary state at either phase |
-//! | `SummaryMerge.children` | Summary state at either phase; at ingestion time only for a merge at ingestion time |
+//! | `SummaryEstimate.summary_input` | Summary state at either timing |
+//! | `SummaryMerge.children` | Summary state at either timing; at ingestion time only for a merge at ingestion time |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
 //! | `EvaluatePopulation.child` | A timed `MaintainPopulation` |
-//! | `MaintainPopulation.child` | Rows at its own timing matching the population's input |
+//! | `MaintainPopulation.child` | Rows at its own timing matching the population's input; unlike a `NonASAP` consumer, a query-time population does not read a `MatAtIngestion` input's stored output |
 //! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing, or a `MatAtIngestion` output read at query time; ingestion work never reads a query-time value |
 
 use std::collections::HashMap;
@@ -75,10 +75,31 @@ use crate::pre_asap::schema::{DataType, FieldDataType, Schema};
 ///
 /// The assignment keeps every assigned node alive, so a later allocation
 /// cannot reuse its address and match a stale entry.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct MaterializationAssignment {
     assigned: HashMap<*const OperatorNode, (Rc<OperatorNode>, Materialization)>,
     unassigned: Materialization,
+}
+
+/// Each assigned node as its operator kind and address, not its whole
+/// sub-DAG.
+impl std::fmt::Debug for MaterializationAssignment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let assigned: Vec<_> = self
+            .assigned
+            .iter()
+            .map(|(ptr, (node, materialization))| {
+                (
+                    format!("{}@{ptr:p}", node.operator.kind_name()),
+                    materialization,
+                )
+            })
+            .collect();
+        f.debug_struct("MaterializationAssignment")
+            .field("assigned", &assigned)
+            .field("unassigned", &self.unassigned)
+            .finish()
+    }
 }
 
 impl MaterializationAssignment {
@@ -391,7 +412,7 @@ fn placement(
 }
 
 /// The timing `node` takes when its consumer runs at `consumer`, for
-/// [`split_shared_by_phase`]: an assignment that cannot be honored is
+/// [`split_shared_by_timing`]: an assignment that cannot be honored is
 /// reported later by [`apply_materialization_timings`].
 fn own_timing(
     node: &Rc<OperatorNode>,
@@ -502,19 +523,23 @@ fn validate_asap(
                     is_exact_accumulator_state(&child.schema)?
                 }
                 other => {
-                    return Err(ExecutionDataStateError::EvaluationUnderMaintenance {
-                        edge: "SummaryAgg.child",
-                        child: other,
-                    })
+                    return Err(
+                        ExecutionDataStateError::QueryTimeValueUnderIngestionSummary {
+                            edge: "SummaryAgg.child",
+                            child: other,
+                        },
+                    )
                 }
             }
             if timing == ExecutionTiming::IngestionTime
                 && avail.timing == ExecutionTiming::QueryTime
             {
-                return Err(ExecutionDataStateError::EvaluationUnderMaintenance {
-                    edge: "SummaryAgg.child",
-                    child: avail,
-                });
+                return Err(
+                    ExecutionDataStateError::QueryTimeValueUnderIngestionSummary {
+                        edge: "SummaryAgg.child",
+                        child: avail,
+                    },
+                );
             }
             Ok(())
         }
@@ -737,7 +762,7 @@ fn validate_non_asap(
                     || !plain_float_or_ts(&node.schema)
                     || float_count != 1
                 {
-                    return Err(ExecutionDataStateError::InvalidMaintenanceBinary);
+                    return Err(ExecutionDataStateError::InvalidIngestionTimeBinary);
                 }
             }
         }
@@ -759,7 +784,7 @@ fn validate_non_asap(
 /// `Rc`, shared by the roots that read it. Returns the (possibly rewritten)
 /// roots, in order, and `assignment` remapped onto them: a rebuilt node
 /// keeps its original's explicit materialization.
-pub fn split_shared_by_phase(
+pub fn split_shared_by_timing(
     roots: &[Rc<OperatorNode>],
     assignment: &MaterializationAssignment,
 ) -> (Vec<Rc<OperatorNode>>, MaterializationAssignment) {
@@ -855,7 +880,7 @@ pub fn split_shared_by_phase(
     (split, remapped)
 }
 
-/// Maintenance arithmetic needs the same per-series population on both sides.
+/// Ingestion-time arithmetic needs the same per-series population on both sides.
 fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
     use crate::post_asap::ExactKind;
     match &node.operator {
@@ -1161,8 +1186,8 @@ mod tests {
         );
     }
 
-    /// One shared sub-DAG reached as maintenance input and as query-time
-    /// input cannot be executed once for both; splitting it by phase first
+    /// One shared sub-DAG reached as ingestion-time input and as query-time
+    /// input cannot be executed once for both; splitting it by timing first
     /// makes the plan timeable.
     #[test]
     fn a_shared_subtree_reached_at_two_timings_conflicts() {
@@ -1183,7 +1208,7 @@ mod tests {
             })
         );
         let (split, assignment) =
-            split_shared_by_phase(std::slice::from_ref(&root), &all_at_ingestion());
+            split_shared_by_timing(std::slice::from_ref(&root), &all_at_ingestion());
         assert!(
             apply_materialization_timings(&split[0], &assignment, &mut TimingMemo::new()).is_ok()
         );
@@ -1228,7 +1253,7 @@ mod tests {
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&summary, AT_INGESTION);
-        let (split, assignment) = split_shared_by_phase(std::slice::from_ref(&root), &assignment);
+        let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
         let timed =
             apply_materialization_timings(&split[0], &assignment, &mut TimingMemo::new()).unwrap();
         let summary = child(&child(&child(&timed)));
@@ -1333,7 +1358,7 @@ mod tests {
     /// over both roots succeeds; a node both queries reach at one timing
     /// stays one node.
     #[test]
-    fn split_across_roots_copies_only_what_two_queries_read_at_two_phases() {
+    fn split_across_roots_copies_only_what_two_queries_read_at_two_timings() {
         let shared = scan();
         let summary = agg(Rc::clone(&shared), kll());
         let by_summary = max(estimate(Rc::clone(&summary)));
@@ -1356,7 +1381,7 @@ mod tests {
             timed_unsplit,
             Err(ExecutionDataStateError::ConflictingTiming { .. })
         ));
-        let (split, assignment) = split_shared_by_phase(&roots, &assignment);
+        let (split, assignment) = split_shared_by_timing(&roots, &assignment);
         assert_eq!(split.len(), 2);
         let mut memo = TimingMemo::new();
         let timed: Vec<_> = split
@@ -1434,6 +1459,97 @@ mod tests {
         );
     }
 
+    /// The Debug output names each assigned node by its operator kind, not
+    /// its whole sub-DAG.
+    #[test]
+    fn debug_names_each_assigned_node_by_its_kind() {
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&agg(scan(), kll()), AT_INGESTION);
+        let text = format!("{assignment:?}");
+        assert!(text.contains("SummaryAgg@"), "{text}");
+        assert!(!text.contains("fields"), "{text}");
+    }
+
+    /// A node fixed at ingestion time by its candidate rejects a `MatAtQuery`
+    /// assignment, which needs the other timing.
+    #[test]
+    fn ingestion_fixed_node_rejects_mat_at_query() {
+        let fixed = placed_at_ingestion(max(scan()));
+        let root = max(Rc::clone(&fixed));
+        let at_query = Materialization::MatAtQuery(Medium::Memory);
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&fixed, at_query);
+        assert_eq!(
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).err(),
+            Some(
+                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                    operator: "Aggregate",
+                    fixed: ExecutionTiming::IngestionTime,
+                    materialization: at_query,
+                }
+            )
+        );
+    }
+
+    /// An explicit `NotMaterialized` on a node whose timing its candidate
+    /// fixed agrees with either timing: the node keeps its fixed timing and
+    /// records `NotMaterialized`.
+    #[test]
+    fn explicit_not_materialized_keeps_a_fixed_timing() {
+        let read = Rc::new(
+            (*finalize(agg(scan(), exact_sum())))
+                .clone()
+                .with_timing(Some(ExecutionTiming::QueryTime)),
+        );
+        let root = max(Rc::clone(&read));
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&read, Materialization::NotMaterialized);
+        let timed =
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+        let read = child(&timed);
+        assert_eq!(read.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(read.materialization, Materialization::NotMaterialized);
+    }
+
+    /// Splitting a workload that also shares a scan at two timings keeps a
+    /// conflicting assignment on a fixed-timing node: the split roots still
+    /// fail with the conflict instead of dropping the assignment.
+    #[test]
+    fn a_fixed_timing_conflict_survives_the_split() {
+        let shared = scan();
+        let summary = agg(Rc::clone(&shared), kll());
+        let pair = concat(vec![
+            max(estimate(Rc::clone(&summary))),
+            max(Rc::clone(&shared)),
+        ]);
+        let state = agg(Rc::clone(&shared), exact_sum());
+        let read = Rc::new(
+            (*finalize(Rc::clone(&state)))
+                .clone()
+                .with_timing(Some(ExecutionTiming::QueryTime)),
+        );
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&summary, AT_INGESTION);
+        assignment.set(&state, AT_INGESTION);
+        assignment.set(&read, AT_INGESTION);
+        let (split, assignment) = split_shared_by_timing(&[pair, read], &assignment);
+        let mut memo = TimingMemo::new();
+        let timed: Result<Vec<_>, _> = split
+            .iter()
+            .map(|root| apply_materialization_timings(root, &assignment, &mut memo))
+            .collect();
+        assert_eq!(
+            timed.err(),
+            Some(
+                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                    operator: "FinalizeExactAccumulator",
+                    fixed: ExecutionTiming::QueryTime,
+                    materialization: AT_INGESTION,
+                }
+            )
+        );
+    }
+
     /// A root stored at ingestion time is valid: the query reads the stored
     /// output. A root that runs at ingestion time without being stored there
     /// is not.
@@ -1496,7 +1612,7 @@ mod tests {
     // Typed derived updates retain one opaque series identity only when both
     // operands cover the same series; arbitrary labels are never admitted.
     #[test]
-    fn maintenance_binary_accepts_only_well_typed_series_identity() {
+    fn ingestion_time_binary_accepts_only_well_typed_series_identity() {
         use crate::ir::non_asap::BinaryOperator;
         use crate::pre_asap::{ArithmeticOpKind, BinaryOpKind};
         let identity = crate::pre_asap::schema::PROMQL_SERIES_IDENTITY;
@@ -1571,7 +1687,7 @@ mod tests {
         assert!(validate(schema.clone(), "m").is_ok());
         assert_eq!(
             validate(schema.clone(), "n"),
-            Err(ExecutionDataStateError::InvalidMaintenanceBinary),
+            Err(ExecutionDataStateError::InvalidIngestionTimeBinary),
             "different selectors may cover different series"
         );
         for mutation in 0..4 {
@@ -1584,7 +1700,7 @@ mod tests {
             }
             assert_eq!(
                 validate(invalid, "m"),
-                Err(ExecutionDataStateError::InvalidMaintenanceBinary)
+                Err(ExecutionDataStateError::InvalidIngestionTimeBinary)
             );
         }
     }

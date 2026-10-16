@@ -129,13 +129,14 @@ pub enum ExecutionDataStateError {
     #[error("invalid maintained-population maintenance/evaluation contract")]
     InvalidMaintainedPopulation,
     /// A query-time value (a `SummaryEstimate` or query-time operator output)
-    /// placed beneath a maintained summary — the one shape issue #171's
-    /// data_state split exists to make unrepresentable.
+    /// placed beneath a summary built at ingestion time — the one shape issue
+    /// #171's data_state split exists to make unrepresentable.
     #[error(
-        "evaluation value under maintenance: {edge} received a {child} input, but a maintained \
-         summary can only consume update-path values (or exact accumulator state)"
+        "query-time value under an ingestion-time summary: {edge} received a {child} input, but a \
+         summary built at ingestion time can only consume ingestion-time rows (or exact \
+         accumulator state)"
     )]
-    EvaluationUnderMaintenance {
+    QueryTimeValueUnderIngestionSummary {
         edge: &'static str,
         child: ExecutionDataState,
     },
@@ -190,8 +191,12 @@ pub enum ExecutionDataStateError {
     /// apply it.
     #[error("{operator} has a filter, which only a query-time build can apply")]
     FilteredSummaryAtIngestion { operator: &'static str },
-    #[error("unsupported maintenance binary schema or operator")]
-    InvalidMaintenanceBinary,
+    /// An ingestion-time `BinaryOp` the update path cannot evaluate: not
+    /// arithmetic without vector matching, operands that are not the same
+    /// per-series rows, or a schema other than non-null timestamps, at most
+    /// one series identity and one Float64 value.
+    #[error("unsupported ingestion-time binary schema or operator")]
+    InvalidIngestionTimeBinary,
     #[error("checked division requires one valid guard on a read-time division operator")]
     InvalidCheckedDivision,
     /// An exact operator whose input columns are not all `Plain` at its
