@@ -14,11 +14,11 @@
 //!   its exact accumulator states (`ExactAccumulator`; `[Sum, Count]` for
 //!   `avg`) when they can be built, otherwise plain `Exact`. Whether they are
 //!   materialized is decided in Stage 2.
-//! - A computation that fuses a target with the target beneath it is its own
-//!   target, which absorbs the one beneath
-//!   ([`ComputationTarget::fused_target`]): the whole-expression top-k over a
-//!   per-item `sum` or `count` (`Summary` of a heap family) and the nested
-//!   sum, a grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
+//! - A computation that fuses a target with the target beneath it is the
+//!   outer target's [`FusedComputation`], which absorbs the one beneath and
+//!   has its own candidates: the whole-expression top-k over a per-item
+//!   `sum` or `count` (`Summary` of a heap family) and the nested sum, a
+//!   grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
 //! - Summary candidates are unsized; they are sized after Pass 2 sharing.
 //! - Candidates are pruned only when provably unable to meet the accuracy
 //!   requirement, and each pruned candidate keeps its [`PruneReason`].
@@ -37,7 +37,7 @@
 //! [`compose_logical_candidate`] is Algorithm 1's
 //! `SUBSTITUTE(d, s_1 ↦ c_1, …)`: it picks one per-computation candidate per
 //! target (`choice[i]` indexes `targets[i]`'s candidates, then its fused
-//! target's, [`ComputationTarget::chosen`]) and builds one whole-workload
+//! computation's, [`ComputationTarget::computation_for`]) and builds one whole-workload
 //! candidate DAG. An aggregate whose chosen candidates are all `Exact` is
 //! kept. Otherwise each of its measures is substituted on its own over the
 //! aggregate's input:
@@ -51,7 +51,7 @@
 //! - `Summary`: `SummaryAgg` → `SummaryEstimate`.
 //! - `Exact` (or a measure that is no target): a single-measure `Aggregate`.
 //!
-//! A fused target's candidate reads the absorbed target's input instead:
+//! A fused computation's candidate reads the absorbed target's input instead:
 //! the whole-expression top-k is one heap `SummaryAgg` keyed by the ranked
 //! item → `SummaryEstimate`; the nested sum is `SummaryAgg` with the exact
 //! `Sum` family grouped by the outer keys → `FinalizeExactAccumulator`.
@@ -130,8 +130,8 @@ use crate::realization::{
 /// intent has an exact mergeable state and it can be built, otherwise
 /// `Exact`. The plain form would duplicate "accumulator, not materialized";
 /// Stage 2/3 decide materialization and sharing. Which computation is
-/// computed is the target's ([`ComputationTarget`]); a fused computation is
-/// its own target ([`ComputationTarget::fused_target`]).
+/// computed is the target's ([`ComputationTarget`]) or its fused
+/// computation's ([`FusedComputation`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComputationCandidate {
     /// Plain exact execution of the original sub-DAG; the exact option only
@@ -229,15 +229,16 @@ pub struct HavingEntry {
 }
 
 /// One measure of an aggregate with at least one realization besides exact
-/// execution, or a fused computation of it ([`Self::fused_target`]). The
-/// target retains source, grouping, filters, input expressions and
-/// evaluation context.
+/// execution. The target retains source, grouping, filters, input
+/// expressions and evaluation context.
 #[derive(Debug, Clone)]
 pub struct ComputationTarget {
     /// The `Aggregate` node the measure belongs to.
     pub aggregate: Rc<OperatorNode>,
     /// Index into the aggregate's measures.
     pub measure: usize,
+    /// The measure's unranked candidates, the exact option first, and the
+    /// candidates Pass 1 pruned with their reasons.
     pub choices: ComputationChoices,
     /// The measure's own filter; only rows that pass it update the state
     /// (`SummaryAgg.filter`).
@@ -245,17 +246,10 @@ pub struct ComputationTarget {
     /// The aggregate's own `having`, then one entry per consumer `Filter`
     /// directly above the aggregate.
     pub having: Vec<HavingEntry>,
-    /// On a fused target only: the index (in
-    /// [`PerComputationCandidates::targets`]) of the target directly
-    /// beneath that it absorbs, which is not computed when the fused target
-    /// is chosen. `None` on every target of the inventory's list.
-    pub absorbs: Option<usize>,
-    /// The fused alternative of this target, computing the same measure
-    /// together with the target beneath it, which it absorbs: a
-    /// whole-expression top-k over the per-item `sum` or `count` beneath, or
-    /// the nested-sum merge of a `sum` over a `sum`. `None` when no fusion
-    /// applies, and on a fused target itself.
-    pub fused_target: Option<Box<ComputationTarget>>,
+    /// The fused computation of this measure together with the target
+    /// directly beneath it, offered beside this target's own candidates;
+    /// `None` when no fusion applies.
+    pub fused: Option<FusedComputation>,
     /// The metric whose raw samples, or plain sums of them, are every value
     /// the aggregate reads ([`samples_of_metric`]); `None` otherwise. A
     /// heap-sketch weight read from them carries the open requirement
@@ -263,28 +257,42 @@ pub struct ComputationTarget {
     pub samples_of: Option<String>,
 }
 
+/// A target's measure computed together with the target directly beneath
+/// it, which it absorbs (that target is not computed): the whole-expression
+/// top-k over a per-item `sum` or `count` (`Summary` of a heap family), or
+/// the nested sum, a grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
+/// It has the outer target's aggregate, measure, filter and `HAVING`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FusedComputation {
+    /// The index in [`PerComputationCandidates::targets`] of the inner
+    /// target it absorbs.
+    pub absorbs: usize,
+    /// How the fused computation is computed: exact or a summary.
+    pub candidates: Vec<ComputationCandidate>,
+}
+
 impl ComputationTarget {
     /// How many values this target's digit of a whole-workload choice
-    /// takes: its own candidates, then its fused target's.
+    /// takes: its own candidates, then its fused computation's.
     pub fn choice_count(&self) -> usize {
         self.choices.candidates.len()
             + self
-                .fused_target
+                .fused
                 .as_ref()
-                .map_or(0, |fused| fused.choices.candidates.len())
+                .map_or(0, |fused| fused.candidates.len())
     }
 
-    /// The target that computes the measure and its candidate when this
-    /// target's digit of a whole-workload choice is `index`: this target
-    /// and its own candidate `index`, or past them, its fused target and
-    /// that target's candidate. `None` past [`Self::choice_count`].
-    pub fn chosen(&self, index: usize) -> Option<(&ComputationTarget, &ComputationCandidate)> {
+    /// How the measure is computed when this target's digit of a
+    /// whole-workload choice is `index`: the candidate, and the target it
+    /// absorbs when the candidate is the fused computation's (past this
+    /// target's own candidates). `None` past [`Self::choice_count`].
+    pub fn computation_for(&self, index: usize) -> Option<(&ComputationCandidate, Option<usize>)> {
         let own = self.choices.candidates.len();
         match self.choices.candidates.get(index) {
-            Some(candidate) => Some((self, candidate)),
+            Some(candidate) => Some((candidate, None)),
             None => {
-                let fused = self.fused_target.as_deref()?;
-                Some((fused, fused.choices.candidates.get(index - own)?))
+                let fused = self.fused.as_ref()?;
+                Some((fused.candidates.get(index - own)?, Some(fused.absorbs)))
             }
         }
     }
@@ -293,21 +301,24 @@ impl ComputationTarget {
 /// Compact Pass 1 inventory; roots and nested producer dependencies are retained.
 #[derive(Debug, Clone)]
 pub struct PerComputationCandidates<Id> {
+    /// The frontends' query roots with their ids, in workload order; whole-
+    /// workload candidates are these roots with chosen candidates substituted.
     pub roots: Vec<(Id, QueryRoot)>,
-    /// The unfused targets; a whole-workload choice has one digit per
-    /// target, ranging over [`ComputationTarget::choice_count`].
+    /// The targets; a whole-workload choice has one digit per target,
+    /// ranging over [`ComputationTarget::choice_count`].
     pub targets: Vec<ComputationTarget>,
 }
 
 impl<Id> PerComputationCandidates<Id> {
     /// The number of whole-workload candidates: the size of the Cartesian
     /// product of the targets' candidates, where a target with a fused
-    /// target and the target beneath that it absorbs count as their own
-    /// pairs plus the fused target's candidates (the absorbed target is not
-    /// computed then), saturating at `usize::MAX`. An absorbed target has
-    /// one fused target over it, and a fused target is never absorbed, so
-    /// each such pair counts as `n · m + f` for a target with `n`
-    /// candidates over an absorbed target with `m`, and `f` fused ones.
+    /// computation and the target beneath that it absorbs count as their
+    /// own pairs plus the fused computation's candidates (the absorbed
+    /// target is not computed then), saturating at `usize::MAX`. An absorbed
+    /// target is absorbed by one fused computation, and a target with one is
+    /// never absorbed, so each such pair counts as `n · m + f` for a target
+    /// with `n` candidates over an absorbed target with `m`, and `f` fused
+    /// ones.
     pub fn combinations(&self) -> usize {
         let absorbed: HashSet<usize> = absorbed_targets(&self.targets).collect();
         self.targets
@@ -316,34 +327,33 @@ impl<Id> PerComputationCandidates<Id> {
             .filter(|(index, _)| !absorbed.contains(index))
             .map(|(_, target)| {
                 let n = target.choices.candidates.len();
-                let Some(fused) = &target.fused_target else {
+                let Some(fused) = &target.fused else {
                     return n;
                 };
-                let inner = fused.absorbs.expect("a fused target absorbs");
-                n.saturating_mul(self.targets[inner].choices.candidates.len())
-                    .saturating_add(fused.choices.candidates.len())
+                n.saturating_mul(self.targets[fused.absorbs].choices.candidates.len())
+                    .saturating_add(fused.candidates.len())
             })
             .fold(1usize, usize::saturating_mul)
     }
 
-    /// Whether `choice` picks a fused target and a candidate other than the
-    /// first for the target it absorbs: the same whole-workload candidate as
-    /// the one with the first, so enumeration skips it.
+    /// Whether `choice` picks a fused computation and a candidate other
+    /// than the first for the target it absorbs: the same whole-workload
+    /// candidate as the one with the first, so enumeration skips it.
     pub fn absorbed_choice_varies(&self, choice: &[usize]) -> bool {
         self.targets.iter().zip(choice).any(|(target, &index)| {
             target
-                .chosen(index)
-                .and_then(|(computing, _)| computing.absorbs)
+                .computation_for(index)
+                .and_then(|(_, absorbed)| absorbed)
                 .is_some_and(|inner| choice[inner] != 0)
         })
     }
 }
 
-/// The indices of `targets` some target's fused target absorbs.
+/// The indices of `targets` some target's fused computation absorbs.
 fn absorbed_targets(targets: &[ComputationTarget]) -> impl Iterator<Item = usize> + '_ {
     targets
         .iter()
-        .filter_map(|target| target.fused_target.as_ref()?.absorbs)
+        .filter_map(|target| Some(target.fused.as_ref()?.absorbs))
 }
 
 #[derive(Debug, Error)]
@@ -580,8 +590,7 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
                 choices,
                 filter: filters.get(measure).cloned().flatten(),
                 having: entries.clone(),
-                absorbs: None,
-                fused_target: None,
+                fused: None,
                 samples_of: node.non_asap().and_then(|op| match op {
                     NonASAPOp::Aggregate { child, .. } => samples_of_metric(child),
                     _ => None,
@@ -595,15 +604,16 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
 }
 
 /// Nested-sum merge: a grouped `sum` over the value of a `sum` target
-/// beneath it gets a fused target ([`ComputationTarget::fused_target`])
+/// beneath it gets a fused computation ([`ComputationTarget::fused`])
 /// with the one candidate `ExactAccumulator([Sum])`: one exact `Sum`
 /// accumulator over the inner sum's input, grouped by the outer keys (the
 /// sum of the inner groups' sums is the sum of their rows), absorbing the
 /// inner target. Applied only when the inner sum has no other consumer, so
 /// absorbing it removes its work, when neither has a filter or `HAVING`
 /// ([`nested_sum_input`]), and when the outer sum is not itself absorbed
-/// and has no fused target yet, and the inner sum has none, so a fused
-/// target is never absorbed and merges do not stack.
+/// and has no fused computation yet, and the inner sum has none, so a
+/// target with a fused computation is never absorbed and merges do not
+/// stack.
 fn add_nested_sum_targets(
     targets: &mut [ComputationTarget],
     consumers: &HashMap<*const OperatorNode, Vec<Option<Rc<OperatorNode>>>>,
@@ -611,7 +621,7 @@ fn add_nested_sum_targets(
     let mut absorbed: HashSet<usize> = absorbed_targets(targets).collect();
     for t in 0..targets.len() {
         let target = &targets[t];
-        if absorbed.contains(&t) || target.fused_target.is_some() || !target.having.is_empty() {
+        if absorbed.contains(&t) || target.fused.is_some() || !target.having.is_empty() {
             continue;
         }
         let Some(NonASAPOp::Aggregate { child, .. }) = target.aggregate.non_asap() else {
@@ -623,36 +633,21 @@ fn add_nested_sum_targets(
         else {
             continue;
         };
-        // A fused target is never absorbed: the inner sum must not have a
-        // fused target of its own.
+        // A target with a fused computation is never absorbed: the inner sum
+        // must not have one of its own.
         if consumers.get(&Rc::as_ptr(child)).map(Vec::len) != Some(1)
             || !targets[inner].having.is_empty()
-            || targets[inner].fused_target.is_some()
+            || targets[inner].fused.is_some()
             || nested_sum_input(&target.aggregate).is_none()
         {
             continue;
         }
         absorbed.insert(inner);
         let merge = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
-        targets[t].fused_target = Some(Box::new(fused_target(&targets[t], inner, vec![merge])));
-    }
-}
-
-/// The fused target of `target` absorbing `targets[inner]`, with
-/// `candidates`: the same measure, filter, `HAVING` and samples.
-fn fused_target(
-    target: &ComputationTarget,
-    inner: usize,
-    candidates: Vec<ComputationCandidate>,
-) -> ComputationTarget {
-    ComputationTarget {
-        choices: ComputationChoices {
-            candidates,
-            pruned: vec![],
-        },
-        absorbs: Some(inner),
-        fused_target: None,
-        ..target.clone()
+        targets[t].fused = Some(FusedComputation {
+            absorbs: inner,
+            candidates: vec![merge],
+        });
     }
 }
 
@@ -727,13 +722,13 @@ fn nested_sum_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, AggInten
 }
 
 /// Whole-expression top-k (Example 1's Q2): a top-k over a per-item `sum`
-/// or `count` that is itself a target gets a fused target
-/// ([`ComputationTarget::fused_target`]) absorbing the inner target, whose
+/// or `count` that is itself a target gets a fused computation
+/// ([`ComputationTarget::fused`]) absorbing the inner target, whose
 /// candidates are the top-k's heap summaries (Count-Min and CountSketch
 /// with a heap), each one heap over the inner aggregate's input, keyed by
 /// the ranked item and weighted by the summed value. Those heaps over the
 /// exact per-item result leave the top-k's own candidates: the fused
-/// target replaces them. Applied only when the inner aggregate has no other
+/// computation replaces them. Applied only when the inner aggregate has no other
 /// consumer, so absorbing it removes its work, when neither has a filter or
 /// `HAVING`, and when the keyed-additive rule realizes it
 /// ([`whole_expression_input`]).
@@ -777,10 +772,12 @@ fn add_whole_expression_targets(
         if heaps.is_empty() {
             continue;
         }
-        let fused = fused_target(&targets[t], inner, heaps);
         let target = &mut targets[t];
         target.choices.candidates = own;
-        target.fused_target = Some(Box::new(fused));
+        target.fused = Some(FusedComputation {
+            absorbs: inner,
+            candidates: heaps,
+        });
     }
 }
 
@@ -921,12 +918,14 @@ fn with_samples_requirement(mut update: SummaryUpdate, metric: Option<&str>) -> 
     update
 }
 
-/// Build one whole-workload candidate (end of Pass 1): `choice[i]` indexes
-/// `inventory.targets[i].choices.candidates`. An aggregate with a chosen
-/// candidate other than `Exact` is replaced measure by measure: an exact
-/// accumulator by `SummaryAgg` → `FinalizeExactAccumulator`, a summary by
-/// `SummaryAgg` → `SummaryEstimate`, `avg` by its `sum` and `count`
-/// accumulators divided, and any other measure by its own single-measure
+/// Build one whole-workload candidate (end of Pass 1): `choice[i]` picks
+/// `inventory.targets[i]`'s candidate, or past its own candidates its fused
+/// computation's ([`ComputationTarget::computation_for`]). An aggregate with
+/// a chosen candidate other than `Exact` is replaced measure by measure: an
+/// exact accumulator by `SummaryAgg` → `FinalizeExactAccumulator`, a summary
+/// by `SummaryAgg` → `SummaryEstimate`, `avg` by its `sum` and `count`
+/// accumulators divided, a fused computation by one state over the absorbed
+/// target's input, and any other measure by its own single-measure
 /// aggregate; several measures are joined back on the group keys. A summary
 /// is sized here for its measure's accuracy requirement; Pass 1 leaves it
 /// unsized; several approximate inputs of one query share its budget
@@ -943,20 +942,24 @@ pub fn compose_logical_candidate<Id: Clone>(
     }
     let mut chosen: Chosen = HashMap::new();
     for (target, &index) in inventory.targets.iter().zip(choice) {
-        let (computing, candidate) = target
-            .chosen(index)
+        let (candidate, absorbs) = target
+            .computation_for(index)
             .ok_or(PerComputationCandidateError::InvalidChoice)?;
         chosen
-            .entry(Rc::as_ptr(&computing.aggregate))
+            .entry(Rc::as_ptr(&target.aggregate))
             .or_default()
-            .push((computing, candidate));
+            .push(ChosenComputation {
+                target,
+                candidate,
+                absorbs,
+            });
     }
     // Consumer `Filter`s whose key-only `HAVING` moves below a substituted
     // aggregate: each is replaced by its input.
     let pushed_below: HashSet<_> = chosen
         .values()
         .filter(|targets| substituted(targets))
-        .flat_map(|targets| &targets[0].0.having)
+        .flat_map(|targets| &targets[0].target.having)
         .filter(|entry| entry.placement == HavingPlacement::BelowAggregate)
         .filter_map(|entry| entry.filter.as_ref().map(Rc::as_ptr))
         .collect();
@@ -1206,17 +1209,27 @@ fn compose_roots<Id: Clone>(
     Ok(roots)
 }
 
-/// Each aggregate's targets with their chosen candidates.
-type Chosen<'a> =
-    HashMap<*const OperatorNode, Vec<(&'a ComputationTarget, &'a ComputationCandidate)>>;
+/// One target's chosen computation in a whole-workload choice.
+struct ChosenComputation<'a> {
+    /// The target whose measure it computes.
+    target: &'a ComputationTarget,
+    /// How it is computed.
+    candidate: &'a ComputationCandidate,
+    /// The target beneath it absorbs when the candidate is the target's fused
+    /// computation's; `None` for one of the target's own candidates.
+    absorbs: Option<usize>,
+}
+
+/// Each aggregate's targets with their chosen computations.
+type Chosen<'a> = HashMap<*const OperatorNode, Vec<ChosenComputation<'a>>>;
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
 /// Whether any measure of the aggregate is substituted by something other than
 /// its plain exact computation.
-fn substituted(targets: &[(&ComputationTarget, &ComputationCandidate)]) -> bool {
+fn substituted(targets: &[ChosenComputation<'_>]) -> bool {
     targets
         .iter()
-        .any(|(_, candidate)| **candidate != ComputationCandidate::Exact)
+        .any(|chosen| *chosen.candidate != ComputationCandidate::Exact)
 }
 
 fn rewrite(
@@ -2447,7 +2460,7 @@ fn estimate_bound_over_samples(
 /// columns.
 fn substitute(
     target: &Rc<OperatorNode>,
-    targets: &[(&ComputationTarget, &ComputationCandidate)],
+    targets: &[ChosenComputation<'_>],
     sizing: &Sizing,
     memo: &Memo,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
@@ -2465,7 +2478,7 @@ fn substitute(
     };
     // A key-only `HAVING` is a row predicate over the input: rows of a
     // dropped group never reach the state.
-    let having = &targets[0].0.having;
+    let having = &targets[0].target.having;
     // Operator refs in a predicate (a subquery) are this aggregate's
     // children, already rewritten.
     let rewritten = |pred: &Predicate| {
@@ -2489,21 +2502,18 @@ fn substitute(
         .iter()
         .enumerate()
         .map(|(measure, intent)| {
-            // `fused`: the candidate is a fused target's, which absorbs the
-            // target beneath.
+            // `fused`: the candidate is the target's fused computation's,
+            // which absorbs the target beneath.
             let (candidate, samples_of, fused) = targets
                 .iter()
-                .find(|(target, _)| target.measure == measure)
-                .map_or(
-                    (&ComputationCandidate::Exact, None, false),
-                    |(target, candidate)| {
-                        (
-                            *candidate,
-                            target.samples_of.as_deref(),
-                            target.absorbs.is_some(),
-                        )
-                    },
-                );
+                .find(|chosen| chosen.target.measure == measure)
+                .map_or((&ComputationCandidate::Exact, None, false), |chosen| {
+                    (
+                        chosen.candidate,
+                        chosen.target.samples_of.as_deref(),
+                        chosen.absorbs.is_some(),
+                    )
+                });
             let filter = filters.get(measure).and_then(Option::as_ref).map(rewritten);
             let key = (Rc::as_ptr(target), measure);
             if fused {
@@ -2513,7 +2523,7 @@ fn substitute(
                         whole_expression(target, intent, algorithm, samples_of, (sizing, key), memo)
                     }
                     ComputationCandidate::Exact => Err(PerComputationCandidateError::Unsupported(
-                        "plain exact execution of a fused target",
+                        "plain exact execution of a fused computation",
                     )),
                 };
             }
@@ -2725,10 +2735,11 @@ fn substitute_measure(
             }))?
         }
         ComputationCandidate::ExactAccumulator(kinds) => {
-            let (AggIntent::Avg { col }, [sum_kind, count_kind]) = (intent, kinds.as_slice())
+            let (AggIntent::Avg { col }, [ExactKind::Sum, ExactKind::Count]) =
+                (intent, kinds.as_slice())
             else {
                 return Err(PerComputationCandidateError::Unsupported(
-                    "several exact states other than avg's sum and count",
+                    "several exact states other than avg's sum then count",
                 ));
             };
             let sum_intent = AggIntent::Sum { col: *col };
@@ -2736,9 +2747,9 @@ fn substitute_measure(
             // non-null (a nullable input prunes this candidate), so it counts
             // the rows the sum reads.
             let read = measure_input(&sum_intent, input, filter.as_ref())?;
-            let mut sum = finalized(sum_kind, &sum_intent, read.clone())?;
+            let mut sum = finalized(&ExactKind::Sum, &sum_intent, read.clone())?;
             let count = finalized(
-                count_kind,
+                &ExactKind::Count,
                 &AggIntent::Count {
                     accuracy: AccuracyTarget::exact(),
                 },
@@ -3869,7 +3880,7 @@ mod tests {
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap()
     }
 
-    /// Every candidate of target `t`, then of its fused target, composed
+    /// Every candidate of target `t`, then of its fused computation, composed
     /// with every other target at its first candidate, with the candidate.
     fn composed_with(
         inventory: &PerComputationCandidates<usize>,
@@ -3883,7 +3894,7 @@ mod tests {
                 let QueryRoot::Operator(root) = &composed[0].1 else {
                     panic!("operator root")
                 };
-                let (_, candidate) = inventory.targets[t].chosen(c).unwrap();
+                let (candidate, _) = inventory.targets[t].computation_for(c).unwrap();
                 (candidate.clone(), root.clone())
             })
             .collect()
@@ -3918,9 +3929,9 @@ mod tests {
     }
 
     /// Example 1's Q2: the top-k over a per-series `sum_over_time` keeps
-    /// only its exact candidate and gets a fused whole-expression target
-    /// with a Count-Min and a CountSketch heap, which replace the heaps over
-    /// the exact sum. The fused target absorbs the inner sum: composed, no
+    /// only its exact candidate and gets a fused whole-expression
+    /// computation with a Count-Min and a CountSketch heap, which replace the
+    /// heaps over the exact sum. The fused computation absorbs the inner sum: composed, no
     /// aggregate is computed and the heap reads the range selector's raw
     /// samples.
     #[test]
@@ -3929,17 +3940,15 @@ mod tests {
         let topk = topk_target(&inventory);
         let target = &inventory.targets[topk];
         assert_eq!(target.choices.candidates, [ComputationCandidate::Exact]);
-        assert_eq!(target.absorbs, None);
-        let fused = target.fused_target.as_deref().expect("a fused target");
+        let fused = target.fused.as_ref().expect("a fused computation");
         assert_eq!(
-            fused.choices.candidates,
+            fused.candidates,
             [
                 ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap),
                 ComputationCandidate::Summary(SketchAlgorithm::CountSketchWithHeap),
             ]
         );
-        assert!(Rc::ptr_eq(&fused.aggregate, &target.aggregate));
-        let inner = fused.absorbs.expect("absorbs the inner sum");
+        let inner = fused.absorbs;
         assert_eq!(inventory.targets[inner].choices.candidates.len(), 1);
         assert_eq!(inventory.combinations(), 3);
         for (candidate, root) in composed_with(&inventory, topk) {
@@ -3984,7 +3993,7 @@ mod tests {
         let mut heaps = 0;
         for (candidate, root) in composed_with(&inventory, topk) {
             // The top-k's own candidate is exact; its summaries are the
-            // fused target's.
+            // fused computation's.
             if !matches!(candidate, ComputationCandidate::Summary(_)) {
                 continue;
             }
@@ -4065,17 +4074,41 @@ mod tests {
         }
     }
 
-    /// The target whose fused target is a nested-sum merge.
+    /// An avg's exact states are its sum then its count: any other order
+    /// is refused rather than divided the wrong way round.
+    #[test]
+    fn avg_states_out_of_order_are_refused() {
+        let mut inventory = inventory("avg by (job) (m)");
+        assert_eq!(
+            inventory.targets[0].choices.candidates,
+            [ComputationCandidate::ExactAccumulator(vec![
+                ExactKind::Sum,
+                ExactKind::Count
+            ])]
+        );
+        assert!(compose_logical_candidate(&inventory, &[0]).is_ok());
+        inventory.targets[0].choices.candidates =
+            vec![ComputationCandidate::ExactAccumulator(vec![
+                ExactKind::Count,
+                ExactKind::Sum,
+            ])];
+        assert!(matches!(
+            compose_logical_candidate(&inventory, &[0]),
+            Err(PerComputationCandidateError::Unsupported(_))
+        ));
+    }
+
+    /// The target whose fused computation is a nested-sum merge.
     fn nested_sum_target(inventory: &PerComputationCandidates<usize>) -> Option<usize> {
         let merge = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
         inventory.targets.iter().position(|t| {
-            t.fused_target
+            t.fused
                 .as_ref()
-                .is_some_and(|fused| fused.choices.candidates == [merge.clone()])
+                .is_some_and(|fused| fused.candidates == [merge.clone()])
         })
     }
 
-    /// `sum by (job) (sum_over_time(m[5m]))` gets a fused nested-sum target
+    /// `sum by (job) (sum_over_time(m[5m]))` gets a fused nested sum
     /// beside its own accumulator: one exact Sum accumulator over the range's
     /// raw samples, grouped by `job`, which absorbs the inner per-series sum.
     /// Composed, no per-series state is built, the value is exact and the
@@ -4087,9 +4120,9 @@ mod tests {
         let target = &inventory.targets[outer];
         let sum = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
         assert_eq!(target.choices.candidates, std::slice::from_ref(&sum));
-        let fused = target.fused_target.as_deref().expect("a fused target");
-        assert_eq!(fused.choices.candidates, [sum]);
-        let inner = fused.absorbs.expect("absorbs the inner sum");
+        let fused = target.fused.as_ref().expect("a fused computation");
+        assert_eq!(fused.candidates, [sum]);
+        let inner = fused.absorbs;
         assert_eq!(inventory.targets[inner].choices.candidates.len(), 1);
         assert_eq!(inventory.combinations(), 2);
         let composed = composed_with(&inventory, outer);
@@ -4167,7 +4200,7 @@ mod tests {
     }
 
     /// Merges do not stack: in `sum(sum by (job) (sum_over_time(m[5m])))`
-    /// a target with a fused target is never absorbed, and `combinations`
+    /// a target with a fused computation is never absorbed, and `combinations`
     /// counts exactly the choices enumeration keeps.
     #[test]
     fn nested_sum_merges_do_not_stack() {
@@ -4176,8 +4209,8 @@ mod tests {
         assert_eq!(absorbed.len(), 1, "one merge");
         for &a in &absorbed {
             assert!(
-                inventory.targets[a].fused_target.is_none(),
-                "an absorbed target has a fused target"
+                inventory.targets[a].fused.is_none(),
+                "an absorbed target has a fused computation"
             );
         }
         let mut enumerated = 0;
@@ -4212,12 +4245,12 @@ mod tests {
         let inventory = inventory("topk by (job) (10, count_over_time(m[1m]))");
         let topk = topk_target(&inventory);
         let target = &inventory.targets[topk];
-        let Some(fused) = &target.fused_target else {
-            panic!("a fused target: {:?}", target.choices.candidates)
+        let Some(fused) = &target.fused else {
+            panic!("a fused computation: {:?}", target.choices.candidates)
         };
-        let inner = fused.absorbs.expect("absorbs the count");
+        let inner = fused.absorbs;
         let n = target.choices.candidates.len();
-        let whole = fused.choices.candidates.len();
+        let whole = fused.candidates.len();
         let m = inventory.targets[inner].choices.candidates.len();
         let mut enumerated = 0;
         let mut choice = vec![0; inventory.targets.len()];

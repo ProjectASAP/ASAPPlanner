@@ -104,7 +104,8 @@ async fn check_every_choice(
                         return false;
                     };
                     matches!(measures[t.measure], AggIntent::TopK { .. })
-                        && t.chosen(i).map(|(_, c)| c) != Some(&ComputationCandidate::Exact)
+                        && t.computation_for(i).map(|(c, _)| c)
+                            != Some(&ComputationCandidate::Exact)
                 });
                 assert!(summarized_topk, "{sql}, choice {choice:?}: {e}");
                 continue;

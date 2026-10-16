@@ -304,15 +304,15 @@ aggregations are separate targets: in `sum by (job) (rate(x[1m]))`, the
 per-series `rate` and the per-`job` `sum` are each a target, and their options
 multiply.
 
-A computation that fuses a target with the one directly beneath it is a
-**fused target** of its own, which absorbs the target beneath: the
+A computation that fuses a target with the one directly beneath it is the
+outer target's **fused computation**, which absorbs the target beneath: the
 whole-expression top-*k* over a per-item `sum` or `count` (one heap summary
 over the inner aggregate's input), and the nested sum, a grouped `sum` over a
 `sum` (one exact Sum accumulator over the inner sum's input). Its options are
 offered beside the unfused pair's: in `topk by (job) (10, sum_over_time(m[1m]))`
 the options are the exact top-*k* over the exact per-series sum, or the fused
-target's Count-Min or Count Sketch with a top-*k* heap. Like every target's
-options, a fused target's are exact or a summary.
+computation's Count-Min or Count Sketch with a top-*k* heap. Like every
+target's options, a fused computation's are exact or a summary.
 
 Example for summary candidates:
 

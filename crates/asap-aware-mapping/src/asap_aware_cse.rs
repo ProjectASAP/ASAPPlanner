@@ -2420,7 +2420,7 @@ mod tests {
             .iter()
             .map(|t| {
                 (0..t.choice_count())
-                    .position(|i| t.chosen(i).is_some_and(|(_, c)| heap(c)))
+                    .position(|i| t.computation_for(i).is_some_and(|(c, _)| heap(c)))
                     .unwrap_or(0)
             })
             .collect();

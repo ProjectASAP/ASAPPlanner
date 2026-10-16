@@ -65,24 +65,21 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
                 .expect("every target is reached from a root")
         })
         .collect();
-    // Each target's chosen candidate, with the target that computes it: the
-    // target itself or its fused target.
+    // Each target's chosen candidate, with the target it absorbs when the
+    // candidate is its fused computation's.
     let chosen: Vec<_> = inventory
         .targets
         .iter()
         .zip(choice)
-        .map(|(target, &index)| target.chosen(index).expect("a listed candidate"))
+        .map(|(target, &index)| target.computation_for(index).expect("a listed candidate"))
         .collect();
-    // Targets a chosen fused target absorbs are not computed.
-    let absorbed: Vec<usize> = chosen
-        .iter()
-        .filter_map(|(computing, _)| computing.absorbs)
-        .collect();
+    // Targets a chosen fused computation absorbs are not computed.
+    let absorbed: Vec<usize> = chosen.iter().filter_map(|&(_, absorbs)| absorbs).collect();
     (0..inventory.roots.len())
         .map(|query| {
             let mut sketches = Vec::new();
             let mut accumulators = Vec::new();
-            for (t, ((computing, candidate), &target_query)) in
+            for (t, (&(candidate, absorbs), &target_query)) in
                 chosen.iter().zip(&query_of_target).enumerate()
             {
                 if target_query != query || absorbed.contains(&t) {
@@ -90,16 +87,12 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
                 }
                 match candidate {
                     ComputationCandidate::Exact => {}
-                    ComputationCandidate::ExactAccumulator(states) => {
+                    ComputationCandidate::ExactAccumulator(kinds) => {
                         // e.g. "Sum acc", "Sum/Count acc" for an avg, or
                         // "nested Sum acc" for a fused nested sum.
                         let kinds: Vec<String> =
-                            states.iter().map(|kind| format!("{kind:?}")).collect();
-                        let nested = if computing.absorbs.is_some() {
-                            "nested "
-                        } else {
-                            ""
-                        };
+                            kinds.iter().map(|kind| format!("{kind:?}")).collect();
+                        let nested = if absorbs.is_some() { "nested " } else { "" };
                         accumulators.push(format!("{nested}{} acc", kinds.join("/")))
                     }
                     ComputationCandidate::Summary(algorithm) => {
@@ -502,11 +495,11 @@ mod tests {
         assert_eq!(distinct.len(), logical.len(), "{logical:#?}");
     }
 
-    /// A fused target's candidate is labeled apart from the unfused pair's:
+    /// A fused computation's candidate is labeled apart from the unfused pair's:
     /// the nested sum as "nested Sum acc", beside the two separate sums; an
     /// avg's exact states as "Sum/Count acc".
     #[test]
-    fn fused_targets_and_avg_states_have_their_own_labels() {
+    fn fused_computations_and_avg_states_have_their_own_labels() {
         use crate::planner_layering_examples::shared_data_workload;
         use asap_types::types::AccuracyTarget;
         use asap_types::workload::{
