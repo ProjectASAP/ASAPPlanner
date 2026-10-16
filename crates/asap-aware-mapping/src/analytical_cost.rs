@@ -1,9 +1,8 @@
 //! Analytical, resource-dimensional cost estimates.
 //!
 //! This module deliberately keeps CPU work, retained state, and scan I/O
-//! separate.  They become one planner objective only through an explicit
-//! [`ResourceCalibration`]; without that calibration the dimensional
-//! estimate is still useful for explanations, but is not silently comparable.
+//! separate. Plan selection (Stage 3) turns them into one objective with
+//! [`crate::stage3_plan_selection::ResourceUnitCost`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -146,42 +145,6 @@ pub fn cache_hit_ratios(
 ) -> Result<(f64, f64), AnalyticalCostError> {
     let resolved = resolve_cache_profile(profile, evaluation_count, data_arrival)?;
     Ok((resolved.result_hit_ratio, resolved.buffer_hit_ratio))
-}
-
-/// Conversion from physical dimensions to one deployment-specific objective.
-/// Memory's coefficient means cost units per retained byte over this model's
-/// explicit comparison scope; it is not mixed with a rate implicitly.
-///
-/// The legacy core's prices ([`crate::physical_plan_cost_model`]); plan
-/// selection (Stage 3) prices with
-/// [`crate::stage3_plan_selection::ResourceUnitCost`] instead.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ResourceCalibration {
-    pub cost_per_cpu_op: f64,
-    pub cost_per_scan_byte: f64,
-    pub cost_per_retained_byte: f64,
-    pub version: String,
-}
-
-impl ResourceCalibration {
-    pub fn validate(&self) -> Result<(), AnalyticalCostError> {
-        for (name, value) in [
-            ("cost_per_cpu_op", self.cost_per_cpu_op),
-            ("cost_per_scan_byte", self.cost_per_scan_byte),
-            ("cost_per_retained_byte", self.cost_per_retained_byte),
-        ] {
-            if !value.is_finite() || value < 0.0 {
-                return Err(AnalyticalCostError::InvalidCalibration(name, value));
-            }
-        }
-        if self.cost_per_cpu_op == 0.0
-            && self.cost_per_scan_byte == 0.0
-            && self.cost_per_retained_byte == 0.0
-        {
-            return Err(AnalyticalCostError::ZeroCalibration);
-        }
-        Ok(())
-    }
 }
 
 /// An analytical estimate requires CPU work, peak memory, and scanned bytes.
@@ -2140,23 +2103,6 @@ fn validate_promql_series_sample(
         }
     }
     Ok(())
-}
-
-impl ResourceEstimate {
-    pub fn calibrated_cost(
-        self,
-        calibration: &ResourceCalibration,
-    ) -> Result<f64, AnalyticalCostError> {
-        calibration.validate()?;
-        let value = self.cpu_ops() * calibration.cost_per_cpu_op
-            + self.scan_bytes() as f64 * calibration.cost_per_scan_byte
-            + self.peak_memory_bytes() as f64 * calibration.cost_per_retained_byte;
-        if value.is_finite() {
-            Ok(value)
-        } else {
-            Err(AnalyticalCostError::Overflow)
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
