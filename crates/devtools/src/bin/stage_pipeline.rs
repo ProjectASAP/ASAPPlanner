@@ -68,7 +68,7 @@
 // `pareto-front`). Cost models 1 and 2 use the illustrative unit costs.
 // Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
 // cost model 3, and `front` lists the Pareto front under `pareto-front`.
-// `--interval-ms` is the sample interval declared for every metric the
+// `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
@@ -104,7 +104,7 @@ use serde_json::{json, Value};
 
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
-[--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--interval-ms <u64>])) \
+[--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--max-combinations <n>] [--max-displayed <n>] --out <file>";
@@ -186,7 +186,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // (language, text, name) in workload order.
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
-    let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
+    let (mut epsilon, mut delta, mut sample_interval_ms) = (None, None, 15_000u64);
     let mut metric: Option<AccuracyMetric> = None;
     let mut max_displayed = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
@@ -223,7 +223,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                         .map_err(|_| format!("unknown metric {name}"))?,
                 )
             }
-            "--interval-ms" => interval_ms = value()?.parse().map_err(|e| format!("{e}"))?,
+            "--sample-interval-ms" => {
+                sample_interval_ms = value()?.parse().map_err(|e| format!("{e}"))?
+            }
             "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
             "--max-combinations" => {
                 max_combinations = value()?.parse().map_err(|e| format!("{e}"))?
@@ -337,7 +339,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             let mut names = HashSet::new();
             let (mut described, mut roots, mut entries) = (Vec::new(), Vec::new(), Vec::new());
             // Every metric the PromQL queries read, each sampled every
-            // `--interval-ms`.
+            // `--sample-interval-ms`.
             let mut metrics = BTreeSet::new();
             for (index, (language, text, name)) in queries.into_iter().enumerate() {
                 let (name, defaulted) = match name {
@@ -356,7 +358,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     .into());
                 }
                 // Each query lowers in its own language; planning sees one workload.
-                let one = query_batch(language.clone(), &[text], accuracy.clone(), interval_ms);
+                let one = query_batch(
+                    language.clone(),
+                    &[text],
+                    accuracy.clone(),
+                    sample_interval_ms,
+                );
                 roots.extend(match language {
                     QueryLanguage::PromQL => lower_promql_roots(&one)?,
                     _ => lower_sql_roots(&one, &catalog)?,
@@ -371,7 +378,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 query["id"] = json!(name);
                 described.push(query);
             }
-            let data = DataWorkload::sampled_every(metrics, DurationMs(interval_ms));
+            let data = DataWorkload::sampled_every(metrics, DurationMs(sample_interval_ms));
             let result = run_planning_stages_over(
                 roots.clone(),
                 &entries,
@@ -668,9 +675,9 @@ fn query_batch(
     language: QueryLanguage,
     queries: &[String],
     accuracy: AccuracyTarget,
-    interval_ms: u64,
+    sample_interval_ms: u64,
 ) -> PlanningWorkload {
-    // Each metric a PromQL query reads is sampled every `interval_ms`; a
+    // Each metric a PromQL query reads is sampled every `sample_interval_ms`; a
     // query that does not parse names none and fails when lowered.
     let metrics: BTreeSet<String> = match language {
         QueryLanguage::PromQL => queries
@@ -701,7 +708,7 @@ fn query_batch(
         },
         data_workload: Some(DataWorkload::sampled_every(
             metrics,
-            DurationMs(interval_ms),
+            DurationMs(sample_interval_ms),
         )),
     }
 }

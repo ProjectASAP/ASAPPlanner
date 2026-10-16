@@ -437,6 +437,28 @@ fn planning_stages_without_a_limit_plan_every_candidate() {
     ));
 }
 
+/// `--sample-interval-ms` is the sample interval of every metric the
+/// queries read, as in the other lowering tools: `sum(up)`'s bare selector
+/// looks back 30 s. The former `--interval-ms` is unknown.
+#[test]
+fn sample_interval_ms_sets_the_instant_selector_lookback() {
+    let document = document_of(&["--promql", "sum(up)", "--sample-interval-ms", "30000"]);
+    let ranges: Vec<&Value> = document["stage0_query_language_frontends"]["dag"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["operator"]["NonASAP"]["TimeRange"]["range"].as_object())
+        .map(|range| &range["secs"])
+        .collect();
+    assert_eq!(ranges, [&Value::from(30)]);
+    let (status, stderr) = failure(&["--promql", "sum(up)", "--interval-ms", "30000"]);
+    assert_eq!(status, Some(2));
+    assert!(
+        stderr.contains("unknown argument --interval-ms"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn table_declared_twice_is_rejected() {
     let table =
