@@ -84,7 +84,7 @@ use asap_aware_mapping::stage3_plan_selection::{
 };
 use asap_devtools::candidate_labels::candidate_labels;
 use asap_devtools::planner_layering_examples::{
-    example1, example2, pattern_a, pattern_b, PatternARecurrence, SharedArrival,
+    example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_planning_stages_over, PlanningStagesError,
@@ -97,8 +97,8 @@ use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
-    BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage, QueryRecurrence,
-    QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
+    QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
 };
 use serde_json::{json, Value};
 
@@ -293,7 +293,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 "planner-layering-1" => (example1(), SqlCatalog::new()),
                 "planner-layering-2" => example2(),
                 "planner-layering-3a" => (
-                    pattern_a(PatternARecurrence::OnceAdHoc, SharedArrival::Mixed),
+                    pattern_a(
+                        PatternARecurrence::OnceAdHoc,
+                        DataArrival::Mixed {
+                            rows_per_second: SHARED_ROWS_PER_SECOND,
+                        },
+                    ),
                     SqlCatalog::new(),
                 ),
                 "planner-layering-3b" => (pattern_b(), SqlCatalog::new()),

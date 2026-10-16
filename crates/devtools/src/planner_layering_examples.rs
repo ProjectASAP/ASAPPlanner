@@ -15,27 +15,15 @@ pub const YEAR_MS: u64 = 365 * 24 * 60 * MINUTE_MS;
 /// Pattern A's batch execution time T (2026-01-01T00:00:00Z).
 pub const T_MS: u64 = 1_767_225_600_000;
 
-/// How the #509 shared data workload arrives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SharedArrival {
-    /// Stored, nothing arriving.
-    AtRest,
-    /// Arriving while the queries run.
-    Ingesting,
-    /// Stored history with new rows arriving.
-    Mixed,
-}
+/// Rows per second the #509 shared data arrives at while ingesting:
+/// 1,000,000 series, each sampled every 15 s.
+pub const SHARED_ROWS_PER_SECOND: f64 = 1_000_000.0 / 15.0;
 
-/// The #509 shared data: one million series of `source`, each sampled
-/// every 15 s, so 1,000,000 / 15 rows per second arrive while ingesting.
-pub fn shared_data_workload(arrival: SharedArrival, source: &str) -> DataWorkload {
-    let rows_per_second = 1_000_000.0 / 15.0;
+/// The #509 shared data, arriving as `arrival` says: one million series
+/// of `source`, each sampled every 15 s.
+pub fn shared_data_workload(arrival: DataArrival, source: &str) -> DataWorkload {
     DataWorkload {
-        arrival: match arrival {
-            SharedArrival::AtRest => DataArrival::AtRest,
-            SharedArrival::Ingesting => DataArrival::Ingesting { rows_per_second },
-            SharedArrival::Mixed => DataArrival::Mixed { rows_per_second },
-        },
+        arrival,
         sources: [(
             source.to_string(),
             SourceFacts {
@@ -80,7 +68,12 @@ pub fn example1() -> PlanningWorkload {
             ]),
         },
         data_workload: Some({
-            let mut data = shared_data_workload(SharedArrival::Ingesting, EXAMPLE1_METRIC);
+            let mut data = shared_data_workload(
+                DataArrival::Ingesting {
+                    rows_per_second: SHARED_ROWS_PER_SECOND,
+                },
+                EXAMPLE1_METRIC,
+            );
             data.sources
                 .get_mut(EXAMPLE1_METRIC)
                 .expect("the shared source")
@@ -216,7 +209,7 @@ fn pattern_a_requirements() -> QueryRequirements {
 }
 
 /// Example 3, Pattern A: p99 over five historical intervals.
-pub fn pattern_a(recurrence: PatternARecurrence, arrival: SharedArrival) -> PlanningWorkload {
+pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> PlanningWorkload {
     let (batch, repeating) = match recurrence {
         PatternARecurrence::OnceAdHoc => (
             Some(
@@ -287,7 +280,9 @@ pub fn pattern_b() -> PlanningWorkload {
             }]),
         },
         data_workload: Some(shared_data_workload(
-            SharedArrival::Ingesting,
+            DataArrival::Ingesting {
+                rows_per_second: SHARED_ROWS_PER_SECOND,
+            },
             PATTERN_METRIC,
         )),
     }
@@ -301,9 +296,13 @@ mod tests {
     #[test]
     fn shared_data_workloads_are_valid() {
         for arrival in [
-            SharedArrival::AtRest,
-            SharedArrival::Ingesting,
-            SharedArrival::Mixed,
+            DataArrival::AtRest,
+            DataArrival::Ingesting {
+                rows_per_second: SHARED_ROWS_PER_SECOND,
+            },
+            DataArrival::Mixed {
+                rows_per_second: SHARED_ROWS_PER_SECOND,
+            },
         ] {
             shared_data_workload(arrival, PATTERN_METRIC)
                 .validate()
