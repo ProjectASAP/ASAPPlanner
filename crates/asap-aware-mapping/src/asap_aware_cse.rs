@@ -1979,6 +1979,19 @@ mod tests {
         );
     }
 
+    /// Quantiles over other groupings share no capability build.
+    #[test]
+    fn different_groupings_are_not_capability_sharing_candidates() {
+        let groupings = chose(
+            &[
+                ("quantile by (job) (0.5, lat)", 0.01),
+                ("quantile (0.99, lat)", 0.001),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        assert!(capability_sharing_candidates(&groupings).is_empty());
+    }
+
     /// Each candidate's label (the groups it shares) and its roots agree:
     /// applying the label gives the same roots, sharing exactly the
     /// labelled groups.
@@ -2273,6 +2286,9 @@ mod tests {
                 "sum by (job) (sum_over_time(m[5m]))",
                 "sum by (job, instance) (sum_over_time(m[1m]))",
             ],
+            &["sum by (job) (m)", "sum by (job) (m)"],
+            &["sum by (job) (m)", "sum without (instance) (m)"],
+            &["sum without (job) (m)", "sum by (job, instance) (m)"],
         ] {
             assert!(rollup_candidates(&exact(queries)).is_empty(), "{queries:?}");
         }
@@ -2386,6 +2402,10 @@ mod tests {
             ][..],
             &["topk(5, sum by (job) (m))", "topk(10, sum by (job) (n))"],
             &["topk(5, sum by (job) (m))", "topk(5, max by (job) (m))"],
+            &[
+                "topk(5, sum by (job) (m))",
+                "topk by (job) (10, sum by (job) (m))",
+            ],
         ] {
             assert!(
                 topk_reuse_candidates(&exact(queries)).is_empty(),

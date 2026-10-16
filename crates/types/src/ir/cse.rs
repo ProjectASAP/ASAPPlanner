@@ -381,6 +381,39 @@ mod tests {
         );
     }
 
+    /// Grouped quantiles differing only in accuracy keep two roots over one shared scan.
+    #[test]
+    fn differing_accuracy_is_never_merged_but_the_scan_child_is_shared() {
+        let shared_scan = scan();
+        let quantile = |epsilon: f64| {
+            node(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![1]),
+                measures: vec![AggIntent::Quantile {
+                    col: Some(2),
+                    q: 0.99,
+                    accuracy: AccuracyTarget::max_error(epsilon),
+                }],
+                output_names: vec![],
+                filters: vec![],
+                having: None,
+                child: Rc::clone(&shared_scan),
+            })
+        };
+        let a = quantile(0.01);
+        assert!(a.schema.has_unique_key(), "fixture sanity: grouped");
+        let (ra, rb) = two_roots(a, quantile(0.05));
+        assert!(!Rc::ptr_eq(&ra, &rb));
+        assert_ne!(ra, rb);
+        let (
+            Some(NonASAPOp::Aggregate { child: child_a, .. }),
+            Some(NonASAPOp::Aggregate { child: child_b, .. }),
+        ) = (ra.non_asap(), rb.non_asap())
+        else {
+            panic!("expected Aggregate roots");
+        };
+        assert!(Rc::ptr_eq(child_a, child_b));
+    }
+
     #[test]
     fn median_and_explicit_half_percentile_merge() {
         // Two spellings that lower to the identical grouped `Quantile { q: 0.5 }`.
