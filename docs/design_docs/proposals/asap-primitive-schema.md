@@ -870,7 +870,7 @@ OperatorNode                                         §6.1
 │     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
 │           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
 │                 └── category, algorithm, params    §6.4
-├── guarantee: ResultGuarantee                       §6.5  (accuracy of an evaluation)
+├── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 └── coverage() → SummaryCoverage                     §6.6
       └── definition: OperatorNode   (again a node, so the same structure)
 ```
@@ -904,7 +904,7 @@ pub struct OperatorNode {
     pub schema: Schema,
     /// The accuracy statement of the output, once known. `None` does not
     /// mean exact.
-    pub guarantee: Option<ResultGuarantee>,
+    pub guarantee: Option<AccuracyGuarantee>,
     /// When the node runs: `IngestionTime` or `QueryTime`. `None` until
     /// planning assigns it.
     pub timing: Option<ExecutionTiming>,
@@ -1325,7 +1325,7 @@ pub struct CurrentSeriesInput {
 }
 ```
 
-A finalized value's accuracy statement is `ResultGuarantee` (`post_asap/guarantee.rs`): `metric` (which error is measured, e.g. rank error), `bound` (the error bound), `failure_probability` (the chance the bound does not hold) and `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
+A finalized value's accuracy statement is `AccuracyGuarantee` (`post_asap/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
 ### 6.6 Summary coverage (`crates/types/src/ir/summary_coverage.rs`)
 

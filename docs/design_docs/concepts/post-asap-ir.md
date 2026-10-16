@@ -71,7 +71,7 @@ execution implement the actual build and update operations. Not every summary fa
 Exact work is represented by the ordinary operators, unchanged:
 
 - A sub-DAG the planner does not rewrite keeps its `NonASAPOp` nodes. Plan
-  assembly marks such a sub-DAG with an exact `ResultGuarantee`
+  assembly marks such a sub-DAG with an exact `AccuracyGuarantee`
   (`asap_aware_mapping::replacement::retain_exact`); a sub-DAG with no ASAP
   operator and no guarantee is a logical rewrite candidate that has not been
   assessed yet (`is_logical_rewrite`).
@@ -90,7 +90,7 @@ Exact work is represented by the ordinary operators, unchanged:
   `Limit` (both with the same `partition_by`) ranks and selects the joined
   rows. Completeness evidence belongs to pruning, not ranking.
 
-Every `OperatorNode` carries its schema and an optional `ResultGuarantee`.
+Every `OperatorNode` carries its schema and an optional `AccuracyGuarantee`.
 State and query values have different contracts; see
 [Schema and physical data for ASAP primitives](../proposals/asap-primitive-schema.md). Exact operations over
 approximate evaluations still require composed accuracy guarantees. See the
