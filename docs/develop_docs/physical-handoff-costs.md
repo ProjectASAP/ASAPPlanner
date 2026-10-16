@@ -11,9 +11,10 @@ calibration, and ranking remain in the mapping crate. handoff traffic/write work
 is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
 collapsed into the generic CPU/byte resource container.
 
-The physical-plan adapter accepts an optional `PhysicalHandoffProfile` in the
-immutable `PhysicalEvidenceSnapshot`. No devtool reads the profile; a caller
-supplies it through the library. With no profile, these
+The `PhysicalHandoffProfile` estimator is kept in `physical_handoff_cost`, but
+its consumer, the legacy physical-plan adapter and its
+`PhysicalEvidenceSnapshot`, has been removed. No planning stage or devtool
+reads the profile yet. With no profile, these
 dimensions remain unestimated and the existing resource objective is preserved.
 
 The profile's `plans` list binds handoffs to complete physical alternatives.

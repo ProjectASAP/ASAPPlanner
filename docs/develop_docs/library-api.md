@@ -172,7 +172,7 @@ asap_aware_mapping::run_stage1_to_stage3<Id>(
 | --- | --- |
 | `PlanningModels::builtin()` | Built-in accuracy model and no extra evidence. `with_plan_selection(&settings)` sets the deployment's `PlanSelectionSettings`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
 | `DeploymentCapabilities` (`asap_aware_mapping::deployment_capabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is invalid, and stored data is refused with `SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling panes) |
-| `PlanSelectionSettings` (`asap_aware_mapping::stage3_plan_selection`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`) and `non_repeating_query_horizon_seconds` (default 3,600) |
+| `PlanSelectionSettings` (`asap_aware_mapping::stage3_plan_selection`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`) `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (default empty: one `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` per measured sketch configuration and `SummaryOperation` (`Update`, `Merge`, `Estimate`); a sketch node with an exactly matching entry is priced from it, every other node from the formulas, and each node's `NodeCost::price_source` says which) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory, ParetoFront}` chooses among the candidates that fit |
@@ -537,31 +537,16 @@ Module-qualified paths below are relative to `asap_aware_mapping`.
 | Parameter | Available value / constructor | Meaning |
 | --- | --- | --- |
 | `&dyn CostModel` | `DefaultCostModel` | Built-in ordering/sizing and structural estimates; no measured deployment guarantee |
-| `&dyn CostModel` | `empirical_cost::EmpiricalCostModel::new(provider)` | Offline sketch-benchmark model: ranks algorithms using matching offline measurements |
-| `&dyn CostModel` | `physical_plan_cost_model::PhysicalPlanCostModel::new(&provider, calibration)?` | Deployment-specific physical-plan model: compares complete physical alternatives using provider evidence and resource calibration; evidence may be offline or online |
 | `&dyn AccuracyModel` | `DefaultAccuracyModel` | Built-in guarantee rules and satisfaction checks |
 | `&dyn AccuracyEvidenceProvider` | `NoAccuracyEvidence` | No extra planning-time statistics; evidence-dependent claims remain unavailable |
 | Any provider trait above | Your implementation | Supplies alternative models/evidence under the same contracts |
 
-### Offline measurements versus physical-plan costing
+### Measured sketch costs
 
-These models differ in scope, not simply in whether they are offline or online.
-
-| Model | Evidence and comparison | Missing evidence / limits |
-| --- | --- | --- |
-| `EmpiricalCostModel` | Offline sketch benchmarks matched to exact parameters, distribution, environment and validity interval; current algorithm ranking uses measured update CPU nanoseconds | If the measurements required for ranking are incomplete, preserves the incoming algorithm order. `estimate_cost()` still uses `DefaultCostModel` structural scores |
-| `PhysicalPlanCostModel` | A downstream provider supplies a consistent evidence snapshot and complete physical alternatives; calibration converts modeled resource quantities into comparable costs | A candidate with incomplete evidence is unavailable, without structural-cost fallback. Current candidate admission also requires it to cost less than the raw alternative |
-
-`PhysicalPlanCostModel` does not collect online telemetry itself. Its provider
-may supply offline estimates/calibration or evidence derived from online
-observations. Therefore, “offline sketch-benchmark model” and “physical-plan cost
-model” describe their roles more accurately than “offline model” and “online model.”
-
-For example, a sketch with the lowest measured update cost can rank first under
-`EmpiricalCostModel`, while its complete execution plan can still cost more than
-another sketch or raw execution under `PhysicalPlanCostModel`. Offline error
-measurements alone do not authorize smaller sketch parameters or replace formal
-accuracy guarantees.
+Measured CPU time per sketch operation now reaches plan selection, not the
+legacy search: put it in `PlanSelectionSettings::measured_operation_costs`
+(see [Plan a workload through the stages](#plan-a-workload-through-the-stages)).
+The legacy offline sketch-benchmark and physical-plan cost models are removed.
 
 ### Example: configure all sketch-strategy providers
 

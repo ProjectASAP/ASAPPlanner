@@ -1,5 +1,13 @@
 # Consuming offline sketch measurements
 
+> **Status: no planner consumer.** The planner-side reader of this artifact
+> (`empirical_cost`, `EmpiricalCostModel`) has been removed. Plan selection
+> reads measured CPU time per sketch operation from
+> `PlanSelectionSettings::measured_operation_costs`, which
+> `convert_rqe_atomic_costs` (in `asap-devtools`) builds from sketch-bench's
+> `rqe_atomic_costs.json`. This document is kept as the record of the
+> artifact contract.
+
 This document is for developers integrating sketch-bench with the planner. The
 Rust schema is `asap_aware_mapping::empirical_cost::EvidenceArtifact`; its JSON
 schema version is `1`. Required artifact-level `benchmark_version` and

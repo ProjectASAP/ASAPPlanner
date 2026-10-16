@@ -1,8 +1,8 @@
 # Storage operation estimates
 
-The physical-plan ranking adapter accepts an optional `StorageIoProfile` in
-its immutable `PhysicalEvidenceSnapshot`. No devtool reads the profile; a
-caller supplies it through the library.
+The `StorageIoProfile` estimator is kept in `storage_io`, but its consumer,
+the legacy physical-plan ranking adapter and its `PhysicalEvidenceSnapshot`,
+has been removed. No planning stage or devtool reads the profile yet.
 Omitting the profile preserves the existing CPU/memory/scan-byte objective;
 operation counts are unestimated, not inferred to be zero.
 
