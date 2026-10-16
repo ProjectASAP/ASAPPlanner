@@ -74,8 +74,8 @@
     if (n.materialization) items.push(['materialization', compactWire(n.materialization)]);
     if (n.output_state && n.output_state.primitive) items.push(['output primitive', compactWire(n.output_state.primitive)]);
     if (d.cost) {
-      const value = typeof d.cost.cost === 'number'
-        ? `${Number(d.cost.cost.toPrecision(4))}${d.cost.multiplier === 1 || d.cost.multiplier === undefined ? '' : ` × ${d.cost.multiplier}`}`
+      const value = typeof d.cost.cost_per_second === 'number'
+        ? `${Number(d.cost.cost_per_second.toPrecision(4))}${d.cost.multiplier === 1 || d.cost.multiplier === undefined ? '' : ` × ${d.cost.multiplier}`}`
         : 'no number';
       items.push(['Stage 3 cost', `${value} · ${d.cost.detail || ''}`]);
     }
@@ -160,7 +160,8 @@
     const row = rows.find((r) => rowKey(r) === `P:${id}`);
     const priced = rows.filter((r) => r.rank !== null).length;
     $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · ` +
-      (cost ? `total <b>${fmtCost(cost.total)}</b> ${esc(cost.unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}` : 'not priced') +
+      (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}`
+        : cost ? 'no price (cost model 3)' : 'not priced') +
       ` · ${statusChip(row.status)}` +
       (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '');
     if (c.from_logical !== current.logical) showLogical(c.from_logical);

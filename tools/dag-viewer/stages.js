@@ -187,7 +187,8 @@ function validateSelection(selection, physicalById) {
   Object.entries(costs).forEach(([id, cost]) => {
     const at = `stage3_plan_selection.costs.${id}`;
     if (!physicalById.has(id)) { errors.push(`${at}: not a Stage 2 candidate`); return; }
-    if (!cost || typeof cost.total !== 'number' || !Number.isFinite(cost.total)) errors.push(`${at}: total must be a number`);
+    // `cost_per_second` is null under cost model 3 (own cluster), which has no prices.
+    if (!cost || (cost.cost_per_second !== null && (typeof cost.cost_per_second !== 'number' || !Number.isFinite(cost.cost_per_second)))) errors.push(`${at}: cost_per_second must be a number or null`);
     if (!cost || typeof cost.unit !== 'string') errors.push(`${at}: unit must be a string`);
     const nodeIds = new Set(physicalById.get(id).dag.nodes.map((node) => String(node.id)));
     Object.keys((cost && cost.per_node) || {}).forEach((key) => {
@@ -294,7 +295,7 @@ function stageCandidateRows(doc) {
       id: candidate.id,
       logical: candidate.from_logical,
       display_name: candidate.display_name,
-      total: cost ? cost.total : null,
+      total: cost ? cost.cost_per_second : null,
       unit: cost ? cost.unit : null,
       rank: null,
       status,
@@ -464,8 +465,8 @@ function stageLaneElements(dag, options) {
     const lines = stageNodeLines(operator, input && input.schema);
     const cost = costPerNode ? costPerNode[String(node.id)] : undefined;
     if (physical && node.timing !== undefined) lines.push(`⏱ ${formatTiming(node.timing)}`);
-    if (cost && typeof cost.cost === 'number') {
-      lines.push(`cost ${Number(cost.cost.toPrecision(3))}${cost.multiplier === 1 || cost.multiplier === undefined ? '' : ` × ${cost.multiplier}`}`);
+    if (cost && typeof cost.cost_per_second === 'number') {
+      lines.push(`cost ${Number(cost.cost_per_second.toPrecision(3))}${cost.multiplier === 1 || cost.multiplier === undefined ? '' : ` × ${cost.multiplier}`}`);
     }
     const roots = rootFor.get(node.id) || [];
     if (roots.length) lines.push(`root of ${roots.join(', ')}`);

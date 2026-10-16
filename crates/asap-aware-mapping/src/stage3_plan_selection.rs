@@ -13,8 +13,10 @@
 //! discards valid candidates.
 //! A candidate whose evaluation of some query takes longer than that
 //! query's latency bound is rejected as invalid too ("Latency" below).
-//! Every valid candidate is priced node by node over its physical DAG, and
-//! the cheapest is selected. The rest are reported valid but costlier.
+//! Every valid candidate's resource usage is measured node by node over its
+//! physical DAG ([`ResourceUsage`]), and the deployment's [`CostModel`]
+//! chooses among them ("Cost models" below). The rest are reported valid
+//! but costlier (or slower, or larger).
 //! Selection prices every candidate it is given; a search that avoids
 //! building every candidate (e.g. a dynamic program over target nesting) is
 //! deferred to #671.
@@ -44,11 +46,12 @@
 //!   pane: each arriving row is placed in it and updates it.
 //! * A query repeating every `I` ms runs `1000 / I` times per second, and an
 //!   estimated rate runs at that rate. One-off, scheduled and unknown
-//!   queries are spread over the calibration's `horizon_s` (default
-//!   3600 s): `invocations / horizon_s` per second.
+//!   queries are spread over the settings' `non_repeating_query_horizon_seconds`
+//!   (default 3600 s): `invocations / horizon` per second.
 //!
-//! Memory is charged only as state kept between computations, at
-//! `cost_per_retained_byte_second` per byte per second. A `MatAtIngestion`
+//! Under cost model 1, memory is charged only as state kept between
+//! computations ([`ResourceUsage::average_memory_bytes`]), at
+//! `cost_per_memory_byte_second` per byte per second. A `MatAtIngestion`
 //! node keeps its state every second: twice for a whole window (the window
 //! being built and the completed one queries read) and `N + 1` panes for a
 //! chain of `N` (the `N` the query merges and the one being built). A
@@ -57,9 +60,9 @@
 //! longest query reading it, once per evaluation, which is close to nothing.
 //! Keeping it across evaluations comes later, charged by its retention.
 //! Memory a computation
-//! holds only while it runs is not charged, and `cost_per_retained_byte` is
-//! ignored: peak capacity belongs to cost model 2 (#683). A computation is
-//! charged for its CPU operations and scanned bytes only.
+//! holds only while it runs is not charged under cost model 1: it counts in
+//! [`ResourceUsage::peak_memory_bytes`], which cost models 2 and 3 read. A
+//! computation is charged for its CPU operations and scanned bytes only.
 //!
 //! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
@@ -78,7 +81,33 @@
 //! illustrative, not calibrated: a binary, join or concat node is priced from
 //! its first input only (MVP; follow-up).
 //! A cost error on any candidate aborts selection; it is reachable only from
-//! bad declared rates. Deployment capabilities are not checked yet.
+//! bad declared rates or bad [`PlanSelectionSettings`].
+//!
+//! ## Cost models
+//!
+//! [`PlanSelectionSettings::cost_model`] (in [`PlanningModels`]) chooses how
+//! usage becomes a choice; the default is cost model 1 with
+//! [`ResourceUnitCost::illustrative`]:
+//!
+//! * [`CostModel::UsageOverTime`] (cost model 1, pay-as-you-go): each
+//!   node's CPU operations, scanned bytes and memory byte-seconds per second
+//!   (and disk bytes, unpriced by default) times their prices; the cheapest
+//!   candidate wins.
+//! * [`CostModel::ProvisionedCapacity`] (cost model 2): the candidate's peak
+//!   memory, peak CPU cores and disk times their prices per second; the
+//!   cheapest wins. Peak memory assumes every evaluation overlaps: kept
+//!   in-memory state plus each computation's working memory, once per
+//!   consumer that recomputes it. Peak cores are the ingestion work's cores
+//!   plus one per query evaluating at once.
+//! * [`CostModel::ClusterCapacity`] (cost model 3, own cluster): no prices.
+//!   A candidate over the cluster's memory, disk or cores is invalid, and
+//!   [`ClusterObjective`] chooses among the rest (lowest worst-query
+//!   latency, least peak memory, or the Pareto front of the three in
+//!   [`Selection::front`]).
+//!
+//! Disk holds state materialized on `Medium::Disk` (Stage 2 places none
+//! there yet) and the raw data query-time scans read: per source, the
+//! longest window a scan reads.
 //!
 //! ## Latency
 //!
@@ -88,14 +117,14 @@
 //! window of an ingestion-time state it reads, then its own query-time
 //! work. Its own work is the sum, over every query-time node it reaches
 //! (shared ones included, each once), of one computation's CPU operations
-//! and scanned bytes timed by the calibration's `ms_per_cpu_op` and
-//! `ms_per_scan_byte`. A state whose ingestion work needs `k` cores keeps
+//! and scanned bytes timed by [`ResourceSpeed`]'s `ms_per_cpu_op` and
+//! `ms_per_scanned_byte`. A state whose ingestion work needs `k` cores keeps
 //! `k` partial copies of its newest window, and compacting them takes
 //! `(k − 1)` one-operation merges for each of its states per window; with
 //! one core there is nothing to compact. A query with
 //! `Some(bound)` whose latency is above the
 //! bound makes the candidate invalid, with the latency as the reason.
-//! [`CandidateCost::latency`] reports every query's latency.
+//! [`ResourceUsage::latency_per_query`] reports every query's latency.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -111,7 +140,7 @@ use asap_types::ir::{
 use asap_types::post_asap::sketch::KLL_MAX_K;
 use asap_types::post_asap::{
     AccuracyGuarantee, AccuracyMetric, CompositionOperator, ExecutionTiming, FieldDataType,
-    Materialization, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
+    Materialization, Medium, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
 use asap_types::types::{AccuracyScope, AccuracyTarget};
@@ -128,7 +157,7 @@ use crate::accuracy::estimators::with_failure_probability;
 use crate::accuracy::estimators::{hll, univmon};
 use crate::accuracy::{OperandDomain, PropagationStats};
 use crate::analytical_cost::{
-    estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
+    estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
 use crate::per_computation_candidates::{
     approximate_inputs, distinct_bound_source, operand_domain_statistic, operand_guarantee,
@@ -140,30 +169,6 @@ use crate::physical_operator_statistics::{
 use crate::stage2_physical_asap_optimization::PhysicalCandidate;
 use crate::PlanningModels;
 
-/// Cost per second of wall time; one unit is one CPU-millisecond under
-/// [`illustrative_calibration`].
-pub const COST_UNIT: &str = "cost_per_second";
-pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
-
-/// The coefficients plan selection prices with until a deployment is
-/// calibrated: 1 ns of CPU per operation, 0.1 ns per scanned byte,
-/// 1 GB kept for a second costs 1/8 vCPU (125 CPU-ms), and one-off work is
-/// spread over one hour. The latency check takes the same times: one cost
-/// unit is one millisecond of one core.
-pub fn illustrative_calibration() -> ResourceCalibration {
-    ResourceCalibration {
-        cost_per_cpu_op: 1e-6,
-        cost_per_scan_byte: 1e-7,
-        // Plan selection charges no memory per computation.
-        cost_per_retained_byte: 0.0,
-        cost_per_retained_byte_second: 1.25e-7,
-        horizon_s: crate::analytical_cost::DEFAULT_HORIZON_S,
-        ms_per_cpu_op: 1e-6,
-        ms_per_scan_byte: 1e-7,
-        version: "illustrative-v2".into(),
-    }
-}
-
 /// Groups assumed for every `by (...)` reduction, absent group-count evidence.
 const DEFAULT_GROUP_COUNT: u64 = 100;
 /// Used only when the data workload does not declare them.
@@ -171,28 +176,265 @@ const DEFAULT_SERIES: u64 = 1_000;
 const DEFAULT_ROWS_PER_SECOND: f64 = 1_000.0;
 const DEFAULT_LOOKBACK_MS: u64 = 60_000;
 
-/// `cost` is the node's price per second: one computation's price times
-/// `per_second`, the times it is computed per second, plus any kept state's
-/// price ([`computations`], [`price`]). `multiplier` is the number of
-/// consumers it is computed for (1 when materialized).
+/// Cost per second of wall time; one unit is one CPU-millisecond under
+/// [`ResourceUnitCost::illustrative`].
+pub const COST_UNIT: &str = "cost_per_second";
+pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
+
+/// Seconds over which non-repeating queries (one-off, scheduled and
+/// unknown) are spread by default: one hour.
+pub const DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS: f64 = 3_600.0;
+
+/// What one candidate uses, per second of wall time unless the name says
+/// otherwise, without prices: its nodes' [`NodeUsage`] summed, with the
+/// candidate's peak cores and per-query latency. Every [`CostModel`] reads
+/// it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResourceUsage {
+    /// CPU operations per second: ingestion-time and query-time work.
+    pub cpu_ops_per_second: f64,
+    /// Bytes scanned per second.
+    pub scanned_bytes_per_second: f64,
+    /// Memory held between computations, averaged over time: retained
+    /// byte-seconds per second (ingestion-time state always, query-time
+    /// state while its evaluation runs).
+    pub average_memory_bytes: f64,
+    /// The most memory live at once, assuming every evaluation overlaps:
+    /// in-memory kept state plus each computation's working memory, once
+    /// per consumer that recomputes it.
+    pub peak_memory_bytes: u64,
+    /// Bytes kept on disk: state materialized on `Medium::Disk`, plus the
+    /// raw data query-time scans read (the longest window of each source).
+    pub disk_bytes: u64,
+    /// CPU cores to provision for the peak: the ingestion work's cores plus
+    /// one per query evaluating at once.
+    pub peak_cpu_cores: u32,
+    /// One per query, in workload order: its latency per evaluation.
+    pub latency_per_query: Vec<QueryLatency>,
+}
+
+/// What one node of a candidate uses: the [`ResourceUsage`] fields that add
+/// up over nodes. Cores and latency are the whole candidate's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeUsage {
+    /// CPU operations per second.
+    pub cpu_ops_per_second: f64,
+    /// Bytes scanned per second.
+    pub scanned_bytes_per_second: f64,
+    /// Kept memory averaged over time, in byte-seconds per second.
+    pub average_memory_bytes: f64,
+    /// The most memory the node holds at once (every evaluation overlapping).
+    pub peak_memory_bytes: u64,
+    /// Bytes the node keeps on disk.
+    pub disk_bytes: u64,
+}
+
+/// The price of one unit of each resource, per second of wall time. Cost
+/// model 1 reads the usage prices (CPU, scan, memory byte-seconds, disk);
+/// cost model 2 the provisioned prices (memory, CPU cores) and disk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceUnitCost {
+    /// Price of one CPU operation.
+    pub cost_per_cpu_op: f64,
+    /// Price of scanning one byte.
+    pub cost_per_scanned_byte: f64,
+    /// Price of holding one byte of memory for one second (cost model 1).
+    pub cost_per_memory_byte_second: f64,
+    /// Price of provisioning one byte of memory for one second (cost model 2).
+    pub cost_per_provisioned_memory_byte_second: f64,
+    /// Price of provisioning one CPU core for one second (cost model 2).
+    pub cost_per_provisioned_cpu_core_second: f64,
+    /// Price of keeping one byte on disk for one second (both models).
+    pub cost_per_disk_byte_second: f64,
+}
+
+impl ResourceUnitCost {
+    /// The prices plan selection uses until a deployment is calibrated:
+    /// 1 ns of CPU per operation, 0.1 ns per scanned byte, 1 GB kept for a
+    /// second costs 1/8 vCPU (125 CPU-ms), held or provisioned alike; one
+    /// provisioned core-second is 1,000 CPU-ms. Disk is not priced (0).
+    pub fn illustrative() -> Self {
+        Self {
+            cost_per_cpu_op: 1e-6,
+            cost_per_scanned_byte: 1e-7,
+            cost_per_memory_byte_second: 1.25e-7,
+            cost_per_provisioned_memory_byte_second: 1.25e-7,
+            cost_per_provisioned_cpu_core_second: 1_000.0,
+            cost_per_disk_byte_second: 0.0,
+        }
+    }
+}
+
+/// How fast one core does work; the latency check reads it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResourceSpeed {
+    /// Milliseconds one CPU operation takes on one core.
+    pub ms_per_cpu_op: f64,
+    /// Milliseconds scanning one byte takes on one core.
+    pub ms_per_scanned_byte: f64,
+}
+
+impl ResourceSpeed {
+    /// 1 ns per operation and 0.1 ns per scanned byte, the times
+    /// [`ResourceUnitCost::illustrative`] prices: one cost unit is one
+    /// millisecond of one core.
+    pub fn illustrative() -> Self {
+        Self {
+            ms_per_cpu_op: 1e-6,
+            ms_per_scanned_byte: 1e-7,
+        }
+    }
+}
+
+/// How plan selection turns each valid candidate's [`ResourceUsage`] into a
+/// choice. Chosen by the deployment ([`PlanSelectionSettings::cost_model`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CostModel {
+    /// Cost model 1, pay-as-you-go: Σ unit cost × usage per second (CPU
+    /// operations, scanned bytes, memory byte-seconds, disk byte-seconds);
+    /// the cheapest valid candidate wins.
+    UsageOverTime(ResourceUnitCost),
+    /// Cost model 2, provisioned: unit cost × peak memory, peak CPU cores
+    /// and disk, per second; the cheapest valid candidate wins.
+    ProvisionedCapacity(ResourceUnitCost),
+    /// Cost model 3, the deployment's own cluster: no prices; memory, disk
+    /// and (when set) CPU cores are hard limits, and the objective chooses
+    /// among the candidates that fit.
+    ClusterCapacity(ClusterLimits),
+}
+
+/// A fixed cluster's capacity (cost model 3) and how to choose within it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClusterLimits {
+    /// Memory available; a candidate whose peak memory is above it is invalid.
+    pub memory_bytes: u64,
+    /// Disk available; a candidate keeping more on disk is invalid.
+    pub disk_bytes: u64,
+    /// CPU cores available; `None` leaves cores unchecked.
+    pub cpu_cores: Option<u32>,
+    /// How to choose among the candidates that fit.
+    pub objective: ClusterObjective,
+}
+
+/// What cost model 3 optimizes among the candidates that fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterObjective {
+    /// The smallest worst-query latency; ties by peak memory, then disk.
+    LowestLatency,
+    /// The smallest peak memory; ties by disk, then worst-query latency.
+    LeastMemory,
+    /// Report every candidate no other beats on peak memory, disk and
+    /// worst-query latency at once ([`Selection::front`]); select the
+    /// front's lowest-latency member.
+    ParetoFront,
+}
+
+/// The deployment's choices for plan selection (Stage 3): the cost model,
+/// how fast a core works, and how long one-off queries are spread over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanSelectionSettings {
+    /// How candidates are compared; default cost model 1 with
+    /// [`ResourceUnitCost::illustrative`].
+    pub cost_model: CostModel,
+    /// Time per operation and per scanned byte, for latency and cores;
+    /// default [`ResourceSpeed::illustrative`].
+    pub resource_speed: ResourceSpeed,
+    /// Seconds one-off, scheduled and unknown queries are spread over
+    /// (`invocations / horizon` per second); default 3,600.
+    pub non_repeating_query_horizon_seconds: f64,
+}
+
+impl Default for PlanSelectionSettings {
+    fn default() -> Self {
+        Self {
+            cost_model: CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
+            resource_speed: ResourceSpeed::illustrative(),
+            non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
+        }
+    }
+}
+
+impl PlanSelectionSettings {
+    /// Bad input: a negative or non-finite speed, a horizon that is not
+    /// positive, or a price the chosen cost model reads that is negative or
+    /// not finite, or every such price 0 (cost model 3 reads none).
+    pub fn validate(&self) -> Result<(), AnalyticalCostError> {
+        for (name, value) in [
+            ("ms_per_cpu_op", self.resource_speed.ms_per_cpu_op),
+            (
+                "ms_per_scanned_byte",
+                self.resource_speed.ms_per_scanned_byte,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(AnalyticalCostError::InvalidCalibration(name, value));
+            }
+        }
+        let horizon = self.non_repeating_query_horizon_seconds;
+        if !horizon.is_finite() || horizon <= 0.0 {
+            return Err(AnalyticalCostError::InvalidCalibration(
+                "non_repeating_query_horizon_seconds",
+                horizon,
+            ));
+        }
+        let read = match &self.cost_model {
+            CostModel::UsageOverTime(p) => vec![
+                ("cost_per_cpu_op", p.cost_per_cpu_op),
+                ("cost_per_scanned_byte", p.cost_per_scanned_byte),
+                ("cost_per_memory_byte_second", p.cost_per_memory_byte_second),
+                ("cost_per_disk_byte_second", p.cost_per_disk_byte_second),
+            ],
+            CostModel::ProvisionedCapacity(p) => vec![
+                (
+                    "cost_per_provisioned_memory_byte_second",
+                    p.cost_per_provisioned_memory_byte_second,
+                ),
+                (
+                    "cost_per_provisioned_cpu_core_second",
+                    p.cost_per_provisioned_cpu_core_second,
+                ),
+                ("cost_per_disk_byte_second", p.cost_per_disk_byte_second),
+            ],
+            CostModel::ClusterCapacity(_) => return Ok(()),
+        };
+        for &(name, value) in &read {
+            if !value.is_finite() || value < 0.0 {
+                return Err(AnalyticalCostError::InvalidCalibration(name, value));
+            }
+        }
+        if read.iter().all(|(_, value)| *value == 0.0) {
+            return Err(AnalyticalCostError::ZeroCalibration);
+        }
+        Ok(())
+    }
+}
+
+/// One node's usage and price, per second of wall time. `multiplier` is the
+/// number of consumers it is computed for (1 when materialized) and
+/// `per_second` the times it is computed per second ([`computations`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeCost {
-    pub cost: f64,
+    pub usage: NodeUsage,
+    /// Its price per second under cost model 1; `None` under cost models 2
+    /// and 3, which price (or limit) the whole candidate's peaks.
+    pub cost_per_second: Option<f64>,
     pub multiplier: u64,
     pub per_second: f64,
     pub detail: String,
 }
 
-/// Whole-workload cost of one candidate: one entry per DAG node, `total` is
-/// their sum. `latency[i]` is query `i`'s latency per evaluation.
+/// One candidate's usage and price over the whole workload: one entry per
+/// DAG node; `usage` sums them, with the candidate's peak cores and
+/// per-query latency.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateCost {
-    pub total: f64,
+    pub usage: ResourceUsage,
+    /// Its price per second under cost model 1 or 2 (under cost model 1, the
+    /// sum of its nodes'); `None` under cost model 3.
+    pub cost_per_second: Option<f64>,
     pub unit: &'static str,
     pub source: &'static str,
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
-    /// One per query, in workload order: its latency per evaluation.
-    pub latency: Vec<QueryLatency>,
 }
 
 /// One query's latency per evaluation, its longest chain of work (module
@@ -219,7 +461,8 @@ impl QueryLatency {
 
 /// The first query whose latency is over its bound, as a rejection reason.
 fn latency_violation(cost: &CandidateCost, entries: &[QueryWorkloadEntry]) -> Option<String> {
-    cost.latency
+    cost.usage
+        .latency_per_query
         .iter()
         .zip(entries)
         .enumerate()
@@ -246,8 +489,11 @@ pub(crate) fn accuracy_targets(entries: &[QueryWorkloadEntry]) -> Vec<AccuracyTa
         .collect()
 }
 
-/// A candidate that was not selected. `valid == false`: it failed a check;
-/// `true`: it lost on cost, or tied and lost on enumeration order.
+/// A candidate that was not selected. `valid == false`: it failed a check
+/// (accuracy, latency bound or, under cost model 3, the cluster's limits);
+/// `true`: it lost under the cost model (costlier, slower, more memory, off
+/// or not chosen from the Pareto front), or tied and lost on enumeration
+/// order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rejection {
     pub id: String,
@@ -310,10 +556,18 @@ pub struct Selection {
     /// For each valid candidate, per query, the accuracy Stage 3 accepted.
     pub accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
     pub rejected: Vec<Rejection>,
+    /// Under [`ClusterObjective::ParetoFront`], the valid candidates no
+    /// other beats on peak memory, disk and worst-query latency at once, in
+    /// candidate order; empty under every other objective and cost model.
+    pub front: Vec<String>,
 }
 
 #[derive(Debug, Error)]
 pub enum SelectionError {
+    /// Bad input: the deployment's plan selection settings
+    /// ([`PlanSelectionSettings::validate`]).
+    #[error("plan selection settings: {0}")]
+    InvalidSettings(AnalyticalCostError),
     /// Bad input: the caller gave a different number of workload entries
     /// than the candidate has query roots.
     #[error("candidate {candidate} has {roots} roots but {entries} workload entries were given")]
@@ -333,23 +587,32 @@ pub enum SelectionError {
 }
 
 /// Stage 3 (plan selection): reject candidates that miss a query's accuracy
-/// target or latency bound, price the rest per second and select the
-/// cheapest (the first on ties). `entries[i]` is the workload entry of
-/// `candidate.roots[i]`: its accuracy target, its latency bound and how
-/// often it is evaluated.
+/// target or latency bound (or, under cost model 3, the cluster's
+/// capacity), measure the rest's resource usage per second and choose one
+/// under the deployment's cost model (`models.plan_selection`): the
+/// cheapest under cost models 1 and 2, the best by the cluster objective
+/// under cost model 3 (the first on ties). `entries[i]` is the workload
+/// entry of `candidate.roots[i]`: its accuracy target, its latency bound and
+/// how often it is evaluated.
 pub fn select_plan(
     cands: &[PhysicalCandidate],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Selection, SelectionError> {
+    let settings = models.plan_selection;
+    settings
+        .validate()
+        .map_err(SelectionError::InvalidSettings)?;
     let targets = &accuracy_targets(entries);
     let mut costs = BTreeMap::new();
     let mut accepted = BTreeMap::new();
     let mut rejected = Vec::new();
-    let mut best: Option<(String, f64, Vec<QueryRoot>)> = None;
+    // Valid candidates in candidate order: the index into `cands` and the
+    // roots sized for their failure probabilities.
+    let mut valid: Vec<(usize, Vec<QueryRoot>)> = Vec::new();
     let recurrence: Vec<QueryRecurrence> = entries.iter().map(|e| e.recurrence.clone()).collect();
-    for candidate in cands {
+    for (index, candidate) in cands.iter().enumerate() {
         if candidate.roots.len() != entries.len() {
             return Err(SelectionError::EntryCount {
                 candidate: candidate.id.clone(),
@@ -357,7 +620,7 @@ pub fn select_plan(
                 entries: entries.len(),
             });
         }
-        let candidate = &match sized_for_failure_probability(candidate, targets, data) {
+        let candidate = match sized_for_failure_probability(candidate, targets, data) {
             Ok(sized) => sized,
             Err(reason) => {
                 rejected.push(Rejection {
@@ -368,7 +631,7 @@ pub fn select_plan(
                 continue;
             }
         };
-        let accepted_accuracy = match accuracy_check(candidate, targets, data, &models) {
+        let accepted_accuracy = match accuracy_check(&candidate, targets, data, &models) {
             Ok(accepted_accuracy) => accepted_accuracy,
             Err(reason) => {
                 rejected.push(Rejection {
@@ -379,16 +642,19 @@ pub fn select_plan(
                 continue;
             }
         };
-        let calibration = illustrative_calibration();
         let cost =
-            price(&candidate.dag, &recurrence, data, &calibration).map_err(|(node, error)| {
+            price(&candidate.dag, &recurrence, data, settings).map_err(|(node, error)| {
                 SelectionError::Cost {
                     candidate: candidate.id.clone(),
                     node,
                     error,
                 }
             })?;
-        if let Some(reason) = latency_violation(&cost, entries) {
+        let violation = latency_violation(&cost, entries).or_else(|| match &settings.cost_model {
+            CostModel::ClusterCapacity(limits) => capacity_violation(&cost.usage, limits),
+            _ => None,
+        });
+        if let Some(reason) = violation {
             rejected.push(Rejection {
                 id: candidate.id.clone(),
                 valid: false,
@@ -396,44 +662,69 @@ pub fn select_plan(
             });
             continue;
         }
-        if best
-            .as_ref()
-            .is_none_or(|(_, total, _)| cheaper(cost.total, *total))
-        {
-            best = Some((candidate.id.clone(), cost.total, candidate.roots.clone()));
-        }
         costs.insert(candidate.id.clone(), cost);
         accepted.insert(candidate.id.clone(), accepted_accuracy);
+        valid.push((index, candidate.roots));
     }
-    let Some((selected, best_total, selected_roots)) = best else {
+    let id = |index: usize| cands[index].id.as_str();
+    let ranking = Ranking::of(&settings.cost_model);
+    let valid_costs: Vec<&CandidateCost> = valid.iter().map(|(i, _)| &costs[id(*i)]).collect();
+    let Some((best, front)) = choose(ranking, &valid_costs) else {
         return Err(SelectionError::NoValidCandidate(rejected));
     };
-    for candidate in cands {
-        if candidate.id != selected && costs.contains_key(&candidate.id) {
-            let total = costs[&candidate.id].total;
-            let reason = if !cheaper(best_total, total) {
-                format!(
-                    "tied with the selected candidate {selected} at {total:.3} {COST_UNIT}; \
-                     lost on enumeration order"
-                )
-            } else {
-                format!("costlier: {total:.3} vs {best_total:.3} {COST_UNIT}")
-            };
+    let selected = id(valid[best].0).to_string();
+    let front: Vec<String> = front
+        .into_iter()
+        .map(|f| id(valid[f].0).to_string())
+        .collect();
+    for (index, _) in &valid {
+        let id = id(*index);
+        if id != selected {
             rejected.push(Rejection {
-                id: candidate.id.clone(),
+                id: id.to_string(),
                 valid: true,
-                reason,
+                reason: ranking.lost_reason(id, &selected, &costs, &front),
             });
         }
     }
-    let plan = with_confirmed_weights(&selected_roots, data);
+    let plan = with_confirmed_weights(&valid.swap_remove(best).1, data);
     Ok(Selection {
         selected,
         plan,
         costs,
         accepted,
         rejected,
+        front,
     })
+}
+
+/// The index of the candidate `ranking` selects among `costs` (the first on
+/// ties) and, under [`Ranking::Front`], the indices of the Pareto front in
+/// order; `None` without candidates.
+fn choose(ranking: Ranking, costs: &[&CandidateCost]) -> Option<(usize, Vec<usize>)> {
+    let front: Vec<usize> = match ranking {
+        Ranking::Front => (0..costs.len())
+            .filter(|&i| {
+                !costs
+                    .iter()
+                    .any(|other| dominates(&other.usage, &costs[i].usage))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Under the Pareto front, only a front member can be selected.
+    let pool: Vec<usize> = match ranking {
+        Ranking::Front => front.clone(),
+        _ => (0..costs.len()).collect(),
+    };
+    let best =
+        pool.into_iter().reduce(
+            |best, next| match ranking.better(costs[next], costs[best]) {
+                true => next,
+                false => best,
+            },
+        )?;
+    Some((best, front))
 }
 
 /// Whether `cost` is cheaper than `best`. Totals that differ only by
@@ -441,6 +732,168 @@ pub fn select_plan(
 /// tie, and a tie keeps the earlier candidate.
 fn cheaper(cost: f64, best: f64) -> bool {
     cost < best - best.abs() * 1e-9
+}
+
+/// The worst latency per evaluation among a candidate's queries (0 with none).
+fn worst_latency_ms(usage: &ResourceUsage) -> f64 {
+    usage
+        .latency_per_query
+        .iter()
+        .map(QueryLatency::total_ms)
+        .fold(0.0, f64::max)
+}
+
+/// Under cost model 3, the first limit of the cluster `usage` is over, as a
+/// rejection reason.
+fn capacity_violation(usage: &ResourceUsage, limits: &ClusterLimits) -> Option<String> {
+    if usage.peak_memory_bytes > limits.memory_bytes {
+        return Some(format!(
+            "peak memory {} bytes is over the cluster's {} bytes",
+            usage.peak_memory_bytes, limits.memory_bytes
+        ));
+    }
+    if usage.disk_bytes > limits.disk_bytes {
+        return Some(format!(
+            "disk {} bytes is over the cluster's {} bytes",
+            usage.disk_bytes, limits.disk_bytes
+        ));
+    }
+    match limits.cpu_cores {
+        Some(cores) if usage.peak_cpu_cores > cores => Some(format!(
+            "{} CPU cores at peak is over the cluster's {cores}",
+            usage.peak_cpu_cores
+        )),
+        _ => None,
+    }
+}
+
+/// Whether `a` is at least as good as `b` on peak memory, disk and
+/// worst-query latency, and better on one of them.
+fn dominates(a: &ResourceUsage, b: &ResourceUsage) -> bool {
+    let (la, lb) = (worst_latency_ms(a), worst_latency_ms(b));
+    a.peak_memory_bytes <= b.peak_memory_bytes
+        && a.disk_bytes <= b.disk_bytes
+        && !cheaper(lb, la)
+        && (a.peak_memory_bytes < b.peak_memory_bytes
+            || a.disk_bytes < b.disk_bytes
+            || cheaper(la, lb))
+}
+
+/// How a cost model orders valid candidates.
+#[derive(Clone, Copy)]
+enum Ranking {
+    /// Cost models 1 and 2: by price.
+    Price,
+    /// Latency, then peak memory, then disk.
+    Latency,
+    /// Peak memory, then disk, then latency.
+    Memory,
+    /// The Pareto front; the selected member by [`Ranking::Latency`].
+    Front,
+}
+
+impl Ranking {
+    fn of(model: &CostModel) -> Self {
+        match model {
+            CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_) => Ranking::Price,
+            CostModel::ClusterCapacity(limits) => match limits.objective {
+                ClusterObjective::LowestLatency => Ranking::Latency,
+                ClusterObjective::LeastMemory => Ranking::Memory,
+                ClusterObjective::ParetoFront => Ranking::Front,
+            },
+        }
+    }
+
+    /// Whether `cost` ranks strictly before `best`. Prices and latencies tie
+    /// within rounding ([`cheaper`]); peak memory and disk are whole bytes,
+    /// compared exactly, as [`dominates`] compares them.
+    fn better(self, cost: &CandidateCost, best: &CandidateCost) -> bool {
+        use std::cmp::Ordering;
+        let rounded = |a: f64, b: f64| match (cheaper(a, b), cheaper(b, a)) {
+            (true, _) => Ordering::Less,
+            (_, true) => Ordering::Greater,
+            _ => Ordering::Equal,
+        };
+        let (a, b) = (&cost.usage, &best.usage);
+        let latency = || rounded(worst_latency_ms(a), worst_latency_ms(b));
+        let memory = || a.peak_memory_bytes.cmp(&b.peak_memory_bytes);
+        let disk = || a.disk_bytes.cmp(&b.disk_bytes);
+        let order = match self {
+            Ranking::Price => rounded(
+                cost.cost_per_second.unwrap_or(f64::INFINITY),
+                best.cost_per_second.unwrap_or(f64::INFINITY),
+            ),
+            Ranking::Latency | Ranking::Front => latency().then_with(memory).then_with(disk),
+            Ranking::Memory => memory().then_with(disk).then_with(latency),
+        };
+        order == Ordering::Less
+    }
+
+    /// Why valid candidate `id` was not `selected`.
+    fn lost_reason(
+        self,
+        id: &str,
+        selected: &str,
+        costs: &BTreeMap<String, CandidateCost>,
+        front: &[String],
+    ) -> String {
+        let (cost, best) = (&costs[id], &costs[selected]);
+        if !self.better(best, cost) {
+            let tied = match self {
+                Ranking::Price => format!(
+                    "{:.3} {COST_UNIT}",
+                    cost.cost_per_second.unwrap_or_default()
+                ),
+                _ => describe_usage(&cost.usage),
+            };
+            return format!(
+                "tied with the selected candidate {selected} at {tied}; lost on enumeration order"
+            );
+        }
+        match self {
+            Ranking::Price => format!(
+                "costlier: {:.3} vs {:.3} {COST_UNIT}",
+                cost.cost_per_second.unwrap_or_default(),
+                best.cost_per_second.unwrap_or_default()
+            ),
+            Ranking::Latency => format!(
+                "slower: {} vs {}",
+                describe_usage(&cost.usage),
+                describe_usage(&best.usage)
+            ),
+            Ranking::Memory => format!(
+                "more memory: {} vs {}",
+                describe_usage(&cost.usage),
+                describe_usage(&best.usage)
+            ),
+            Ranking::Front if front.iter().any(|f| f == id) => format!(
+                "on the Pareto front, not its lowest-latency member: {} vs {}",
+                describe_usage(&cost.usage),
+                describe_usage(&best.usage)
+            ),
+            Ranking::Front => {
+                let by = front
+                    .iter()
+                    .find(|f| dominates(&costs[f.as_str()].usage, &cost.usage))
+                    .map_or(selected, String::as_str);
+                format!(
+                    "dominated by {by}: {} vs {}",
+                    describe_usage(&cost.usage),
+                    describe_usage(&costs[by].usage)
+                )
+            }
+        }
+    }
+}
+
+/// E.g. `latency 126.0 ms, peak memory 9648000000 bytes, disk 480000000 bytes`.
+fn describe_usage(usage: &ResourceUsage) -> String {
+    format!(
+        "latency {:.1} ms, peak memory {} bytes, disk {} bytes",
+        worst_latency_ms(usage),
+        usage.peak_memory_bytes,
+        usage.disk_bytes
+    )
 }
 
 /// Without a planning time, only evidence that cannot expire is fresh.
@@ -1123,10 +1576,10 @@ struct Shape {
 /// Repeating queries with equal intervals are evaluated together, so each
 /// interval counts once; estimated rates add. One-off, scheduled and unknown
 /// queries run as one batch: the most invocations among them, spread over
-/// `horizon_s`.
+/// `non_repeating_query_horizon_seconds`.
 fn evaluation_rate<'r>(
     queries: impl IntoIterator<Item = &'r QueryRecurrence>,
-    horizon_s: f64,
+    non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
     let mut intervals = BTreeSet::new();
     let mut estimated = 0.0;
@@ -1159,7 +1612,7 @@ fn evaluation_rate<'r>(
         }
     }
     let repeated: f64 = intervals.into_iter().map(|ms| 1_000.0 / ms as f64).sum();
-    Ok(repeated + estimated + invocations as f64 / horizon_s)
+    Ok(repeated + estimated + invocations as f64 / non_repeating_query_horizon_seconds)
 }
 
 /// The nodes each query reads first, in query order: query `i` is the scalar
@@ -1193,7 +1646,7 @@ fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
 fn computations(
     dag: &PhysicalASAPDAG,
     recurrence: &[QueryRecurrence],
-    horizon_s: f64,
+    non_repeating_query_horizon_seconds: f64,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
     let materialized: HashMap<_, _> = dag
         .nodes
@@ -1231,7 +1684,7 @@ fn computations(
                     .into_iter()
                     .flatten()
                     .filter_map(|&q| recurrence.get(q)),
-                horizon_s,
+                non_repeating_query_horizon_seconds,
             )?,
         };
         rate_of_materialized.insert(id, rate);
@@ -1239,7 +1692,7 @@ fn computations(
     // Each consumer's starting nodes and its rate.
     let mut consumers = Vec::new();
     for (query, start) in starts.into_iter().enumerate() {
-        let rate = evaluation_rate(recurrence.get(query), horizon_s)?;
+        let rate = evaluation_rate(recurrence.get(query), non_repeating_query_horizon_seconds)?;
         consumers.push((start, rate));
     }
     for (&id, &rate) in &rate_of_materialized {
@@ -1272,24 +1725,26 @@ fn computations(
         .collect())
 }
 
-/// Price every node of `dag` per second of wall time (module doc, "Cost
-/// model"). Nodes are exported children first, so each node's input
-/// statistics are known when it is reached. A query-time node is priced per
-/// computation over the rows its time ranges keep, times how often it is
-/// computed per second ([`computations`]); an ingestion-time node over one
-/// second of arriving rows. A materialized node's kept state is charged per
-/// byte per second.
+/// Measure every node of `dag` per second of wall time (module doc, "Cost
+/// model") and price it under `settings.cost_model`. Nodes are exported
+/// children first, so each node's input statistics are known when it is
+/// reached. A query-time node is measured per computation over the rows its
+/// time ranges keep, times how often it is computed per second
+/// ([`computations`]); an ingestion-time node over one second of arriving
+/// rows. A materialized node's kept state is counted in byte-seconds per
+/// second.
 fn price(
     dag: &PhysicalASAPDAG,
     recurrence: &[QueryRecurrence],
     data: &DataWorkload,
-    calibration: &ResourceCalibration,
+    settings: &PlanSelectionSettings,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
-    calibration.validate().map_err(|error| (first, error))?;
-    let per_computation = ResourceCalibration {
-        cost_per_retained_byte: 0.0,
-        ..calibration.clone()
+    let speed = settings.resource_speed;
+    // Cost model 1 prices each node as it is measured.
+    let usage_prices = match &settings.cost_model {
+        CostModel::UsageOverTime(prices) => Some(prices),
+        _ => None,
     };
     let series = data
         .input_cardinality
@@ -1305,16 +1760,26 @@ fn price(
             / 1_000.0,
     };
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
-    let multipliers =
-        computations(dag, recurrence, calibration.horizon_s).map_err(|error| (first, error))?;
+    let multipliers = computations(
+        dag,
+        recurrence,
+        settings.non_repeating_query_horizon_seconds,
+    )
+    .map_err(|error| (first, error))?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
     // Each node's work in ms on one core: one computation at query time,
     // one second of arriving rows at ingestion time.
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
-    // MatAtQuery state, held only while one evaluation runs: (bytes, per
-    // second), charged once the evaluations' latencies are known.
+    // MatAtQuery state in memory, held only while one evaluation runs:
+    // (bytes, per second), counted once the evaluations' latencies are known.
     let mut held: HashMap<PhysicalASAPNodeId, (u64, f64)> = HashMap::new();
+    // The raw data query-time scans read, kept on disk: per source, the
+    // largest scan's (bytes, node).
+    let mut raw_data: HashMap<String, (u64, PhysicalASAPNodeId)> = HashMap::new();
+    // Each in-memory ingestion-time state's bytes per window (what it keeps
+    // for one window, its output or an exact aggregate's values).
+    let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
     for node in &dag.nodes {
         let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
         let inputs: Vec<_> = dag
@@ -1608,59 +2073,120 @@ fn price(
         let estimate = estimate.map_err(|error| (node.id, error))?;
         work_ms.insert(
             node.id,
-            estimate.cpu_ops() * calibration.ms_per_cpu_op
-                + estimate.scan_bytes() as f64 * calibration.ms_per_scan_byte,
+            estimate.cpu_ops() * speed.ms_per_cpu_op
+                + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte,
         );
-        // A computation is charged for its CPU work and scanned bytes; memory
-        // only as kept state, below.
-        let cost = estimate
-            .calibrated_cost(&per_computation)
-            .map_err(|error| (node.id, error))?;
         let (multiplier, per_second) = multipliers[&node.id];
-        let mut cost = cost * per_second;
+        let mut usage = NodeUsage {
+            cpu_ops_per_second: estimate.cpu_ops() * per_second,
+            scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
+            ..NodeUsage::default()
+        };
         let mut detail = format!("{detail}; x {per_second:.4}/s");
         // State kept between computations: at ingestion time, the window
         // being built and the completed ones queries read (a chain of N
         // panes keeps N + 1), every second. At query time the output is
         // reused only within one evaluation, so it is held only while that
-        // evaluation runs (charged below, once latencies are known). The
+        // evaluation runs (counted below, once latencies are known). The
         // state is what the node holds: its output, or the values an exact
-        // aggregate keeps per group when that is more.
+        // aggregate keeps per group when that is more. A computation that
+        // keeps nothing holds its working memory while it runs, once per
+        // consumer that recomputes it.
         let state = out.bytes.max(estimate.peak_memory_bytes());
-        let kept = match (node.materialization, &node.payload) {
-            (Materialization::NotMaterialized, _) => 0,
-            (Materialization::MatAtQuery(_), _) => {
-                held.insert(node.id, (state, per_second));
-                0
+        let (kept, medium) = match (node.materialization, &node.payload) {
+            (Materialization::NotMaterialized, _) => {
+                usage.peak_memory_bytes = estimate.peak_memory_bytes().saturating_mul(multiplier);
+                (0, Medium::Memory)
+            }
+            (Materialization::MatAtQuery(medium), _) => {
+                match medium {
+                    Medium::Memory => {
+                        held.insert(node.id, (state, per_second));
+                        usage.peak_memory_bytes = state;
+                    }
+                    Medium::Disk => usage.disk_bytes = state,
+                }
+                (0, medium)
             }
             (
-                Materialization::MatAtIngestion(_),
+                Materialization::MatAtIngestion(medium),
                 Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }),
             ) => {
                 let panes = u64::from(*pane_count).max(1);
-                state / panes * (panes + 1)
+                (state / panes * (panes + 1), medium)
             }
-            (Materialization::MatAtIngestion(_), _) => 2 * state,
+            (Materialization::MatAtIngestion(medium), _) => (2 * state, medium),
         };
+        if node.materialization == Materialization::MatAtIngestion(Medium::Memory) {
+            maintained.push((node.id, state / panes_of(node)));
+        }
         if kept > 0 {
-            cost += calibration.cost_per_retained_byte_second * kept as f64;
+            match medium {
+                Medium::Memory => {
+                    usage.average_memory_bytes = kept as f64;
+                    usage.peak_memory_bytes = kept;
+                }
+                Medium::Disk => usage.disk_bytes = kept,
+            }
             detail += &format!("; keeps {kept} bytes");
         }
-        if !cost.is_finite() {
+        if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
+            if !ingestion {
+                let largest = raw_data
+                    .entry(format!("{source:?}"))
+                    .or_insert((out.bytes, node.id));
+                if out.bytes > largest.0 {
+                    *largest = (out.bytes, node.id);
+                }
+            }
+        }
+        // One computation's CPU and scan price times its rate, then the
+        // kept state's.
+        let cost = usage_prices.map(|prices| {
+            (estimate.cpu_ops() * prices.cost_per_cpu_op
+                + estimate.scan_bytes() as f64 * prices.cost_per_scanned_byte)
+                * per_second
+                + prices.cost_per_memory_byte_second * usage.average_memory_bytes
+                + prices.cost_per_disk_byte_second * usage.disk_bytes as f64
+        });
+        if cost.is_some_and(|cost| !cost.is_finite()) {
             return Err((node.id, AnalyticalCostError::Overflow));
         }
         output.insert(node.id, out);
         per_node.insert(
             node.id,
             NodeCost {
-                cost,
+                usage,
+                cost_per_second: cost,
                 multiplier,
                 per_second,
                 detail,
             },
         );
     }
-    let latency = query_latencies(dag, &nodes, &output, &work_ms, calibration);
+    for (bytes, id) in raw_data.into_values() {
+        let node = per_node.get_mut(&id).expect("every node is measured");
+        node.usage.disk_bytes += bytes;
+        node.detail += &format!("; keeps {bytes} bytes of raw data on disk");
+        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
+            *cost += prices.cost_per_disk_byte_second * bytes as f64;
+        }
+    }
+    // With k ingest workers, each of the k − 1 beyond the first builds its
+    // own partial copy of an in-memory ingestion-time state's newest window
+    // (merged at query time, [`query_latencies`]), held at the peak too.
+    for (id, window) in maintained {
+        let copies = ingest_workers(dag, &work_ms, id) - 1;
+        if copies == 0 {
+            continue;
+        }
+        let bytes = copies.saturating_mul(window);
+        let measured = per_node.get_mut(&id).expect("every node is measured");
+        measured.usage.peak_memory_bytes = measured.usage.peak_memory_bytes.saturating_add(bytes);
+        measured.detail +=
+            &format!("; {copies} partial copies of its newest window, {bytes} bytes");
+    }
+    let latency = query_latencies(dag, &nodes, &output, &work_ms, &speed);
     // A MatAtQuery state is held for one evaluation: from its build until
     // the longest query reading it finishes, about that query's latency.
     let reach = query_reach(dag, &nodes);
@@ -1672,20 +2198,75 @@ fn price(
             .map(|(_, l)| l.total_ms())
             .fold(0.0, f64::max);
         let byte_seconds = state as f64 * evaluation_ms / 1_000.0 * per_second;
-        let node = per_node.get_mut(&id).expect("every node is priced");
-        node.cost += calibration.cost_per_retained_byte_second * byte_seconds;
+        let node = per_node.get_mut(&id).expect("every node is measured");
+        node.usage.average_memory_bytes += byte_seconds;
         node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
-        if !node.cost.is_finite() {
-            return Err((id, AnalyticalCostError::Overflow));
+        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
+            *cost += prices.cost_per_memory_byte_second * byte_seconds;
+            if !cost.is_finite() {
+                return Err((id, AnalyticalCostError::Overflow));
+            }
         }
     }
+    let mut usage = ResourceUsage::default();
+    for node in per_node.values() {
+        usage.cpu_ops_per_second += node.usage.cpu_ops_per_second;
+        usage.scanned_bytes_per_second += node.usage.scanned_bytes_per_second;
+        usage.average_memory_bytes += node.usage.average_memory_bytes;
+        usage.peak_memory_bytes = usage
+            .peak_memory_bytes
+            .saturating_add(node.usage.peak_memory_bytes);
+        usage.disk_bytes = usage.disk_bytes.saturating_add(node.usage.disk_bytes);
+    }
+    usage.peak_cpu_cores = peak_cpu_cores(dag, &nodes, &work_ms, &multipliers, &latency);
+    usage.latency_per_query = latency;
+    let cost = match &settings.cost_model {
+        CostModel::UsageOverTime(_) => per_node.values().map(|node| node.cost_per_second).sum(),
+        CostModel::ProvisionedCapacity(prices) => {
+            let cost = prices.cost_per_provisioned_memory_byte_second
+                * usage.peak_memory_bytes as f64
+                + prices.cost_per_provisioned_cpu_core_second * f64::from(usage.peak_cpu_cores)
+                + prices.cost_per_disk_byte_second * usage.disk_bytes as f64;
+            if !cost.is_finite() {
+                return Err((first, AnalyticalCostError::Overflow));
+            }
+            Some(cost)
+        }
+        CostModel::ClusterCapacity(_) => None,
+    };
     Ok(CandidateCost {
-        total: per_node.values().map(|n| n.cost).sum(),
+        usage,
+        cost_per_second: cost,
         unit: COST_UNIT,
         source: COST_SOURCE,
         per_node,
-        latency,
     })
+}
+
+/// The CPU cores a candidate needs at its peak: enough for its
+/// ingestion-time work every second (none without any), plus one per
+/// query with query-time work, all evaluating at once; at least the cores
+/// its average query-time work fills.
+fn peak_cpu_cores(
+    dag: &PhysicalASAPDAG,
+    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
+    work_ms: &HashMap<PhysicalASAPNodeId, f64>,
+    multipliers: &HashMap<PhysicalASAPNodeId, (u64, f64)>,
+    latency: &[QueryLatency],
+) -> u32 {
+    let mut ingestion_ms_per_second = 0.0;
+    let mut query_ms_per_second = 0.0;
+    for node in &dag.nodes {
+        let per_second = multipliers[&node.id].1;
+        if nodes[&node.id].output_state.timing == ExecutionTiming::IngestionTime {
+            ingestion_ms_per_second += work_ms[&node.id] * per_second;
+        } else {
+            query_ms_per_second += work_ms[&node.id] * per_second;
+        }
+    }
+    let cores = |ms_per_second: f64| (ms_per_second / 1_000.0).ceil() as u32;
+    let evaluating = latency.iter().filter(|l| l.query_ms > 0.0).count() as u32;
+    cores(ingestion_ms_per_second) + evaluating.max(cores(query_ms_per_second))
 }
 
 /// Each query's latency per evaluation (module doc, "Latency"): the sum of
@@ -1700,7 +2281,7 @@ fn query_latencies(
     nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
     output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
-    calibration: &ResourceCalibration,
+    speed: &ResourceSpeed,
 ) -> Vec<QueryLatency> {
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
@@ -1711,22 +2292,9 @@ fn query_latencies(
     let at_ingestion =
         |id: PhysicalASAPNodeId| nodes[&id].output_state.timing == ExecutionTiming::IngestionTime;
     let compaction_ms = |state: PhysicalASAPNodeId| {
-        let mut ingest_ms_per_s = 0.0;
-        let mut seen = HashSet::new();
-        let mut stack = vec![state];
-        while let Some(id) = stack.pop() {
-            if seen.insert(id) {
-                ingest_ms_per_s += work_ms[&id];
-                stack.extend(inputs(id));
-            }
-        }
-        let workers = (ingest_ms_per_s / 1_000.0).ceil().max(1.0);
-        let panes = match &nodes[&state].payload {
-            Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count).max(1),
-            _ => 1,
-        };
-        let states = (output[&state].rows / panes) as f64;
-        (workers - 1.0) * states * calibration.ms_per_cpu_op
+        let workers = ingest_workers(dag, work_ms, state) as f64;
+        let states = (output[&state].rows / panes_of(nodes[&state])) as f64;
+        (workers - 1.0) * states * speed.ms_per_cpu_op
     };
     query_starts(dag)
         .into_iter()
@@ -1751,6 +2319,38 @@ fn query_latencies(
             latency
         })
         .collect()
+}
+
+/// The cores `state`'s ingestion work takes, at least one: the ingest
+/// workers that each build a partial copy of its newest window.
+fn ingest_workers(
+    dag: &PhysicalASAPDAG,
+    work_ms: &HashMap<PhysicalASAPNodeId, f64>,
+    state: PhysicalASAPNodeId,
+) -> u64 {
+    let mut ingest_ms_per_s = 0.0;
+    let mut seen = HashSet::new();
+    let mut stack = vec![state];
+    while let Some(id) = stack.pop() {
+        if seen.insert(id) {
+            ingest_ms_per_s += work_ms[&id];
+            stack.extend(
+                dag.edges
+                    .iter()
+                    .filter(|e| e.consumer == id)
+                    .map(|e| e.producer),
+            );
+        }
+    }
+    (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
+}
+
+/// A node's panes: a pane chain's count, 1 for any other node.
+fn panes_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
+    match &node.payload {
+        Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count).max(1),
+        _ => 1,
+    }
 }
 
 /// The nodes each query reaches at query time, in workload order: its walk
@@ -2392,9 +2992,13 @@ mod tests {
             let mut sorted = ids.clone();
             sorted.sort();
             assert_eq!(keys, sorted);
-            let sum: f64 = cost.per_node.values().map(|n| n.cost).sum();
-            assert_eq!(cost.total, sum);
-            assert!(cost.total > 0.0);
+            let sum: f64 = cost
+                .per_node
+                .values()
+                .map(|n| n.cost_per_second.unwrap())
+                .sum();
+            assert_eq!(cost.cost_per_second.unwrap(), sum);
+            assert!(cost.cost_per_second.unwrap() > 0.0);
         }
         let costlier: Vec<_> = selection.rejected.iter().filter(|r| r.valid).collect();
         assert_eq!(costlier.len(), 1);
@@ -2421,11 +3025,8 @@ mod tests {
             panic!("two roots")
         };
         // Kept state is priced apart; this compares computations only.
-        let calibration = ResourceCalibration {
-            cost_per_retained_byte_second: 0.0,
-            ..illustrative_calibration()
-        };
-        let cost = price(&candidate.dag, &recurrences(2), &data(), &calibration).unwrap();
+        let settings = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
+        let cost = price(&candidate.dag, &recurrences(2), &data(), &settings).unwrap();
         let multipliers: BTreeMap<_, _> = cost
             .per_node
             .iter()
@@ -2447,13 +3048,16 @@ mod tests {
             .find(|n| n.id == inner)
             .unwrap();
         node.materialization = Materialization::MatAtQuery(asap_types::ir::Medium::Memory);
-        let stored = price(&candidate.dag, &recurrences(2), &data(), &calibration).unwrap();
+        let stored = price(&candidate.dag, &recurrences(2), &data(), &settings).unwrap();
         for (id, c) in &stored.per_node {
             assert_eq!(c.multiplier, 1, "node {id} is computed once");
-            let once = cost.per_node[id].cost / multipliers[id] as f64;
-            assert!((c.cost - once).abs() <= 1e-12 * once, "node {id}");
+            let once = cost.per_node[id].cost_per_second.unwrap() / multipliers[id] as f64;
+            assert!(
+                (c.cost_per_second.unwrap() - once).abs() <= 1e-12 * once,
+                "node {id}"
+            );
         }
-        assert!(stored.total < cost.total);
+        assert!(stored.cost_per_second.unwrap() < cost.cost_per_second.unwrap());
     }
 
     /// Every combination of Pass 1 candidates of one query, as Stage 2
@@ -2937,7 +3541,7 @@ mod tests {
                 .values()
                 .find(|n| n.detail.starts_with("hash aggregate"))
                 .unwrap()
-                .cost
+                .cost_per_second
         };
         assert_eq!(
             aggregate_cost("l2_over_time(x[5m])"),
@@ -3825,7 +4429,7 @@ mod tests {
             priced(&shifted, &every_minute),
         );
         let cost_of = |dag: &PhysicalASAPDAG, cost: &CandidateCost, pick: fn(&Payload) -> bool| {
-            cost.per_node[&node_of(dag, pick)].cost
+            cost.per_node[&node_of(dag, pick)].cost_per_second.unwrap()
         };
         let is_shift = |p: &Payload| matches!(p, Payload::NonASAP(NonASAPOp::TimeShift { .. }));
         let is_range = |p: &Payload| matches!(p, Payload::NonASAP(NonASAPOp::TimeRange { .. }));
@@ -3834,7 +4438,10 @@ mod tests {
             cost_of(&shifted, &shifted_cost, is_scan),
             cost_of(&plain, &plain_cost, is_scan)
         ));
-        assert!(close(shifted_cost.total, plain_cost.total));
+        assert!(close(
+            shifted_cost.cost_per_second.unwrap(),
+            plain_cost.cost_per_second.unwrap()
+        ));
         let range = &plain_cost.per_node[&node_of(&plain, is_range)];
         assert!(range.detail.contains("keep"), "{}", range.detail);
     }
@@ -3856,7 +4463,17 @@ mod tests {
     }
 
     fn priced(dag: &PhysicalASAPDAG, recurrence: &[QueryRecurrence]) -> CandidateCost {
-        price(dag, recurrence, &data(), &illustrative_calibration()).unwrap()
+        price(dag, recurrence, &data(), &PlanSelectionSettings::default()).unwrap()
+    }
+
+    /// The default settings with cost model 1's unit costs edited.
+    fn unit_costs(edit: impl FnOnce(&mut ResourceUnitCost)) -> PlanSelectionSettings {
+        let mut prices = ResourceUnitCost::illustrative();
+        edit(&mut prices);
+        PlanSelectionSettings {
+            cost_model: CostModel::UsageOverTime(prices),
+            ..PlanSelectionSettings::default()
+        }
     }
 
     fn close(a: f64, b: f64) -> bool {
@@ -3874,13 +4491,16 @@ mod tests {
             priced(&dag, &[repeating(10_000)]),
         );
         for id in [node_of(&dag, is_scan), node_of(&dag, is_build)] {
-            assert_eq!(fast.per_node[&id].cost, slow.per_node[&id].cost);
+            assert_eq!(
+                fast.per_node[&id].cost_per_second,
+                slow.per_node[&id].cost_per_second
+            );
             assert_eq!(fast.per_node[&id].per_second, 1.0);
         }
         let estimate = dag.roots[0];
         assert!(close(
-            fast.per_node[&estimate].cost,
-            10.0 * slow.per_node[&estimate].cost
+            fast.per_node[&estimate].cost_per_second.unwrap(),
+            10.0 * slow.per_node[&estimate].cost_per_second.unwrap()
         ));
     }
 
@@ -3893,11 +4513,8 @@ mod tests {
     #[test]
     fn kept_state_is_charged_per_byte_per_second() {
         let cost = |dag: &PhysicalASAPDAG, w| {
-            let calibration = ResourceCalibration {
-                cost_per_retained_byte_second: w,
-                ..illustrative_calibration()
-            };
-            price(dag, &recurrences(1), &data(), &calibration).unwrap()
+            let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
+            price(dag, &recurrences(1), &data(), &settings).unwrap()
         };
         for materialization in [AT_INGESTION, AT_QUERY] {
             let dag = kll_dag(materialization);
@@ -3913,62 +4530,78 @@ mod tests {
             let byte_seconds = if materialization == AT_INGESTION {
                 2.0 * state
             } else {
-                let evaluation_s = with.latency[0].total_ms() / 1_000.0;
+                let evaluation_s = with.usage.latency_per_query[0].total_ms() / 1_000.0;
                 assert!(evaluation_s > 0.0 && evaluation_s < 1.0, "{evaluation_s}");
                 state * evaluation_s * with.per_node[&build].per_second
             };
-            let term = with.per_node[&build].cost - without.per_node[&build].cost;
+            let term = with.per_node[&build].cost_per_second.unwrap()
+                - without.per_node[&build].cost_per_second.unwrap();
             assert!(
                 close(term, 1.25e-7 * byte_seconds),
                 "{materialization:?}: {term} vs {}",
                 1.25e-7 * byte_seconds
             );
-            assert!(close(with.total - without.total, term));
+            assert!(close(
+                with.cost_per_second.unwrap() - without.cost_per_second.unwrap(),
+                term
+            ));
         }
         let transient = kll_dag(Materialization::NotMaterialized);
-        assert_eq!(cost(&transient, 1.25e-7).total, cost(&transient, 0.0).total);
+        assert_eq!(
+            cost(&transient, 1.25e-7).cost_per_second.unwrap(),
+            cost(&transient, 0.0).cost_per_second.unwrap()
+        );
     }
 
-    /// Memory is charged only as kept bytes per second: the memory a
-    /// computation holds while it runs (a sketch being built, an exact
-    /// quantile's values) adds nothing, whatever the per-computation memory
-    /// coefficient.
+    /// Under cost model 1, memory is charged only as kept bytes per second
+    /// (average memory): the memory a computation holds while it runs (a
+    /// sketch being built, an exact quantile's values), counted in peak
+    /// memory, adds nothing. The memory price's term is exactly the average
+    /// memory, though peak memory is larger.
     #[test]
     fn memory_held_only_while_a_query_runs_is_not_charged() {
-        for query in [
+        let memory_term = |dag: &PhysicalASAPDAG| {
+            let cost = |price_per_byte_second| {
+                let settings =
+                    unit_costs(|c| c.cost_per_memory_byte_second = price_per_byte_second);
+                price(dag, &recurrences(1), &data(), &settings).unwrap()
+            };
+            let (with, without) = (cost(1.0), cost(0.0));
+            let term = with.cost_per_second.unwrap() - without.cost_per_second.unwrap();
+            (term, with.usage)
+        };
+        let mut dags: Vec<(String, PhysicalASAPDAG)> = [
             "quantile_over_time(0.99, m[1m])",
             "quantile by (job) (0.99, m)",
-        ] {
-            let target = AccuracyTarget::exact();
-            let root = lower_promql(query, target);
+        ]
+        .into_iter()
+        .map(|query| {
+            let root = lower_promql(query, AccuracyTarget::exact());
             let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data())
                 .unwrap()
                 .remove(0)
                 .dag;
-            let total = |per_computation_memory| {
-                let calibration = ResourceCalibration {
-                    cost_per_retained_byte: per_computation_memory,
-                    ..illustrative_calibration()
-                };
-                price(&dag, &recurrences(1), &data(), &calibration)
-                    .unwrap()
-                    .total
-            };
-            assert_eq!(total(0.0), total(1.0), "{query}");
-        }
+            (query.to_string(), dag)
+        })
+        .collect();
         for materialization in [AT_INGESTION, AT_QUERY, Materialization::NotMaterialized] {
-            let dag = kll_dag(materialization);
-            let total = |per_computation_memory| {
-                let calibration = ResourceCalibration {
-                    cost_per_retained_byte: per_computation_memory,
-                    ..illustrative_calibration()
-                };
-                price(&dag, &recurrences(1), &data(), &calibration)
-                    .unwrap()
-                    .total
-            };
-            assert_eq!(total(0.0), total(1.0), "{materialization:?}");
+            dags.push((format!("{materialization:?}"), kll_dag(materialization)));
         }
+        for (name, dag) in &dags {
+            let (term, usage) = memory_term(dag);
+            assert!(
+                close(term, usage.average_memory_bytes),
+                "{name}: {term} vs {}",
+                usage.average_memory_bytes
+            );
+            assert!(
+                usage.peak_memory_bytes as f64 > usage.average_memory_bytes,
+                "{name}: {usage:?}"
+            );
+        }
+        // Not materialized, nothing is kept: the memory price changes nothing.
+        let (term, _) = memory_term(&kll_dag(Materialization::NotMaterialized));
+        assert_eq!(term, 0.0);
     }
 
     /// Kept exact state that grows with the data is charged by the values it
@@ -3990,14 +4623,12 @@ mod tests {
             aggregate.materialization = AT_QUERY;
             let id = aggregate.id;
             let cost = |w| {
-                let calibration = ResourceCalibration {
-                    cost_per_retained_byte_second: w,
-                    ..illustrative_calibration()
-                };
-                price(&dag, &recurrences(1), &data(), &calibration)
+                let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
+                price(&dag, &recurrences(1), &data(), &settings)
                     .unwrap()
                     .per_node[&id]
-                    .cost
+                    .cost_per_second
+                    .unwrap()
             };
             (cost(1.0) - cost(0.0)).round() as u64
         };
@@ -4027,14 +4658,12 @@ mod tests {
         .unwrap()
         .remove(0)
         .dag;
-        let without_memory = ResourceCalibration {
-            cost_per_retained_byte_second: 0.0,
-            ..illustrative_calibration()
-        };
+        let without_memory = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let total = |dag: &PhysicalASAPDAG, recurrence: &[QueryRecurrence]| {
             price(dag, recurrence, &data(), &without_memory)
                 .unwrap()
-                .total
+                .cost_per_second
+                .unwrap()
         };
         let single = total(&one, &recurrences(1));
         let mixed = [repeating(10_000), repeating(20_000)];
@@ -4049,7 +4678,7 @@ mod tests {
     }
 
     /// One-off and unknown recurrence are spread over the horizon:
-    /// invocations × per-evaluation cost / horizon_s.
+    /// invocations × per-evaluation cost / non_repeating_query_horizon_seconds.
     #[test]
     fn one_off_recurrence_is_spread_over_the_horizon() {
         let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
@@ -4057,9 +4686,9 @@ mod tests {
             .unwrap()
             .remove(0)
             .dag;
-        let horizon = illustrative_calibration().horizon_s;
+        let horizon = PlanSelectionSettings::default().non_repeating_query_horizon_seconds;
         assert_eq!(horizon, 3_600.0);
-        let per_evaluation = priced(&dag, &[repeating(1_000)]).total;
+        let per_evaluation = priced(&dag, &[repeating(1_000)]).cost_per_second.unwrap();
         let once = priced(
             &dag,
             &[QueryRecurrence::OneTime {
@@ -4067,30 +4696,58 @@ mod tests {
                 execute_at: None,
             }],
         )
-        .total;
+        .cost_per_second
+        .unwrap();
         assert!(close(once, 3.0 * per_evaluation / horizon), "{once}");
         assert!(close(
-            priced(&dag, &[QueryRecurrence::Unknown]).total,
+            priced(&dag, &[QueryRecurrence::Unknown])
+                .cost_per_second
+                .unwrap(),
             per_evaluation / horizon
         ));
     }
 
-    /// A calibration outside its domain is an error, not a price.
+    /// Settings outside their domain are an error, not a price, checked once
+    /// before any candidate: a price the cost model reads that is negative,
+    /// the model's prices all 0 (cost model 1 with only provisioned prices
+    /// set), or a horizon that is not positive. A price the model does not
+    /// read is not checked.
     #[test]
-    fn invalid_calibration_is_rejected() {
-        let dag = kll_dag(Materialization::NotMaterialized);
-        for calibration in [
-            ResourceCalibration {
-                cost_per_retained_byte_second: -1.0,
-                ..illustrative_calibration()
-            },
-            ResourceCalibration {
-                horizon_s: 0.0,
-                ..illustrative_calibration()
+    fn invalid_settings_are_rejected() {
+        let candidates = pane_candidates(10_000.0);
+        let select = |settings: &PlanSelectionSettings| {
+            select_plan(
+                &candidates,
+                &[every_minute()],
+                &arriving(10_000.0),
+                PlanningModels::builtin().with_plan_selection(settings),
+            )
+        };
+        let only_provisioned = ResourceUnitCost {
+            cost_per_cpu_op: 0.0,
+            cost_per_scanned_byte: 0.0,
+            cost_per_memory_byte_second: 0.0,
+            cost_per_disk_byte_second: 0.0,
+            ..ResourceUnitCost::illustrative()
+        };
+        for settings in [
+            unit_costs(|c| c.cost_per_memory_byte_second = -1.0),
+            under(CostModel::UsageOverTime(only_provisioned.clone())),
+            PlanSelectionSettings {
+                non_repeating_query_horizon_seconds: 0.0,
+                ..PlanSelectionSettings::default()
             },
         ] {
-            assert!(price(&dag, &recurrences(1), &data(), &calibration).is_err());
+            assert!(
+                matches!(select(&settings), Err(SelectionError::InvalidSettings(_))),
+                "{settings:?}"
+            );
         }
+        assert!(select(&under(CostModel::ProvisionedCapacity(only_provisioned))).is_ok());
+        assert!(select(&unit_costs(
+            |c| c.cost_per_provisioned_cpu_core_second = -1.0
+        ))
+        .is_ok());
     }
 
     // ── Stage 2 materialization and the latency check ────────────────────
@@ -4191,29 +4848,32 @@ mod tests {
         assert_eq!(*pane_count, 5);
         let (depth, state_bytes) = summary_shape(family);
         let recurrence = [repeating(MINUTE)];
-        let without_memory = ResourceCalibration {
-            cost_per_retained_byte_second: 0.0,
-            ..illustrative_calibration()
-        };
+        let without_memory = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let work = &price(dag, &recurrence, &arriving(10_000.0), &without_memory)
             .unwrap()
             .per_node[&chain];
         assert_eq!(work.per_second, 1.0);
         assert!(
-            close(work.cost, 10_000.0 * (depth + 1.0) * 1e-6),
+            close(
+                work.cost_per_second.unwrap(),
+                10_000.0 * (depth + 1.0) * 1e-6
+            ),
             "{work:?}"
         );
         let with_memory = &price(
             dag,
             &recurrence,
             &arriving(10_000.0),
-            &illustrative_calibration(),
+            &PlanSelectionSettings::default(),
         )
         .unwrap()
         .per_node[&chain];
         let kept = 6 * 10_000 * state_bytes;
         assert!(
-            close(with_memory.cost - work.cost, 1.25e-7 * kept as f64),
+            close(
+                with_memory.cost_per_second.unwrap() - work.cost_per_second.unwrap(),
+                1.25e-7 * kept as f64
+            ),
             "{with_memory:?}"
         );
         assert!(with_memory.detail.contains(&format!("keeps {kept} bytes")));
@@ -4232,10 +4892,10 @@ mod tests {
                 &c.dag,
                 &[repeating(MINUTE)],
                 &arriving(10_000.0),
-                &illustrative_calibration(),
+                &PlanSelectionSettings::default(),
             )
             .unwrap();
-            cost.latency[0]
+            cost.usage.latency_per_query[0]
         };
         let (b2, b1) = (latency(&candidates[0]), latency(&candidates[1]));
         assert_eq!((b2.compaction_ms, b1.compaction_ms), (0.0, 0.0));
@@ -4279,10 +4939,11 @@ mod tests {
                 &candidates[1].dag,
                 &[repeating(MINUTE)],
                 &arriving(rows_per_s),
-                &illustrative_calibration(),
+                &PlanSelectionSettings::default(),
             )
             .unwrap()
-            .latency[0]
+            .usage
+            .latency_per_query[0]
         };
         assert_eq!(latency(10_000.0).compaction_ms, 0.0);
         let fast = latency(1e10);
@@ -4292,5 +4953,366 @@ mod tests {
             merges >= 1.0 && (merges - merges.round()).abs() < 1e-6,
             "{fast:?}"
         );
+    }
+
+    // ── Cost models ──────────────────────────────────────────────────────
+
+    /// [`PlanSelectionSettings`] with `cost_model`.
+    fn under(cost_model: CostModel) -> PlanSelectionSettings {
+        PlanSelectionSettings {
+            cost_model,
+            ..PlanSelectionSettings::default()
+        }
+    }
+
+    /// A node's usage adds up to its candidate's: CPU, scanned bytes,
+    /// average and peak memory and disk; peak cores and latency are the
+    /// candidate's own.
+    #[test]
+    fn node_usage_adds_up_to_the_candidates() {
+        for candidate in pane_candidates(10_000.0) {
+            let cost = price(
+                &candidate.dag,
+                &[repeating(MINUTE)],
+                &arriving(10_000.0),
+                &PlanSelectionSettings::default(),
+            )
+            .unwrap();
+            let nodes = cost.per_node.values().map(|n| &n.usage);
+            let sum = |f: fn(&NodeUsage) -> f64| nodes.clone().map(f).sum::<f64>();
+            assert!(close(
+                cost.usage.cpu_ops_per_second,
+                sum(|u| u.cpu_ops_per_second)
+            ));
+            assert!(close(
+                cost.usage.scanned_bytes_per_second,
+                sum(|u| u.scanned_bytes_per_second)
+            ));
+            assert!(close(
+                cost.usage.average_memory_bytes,
+                sum(|u| u.average_memory_bytes)
+            ));
+            assert_eq!(
+                cost.usage.peak_memory_bytes,
+                nodes.clone().map(|u| u.peak_memory_bytes).sum::<u64>()
+            );
+            assert_eq!(
+                cost.usage.disk_bytes,
+                nodes.clone().map(|u| u.disk_bytes).sum::<u64>()
+            );
+            assert_eq!(cost.usage.latency_per_query.len(), 1);
+        }
+    }
+
+    /// Cost model 2 prices the candidate's peaks per second: provisioned
+    /// memory, cores and disk; its nodes carry no price. B1 (maintained
+    /// panes) needs a core for ingestion and one for the query; B2 (rebuilt
+    /// at query time) one.
+    #[test]
+    fn provisioned_capacity_prices_peak_memory_cores_and_disk() {
+        let prices = ResourceUnitCost {
+            cost_per_disk_byte_second: 1e-9,
+            ..ResourceUnitCost::illustrative()
+        };
+        let settings = under(CostModel::ProvisionedCapacity(prices.clone()));
+        let candidates = pane_candidates(10_000.0);
+        let cores: Vec<u32> = candidates
+            .iter()
+            .map(|candidate| {
+                let cost = price(
+                    &candidate.dag,
+                    &[repeating(MINUTE)],
+                    &arriving(10_000.0),
+                    &settings,
+                )
+                .unwrap();
+                let usage = &cost.usage;
+                let expected = prices.cost_per_provisioned_memory_byte_second
+                    * usage.peak_memory_bytes as f64
+                    + prices.cost_per_provisioned_cpu_core_second * f64::from(usage.peak_cpu_cores)
+                    + prices.cost_per_disk_byte_second * usage.disk_bytes as f64;
+                assert_eq!(cost.cost_per_second, Some(expected));
+                assert!(cost.per_node.values().all(|n| n.cost_per_second.is_none()));
+                usage.peak_cpu_cores
+            })
+            .collect();
+        assert_eq!(cores, [1, 2]);
+    }
+
+    /// Cost model 3 has no prices; a candidate over the cluster's cores is
+    /// invalid with the reason, and the rest are chosen by the objective.
+    #[test]
+    fn cluster_capacity_rejects_a_candidate_over_its_cores() {
+        let limits = |cpu_cores| ClusterLimits {
+            memory_bytes: u64::MAX,
+            disk_bytes: u64::MAX,
+            cpu_cores,
+            objective: ClusterObjective::LowestLatency,
+        };
+        let candidates = pane_candidates(10_000.0);
+        let select = |cpu_cores| {
+            let settings = under(CostModel::ClusterCapacity(limits(cpu_cores)));
+            select_plan(
+                &candidates,
+                &[every_minute()],
+                &arriving(10_000.0),
+                PlanningModels::builtin().with_plan_selection(&settings),
+            )
+            .unwrap()
+        };
+        let unlimited = select(None);
+        assert_eq!(unlimited.selected, candidates[1].id, "B1 merges faster");
+        assert!(unlimited
+            .costs
+            .values()
+            .all(|c| c.cost_per_second.is_none()));
+        let one_core = select(Some(1));
+        assert_eq!(one_core.selected, candidates[0].id);
+        let b1 = one_core
+            .rejected
+            .iter()
+            .find(|r| r.id == candidates[1].id)
+            .unwrap();
+        assert!(!b1.valid);
+        assert_eq!(b1.reason, "2 CPU cores at peak is over the cluster's 1");
+    }
+
+    /// Raw data kept on disk for query-time scans is counted once per
+    /// source, for the longest window read: two queries over `m` keep its
+    /// last 5 minutes, as the 5-minute query alone does.
+    #[test]
+    fn raw_data_on_disk_is_the_longest_window_per_source() {
+        let disk = |queries: &[&str]| {
+            let roots: Vec<_> = queries
+                .iter()
+                .map(|q| QueryRoot::Operator(lower_promql(q, AccuracyTarget::exact())))
+                .collect();
+            let dag = optimize_physical_asap("L", &roots, &[], &data())
+                .unwrap()
+                .remove(0)
+                .dag;
+            priced(&dag, &recurrences(queries.len())).usage.disk_bytes
+        };
+        let five_minutes = disk(&["sum_over_time(m[5m])"]);
+        assert!(five_minutes > disk(&["sum_over_time(m[1m])"]));
+        assert_eq!(
+            disk(&["sum_over_time(m[1m])", "sum_over_time(m[5m])"]),
+            five_minutes
+        );
+    }
+
+    /// One candidate dominates another only when it is no worse on peak
+    /// memory, disk and latency and better on one; equal usage does not.
+    #[test]
+    fn dominance_needs_one_strictly_better_resource() {
+        let usage = |memory, latency_ms| ResourceUsage {
+            peak_memory_bytes: memory,
+            latency_per_query: vec![QueryLatency {
+                compaction_ms: 0.0,
+                query_ms: latency_ms,
+            }],
+            ..ResourceUsage::default()
+        };
+        assert!(dominates(&usage(1, 5.0), &usage(2, 5.0)));
+        assert!(!dominates(&usage(1, 5.0), &usage(1, 5.0)));
+        assert!(!dominates(&usage(1, 6.0), &usage(2, 5.0)));
+    }
+
+    /// Cost model 3's disk limit: B2 reads its 5-minute window of raw data
+    /// at query time and keeps it on disk; B1 keeps none. A cluster with
+    /// less disk than B2's raw data leaves only B1.
+    #[test]
+    fn cluster_capacity_rejects_a_candidate_over_its_disk() {
+        let candidates = pane_candidates(10_000.0);
+        let select = |disk_bytes| {
+            let settings = under(CostModel::ClusterCapacity(ClusterLimits {
+                memory_bytes: u64::MAX,
+                disk_bytes,
+                cpu_cores: None,
+                objective: ClusterObjective::LeastMemory,
+            }));
+            select_plan(
+                &candidates,
+                &[every_minute()],
+                &arriving(10_000.0),
+                PlanningModels::builtin().with_plan_selection(&settings),
+            )
+            .unwrap()
+        };
+        let unlimited = select(u64::MAX);
+        let raw = unlimited.costs[&candidates[0].id].usage.disk_bytes;
+        assert!(raw > 0);
+        assert_eq!(unlimited.costs[&candidates[1].id].usage.disk_bytes, 0);
+        assert_eq!(unlimited.selected, candidates[0].id, "B2 needs less memory");
+        let small = select(raw - 1);
+        assert_eq!(small.selected, candidates[1].id);
+        let b2 = small
+            .rejected
+            .iter()
+            .find(|r| r.id == candidates[0].id)
+            .unwrap();
+        assert!(!b2.valid);
+        assert_eq!(
+            b2.reason,
+            format!("disk {raw} bytes is over the cluster's {} bytes", raw - 1)
+        );
+    }
+
+    /// State materialized on disk is counted as disk, not memory: the KLL
+    /// state kept on disk at ingestion time (its window being built and the
+    /// completed one) or for one evaluation at query time adds its bytes to
+    /// disk, nothing to average memory, and costs only its disk price.
+    #[test]
+    fn state_on_disk_is_counted_as_disk_not_memory() {
+        use asap_types::ir::Medium;
+        let settings = unit_costs(|c| c.cost_per_disk_byte_second = 1e-9);
+        let state = |dag: &PhysicalASAPDAG| node_of(dag, is_build);
+        for (on_disk, in_memory) in [
+            (Materialization::MatAtIngestion(Medium::Disk), AT_INGESTION),
+            (Materialization::MatAtQuery(Medium::Disk), AT_QUERY),
+        ] {
+            let (disk_dag, memory_dag) = (kll_dag(on_disk), kll_dag(in_memory));
+            let disk = price(&disk_dag, &recurrences(1), &data(), &settings).unwrap();
+            let memory = price(&memory_dag, &recurrences(1), &data(), &settings).unwrap();
+            let (on_disk_node, in_memory_node) = (
+                &disk.per_node[&state(&disk_dag)],
+                &memory.per_node[&state(&memory_dag)],
+            );
+            assert_eq!(on_disk_node.usage.average_memory_bytes, 0.0, "{on_disk:?}");
+            assert_eq!(on_disk_node.usage.peak_memory_bytes, 0, "{on_disk:?}");
+            assert!(
+                in_memory_node.usage.average_memory_bytes > 0.0,
+                "{in_memory:?}"
+            );
+            // The bytes kept are the same, on disk instead of in memory.
+            let bytes = on_disk_node.usage.disk_bytes;
+            assert!(bytes > 0);
+            assert_eq!(bytes, in_memory_node.usage.peak_memory_bytes, "{on_disk:?}");
+            let work = on_disk_node.usage.cpu_ops_per_second * 1e-6
+                + on_disk_node.usage.scanned_bytes_per_second * 1e-7;
+            assert!(
+                close(
+                    on_disk_node.cost_per_second.unwrap(),
+                    work + 1e-9 * bytes as f64
+                ),
+                "{on_disk_node:?}"
+            );
+        }
+    }
+
+    /// Under every cluster objective, two candidates with the same usage
+    /// tie, and the earlier is selected; the later is reported as tied.
+    /// Under the Pareto front neither dominates the other: both are on it.
+    #[test]
+    fn cluster_objectives_keep_the_earlier_of_tied_candidates() {
+        let b2 = pane_candidates(10_000.0).remove(0);
+        let twin = PhysicalCandidate {
+            id: format!("{}-twin", b2.id),
+            ..b2.clone()
+        };
+        let candidates = [b2, twin];
+        for objective in [
+            ClusterObjective::LowestLatency,
+            ClusterObjective::LeastMemory,
+            ClusterObjective::ParetoFront,
+        ] {
+            let settings = under(CostModel::ClusterCapacity(ClusterLimits {
+                memory_bytes: u64::MAX,
+                disk_bytes: u64::MAX,
+                cpu_cores: None,
+                objective,
+            }));
+            let selection = select_plan(
+                &candidates,
+                &[every_minute()],
+                &arriving(10_000.0),
+                PlanningModels::builtin().with_plan_selection(&settings),
+            )
+            .unwrap();
+            assert_eq!(selection.selected, candidates[0].id, "{objective:?}");
+            let twin = &selection.rejected[0];
+            assert_eq!(twin.id, candidates[1].id);
+            assert!(twin.valid);
+            assert!(
+                twin.reason.starts_with(&format!(
+                    "tied with the selected candidate {}",
+                    candidates[0].id
+                )),
+                "{objective:?}: {}",
+                twin.reason
+            );
+            let expected_front = match objective {
+                ClusterObjective::ParetoFront => {
+                    vec![candidates[0].id.clone(), candidates[1].id.clone()]
+                }
+                _ => Vec::new(),
+            };
+            assert_eq!(selection.front, expected_front, "{objective:?}");
+        }
+    }
+
+    /// With more than one ingest worker, each worker beyond the first holds
+    /// its own partial copy of a maintained state's newest window: B1's
+    /// peak memory grows by (k − 1) panes of states, its average memory
+    /// (and so cost model 1's price) does not.
+    #[test]
+    fn partial_copies_of_the_newest_window_add_to_peak_memory() {
+        let rows_per_s = 1e9;
+        let b1 = pane_candidates(rows_per_s).remove(1);
+        let chain = node_of(&b1.dag, is_chain);
+        let cost = price(
+            &b1.dag,
+            &[repeating(MINUTE)],
+            &arriving(rows_per_s),
+            &PlanSelectionSettings::default(),
+        )
+        .unwrap();
+        let node = &cost.per_node[&chain];
+        let workers = cost.usage.peak_cpu_cores - 1;
+        assert!(workers > 1, "{workers}");
+        let kept = node.usage.average_memory_bytes as u64;
+        let window = kept / 6;
+        assert_eq!(
+            node.usage.peak_memory_bytes,
+            kept + u64::from(workers - 1) * window,
+            "{}",
+            node.detail
+        );
+    }
+
+    /// A candidate with the given latency, peak memory and disk under cost
+    /// model 3.
+    fn cluster_cost(latency_ms: f64, peak_memory_bytes: u64, disk_bytes: u64) -> CandidateCost {
+        CandidateCost {
+            usage: ResourceUsage {
+                peak_memory_bytes,
+                disk_bytes,
+                latency_per_query: vec![QueryLatency {
+                    compaction_ms: 0.0,
+                    query_ms: latency_ms,
+                }],
+                ..ResourceUsage::default()
+            },
+            cost_per_second: None,
+            unit: COST_UNIT,
+            source: COST_SOURCE,
+            per_node: BTreeMap::new(),
+        }
+    }
+
+    /// Peak memory and disk are compared exactly, as dominance compares
+    /// them: 100 bytes less at 124 GB is less memory, not a tie. Under the
+    /// Pareto front the selected candidate is a front member, and under
+    /// least memory the smaller one wins.
+    #[test]
+    fn memory_differing_by_a_few_bytes_is_compared_exactly() {
+        let larger = cluster_cost(7.0, 124_000_000_100, 0);
+        let smaller = cluster_cost(7.0, 124_000_000_000, 0);
+        let costs = [&larger, &smaller];
+        let (best, front) = choose(Ranking::Front, &costs).unwrap();
+        assert_eq!(front, [1]);
+        assert_eq!(best, 1, "the selection is on the front");
+        assert_eq!(choose(Ranking::Memory, &costs).unwrap().0, 1);
+        assert_eq!(choose(Ranking::Latency, &costs).unwrap().0, 1);
     }
 }

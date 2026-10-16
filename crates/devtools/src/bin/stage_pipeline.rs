@@ -58,6 +58,16 @@
 // in, and `stage3_plan_selection.accepted` reports, per shown valid
 // candidate and query, the metric accepted (e.g. "metric not set; accepted
 // rank (Kll)").
+// `--cost-model` chooses how plan selection compares valid candidates:
+// `usage-over-time` (cost model 1, the default: CPU, scanned bytes and
+// memory byte-seconds per second, priced), `provisioned-capacity` (cost
+// model 2: peak memory, peak CPU cores and disk, priced) or
+// `cluster-capacity` (cost model 3: no prices; `--cluster-memory-bytes`,
+// `--cluster-disk-bytes` and the optional `--cluster-cpu-cores` are hard
+// limits, and `--cluster-objective` is `lowest-latency`, `least-memory` or
+// `pareto-front`). Cost models 1 and 2 use the illustrative unit costs.
+// Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
+// cost model 3, and `front` lists the Pareto front under `pareto-front`.
 // `--interval-ms` is the source cadence (default 15000). `--table '<json>'`
 // (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
@@ -67,14 +77,17 @@
 
 use std::collections::HashSet;
 
-use asap_aware_mapping::stage3_plan_selection::{Rejection, Selection, SelectionError};
+use asap_aware_mapping::stage3_plan_selection::{
+    ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, Rejection, ResourceUnitCost,
+    ResourceUsage, Selection, SelectionError,
+};
 use asap_devtools::candidate_labels::candidate_labels;
 use asap_devtools::planner_layering_examples::{
     declared, example1, example2, example2_catalog, pattern_a, pattern_b, PatternARecurrence,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_planning_stages, run_planning_stages_over,
-    PlanningStagesError, PlanningStagesRun,
+    lower_promql_roots, lower_sql_roots, run_planning_stages_over, PlanningStagesError,
+    PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -90,6 +103,8 @@ use serde_json::{json, Value};
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
 [--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--interval-ms <u64>])) \
+[--cost-model usage-over-time|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
+--cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
@@ -173,6 +188,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut metric: Option<AccuracyMetric> = None;
     let mut max_displayed = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
+    let mut cost_model: Option<String> = None;
+    let (mut cluster_memory, mut cluster_disk, mut cluster_cores) = (None, None, None);
+    let mut cluster_objective: Option<String> = None;
     let mut out = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -208,6 +226,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--max-combinations" => {
                 max_combinations = value()?.parse().map_err(|e| format!("{e}"))?
             }
+            "--cost-model" => cost_model = Some(value()?),
+            "--cluster-memory-bytes" => {
+                cluster_memory = Some(value()?.parse::<u64>().map_err(|e| format!("{e}"))?)
+            }
+            "--cluster-disk-bytes" => {
+                cluster_disk = Some(value()?.parse::<u64>().map_err(|e| format!("{e}"))?)
+            }
+            "--cluster-cpu-cores" => {
+                cluster_cores = Some(value()?.parse::<u32>().map_err(|e| format!("{e}"))?)
+            }
+            "--cluster-objective" => cluster_objective = Some(value()?),
             "--out" => out = Some(value()?),
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -219,6 +248,43 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
+    let cluster = (cluster_memory, cluster_disk, cluster_objective.as_deref());
+    let cost_model = match (cost_model.as_deref(), cluster) {
+        (None | Some("usage-over-time"), (None, None, None)) if cluster_cores.is_none() => {
+            CostModel::UsageOverTime(ResourceUnitCost::illustrative())
+        }
+        (Some("provisioned-capacity"), (None, None, None)) if cluster_cores.is_none() => {
+            CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative())
+        }
+        (Some("cluster-capacity"), (Some(memory_bytes), Some(disk_bytes), Some(objective))) => {
+            CostModel::ClusterCapacity(ClusterLimits {
+                memory_bytes,
+                disk_bytes,
+                cpu_cores: cluster_cores,
+                objective: match objective {
+                    "lowest-latency" => ClusterObjective::LowestLatency,
+                    "least-memory" => ClusterObjective::LeastMemory,
+                    "pareto-front" => ClusterObjective::ParetoFront,
+                    other => return Err(format!("unknown cluster objective {other}").into()),
+                },
+            })
+        }
+        (Some("cluster-capacity"), _) => {
+            return Err(
+                "--cost-model cluster-capacity needs --cluster-memory-bytes, \
+                 --cluster-disk-bytes and --cluster-objective"
+                    .into(),
+            )
+        }
+        (None | Some("usage-over-time" | "provisioned-capacity"), _) => {
+            return Err("--cluster-* flags need --cost-model cluster-capacity".into())
+        }
+        (Some(other), _) => return Err(format!("unknown cost model {other}").into()),
+    };
+    let plan_selection = PlanSelectionSettings {
+        cost_model,
+        ..PlanSelectionSettings::default()
+    };
     let document = match (example.as_deref(), queries.is_empty()) {
         (Some(example), true) => {
             let workload = match example {
@@ -234,7 +300,15 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 QueryLanguage::PromQL => lower_promql_roots(&workload)?,
                 _ => lower_sql_roots(&workload, &example2_catalog())?,
             };
-            let result = run_planning_stages(&workload, roots.clone(), Some(max_combinations));
+            let entries: Vec<_> = workload.query_workload.entries().collect();
+            let data = workload.data_workload.clone().unwrap_or_default();
+            let result = run_planning_stages_over(
+                roots.clone(),
+                &entries,
+                &data,
+                Some(max_combinations),
+                &plan_selection,
+            );
             document_of(workload_queries(&workload), &roots, result, max_displayed)?
         }
         (None, false) => {
@@ -285,8 +359,13 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 data_ingestion_interval: declared(DurationMs(interval_ms)),
                 ..Default::default()
             };
-            let result =
-                run_planning_stages_over(roots.clone(), &entries, &data, Some(max_combinations));
+            let result = run_planning_stages_over(
+                roots.clone(),
+                &entries,
+                &data,
+                Some(max_combinations),
+                &plan_selection,
+            );
             document_of(described, &roots, result, max_displayed)?
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),
@@ -394,13 +473,23 @@ fn plan_selection_json(
                 .map(|(node, c)| {
                     (
                         node.to_string(),
-                        json!({ "cost": c.cost, "multiplier": c.multiplier, "detail": c.detail }),
+                        json!({
+                            "cost_per_second": c.cost_per_second,
+                            "multiplier": c.multiplier,
+                            "detail": c.detail,
+                        }),
                     )
                 })
                 .collect();
             (
                 id.clone(),
-                json!({ "total": cost.total, "unit": cost.unit, "source": cost.source, "per_node": per_node }),
+                json!({
+                    "cost_per_second": cost.cost_per_second,
+                    "unit": cost.unit,
+                    "source": cost.source,
+                    "usage": usage_json(&cost.usage),
+                    "per_node": per_node,
+                }),
             )
         })
         .collect();
@@ -428,6 +517,24 @@ fn plan_selection_json(
         "accepted": accepted,
         "selected": selection.selected,
         "rejected": rejections_json(&selection.rejected),
+        "front": selection.front,
+    })
+}
+
+/// A candidate's resource usage, in the units its field names give.
+fn usage_json(usage: &ResourceUsage) -> Value {
+    json!({
+        "cpu_ops_per_second": usage.cpu_ops_per_second,
+        "scanned_bytes_per_second": usage.scanned_bytes_per_second,
+        "average_memory_bytes": usage.average_memory_bytes,
+        "peak_memory_bytes": usage.peak_memory_bytes,
+        "disk_bytes": usage.disk_bytes,
+        "peak_cpu_cores": usage.peak_cpu_cores,
+        "latency_per_query": usage
+            .latency_per_query
+            .iter()
+            .map(|l| json!({ "compaction_ms": l.compaction_ms, "query_ms": l.query_ms }))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -580,6 +687,7 @@ fn query_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_devtools::planning_stages::run_planning_stages;
 
     /// With no valid candidate, the document is still written: `selected`
     /// is null and every rejection is listed.

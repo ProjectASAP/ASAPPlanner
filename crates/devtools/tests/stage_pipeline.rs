@@ -642,3 +642,64 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
         "{summaries:?}"
     );
 }
+
+/// `--cost-model` chooses how plan selection compares Example 4's
+/// candidates: cost model 1 (the default) selects the whole-window KLL (P2),
+/// cost model 2 the exact plan (P1), and cost model 3 with a 256 GB cluster
+/// the panes maintained at ingestion time (P3-m1), with no prices and, for
+/// `pareto-front`, the front. Each candidate reports its usage.
+#[test]
+fn cost_model_flag_chooses_how_candidates_are_compared() {
+    let selected = |extra: &[&str]| {
+        let document = generate_example("planner-layering-3b", extra);
+        document["stage3_plan_selection"].clone()
+    };
+    assert_eq!(selected(&[])["selected"], "P2");
+    let usage = &selected(&[])["costs"]["P3-m1"]["usage"];
+    assert_eq!(usage["average_memory_bytes"], 106_608_000_000.0);
+    assert_eq!(
+        usage["latency_per_query"],
+        serde_json::json!([{ "compaction_ms": 0.0, "query_ms": 7.0 }])
+    );
+    assert_eq!(
+        selected(&["--cost-model", "provisioned-capacity"])["selected"],
+        "P1"
+    );
+    let cluster = selected(&[
+        "--cost-model",
+        "cluster-capacity",
+        "--cluster-memory-bytes",
+        "256000000000",
+        "--cluster-disk-bytes",
+        "1000000000000",
+        "--cluster-objective",
+        "pareto-front",
+    ]);
+    assert_eq!(cluster["selected"], "P3-m1");
+    assert_eq!(cluster["front"], serde_json::json!(["P1", "P2", "P3-m1"]));
+    assert!(cluster["costs"]["P3-m1"]["cost_per_second"].is_null());
+}
+
+/// Cluster limits need cost model 3, and cost model 3 needs them.
+#[test]
+fn cluster_flags_and_cost_model_3_go_together() {
+    let (code, stderr) = failure(&[
+        "--example",
+        "planner-layering-3b",
+        "--cluster-memory-bytes",
+        "1",
+    ]);
+    assert_eq!(code, Some(2));
+    assert!(
+        stderr.contains("need --cost-model cluster-capacity"),
+        "{stderr}"
+    );
+    let (code, stderr) = failure(&[
+        "--example",
+        "planner-layering-3b",
+        "--cost-model",
+        "cluster-capacity",
+    ]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("needs --cluster-memory-bytes"), "{stderr}");
+}

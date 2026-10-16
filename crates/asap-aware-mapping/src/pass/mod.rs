@@ -32,7 +32,7 @@ use crate::accuracy::{
 };
 use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::per_computation_candidates::PerComputationCandidateError;
-use crate::stage3_plan_selection::{Selection, SelectionError};
+use crate::stage3_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
 
 pub use stage1_to_stage3::{
     run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage2_and_stage3,
@@ -43,20 +43,28 @@ pub use stage1_to_stage3::{
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
+static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<PlanSelectionSettings> =
+    std::sync::LazyLock::new(PlanSelectionSettings::default);
 
 // ── Input ────────────────────────────────────────────────────────────────
 
 /// Planning logic, as opposed to the scoped facts it consumes: a model can have
 /// a built-in default, evidence about a particular deployment cannot.
 ///
-/// Plan selection reads `accuracy` and `evidence`. It prices candidates with
-/// its own analytical model, so [`Stage1ToStage3Pass`] does not read `cost`.
+/// Plan selection reads `accuracy`, `evidence` and `plan_selection`. It
+/// measures candidates with its own analytical model and compares them
+/// under `plan_selection`'s cost model, so [`Stage1ToStage3Pass`] does not
+/// read `cost`.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
     pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
+    /// The deployment's plan selection settings: the cost model (default
+    /// cost model 1 with illustrative unit costs), the resource speed and
+    /// the non-repeating query horizon.
+    pub plan_selection: &'a PlanSelectionSettings,
 }
 
 impl<'a> PlanningModels<'a> {
@@ -69,6 +77,7 @@ impl<'a> PlanningModels<'a> {
             cost,
             accuracy,
             evidence,
+            plan_selection: &DEFAULT_PLAN_SELECTION,
         }
     }
 
@@ -78,6 +87,7 @@ impl<'a> PlanningModels<'a> {
             cost: &DEFAULT_COST_MODEL,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
+            plan_selection: &DEFAULT_PLAN_SELECTION,
         }
     }
 
@@ -93,6 +103,13 @@ impl<'a> PlanningModels<'a> {
 
     pub fn with_evidence(mut self, evidence: &'a dyn AccuracyEvidenceProvider) -> Self {
         self.evidence = evidence;
+        self
+    }
+
+    /// These models with the deployment's plan selection settings (cost
+    /// model, resource speed, non-repeating query horizon).
+    pub fn with_plan_selection(mut self, plan_selection: &'a PlanSelectionSettings) -> Self {
+        self.plan_selection = plan_selection;
         self
     }
 }

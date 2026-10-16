@@ -111,9 +111,9 @@ class ValidationTests(unittest.TestCase):
             "rejected also selected": lambda d: selection(d)["rejected"].append({"id": selection(d)["selected"], "valid": True, "reason": "x"}),
             "unaccounted candidate": lambda d: selection(d)["rejected"].pop(),
             "valid flag": lambda d: selection(d)["rejected"][0].pop("valid"),
-            "per_node": lambda d: selection(d)["costs"]["P1"]["per_node"].update({"99": {"cost": 1, "multiplier": 1}}),
-            "cost total": lambda d: selection(d)["costs"]["P1"].pop("total"),
-            "cost for unknown candidate": lambda d: selection(d)["costs"].update({"P99": {"total": 1, "unit": "u", "per_node": {}}}),
+            "per_node": lambda d: selection(d)["costs"]["P1"]["per_node"].update({"99": {"cost_per_second": 1, "multiplier": 1}}),
+            "cost per second": lambda d: selection(d)["costs"]["P1"].pop("cost_per_second"),
+            "cost for unknown candidate": lambda d: selection(d)["costs"].update({"P99": {"cost_per_second": 1, "unit": "u", "per_node": {}}}),
             "missing stage": lambda d: d.pop("stage2_physical_asap_optimization"),
             "binary operand names no node": lambda d: stage0(d)["nodes"].append(
                 {"operator": {"NonASAP": {"BinaryOp": {"lhs": 0, "rhs": 42, "operator": {}, "return_bool": False}}}}),
@@ -144,7 +144,7 @@ class CandidateRowTests(unittest.TestCase):
         selection = self.doc["stage3_plan_selection"]
         rows = self.js.call("stageCandidateRows", self.doc)
         self.assertEqual((rows[0]["id"], rows[0]["status"]), (selection["selected"], "selected"))
-        self.assertEqual(rows[0]["total"], selection["costs"][selection["selected"]]["total"])
+        self.assertEqual(rows[0]["total"], selection["costs"][selection["selected"]]["cost_per_second"])
         self.assertEqual(rows[0]["rank"], 1)
         costlier = [row for row in rows if row["status"] == "costlier"]
         self.assertEqual([r["total"] for r in costlier], sorted(r["total"] for r in costlier))
