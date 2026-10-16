@@ -162,13 +162,13 @@ async fn stage1_offers_exact_and_summary_l2_candidates() {
     let l2 = inventory
         .targets
         .iter()
-        .find(|t| has_l2(&t.target))
+        .find(|t| has_l2(&t.aggregate))
         .expect("L2 target");
     let candidates = &l2.choices.candidates;
     assert!(
         candidates.iter().any(|c| matches!(
             c,
-            ComputationCandidate::Exact | ComputationCandidate::ExactAccumulator { .. }
+            ComputationCandidate::Exact | ComputationCandidate::ExactAccumulator(_)
         )),
         "{candidates:?}"
     );

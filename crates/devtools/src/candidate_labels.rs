@@ -59,46 +59,52 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
                     root_operators(root).into_iter().any(|node| {
                         OperatorNode::reachable(node)
                             .iter()
-                            .any(|n| Rc::ptr_eq(n, &target.target))
+                            .any(|n| Rc::ptr_eq(n, &target.aggregate))
                     })
                 })
                 .expect("every target is reached from a root")
         })
         .collect();
-    // Targets a chosen whole-expression candidate absorbs are not computed.
-    let absorbed: Vec<usize> = inventory
+    // Each target's chosen candidate, with the target that computes it: the
+    // target itself or its fused target.
+    let chosen: Vec<_> = inventory
         .targets
         .iter()
         .zip(choice)
-        .filter(|(target, &index)| target.choices.candidates[index].absorbs_inner())
-        .filter_map(|(target, _)| target.absorbs)
+        .map(|(target, &index)| target.chosen(index).expect("a listed candidate"))
+        .collect();
+    // Targets a chosen fused target absorbs are not computed.
+    let absorbed: Vec<usize> = chosen
+        .iter()
+        .filter_map(|(computing, _)| computing.absorbs)
         .collect();
     (0..inventory.roots.len())
         .map(|query| {
             let mut sketches = Vec::new();
             let mut accumulators = Vec::new();
-            for (t, (target, (&target_query, &index))) in inventory
-                .targets
-                .iter()
-                .zip(query_of_target.iter().zip(choice))
-                .enumerate()
+            for (t, ((computing, candidate), &target_query)) in
+                chosen.iter().zip(&query_of_target).enumerate()
             {
                 if target_query != query || absorbed.contains(&t) {
                     continue;
                 }
-                match &target.choices.candidates[index] {
+                match candidate {
                     ComputationCandidate::Exact => {}
-                    ComputationCandidate::ExactAccumulator { kind, .. } => {
-                        accumulators.push(format!("{kind:?} acc"))
+                    ComputationCandidate::ExactAccumulator(states) => {
+                        // e.g. "Sum acc", "Sum/Count acc" for an avg, or
+                        // "nested Sum acc" for a fused nested sum.
+                        let kinds: Vec<String> = states
+                            .iter()
+                            .map(|state| format!("{:?}", state.kind))
+                            .collect();
+                        let nested = if computing.absorbs.is_some() {
+                            "nested "
+                        } else {
+                            ""
+                        };
+                        accumulators.push(format!("{nested}{} acc", kinds.join("/")))
                     }
-                    ComputationCandidate::AvgAsSumCount => {
-                        accumulators.push("Sum/Count acc".into())
-                    }
-                    ComputationCandidate::NestedSumMerge => {
-                        accumulators.push("nested Sum acc".into())
-                    }
-                    ComputationCandidate::Summary(algorithm)
-                    | ComputationCandidate::WholeExpression(algorithm) => {
+                    ComputationCandidate::Summary(algorithm) => {
                         sketches.push(sketch_name(algorithm))
                     }
                 }
@@ -496,6 +502,50 @@ mod tests {
         );
         let distinct: std::collections::BTreeSet<&String> = logical.iter().copied().collect();
         assert_eq!(distinct.len(), logical.len(), "{logical:#?}");
+    }
+
+    /// A fused target's candidate is labeled apart from the unfused pair's:
+    /// the nested sum as "nested Sum acc", beside the two separate sums; an
+    /// avg's exact states as "Sum/Count acc".
+    #[test]
+    fn fused_targets_and_avg_states_have_their_own_labels() {
+        use crate::planner_layering_examples::shared_data_workload;
+        use asap_types::types::AccuracyTarget;
+        use asap_types::workload::{
+            DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
+            QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+        };
+        let labels_of = |query: &str| {
+            let workload = PlanningWorkload {
+                query_workload: QueryWorkload {
+                    language: QueryLanguage::PromQL,
+                    query_batch: None,
+                    repeating_queries: Some(vec![RepeatingEntry {
+                        query: Query(query.into()),
+                        demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+                        requirements: QueryRequirements {
+                            accuracy: AccuracyTarget::exact(),
+                            max_latency_ms: None,
+                        },
+                        predictability: Predictability::Predictable { known_at: None },
+                    }]),
+                },
+                data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
+            };
+            let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None)
+                .unwrap();
+            let labels = candidate_labels(&run);
+            run.stage1_logical_asap_optimization
+                .iter()
+                .filter(|c| c.pass2.is_none())
+                .map(|c| labels[&c.id].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels_of("sum by (job) (sum_over_time(m[5m]))"),
+            ["Q1 exact (Sum acc, Sum acc)", "Q1 exact (nested Sum acc)"]
+        );
+        assert_eq!(labels_of("avg by (job) (m)"), ["Q1 exact (Sum/Count acc)"]);
     }
 
     /// A summary build read by two queries can be built once per evaluation

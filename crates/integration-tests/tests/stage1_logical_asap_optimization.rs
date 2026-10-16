@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use asap_aware_mapping::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    ExactState,
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_physical_operators::{
@@ -18,7 +19,9 @@ use asap_physical_operators::{
 };
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate};
+use asap_types::post_asap::{
+    ExactKind, FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate,
+};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
@@ -103,7 +106,7 @@ fn compose_all(label: &str, root: QueryRoot) -> usize {
     let radix: Vec<_> = inventory
         .targets
         .iter()
-        .map(|target| target.choices.candidates.len())
+        .map(|target| target.choice_count())
         .collect();
     let total: usize = radix.iter().product();
     let mut choice = vec![0; radix.len()];
@@ -168,7 +171,7 @@ fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
         .iter()
         .enumerate()
         .flat_map(|(target, computation)| {
-            (1..computation.choices.candidates.len()).map(move |index| {
+            (1..computation.choice_count()).map(move |index| {
                 let mut choice = vec![0; targets];
                 choice[target] = index;
                 choice
@@ -255,7 +258,7 @@ async fn subquery_in_a_measure_filter_is_substituted() {
         .iter()
         .position(|target| {
             target
-                .target
+                .aggregate
                 .non_asap()
                 .and_then(|op| match op {
                     NonASAPOp::Aggregate { reduction, .. } => reduction.group_keys(),
@@ -410,7 +413,12 @@ async fn avg_as_sum_and_count(
                 .choices
                 .candidates
                 .iter()
-                .position(|c| *c == ComputationCandidate::AvgAsSumCount)
+                .position(|c| {
+                    *c == ComputationCandidate::ExactAccumulator(vec![
+                        ExactState::of(ExactKind::Sum),
+                        ExactState::of(ExactKind::Count),
+                    ])
+                })
                 .expect("avg as sum and count")
         })
         .collect();
@@ -532,7 +540,10 @@ fn promql_avg_divides_sum_and_count_vectors() {
         generate_per_computation_candidates(vec![(0, promql("avg by (job) (m)"))]).unwrap();
     assert_eq!(
         inventory.targets[0].choices.candidates[0],
-        ComputationCandidate::AvgAsSumCount
+        ComputationCandidate::ExactAccumulator(vec![
+            ExactState::of(ExactKind::Sum),
+            ExactState::of(ExactKind::Count)
+        ])
     );
     let composed = compose_logical_candidate(&inventory, &[0]).unwrap();
     let QueryRoot::Operator(root) = &composed[0].1 else {

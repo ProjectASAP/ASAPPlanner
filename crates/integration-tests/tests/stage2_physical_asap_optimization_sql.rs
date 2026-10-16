@@ -82,7 +82,7 @@ async fn check_every_choice(
         choices = choices
             .into_iter()
             .flat_map(|prefix: Vec<usize>| {
-                (0..target.choices.candidates.len()).map(move |i| {
+                (0..target.choice_count()).map(move |i| {
                     let mut choice = prefix.clone();
                     choice.push(i);
                     choice
@@ -99,11 +99,12 @@ async fn check_every_choice(
             // that candidate. Every other choice must compose.
             Err(e) => {
                 let summarized_topk = inventory.targets.iter().zip(&choice).any(|(t, &i)| {
-                    let NonASAPOp::Aggregate { measures, .. } = t.target.expect_non_asap() else {
+                    let NonASAPOp::Aggregate { measures, .. } = t.aggregate.expect_non_asap()
+                    else {
                         return false;
                     };
                     matches!(measures[t.measure], AggIntent::TopK { .. })
-                        && t.choices.candidates[i] != ComputationCandidate::Exact
+                        && t.chosen(i).map(|(_, c)| c) != Some(&ComputationCandidate::Exact)
                 });
                 assert!(summarized_topk, "{sql}, choice {choice:?}: {e}");
                 continue;

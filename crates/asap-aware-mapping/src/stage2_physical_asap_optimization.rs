@@ -896,7 +896,7 @@ mod tests {
         let choice: Vec<_> = inventory
             .targets
             .iter()
-            .map(|t| t.choices.candidates.len() - 1)
+            .map(|t| t.choice_count() - 1)
             .collect();
         let roots: Vec<_> =
             crate::per_computation_candidates::compose_logical_candidate(&inventory, &choice)
@@ -939,7 +939,7 @@ mod tests {
         let choice: Vec<_> = inventory
             .targets
             .iter()
-            .map(|t| t.choices.candidates.len() - 1)
+            .map(|t| t.choice_count() - 1)
             .collect();
         crate::per_computation_candidates::compose_logical_candidate(&inventory, &choice)
             .unwrap()
