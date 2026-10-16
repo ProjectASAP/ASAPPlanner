@@ -52,11 +52,10 @@ pub struct MeasuredOperationCost {
 }
 
 /// Which prices one node's CPU operations came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePriceSource {
     /// Plan selection's formulas (`analytical_cost` and the sketch shapes).
-    #[default]
     Analytical,
     /// The entry of [`MeasuredOperationCost`] for its sketch and operation.
     Measured,
@@ -83,8 +82,7 @@ pub(super) fn validate(
     ms_per_cpu_op: f64,
 ) -> Result<(), AnalyticalCostError> {
     if !table.is_empty() && ms_per_cpu_op <= 0.0 {
-        return Err(AnalyticalCostError::InvalidCalibration(
-            "ms_per_cpu_op (measured_operation_costs needs it positive)",
+        return Err(AnalyticalCostError::MeasuredCostsWithoutCpuSpeed(
             ms_per_cpu_op,
         ));
     }
@@ -100,10 +98,10 @@ pub(super) fn validate(
             .iter()
             .any(|earlier| earlier.operation == entry.operation && earlier.sketch == entry.sketch)
         {
-            return Err(AnalyticalCostError::InvalidCalibration(
-                "measured_operation_costs: two entries for one sketch and operation",
-                ns,
-            ));
+            return Err(AnalyticalCostError::DuplicateMeasuredOperationCost {
+                sketch: entry.sketch.clone(),
+                operation: entry.operation,
+            });
         }
     }
     Ok(())

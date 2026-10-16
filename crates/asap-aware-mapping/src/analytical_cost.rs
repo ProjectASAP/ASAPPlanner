@@ -2165,6 +2165,19 @@ pub enum AnalyticalCostError {
     },
     #[error("invalid physical DAG: {0}")]
     InvalidPhysicalDAG(&'static str),
+    /// Bad input: plan selection's measured table has two entries for one
+    /// sketch configuration and operation.
+    #[error("measured_operation_costs has two entries for {operation:?} on {sketch:?}")]
+    DuplicateMeasuredOperationCost {
+        sketch: SketchParams,
+        operation: crate::stage3_plan_selection::SummaryOperation,
+    },
+    /// Bad input: a non-empty measured table with `ms_per_cpu_op` not
+    /// positive, so a measured time cannot be counted in CPU operations.
+    #[error(
+        "measured_operation_costs needs a positive ms_per_cpu_op to count measured times as operations, got {0}"
+    )]
+    MeasuredCostsWithoutCpuSpeed(f64),
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
