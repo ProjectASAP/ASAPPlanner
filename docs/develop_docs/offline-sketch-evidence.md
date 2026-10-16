@@ -102,6 +102,10 @@ parameters solely because one dataset had low observed error.
 
 ## Query-matched offline recommendations
 
+> **Removed.** The `empirical_comparison` module that implemented this section
+> has been deleted, and nothing in the planner reads `OfflineComparisonEvidence`
+> now. The section is kept as the record of its contract.
+
 `empirical_comparison::recommend_offline` consumes the companion
 [`OfflineComparisonEvidence` JSON format](offline-comparison-evidence.schema.json).
 This combines the sketch artifact with explicit query bindings and a separately
