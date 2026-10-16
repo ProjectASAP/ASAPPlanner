@@ -41,13 +41,10 @@ fn exact_promql_root(query: &str) -> std::rc::Rc<planner_types::ir::OperatorNode
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(1000)),
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
+            DurationMs(1000),
+        )),
     };
     let root = asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
@@ -641,13 +638,10 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(60_000)),
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            ["m".to_string()],
+            DurationMs(60_000),
+        )),
     };
     let original = asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()

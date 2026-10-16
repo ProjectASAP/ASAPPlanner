@@ -7,7 +7,7 @@ use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
-    QueryRequirements, QueryWorkload, WorkloadError,
+    QueryRequirements, QueryWorkload, SourceFacts, WorkloadError,
 };
 
 const INTERVAL: Duration = Duration::from_secs(15);
@@ -33,11 +33,15 @@ fn workload(language: QueryLanguage, query: &str) -> PlanningWorkload {
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(15_000)),
-            },
-            ..Default::default()
+            arrival: DataArrival::Unknown,
+            sources: [(
+                "up".to_string(),
+                SourceFacts {
+                    sample_interval: Some(DurationMs(15_000)),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into(),
         }),
     }
 }
@@ -86,10 +90,10 @@ fn rollups_without_an_explicit_range_are_rejected() {
     assert!(lower_metricsql("rate(m[5m])", AccuracyTarget::exact()).is_ok());
 }
 
-/// A bare instant selector reads the latest sample within the ingestion
+/// A bare instant selector reads the latest sample within the sample
 /// interval, as in PromQL; an explicit range keeps its own window.
 #[test]
-fn instant_selectors_look_back_one_ingestion_interval() {
+fn instant_selectors_look_back_one_sample_interval() {
     let node = lower_metricsql("sum(up)", AccuracyTarget::exact()).unwrap();
     assert_eq!(
         time_range_under_aggregate(&node),
@@ -102,8 +106,9 @@ fn instant_selectors_look_back_one_ingestion_interval() {
     );
 }
 
-/// The workload entry takes the interval from the workload and checks its
-/// language, as `lower_promql_query_workload` does.
+/// The workload entry takes each selector's interval from its metric's
+/// source facts and checks its language, as `lower_promql_query_workload`
+/// does; a metric without an interval fails, whatever the arrival.
 #[test]
 fn workload_lowering_uses_the_declared_sample_interval() {
     let roots =
@@ -122,12 +127,18 @@ fn workload_lowering_uses_the_declared_sample_interval() {
     ));
     let mut missing = workload(QueryLanguage::MetricsQL, "sum(up)");
     missing.data_workload = Some(DataWorkload::default());
-    assert!(matches!(
-        lower_metricsql_query_workload(&missing),
-        Err(MetricsqlError::InvalidWorkload(
-            WorkloadError::MissingSampleInterval
-        ))
-    ));
+    let mut other_metric = workload(QueryLanguage::MetricsQL, "sum(up) + sum(down)");
+    other_metric.data_workload.as_mut().unwrap().arrival = DataArrival::Ingesting {
+        rows_per_second: 1.0,
+    };
+    for workload in [missing, other_metric] {
+        assert!(matches!(
+            lower_metricsql_query_workload(&workload),
+            Err(MetricsqlError::InvalidWorkload(
+                WorkloadError::MissingSampleInterval
+            ))
+        ));
+    }
     // A rollup over an explicit range needs no sample interval.
     let mut at_rest = workload(QueryLanguage::MetricsQL, "sum(rate(up[5m]))");
     at_rest.data_workload = Some(DataWorkload {

@@ -8,7 +8,7 @@ use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
 use asap_types::pre_asap::{AggIntent, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
-/// The workload's ingestion interval, the lookback of a bare selector.
+/// Every metric's sample interval, the lookback of a bare selector.
 const INTERVAL: Duration = Duration::from_secs(15);
 
 fn lower(query: &str) -> Rc<OperatorNode> {

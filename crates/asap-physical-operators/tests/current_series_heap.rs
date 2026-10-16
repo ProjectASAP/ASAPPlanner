@@ -314,13 +314,10 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(60_000)),
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            ["m".to_string()],
+            DurationMs(60_000),
+        )),
     };
     let original = asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()

@@ -151,7 +151,7 @@ fn reads_ddsketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
 }
 
 /// A SQL fold over the groups of an approximate subquery counts rows the
-/// data workload's input cardinality (a series count) does not bound, so
+/// series count of its source does not bound, so
 /// it leaves its own row-count statistic, which plan selection does not
 /// bind: the target stays unmet.
 #[tokio::test]

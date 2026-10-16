@@ -68,15 +68,15 @@
 // `pareto-front`). Cost models 1 and 2 use the illustrative unit costs.
 // Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
 // cost model 3, and `front` lists the Pareto front under `pareto-front`.
-// `--interval-ms` is the PromQL sample interval (default 15000); the data
-// is taken as ingesting at 1,000 rows per second, with no source facts.
+// `--interval-ms` is the sample interval declared for every metric the
+// PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
 // int64|bigint", "nullable": true}], "time_index": 0}` (`nullable` defaults
 // to true; without `time_index` the table has no time column; a
 // `time_index` that is not a column index is an error).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use asap_aware_mapping::stage3_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, Rejection, ResourceUnitCost,
@@ -91,13 +91,14 @@ use asap_devtools::planning_stages::{
     PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
+use asap_frontend_promql::promql_metric_names;
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
-    QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
+    BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage, QueryRecurrence,
+    QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
 };
 use serde_json::{json, Value};
 
@@ -330,6 +331,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             let catalog = sql_catalog(&tables)?;
             let mut names = HashSet::new();
             let (mut described, mut roots, mut entries) = (Vec::new(), Vec::new(), Vec::new());
+            // Every metric the PromQL queries read, each sampled every
+            // `--interval-ms`.
+            let mut metrics = BTreeSet::new();
             for (index, (language, text, name)) in queries.into_iter().enumerate() {
                 let (name, defaulted) = match name {
                     Some(name) => (name, false),
@@ -353,11 +357,16 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     _ => lower_sql_roots(&one, &catalog)?,
                 });
                 entries.extend(one.query_workload.entries());
+                metrics.extend(
+                    one.data_workload
+                        .iter()
+                        .flat_map(|d| d.sources.keys().cloned()),
+                );
                 let mut query = workload_queries(&one).remove(0);
                 query["id"] = json!(name);
                 described.push(query);
             }
-            let data = adhoc_data_workload(interval_ms);
+            let data = DataWorkload::sampled_every(metrics, DurationMs(interval_ms));
             let result = run_planning_stages_over(
                 roots.clone(),
                 &entries,
@@ -656,6 +665,15 @@ fn query_batch(
     accuracy: AccuracyTarget,
     interval_ms: u64,
 ) -> PlanningWorkload {
+    // Each metric a PromQL query reads is sampled every `interval_ms`; a
+    // query that does not parse names none and fails when lowered.
+    let metrics: BTreeSet<String> = match language {
+        QueryLanguage::PromQL => queries
+            .iter()
+            .flat_map(|query| promql_metric_names(query).unwrap_or_default())
+            .collect(),
+        _ => BTreeSet::new(),
+    };
     PlanningWorkload {
         query_workload: QueryWorkload {
             language,
@@ -676,20 +694,10 @@ fn query_batch(
             ),
             repeating_queries: None,
         },
-        data_workload: Some(adhoc_data_workload(interval_ms)),
-    }
-}
-
-/// The data `--promql`/`--sql` queries read: ingesting, each series
-/// sampled every `interval_ms` (`--interval-ms`), at Stage 3's default rate
-/// of 1,000 rows per second, with no source facts.
-fn adhoc_data_workload(interval_ms: u64) -> DataWorkload {
-    DataWorkload {
-        arrival: DataArrival::Ingesting {
-            rows_per_second: 1_000.0,
-            sample_interval: Some(DurationMs(interval_ms)),
-        },
-        ..Default::default()
+        data_workload: Some(DataWorkload::sampled_every(
+            metrics,
+            DurationMs(interval_ms),
+        )),
     }
 }
 

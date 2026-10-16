@@ -29,23 +29,18 @@ pub enum SharedArrival {
 /// The #509 shared data: one million series of `source`, each sampled
 /// every 15 s, so 1,000,000 / 15 rows per second arrive while ingesting.
 pub fn shared_data_workload(arrival: SharedArrival, source: &str) -> DataWorkload {
-    let (rows_per_second, sample_interval) = (1_000_000.0 / 15.0, Some(DurationMs(15_000)));
+    let rows_per_second = 1_000_000.0 / 15.0;
     DataWorkload {
         arrival: match arrival {
             SharedArrival::AtRest => DataArrival::AtRest,
-            SharedArrival::Ingesting => DataArrival::Ingesting {
-                rows_per_second,
-                sample_interval,
-            },
-            SharedArrival::Mixed => DataArrival::Mixed {
-                rows_per_second,
-                sample_interval,
-            },
+            SharedArrival::Ingesting => DataArrival::Ingesting { rows_per_second },
+            SharedArrival::Mixed => DataArrival::Mixed { rows_per_second },
         },
         sources: [(
             source.to_string(),
             SourceFacts {
-                series: Some(1_000_000),
+                series_count: Some(1_000_000),
+                sample_interval: Some(DurationMs(15_000)),
                 ..SourceFacts::default()
             },
         )]
@@ -146,16 +141,16 @@ pub fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
                     .collect(),
             ),
         },
-        // SQL needs no sample interval; `flows` has 10,000,000 sources.
+        // SQL needs no sample interval; `flows` holds 10,000,000 groups
+        // (one per source IP).
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000_000.0 / 15.0,
-                sample_interval: None,
             },
             sources: [(
                 "flows".to_string(),
                 SourceFacts {
-                    series: Some(10_000_000),
+                    series_count: Some(10_000_000),
                     ..SourceFacts::default()
                 },
             )]
@@ -302,8 +297,7 @@ pub fn pattern_b() -> PlanningWorkload {
 mod tests {
     use super::*;
 
-    /// Every shared arrival validates, at rest included: Pattern A reads
-    /// only explicit ranges, so it needs no sample interval.
+    /// Every shared arrival validates, at rest included.
     #[test]
     fn shared_data_workloads_are_valid() {
         for arrival in [

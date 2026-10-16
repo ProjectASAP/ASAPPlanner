@@ -312,10 +312,10 @@ async fn each_plan_carries_its_selected_root() {
                 predictability: Predictability::Unknown,
             }]),
         },
+        // A range selector only: no sample interval is needed.
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(15_000)),
             },
             ..Default::default()
         }),
@@ -346,13 +346,12 @@ async fn scalar_roots_survive_planning_in_workload_order() {
                 query_batch: Some(queries.iter().map(|q| batch(q)).collect()),
                 repeating_queries: None,
             },
-            data_workload: Some(DataWorkload {
-                arrival: DataArrival::Ingesting {
-                    rows_per_second: 1_000.0,
-                    sample_interval: Some(DurationMs(1000)),
-                },
-                ..Default::default()
-            }),
+            data_workload: Some(DataWorkload::sampled_every(
+                queries
+                    .iter()
+                    .flat_map(|q| asap_frontend_promql::promql_metric_names(q).unwrap()),
+                DurationMs(1000),
+            )),
         };
         let output = e2e_plan(UserInput::new(
             &workload,
