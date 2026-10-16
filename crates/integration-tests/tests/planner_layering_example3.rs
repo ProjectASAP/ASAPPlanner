@@ -67,7 +67,7 @@ fn workload_encodes_example3() {
     );
     a.validate().expect("valid Pattern A");
     let queries: Vec<_> = a.query_workload.entries().map(|e| e.query.0).collect();
-    assert_eq!(queries, PATTERN_A.map(|(q, ..)| q));
+    assert_eq!(queries, PATTERN_A.map(|pattern| pattern.promql));
     let b = pattern_b();
     b.validate().expect("valid Pattern B");
     assert_eq!(evaluation_interval_ms(&b, 0), Some(PATTERN_B_INTERVAL_MS));

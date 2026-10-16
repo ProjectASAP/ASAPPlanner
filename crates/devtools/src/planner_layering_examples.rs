@@ -167,26 +167,44 @@ pub fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
 /// The metric Example 3's Patterns A and B read.
 pub const PATTERN_METRIC: &str = "latency_ms";
 
-/// Pattern A's five queries: (PromQL, its range window in ms, its offset
-/// before T in ms); the window and offset restate the query text.
-pub const PATTERN_A: [(&str, u64, u64); 5] = [
-    ("quantile_over_time(0.99, latency_ms[5y])", 5 * YEAR_MS, 0),
-    ("quantile_over_time(0.99, latency_ms[1y])", YEAR_MS, 0),
-    (
-        "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
-        YEAR_MS,
-        YEAR_MS,
-    ),
-    (
-        "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
-        YEAR_MS,
-        2 * YEAR_MS,
-    ),
-    (
-        "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
-        3 * YEAR_MS,
-        2 * YEAR_MS,
-    ),
+/// One of Pattern A's queries, with the window and offset its text states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternAQuery {
+    /// The PromQL text.
+    pub promql: &'static str,
+    /// Its range window, in ms.
+    pub window_ms: u64,
+    /// Its offset before T, in ms.
+    pub offset_before_t_ms: u64,
+}
+
+/// Pattern A's five queries; the window and offset restate the query text.
+pub const PATTERN_A: [PatternAQuery; 5] = [
+    PatternAQuery {
+        promql: "quantile_over_time(0.99, latency_ms[5y])",
+        window_ms: 5 * YEAR_MS,
+        offset_before_t_ms: 0,
+    },
+    PatternAQuery {
+        promql: "quantile_over_time(0.99, latency_ms[1y])",
+        window_ms: YEAR_MS,
+        offset_before_t_ms: 0,
+    },
+    PatternAQuery {
+        promql: "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
+        window_ms: YEAR_MS,
+        offset_before_t_ms: YEAR_MS,
+    },
+    PatternAQuery {
+        promql: "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
+        window_ms: YEAR_MS,
+        offset_before_t_ms: 2 * YEAR_MS,
+    },
+    PatternAQuery {
+        promql: "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
+        window_ms: 3 * YEAR_MS,
+        offset_before_t_ms: 2 * YEAR_MS,
+    },
 ];
 
 /// How Pattern A's batch recurs (Example 4 varies it).
@@ -215,8 +233,8 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
             Some(
                 PATTERN_A
                     .iter()
-                    .map(|&(query, ..)| BatchEntry {
-                        query: Query(query.into()),
+                    .map(|pattern| BatchEntry {
+                        query: Query(pattern.promql.into()),
                         requirements: pattern_a_requirements(),
                         predictability: Predictability::AdHoc,
                         invocations: 1,
@@ -231,8 +249,8 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
             Some(
                 PATTERN_A
                     .iter()
-                    .map(|&(query, ..)| RepeatingEntry {
-                        query: Query(query.into()),
+                    .map(|pattern| RepeatingEntry {
+                        query: Query(pattern.promql.into()),
                         demand: RepeatedDemand::FixedInterval(RepetitionInterval(
                             (30 * 24 * 60 * MINUTE_MS) as u32,
                         )),

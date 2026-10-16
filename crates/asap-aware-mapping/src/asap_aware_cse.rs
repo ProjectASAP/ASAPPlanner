@@ -1544,8 +1544,8 @@ mod tests {
             .collect()
     }
 
-    fn kinds(group: &SharingCandidate) -> &'static str {
-        group.nodes[0].operator.kind_name()
+    fn kinds(sharing_candidate: &SharingCandidate) -> &'static str {
+        sharing_candidate.nodes[0].operator.kind_name()
     }
 
     /// The positions in `all` (by their nodes) of the sharing candidates
@@ -1580,29 +1580,30 @@ mod tests {
             "sum by (job) (rate(m[1m]))",
             "topk by (job) (10, sum_over_time(m[1m]))",
         ]);
-        let groups = sharing_candidates(&roots);
+        let sharing = sharing_candidates(&roots);
         assert_eq!(
-            groups.iter().map(kinds).collect::<Vec<_>>(),
+            sharing.iter().map(kinds).collect::<Vec<_>>(),
             ["Scan", "TimeRange"]
         );
-        let variants = identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots));
+        let pass2_candidates =
+            identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots));
         assert_eq!(
-            variants
+            pass2_candidates
                 .iter()
-                .map(|v| shared_positions(&groups, v))
+                .map(|v| shared_positions(&sharing, v))
                 .collect::<Vec<_>>(),
             [vec![0], vec![0, 1]]
         );
-        for variant in &variants {
-            assert_eq!(variant.roots, roots, "values are unchanged");
-            assert!(distinct_nodes(&variant.roots) < distinct_nodes(&roots));
+        for pass2_candidate in &pass2_candidates {
+            assert_eq!(pass2_candidate.roots, roots, "values are unchanged");
+            assert!(distinct_nodes(&pass2_candidate.roots) < distinct_nodes(&roots));
         }
         assert_eq!(
-            common_nodes(&variants[0].roots[0], &variants[0].roots[1]).len(),
+            common_nodes(&pass2_candidates[0].roots[0], &pass2_candidates[0].roots[1]).len(),
             1
         );
         assert_eq!(
-            common_nodes(&variants[1].roots[0], &variants[1].roots[1]).len(),
+            common_nodes(&pass2_candidates[1].roots[0], &pass2_candidates[1].roots[1]).len(),
             2
         );
     }
@@ -1621,8 +1622,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Scan", "TimeRange", "Scan", "TimeRange"]
         );
-        let variants = identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots));
-        assert_eq!(variants.len(), 8);
+        let pass2_candidates =
+            identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots));
+        assert_eq!(pass2_candidates.len(), 8);
         let shares = |v: &IdenticalExpressionPass2Candidate| {
             (
                 !common_nodes(&v.roots[0], &v.roots[1]).is_empty(),
@@ -1630,10 +1632,10 @@ mod tests {
             )
         };
         assert_eq!(
-            variants.iter().map(shares).collect::<HashSet<_>>(),
+            pass2_candidates.iter().map(shares).collect::<HashSet<_>>(),
             HashSet::from([(true, false), (false, true), (true, true)])
         );
-        assert!(variants.iter().all(|v| v.roots == roots));
+        assert!(pass2_candidates.iter().all(|v| v.roots == roots));
     }
 
     /// Queries with nothing in common have no Pass 2 candidate.
@@ -1649,13 +1651,13 @@ mod tests {
     /// Every non-empty subset of the sharing candidates, applied, kept when it gives a
     /// distinct candidate: the definition the direct enumeration follows.
     fn brute_force(roots: &[QueryRoot]) -> Vec<Vec<usize>> {
-        let groups = sharing_candidates(roots);
-        let mut subset = vec![false; groups.len()];
+        let sharing = sharing_candidates(roots);
+        let mut subset = vec![false; sharing.len()];
         let mut out = Vec::new();
         while next_subset(&mut subset) {
-            let (_, merged) = apply(roots, &groups, &subset);
+            let (_, merged) = apply(roots, &sharing, &subset);
             if merged == subset {
-                out.push((0..groups.len()).filter(|&g| subset[g]).collect());
+                out.push((0..sharing.len()).filter(|&g| subset[g]).collect());
             }
         }
         out
@@ -1675,10 +1677,10 @@ mod tests {
             &["sum(abs(ceil(a)))", "max(abs(ceil(a)))", "min(ceil(a))"],
         ] {
             let roots = roots(queries);
-            let groups = sharing_candidates(&roots);
-            let direct: Vec<_> = identical_expression_pass2_candidates(&roots, &groups)
+            let sharing = sharing_candidates(&roots);
+            let direct: Vec<_> = identical_expression_pass2_candidates(&roots, &sharing)
                 .iter()
-                .map(|v| shared_positions(&groups, v))
+                .map(|v| shared_positions(&sharing, v))
                 .collect();
             assert_eq!(direct, brute_force(&roots), "{queries:?}");
         }
@@ -1708,11 +1710,11 @@ mod tests {
             QueryRoot::Operator(node)
         };
         let roots = [chain(), chain()];
-        let groups = sharing_candidates(&roots);
-        assert_eq!(groups.len(), 20);
+        let sharing = sharing_candidates(&roots);
+        assert_eq!(sharing.len(), 20);
         let start = std::time::Instant::now();
-        let variants = identical_expression_pass2_candidates(&roots, &groups);
-        assert_eq!(variants.len(), 20);
+        let pass2_candidates = identical_expression_pass2_candidates(&roots, &sharing);
+        assert_eq!(pass2_candidates.len(), 20);
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
             "{:?}",
@@ -1869,21 +1871,23 @@ mod tests {
         let own = kll_builds(&roots);
         assert_eq!(own.len(), 2);
         assert!(own[0].1 < own[1].1);
-        let groups = capability_sharing_candidates(&roots);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].family, SketchAlgorithm::Kll);
-        let variants = summary_capability_pass2_candidates(&roots, &groups).unwrap();
-        assert_eq!(variants.len(), 1);
-        let [shared_builds] = variants[0].shared_builds.as_slice() else {
-            panic!("one shared build: {:?}", variants[0].shared_builds)
+        let sharing = capability_sharing_candidates(&roots);
+        assert_eq!(sharing.len(), 1);
+        assert_eq!(sharing[0].family, SketchAlgorithm::Kll);
+        let pass2_candidates = summary_capability_pass2_candidates(&roots, &sharing).unwrap();
+        assert_eq!(pass2_candidates.len(), 1);
+        let [shared_builds] = pass2_candidates[0].shared_builds.as_slice() else {
+            panic!("one shared build: {:?}", pass2_candidates[0].shared_builds)
         };
-        assert_eq!(positions(&groups[0].members, shared_builds, |m| m), [0, 1]);
-        let shared = kll_builds(variants[0].roots.as_ref().unwrap());
+        assert_eq!(positions(&sharing[0].members, shared_builds, |m| m), [0, 1]);
+        let shared = kll_builds(pass2_candidates[0].roots.as_ref().unwrap());
         assert_eq!(shared.len(), 1, "one KLL serves both");
         assert_eq!(shared[0].1, own[1].1);
-        assert!(root_bound(&variants[0].roots.as_ref().unwrap()[0]) < root_bound(&roots[0]));
+        assert!(
+            root_bound(&pass2_candidates[0].roots.as_ref().unwrap()[0]) < root_bound(&roots[0])
+        );
         assert_eq!(
-            root_bound(&variants[0].roots.as_ref().unwrap()[1]),
+            root_bound(&pass2_candidates[0].roots.as_ref().unwrap()[1]),
             root_bound(&roots[1])
         );
     }
@@ -1901,18 +1905,18 @@ mod tests {
             ],
             SketchAlgorithm::Kll,
         );
-        let groups = capability_sharing_candidates(&roots);
-        let variants = summary_capability_pass2_candidates(&roots, &groups).unwrap();
+        let sharing = capability_sharing_candidates(&roots);
+        let pass2_candidates = summary_capability_pass2_candidates(&roots, &sharing).unwrap();
         assert_eq!(
-            variants
+            pass2_candidates
                 .iter()
-                .map(|v| positions(&groups[0].members, &v.shared_builds[0], |m| m))
+                .map(|v| positions(&sharing[0].members, &v.shared_builds[0], |m| m))
                 .collect::<Vec<_>>(),
             [vec![0, 1], vec![0, 2], vec![1, 2], vec![0, 1, 2]]
         );
-        for variant in &variants {
-            let builds = kll_builds(variant.roots.as_ref().unwrap());
-            assert_eq!(builds.len(), 4 - variant.shared_builds[0].len());
+        for pass2_candidate in &pass2_candidates {
+            let builds = kll_builds(pass2_candidate.roots.as_ref().unwrap());
+            assert_eq!(builds.len(), 4 - pass2_candidate.shared_builds[0].len());
         }
     }
 
@@ -1927,16 +1931,16 @@ mod tests {
             ],
             SketchAlgorithm::Kll,
         );
-        let mut groups = capability_sharing_candidates(&roots);
-        let members = groups[0].members.clone();
-        groups[0].members = members
+        let mut sharing = capability_sharing_candidates(&roots);
+        let members = sharing[0].members.clone();
+        sharing[0].members = members
             .iter()
             .cycle()
             .take(MAX_CAPABILITY_SHARING_MEMBERS + 1)
             .cloned()
             .collect();
         assert!(matches!(
-            summary_capability_pass2_candidates(&roots, &groups),
+            summary_capability_pass2_candidates(&roots, &sharing),
             Err(PerComputationCandidateError::Unsupported(_))
         ));
     }
@@ -1993,16 +1997,16 @@ mod tests {
             &["sum(abs(a))", "max(abs(a))", "min(a)", "sum(b)", "max(b)"],
         ] {
             let roots = roots(queries);
-            let groups = sharing_candidates(&roots);
-            for variant in identical_expression_pass2_candidates(&roots, &groups) {
-                let shared = shared_positions(&groups, &variant);
-                let label: Vec<bool> = (0..groups.len()).map(|g| shared.contains(&g)).collect();
-                let (applied, merged) = apply(&roots, &groups, &label);
+            let sharing = sharing_candidates(&roots);
+            for pass2_candidate in identical_expression_pass2_candidates(&roots, &sharing) {
+                let shared = shared_positions(&sharing, &pass2_candidate);
+                let label: Vec<bool> = (0..sharing.len()).map(|g| shared.contains(&g)).collect();
+                let (applied, merged) = apply(&roots, &sharing, &label);
                 assert_eq!(merged, label, "{queries:?}");
-                assert_eq!(applied, variant.roots, "{queries:?}");
+                assert_eq!(applied, pass2_candidate.roots, "{queries:?}");
                 assert_eq!(
                     distinct_nodes(&applied),
-                    distinct_nodes(&variant.roots),
+                    distinct_nodes(&pass2_candidate.roots),
                     "{queries:?} {:?}",
                     shared
                 );
@@ -2010,7 +2014,8 @@ mod tests {
                     if b < roots.len() {
                         assert_eq!(
                             common_nodes(&applied[a], &applied[b]).len(),
-                            common_nodes(&variant.roots[a], &variant.roots[b]).len()
+                            common_nodes(&pass2_candidate.roots[a], &pass2_candidate.roots[b])
+                                .len()
                         );
                     }
                 }
@@ -2022,7 +2027,7 @@ mod tests {
     fn panes(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<(u64, u32)> {
         pane_candidates(roots, interval_ms)
             .iter()
-            .map(|site| (site.pane_width_ms, site.pane_count))
+            .map(|rule_candidate| (rule_candidate.pane_width_ms, rule_candidate.pane_count))
             .collect()
     }
 
@@ -2072,16 +2077,18 @@ mod tests {
             &[("quantile_over_time(0.99, m[5m])", 0.01)],
             SketchAlgorithm::Kll,
         );
-        let sites = pane_candidates(&roots, &[Some(60_000)]);
-        let variants = window_composition_pass2_candidates(&roots, &sites).unwrap();
-        let [variant] = variants.as_slice() else {
-            panic!("one variant: {variants:?}")
+        let rule_candidates = pane_candidates(&roots, &[Some(60_000)]);
+        let pass2_candidates =
+            window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
+        let [pass2_candidate] = pass2_candidates.as_slice() else {
+            panic!("one Pass 2 candidate: {pass2_candidates:?}")
         };
         assert_eq!(
-            positions(&sites, &variant.pane_candidates, |c| &c.build),
+            positions(&rule_candidates, &pass2_candidate.pane_candidates, |c| &c
+                .build),
             [0]
         );
-        let panes = variant.roots.as_ref().unwrap();
+        let panes = pass2_candidate.roots.as_ref().unwrap();
         let QueryRoot::Operator(root) = &panes[0] else {
             panic!("operator root")
         };
@@ -2115,14 +2122,14 @@ mod tests {
             child: range,
             family: whole_family,
             ..
-        }) = sites[0].build.asap()
+        }) = rule_candidates[0].build.asap()
         else {
             unreachable!()
         };
         assert_eq!(family, whole_family);
         assert_eq!(child.operator, range.children()[0].operator);
-        assert_eq!(chain.schema, sites[0].build.schema);
-        assert_eq!(merge.coverage(), sites[0].build.coverage());
+        assert_eq!(chain.schema, rule_candidates[0].build.schema);
+        assert_eq!(merge.coverage(), rule_candidates[0].build.coverage());
     }
 
     /// Two builds that could be split give three candidates: each alone and
@@ -2136,14 +2143,14 @@ mod tests {
             ],
             SketchAlgorithm::Kll,
         );
-        let sites = pane_candidates(&roots, &[Some(60_000), Some(60_000)]);
-        assert_eq!(sites.len(), 2);
-        let subsets: Vec<_> = window_composition_pass2_candidates(&roots, &sites)
+        let rule_candidates = pane_candidates(&roots, &[Some(60_000), Some(60_000)]);
+        assert_eq!(rule_candidates.len(), 2);
+        let subsets: Vec<_> = window_composition_pass2_candidates(&roots, &rule_candidates)
             .unwrap()
             .iter()
             .map(|v| {
                 assert!(v.roots.is_ok());
-                positions(&sites, &v.pane_candidates, |c| &c.build)
+                positions(&rule_candidates, &v.pane_candidates, |c| &c.build)
             })
             .collect();
         assert_eq!(subsets, [vec![0], vec![1], vec![0, 1]]);
@@ -2177,16 +2184,16 @@ mod tests {
     #[test]
     fn rollup_from_a_finer_exact_sum() {
         let roots = exact(&["sum by (job) (m)", "sum by (job, instance) (m)"]);
-        let sites = rollup_candidates(&roots);
-        let [site] = sites.as_slice() else {
-            panic!("one site: {sites:?}")
+        let rule_candidates = rollup_candidates(&roots);
+        let [rule_candidate] = rule_candidates.as_slice() else {
+            panic!("one candidate: {rule_candidates:?}")
         };
-        assert!(Rc::ptr_eq(&site.coarse, &builds(&roots[0])[0]));
-        let variants = rollup_pass2_candidates(&roots, &sites).unwrap();
-        let [variant] = variants.as_slice() else {
-            panic!("one variant")
+        assert!(Rc::ptr_eq(&rule_candidate.coarse, &builds(&roots[0])[0]));
+        let pass2_candidates = rollup_pass2_candidates(&roots, &rule_candidates).unwrap();
+        let [pass2_candidate] = pass2_candidates.as_slice() else {
+            panic!("one Pass 2 candidate")
         };
-        let rolled = variant.roots.as_ref().unwrap();
+        let rolled = pass2_candidate.roots.as_ref().unwrap();
         let coarse = builds(&rolled[0]);
         let fine = builds(&rolled[1]);
         assert_eq!(fine.len(), 1);
@@ -2231,11 +2238,11 @@ mod tests {
         ] {
             let finer = query.replace("(job)", "(job, instance)");
             let roots = exact(&[query, &finer]);
-            let sites = rollup_candidates(&roots);
-            let [site] = sites.as_slice() else {
-                panic!("{query}: one site: {sites:?}")
+            let rule_candidates = rollup_candidates(&roots);
+            let [rule_candidate] = rule_candidates.as_slice() else {
+                panic!("{query}: one candidate: {rule_candidates:?}")
             };
-            let mut value = Rc::clone(&site.rollup);
+            let mut value = Rc::clone(&rule_candidate.rollup);
             if let Some(NonASAPOp::Project { child, .. }) = value.non_asap() {
                 value = Rc::clone(child);
             }
@@ -2250,9 +2257,11 @@ mod tests {
                 panic!("an exact accumulator")
             };
             assert_eq!(*rolled, kind, "{query}");
-            let variant = rollup_pass2_candidates(&roots, &sites).unwrap().remove(0);
+            let pass2_candidate = rollup_pass2_candidates(&roots, &rule_candidates)
+                .unwrap()
+                .remove(0);
             assert_eq!(
-                operator(&variant.roots.unwrap()[0]).schema,
+                operator(&pass2_candidate.roots.unwrap()[0]).schema,
                 operator(&roots[0]).schema,
                 "{query}"
             );
@@ -2339,18 +2348,18 @@ mod tests {
     #[test]
     fn exact_topk_reuses_the_larger_ranking() {
         let roots = exact(&["topk(5, sum by (job) (m))", "topk(10, sum by (job) (m))"]);
-        let sites = topk_reuse_candidates(&roots);
-        let [site] = sites.as_slice() else {
-            panic!("one site: {sites:?}")
+        let rule_candidates = topk_reuse_candidates(&roots);
+        let [rule_candidate] = rule_candidates.as_slice() else {
+            panic!("one candidate: {rule_candidates:?}")
         };
-        assert_eq!(site.members.len(), 2);
-        let Some(NonASAPOp::Limit { n: Some(10), .. }) = site.ranking.non_asap() else {
-            panic!("{:?}", site.ranking.operator)
+        assert_eq!(rule_candidate.members.len(), 2);
+        let Some(NonASAPOp::Limit { n: Some(10), .. }) = rule_candidate.ranking.non_asap() else {
+            panic!("{:?}", rule_candidate.ranking.operator)
         };
-        let variant = topk_reuse_pass2_candidates(&roots, &sites)
+        let pass2_candidate = topk_reuse_pass2_candidates(&roots, &rule_candidates)
             .unwrap()
             .remove(0);
-        let reused = variant.roots.unwrap();
+        let reused = pass2_candidate.roots.unwrap();
         let read = |root: &QueryRoot| {
             let Some(NonASAPOp::Aggregate {
                 child, measures, ..

@@ -151,7 +151,9 @@ pub fn pass2_label(
         .shared_builds
         .iter()
         .map(|builds| {
-            let queries = readers(pass1_roots, |node| builds.iter().any(|b| same(node, b)));
+            let queries = readers(pass1_roots, |node| {
+                builds.iter().any(|b| same_computation(node, b))
+            });
             let family = match builds[0].asap().and_then(ASAPOp::produced_state) {
                 Some(FieldDataType::Sketch(kind, _)) => format!("{:?}", kind.algorithm()),
                 _ => builds[0].operator.kind_name().to_string(),
@@ -200,8 +202,14 @@ pub fn pass2_label(
             format!(
                 "{} for {} rolled up from {}",
                 state_name(&candidate.coarse),
-                query_names(&readers(pass1_roots, |n| same(n, &candidate.coarse))),
-                query_names(&readers(pass1_roots, |n| same(n, &candidate.finer)))
+                query_names(&readers(pass1_roots, |n| same_computation(
+                    n,
+                    &candidate.coarse
+                ))),
+                query_names(&readers(pass1_roots, |n| same_computation(
+                    n,
+                    &candidate.finer
+                )))
             )
         })
         .chain(pass2.topk_reuse_candidates.iter().map(|candidate| {
@@ -211,7 +219,10 @@ pub fn pass2_label(
             };
             format!(
                 "top-k for {} from one top-{k}",
-                query_names(&readers(candidate_roots, |n| same(n, &candidate.ranking)))
+                query_names(&readers(candidate_roots, |n| same_computation(
+                    n,
+                    &candidate.ranking
+                )))
             )
         }))
         .collect();
@@ -228,7 +239,7 @@ pub fn pass2_label(
             format!(
                 "{} ({})",
                 node.operator.kind_name(),
-                query_names(&readers(candidate_roots, |n| same(n, node)))
+                query_names(&readers(candidate_roots, |n| same_computation(n, node)))
             )
         })
         .collect();
@@ -263,13 +274,9 @@ fn readers(roots: &[QueryRoot], matches: impl Fn(&OperatorNode) -> bool) -> Vec<
         .collect()
 }
 
-/// Whether `node` is `other` or computes the same thing: the same
-/// operators, schemas and children, whatever guarantees, timings and
-/// materializations later steps attached.
-fn same(node: &OperatorNode, other: &Rc<OperatorNode>) -> bool {
-    same_computation(node, other)
-}
-
+/// Whether `a` is `b` or computes the same thing: the same operators,
+/// schemas and children, whatever guarantees, timings and materializations
+/// later steps attached.
 fn same_computation(a: &OperatorNode, b: &OperatorNode) -> bool {
     std::ptr::eq(a, b)
         || (a.operator.map_children(|_| ()) == b.operator.map_children(|_| ())
@@ -318,7 +325,7 @@ fn is_pane_chain_of(node: &OperatorNode, candidate: &PaneCandidate) -> bool {
         && range
             .children()
             .first()
-            .is_some_and(|window_input| same(child, window_input))
+            .is_some_and(|window_input| same_computation(child, window_input))
 }
 
 /// Whether two pane candidates become the same pane chain: the same

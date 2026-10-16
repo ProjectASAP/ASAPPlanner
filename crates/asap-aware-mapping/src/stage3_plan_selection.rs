@@ -776,13 +776,20 @@ pub fn select_plan(
 /// order; `None` without candidates.
 fn choose(ranking: Ranking, costs: &[&CandidateCost]) -> Option<(usize, Vec<usize>)> {
     let front: Vec<usize> = match ranking {
-        Ranking::Front => (0..costs.len())
-            .filter(|&i| {
-                !costs
-                    .iter()
-                    .any(|other| dominates(&other.usage, &costs[i].usage))
-            })
-            .collect(),
+        Ranking::Front => {
+            // Each candidate's worst latency once, not once per comparison.
+            let latencies: Vec<f64> = costs.iter().map(|c| worst_latency_ms(&c.usage)).collect();
+            (0..costs.len())
+                .filter(|&i| {
+                    !(0..costs.len()).any(|j| {
+                        dominates_at(
+                            (&costs[j].usage, latencies[j]),
+                            (&costs[i].usage, latencies[i]),
+                        )
+                    })
+                })
+                .collect()
+        }
         _ => Vec::new(),
     };
     // Under the Pareto front, only a front member can be selected.
@@ -843,7 +850,11 @@ fn capacity_violation(usage: &ResourceUsage, limits: &ClusterLimits) -> Option<S
 /// Whether `a` is at least as good as `b` on peak memory, disk and
 /// worst-query latency, and better on one of them.
 fn dominates(a: &ResourceUsage, b: &ResourceUsage) -> bool {
-    let (la, lb) = (worst_latency_ms(a), worst_latency_ms(b));
+    dominates_at((a, worst_latency_ms(a)), (b, worst_latency_ms(b)))
+}
+
+/// [`dominates`] with each usage's worst-query latency already computed.
+fn dominates_at((a, la): (&ResourceUsage, f64), (b, lb): (&ResourceUsage, f64)) -> bool {
     a.peak_memory_bytes <= b.peak_memory_bytes
         && a.disk_bytes <= b.disk_bytes
         && !cheaper(lb, la)
