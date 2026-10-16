@@ -15,11 +15,14 @@
 //! [`planning_stages`] and [`planner_layering_examples`] hold the one
 //! pipeline and the #509 example workloads that `stage_pipeline` and the
 //! planner-layering acceptance tests share; [`candidate_labels`] names the
-//! candidates for the viewer document.
+//! candidates for the viewer document. [`rqe_atomic_costs`] converts
+//! sketch-bench's measured per-operation costs into plan selection's
+//! measured table.
 
 pub mod candidate_labels;
 pub mod planner_layering_examples;
 pub mod planning_stages;
+pub mod rqe_atomic_costs;
 
 pub use asap_frontend_promql::{
     lower_promql_workload, lower_promql_workload_with_histograms, PromqlError,

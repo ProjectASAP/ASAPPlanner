@@ -86,6 +86,11 @@
 // also offered built at query time and kept across evaluations, beside being
 // shared within one evaluation. The document's top-level
 // `deployment_capabilities` shows the inputs used.
+// `--measured-operation-costs <file>` reads the deployment's measured CPU
+// time per sketch operation (a JSON array, as `convert_rqe_atomic_costs`
+// writes from sketch-bench's `rqe_atomic_costs.json`); a sketch node with an
+// entry is priced from it, and each node's `price_source` says `measured`
+// or `analytical`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
@@ -100,8 +105,8 @@ use asap_aware_mapping::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates, PruneReason,
 };
 use asap_aware_mapping::stage3_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, Rejection, ResourceUnitCost,
-    ResourceUsage, Selection, SelectionError,
+    ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCost, PlanSelectionSettings,
+    Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
 };
 use asap_aware_mapping::DeploymentCapabilities;
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
@@ -218,6 +223,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut cluster_objective: Option<String> = None;
     let mut deployment_capabilities = DeploymentCapabilities::default();
     let mut out = None;
+    let mut measured_operation_costs_path: Option<String> = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value"));
@@ -270,6 +276,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     .map_err(|e| format!("--deployment-capabilities: {e}"))?
             }
             "--out" => out = Some(value()?),
+            "--measured-operation-costs" => measured_operation_costs_path = Some(value()?),
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -313,8 +320,19 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         (Some(other), _) => return Err(format!("unknown cost model {other}").into()),
     };
+    let measured_operation_costs: Vec<MeasuredOperationCost> = match &measured_operation_costs_path
+    {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("--measured-operation-costs {path}: {e}"))?;
+            serde_json::from_str(&text)
+                .map_err(|e| format!("--measured-operation-costs {path}: {e}"))?
+        }
+        None => Vec::new(),
+    };
     let plan_selection = PlanSelectionSettings {
         cost_model,
+        measured_operation_costs,
         ..PlanSelectionSettings::default()
     };
     let mut document = match (example.as_deref(), queries.is_empty()) {
@@ -564,6 +582,7 @@ fn plan_selection_json(
                             "cost_per_second": c.cost_per_second,
                             "multiplier": c.multiplier,
                             "detail": c.detail,
+                            "price_source": c.price_source,
                         }),
                     )
                 })

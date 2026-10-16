@@ -90,6 +90,24 @@
 //! A cost error on any candidate aborts selection; it is reachable only from
 //! bad declared rates or bad [`PlanSelectionSettings`].
 //!
+//! ## Measured operation costs
+//!
+//! A deployment that measured its sketches gives the measured CPU time of
+//! one update, merge or estimate per sketch configuration
+//! ([`PlanSelectionSettings::measured_operation_costs`]). A sketch build
+//! (one instance per group), merge or estimate with an entry is priced
+//! from it: rows × measured updates (plus the one placement operation per
+//! row of a pane chain), states × measured merges, groups × measured
+//! estimates. The newest window's compaction (see "Latency") merges with
+//! the state's measured merge too. Every other node is priced from the
+//! formulas above, and each node reports which ([`NodeCost::price_source`]).
+//! An entry matches only a node with exactly its sketch parameters (up to
+//! the error and failure probability the sketch was sized for): a node whose
+//! parameters differ, however slightly, is priced from the formulas, with no
+//! interpolation between measured configurations. Measured times count as
+//! CPU operations of [`ResourceSpeed`], so latency and all three cost
+//! models read them like any other operation.
+//!
 //! ## Cost models
 //!
 //! [`PlanSelectionSettings::cost_model`] (in [`PlanningModels`]) chooses how
@@ -130,7 +148,8 @@
 //! and scanned bytes timed by [`ResourceSpeed`]'s `ms_per_cpu_op` and
 //! `ms_per_scanned_byte`. A state whose ingestion work needs `k` cores keeps
 //! `k` partial copies of its newest window, and compacting them takes
-//! `(k − 1)` one-operation merges for each of its states per window; with
+//! `(k − 1)` merges for each of its states per window, each one operation,
+//! or the state's measured merge time when the measured table has one; with
 //! one core there is nothing to compact. A query with
 //! `Some(bound)` whose latency is above the
 //! bound makes the candidate invalid, with the latency as the reason.
@@ -152,7 +171,8 @@ use asap_types::ir::{
 use asap_types::post_asap::sketch::KLL_MAX_K;
 use asap_types::post_asap::{
     AccuracyGuarantee, AccuracyMetric, CompositionOperator, ExecutionTiming, FieldDataType,
-    Materialization, Medium, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
+    GroupingStrategy, Materialization, Medium, SketchAlgorithm, SketchParams, SketchStatistic,
+    WeightDomain,
 };
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema, Source};
 use asap_types::types::{AccuracyScope, AccuracyTarget};
@@ -182,6 +202,10 @@ use crate::physical_operator_statistics::{
 use crate::stage2_physical_asap_optimization::PhysicalCandidate;
 use crate::PlanningModels;
 
+mod measured_operation_costs;
+use measured_operation_costs::measured_cpu_ns;
+pub use measured_operation_costs::{MeasuredOperationCost, NodePriceSource, SummaryOperation};
+
 /// Groups assumed for every `by (...)` reduction, absent group-count evidence.
 const DEFAULT_GROUP_COUNT: u64 = 100;
 /// Used only when the data workload does not declare them.
@@ -192,7 +216,15 @@ const DEFAULT_LOOKBACK_MS: u64 = 60_000;
 /// Cost per second of wall time; one unit is one CPU-millisecond under
 /// [`ResourceUnitCost::illustrative`].
 pub const COST_UNIT: &str = "cost_per_second";
+/// [`CandidateCost::source`] when every node is priced from the formulas.
 pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
+/// [`CandidateCost::source`] when every node is priced from the measured
+/// table.
+pub const MEASURED_COST_SOURCE: &str = "measured operation costs (illustrative statistics)";
+/// [`CandidateCost::source`] when some nodes are priced from the measured
+/// table and the others from the formulas.
+pub const MIXED_COST_SOURCE: &str =
+    "measured operation costs and analytical-cost-v2 (illustrative statistics)";
 
 /// Seconds over which non-repeating queries (one-off, scheduled and
 /// unknown) are spread by default: one hour.
@@ -339,6 +371,11 @@ pub struct PlanSelectionSettings {
     /// Seconds one-off, scheduled and unknown queries are spread over
     /// (`invocations / horizon` per second); default 3,600.
     pub non_repeating_query_horizon_seconds: f64,
+    /// The deployment's measured CPU time per sketch operation; a sketch
+    /// node with an entry is priced from it, every other node from the
+    /// formulas (module doc, "Measured operation costs"). Default empty:
+    /// every node is priced from the formulas.
+    pub measured_operation_costs: Vec<MeasuredOperationCost>,
 }
 
 impl Default for PlanSelectionSettings {
@@ -347,13 +384,16 @@ impl Default for PlanSelectionSettings {
             cost_model: CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
             resource_speed: ResourceSpeed::illustrative(),
             non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
+            measured_operation_costs: Vec::new(),
         }
     }
 }
 
 impl PlanSelectionSettings {
     /// Bad input: a negative or non-finite speed, a horizon that is not
-    /// positive, or a price the chosen cost model reads that is negative or
+    /// positive, a bad measured table ([`MeasuredOperationCost`]: a
+    /// negative or non-finite time, a duplicate entry, or `ms_per_cpu_op`
+    /// 0), or a price the chosen cost model reads that is negative or
     /// not finite, or every such price 0 (cost model 3 reads none).
     pub fn validate(&self) -> Result<(), AnalyticalCostError> {
         for (name, value) in [
@@ -374,6 +414,10 @@ impl PlanSelectionSettings {
                 horizon,
             ));
         }
+        measured_operation_costs::validate(
+            &self.measured_operation_costs,
+            self.resource_speed.ms_per_cpu_op,
+        )?;
         let read = match &self.cost_model {
             CostModel::UsageOverTime(p) => vec![
                 ("cost_per_cpu_op", p.cost_per_cpu_op),
@@ -419,6 +463,9 @@ pub struct NodeCost {
     /// ... bytes": one computation's work, the times it is computed per
     /// second and what it keeps.
     pub detail: String,
+    /// Whether its CPU operations were priced from the measured table or
+    /// from the formulas.
+    pub price_source: NodePriceSource,
 }
 
 /// One candidate's usage and price over the whole workload: `usage` is
@@ -430,6 +477,9 @@ pub struct CandidateCost {
     /// sum of its nodes'); `None` under cost model 3.
     pub cost_per_second: Option<f64>,
     pub unit: &'static str,
+    /// Where its prices came from, from its nodes' [`NodeCost::price_source`]:
+    /// [`COST_SOURCE`] (all formulas), [`MEASURED_COST_SOURCE`] (all
+    /// measured) or [`MIXED_COST_SOURCE`].
     pub source: &'static str,
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
 }
@@ -1943,6 +1993,16 @@ fn price(
     for e in &dag.edges {
         producers_of.entry(e.consumer).or_default().push(e.producer);
     }
+    // Each sketch node's sketch, to look up in the measured table: a
+    // build's own (one instance per group; a shared Hydra structure is not
+    // that sketch), inherited by the merges and estimates over it.
+    let mut sketch_of: HashMap<PhysicalASAPNodeId, &SketchParams> = HashMap::new();
+    // The measured cost of one `operation` on `sketch`, in operations of
+    // `speed` (measured ns · 10⁻⁶ / ms_per_cpu_op), when the table has it.
+    let measured_ops = |sketch: Option<&SketchParams>, operation| {
+        measured_cpu_ns(&settings.measured_operation_costs, sketch?, operation)
+            .map(|ns| ns * 1e-6 / speed.ms_per_cpu_op)
+    };
     for node in &dag.nodes {
         let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
         let producers = producers_of.get(&node.id).map_or(&[][..], Vec::as_slice);
@@ -1956,6 +2016,28 @@ fn price(
         };
         let series = priced_series(&sources, data);
         sources_read_by.insert(node.id, sources);
+        let node_sketch = match &node.payload {
+            Payload::ASAP(
+                ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    grouping: GroupingStrategy::PerSubpopulationInstance,
+                    ..
+                }
+                | ASAPOp::PaneChain {
+                    family: FieldDataType::Sketch(kind, _),
+                    grouping: GroupingStrategy::PerSubpopulationInstance,
+                    ..
+                },
+            ) => Some(kind.params()),
+            Payload::ASAP(ASAPOp::SummaryMerge { .. } | ASAPOp::SummaryEstimate { .. }) => {
+                producers.first().and_then(|p| sketch_of.get(p).copied())
+            }
+            _ => None,
+        };
+        if let Some(sketch) = node_sketch {
+            sketch_of.insert(node.id, sketch);
+        }
+        let mut price_source = NodePriceSource::Analytical;
         let input = inputs
             .first()
             .copied()
@@ -2147,12 +2229,22 @@ fn price(
                     rows: group_count,
                     bytes: group_count * state_bytes,
                 };
-                let ops = input.rows as f64 * depth;
+                let (ops, per_row_text) = match measured_ops(node_sketch, SummaryOperation::Update)
+                {
+                    Some(per_update) => {
+                        price_source = NodePriceSource::Measured;
+                        (
+                            input.rows as f64 * per_update,
+                            format!("{per_update:.3} measured ops per update"),
+                        )
+                    }
+                    None => (input.rows as f64 * depth, format!("depth {depth}")),
+                };
                 (
                     out,
                     Ok(ResourceEstimate::new(ops, out.bytes, 0)),
                     format!(
-                        "build {} into {group_count} states: {} rows x depth {depth}",
+                        "build {} into {group_count} states: {} rows x {per_row_text}",
                         family_name(family),
                         input.rows
                     ),
@@ -2175,13 +2267,26 @@ fn price(
                     rows: states,
                     bytes: states * state_bytes,
                 };
-                let ops = input.rows as f64 * (depth + 1.0);
+                let (ops, per_row_text) = match measured_ops(node_sketch, SummaryOperation::Update)
+                {
+                    Some(per_update) => {
+                        price_source = NodePriceSource::Measured;
+                        (
+                            input.rows as f64 * (per_update + 1.0),
+                            format!("(1 + {per_update:.3} measured ops per update)"),
+                        )
+                    }
+                    None => (
+                        input.rows as f64 * (depth + 1.0),
+                        format!("(1 + depth {depth})"),
+                    ),
+                };
                 (
                     out,
                     Ok(ResourceEstimate::new(ops, out.bytes, 0)),
                     format!(
                         "build {} in {pane_count} panes of {pane_width_ms} ms for \
-                         {group_count} groups: {} rows x (1 + depth {depth})",
+                         {group_count} groups: {} rows x {per_row_text}",
                         family_name(family),
                         input.rows
                     ),
@@ -2207,10 +2312,21 @@ fn price(
                     rows: group_count,
                     bytes: input.bytes.div_ceil(input.rows.max(1)) * group_count,
                 };
+                let (ops, per_merge_text) = match measured_ops(node_sketch, SummaryOperation::Merge)
+                {
+                    Some(per_merge) => {
+                        price_source = NodePriceSource::Measured;
+                        (
+                            states as f64 * per_merge,
+                            format!(" x {per_merge:.3} measured ops per merge"),
+                        )
+                    }
+                    None => (states as f64, String::new()),
+                };
                 (
                     out,
-                    Ok(ResourceEstimate::new(states as f64, out.bytes, 0)),
-                    format!("merge {states} states into {group_count}"),
+                    Ok(ResourceEstimate::new(ops, out.bytes, 0)),
+                    format!("merge {states} states into {group_count}{per_merge_text}"),
                 )
             }
             Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
@@ -2219,10 +2335,23 @@ fn price(
                     _ => 1,
                 };
                 let out = edge(input.rows * per_group);
+                // A measured estimate reads one group's result, all of a
+                // top-k's `k` entries included.
+                let (ops, per_group_text) =
+                    match measured_ops(node_sketch, SummaryOperation::Estimate) {
+                        Some(per_estimate) => {
+                            price_source = NodePriceSource::Measured;
+                            (
+                                input.rows as f64 * per_estimate,
+                                format!("{per_estimate:.3} measured ops per estimate"),
+                            )
+                        }
+                        None => (out.rows as f64, per_group.to_string()),
+                    };
                 (
                     out,
-                    Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
-                    format!("estimate {} groups x {per_group}", input.rows),
+                    Ok(ResourceEstimate::new(ops, 0, 0)),
+                    format!("estimate {} groups x {per_group_text}", input.rows),
                 )
             }
             Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
@@ -2347,6 +2476,7 @@ fn price(
                 cost_per_second: cost,
                 multiplier,
                 detail,
+                price_source,
             },
         );
     }
@@ -2372,7 +2502,16 @@ fn price(
         measured.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
     }
-    let latency = query_latencies(dag, nodes, &output, &work_ms, &speed);
+    // Milliseconds of one merge of each state with a measured merge entry
+    // (measured ns · 10⁻⁶), for the newest window's compaction.
+    let merge_ms: HashMap<PhysicalASAPNodeId, f64> = sketch_of
+        .iter()
+        .filter_map(|(id, sketch)| {
+            measured_ops(Some(sketch), SummaryOperation::Merge)
+                .map(|ops| (*id, ops * speed.ms_per_cpu_op))
+        })
+        .collect();
+    let latency = query_latencies(dag, nodes, &output, &work_ms, &merge_ms, &speed);
     // A MatAtQuery state is held for one evaluation: from its build until
     // the longest query reading it finishes, about that query's latency.
     let reach = query_reach(dag, nodes);
@@ -2414,9 +2553,21 @@ fn price(
         usage,
         cost_per_second: cost,
         unit: COST_UNIT,
-        source: COST_SOURCE,
+        source: cost_source(&per_node),
         per_node,
     })
+}
+
+/// [`CandidateCost::source`] for nodes priced as `per_node` says.
+fn cost_source(per_node: &BTreeMap<PhysicalASAPNodeId, NodeCost>) -> &'static str {
+    let measured = |node: &NodeCost| node.price_source == NodePriceSource::Measured;
+    if !per_node.values().any(measured) {
+        COST_SOURCE
+    } else if per_node.values().all(measured) {
+        MEASURED_COST_SOURCE
+    } else {
+        MIXED_COST_SOURCE
+    }
 }
 
 /// The CPU cores a candidate needs at its peak: enough for its
@@ -2449,14 +2600,16 @@ fn peak_cpu_cores(
 /// the query-time work it reaches, each node once, plus the longest
 /// compaction among the ingestion-time states it reads. Compacting a
 /// state's newest window merges, for each of its `I` states per window,
-/// the `k` ingest workers' partial copies, `(k − 1)·I` merges of one
-/// operation each, where `k` is the cores its ingestion work takes, at
-/// least one.
+/// the `k` ingest workers' partial copies, `(k − 1)·I` merges, where `k`
+/// is the cores its ingestion work takes, at least one. Each merge takes
+/// the state's measured merge time (`merge_ms`) when the measured table has
+/// one, and one operation otherwise.
 fn query_latencies(
     dag: &PhysicalASAPDAG,
     nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
     output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
+    merge_ms: &HashMap<PhysicalASAPNodeId, f64>,
     speed: &ResourceSpeed,
 ) -> Vec<QueryLatency> {
     let inputs = |id: PhysicalASAPNodeId| {
@@ -2470,7 +2623,8 @@ fn query_latencies(
     let compaction_ms = |state: PhysicalASAPNodeId| {
         let workers = ingest_workers(dag, work_ms, state) as f64;
         let states = (output[&state].rows / panes_of(nodes[&state])) as f64;
-        (workers - 1.0) * states * speed.ms_per_cpu_op
+        let per_merge_ms = merge_ms.get(&state).copied().unwrap_or(speed.ms_per_cpu_op);
+        (workers - 1.0) * states * per_merge_ms
     };
     query_starts(dag)
         .into_iter()
@@ -5593,6 +5747,54 @@ mod tests {
         );
     }
 
+    /// The newest window's compaction merges the `k` workers' partial
+    /// sketches with the state's measured merge when the table has one:
+    /// a 1,200 ns KLL merge makes each of the `(k − 1)·I` merges 1,200
+    /// operations of 1 ns instead of one, and nothing else in the
+    /// compaction changes.
+    #[test]
+    fn compaction_prices_merges_from_the_measured_merge() {
+        let candidates = pane_candidates(1e10);
+        let dag = &candidates[1].dag;
+        let kll = dag
+            .nodes
+            .iter()
+            .find_map(|n| match &n.payload {
+                Payload::ASAP(
+                    ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    }
+                    | ASAPOp::PaneChain {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    },
+                ) => Some(kind.params().clone()),
+                _ => None,
+            })
+            .expect("a KLL build");
+        let latency = |settings: &PlanSelectionSettings| {
+            price(dag, &[repeating(MINUTE)], &arriving(1e10), settings)
+                .unwrap()
+                .usage
+                .latency_per_query[0]
+        };
+        let analytical = latency(&PlanSelectionSettings::default());
+        assert!(analytical.compaction_ms > 0.0, "{analytical:?}");
+        let measured = latency(&PlanSelectionSettings {
+            measured_operation_costs: vec![MeasuredOperationCost {
+                sketch: kll,
+                operation: SummaryOperation::Merge,
+                cpu_ns_per_operation: 1200.0,
+            }],
+            ..PlanSelectionSettings::default()
+        });
+        assert!(
+            close(measured.compaction_ms, 1200.0 * analytical.compaction_ms),
+            "{analytical:?} vs {measured:?}"
+        );
+    }
+
     // ── Cost models ──────────────────────────────────────────────────────
 
     /// [`PlanSelectionSettings`] with `cost_model`.
@@ -6003,5 +6205,195 @@ mod tests {
         assert_eq!(best, 1, "the selection is on the front");
         assert_eq!(choose(Ranking::Memory, &costs).unwrap().0, 1);
         assert_eq!(choose(Ranking::Latency, &costs).unwrap().0, 1);
+    }
+
+    /// The KLL build of a `quantile_over_time` candidate, with its sketch
+    /// parameters, and the candidate.
+    fn kll_build() -> (PhysicalCandidate, PhysicalASAPNodeId, SketchParams) {
+        let (candidates, _) = per_series_kll(AccuracyScope::PerValue);
+        let candidate = candidates.into_iter().next().unwrap();
+        let (build, sketch) = candidate
+            .dag
+            .nodes
+            .iter()
+            .find_map(|n| match &n.payload {
+                Payload::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) => Some((n.id, kind.params().clone())),
+                _ => None,
+            })
+            .unwrap();
+        (candidate, build, sketch)
+    }
+
+    /// A measured update time for the candidate's KLL changes that build's
+    /// price and nothing else: its CPU is rows × measured ns, counted in
+    /// operations of `ms_per_cpu_op`, and it reports `Measured`; every
+    /// other node keeps its analytical price and reports `Analytical`.
+    #[test]
+    fn a_measured_entry_prices_exactly_its_node_and_reports_it() {
+        let (candidate, build, sketch) = kll_build();
+        let sketch_of_build = sketch.clone();
+        let analytical = PlanSelectionSettings::default();
+        let before = price(&candidate.dag, &recurrences(1), &data(), &analytical).unwrap();
+        let cpu_ns_per_operation = 250.0;
+        let measured = PlanSelectionSettings {
+            measured_operation_costs: vec![MeasuredOperationCost {
+                sketch,
+                operation: SummaryOperation::Update,
+                cpu_ns_per_operation,
+            }],
+            ..PlanSelectionSettings::default()
+        };
+        let after = price(&candidate.dag, &recurrences(1), &data(), &measured).unwrap();
+        for (id, node) in &after.per_node {
+            if *id == build {
+                assert_eq!(node.price_source, NodePriceSource::Measured);
+                assert_ne!(node.cost_per_second, before.per_node[id].cost_per_second);
+            } else {
+                assert_eq!(node.price_source, NodePriceSource::Analytical, "node {id}");
+                assert_eq!(node, &before.per_node[id], "node {id}");
+            }
+        }
+        assert!(after.per_node[&build]
+            .detail
+            .contains("250.000 measured ops per update"));
+        assert!(after.cost_per_second.unwrap() > before.cost_per_second.unwrap());
+        assert_eq!(before.source, COST_SOURCE);
+        assert_eq!(after.source, MIXED_COST_SOURCE);
+        // The build's CPU is rows × measured ns, counted in operations of
+        // `ms_per_cpu_op`: the candidate's CPU operations grow linearly in
+        // the measured time, (cpu(250) - cpu(100)) / (cpu(400) - cpu(100))
+        // = 150 / 300.
+        let cpu_at = |ns: f64| {
+            let settings = PlanSelectionSettings {
+                measured_operation_costs: vec![MeasuredOperationCost {
+                    sketch: sketch_of_build.clone(),
+                    operation: SummaryOperation::Update,
+                    cpu_ns_per_operation: ns,
+                }],
+                ..PlanSelectionSettings::default()
+            };
+            price(&candidate.dag, &recurrences(1), &data(), &settings)
+                .unwrap()
+                .usage
+                .cpu_ops_per_second
+        };
+        assert!(close(
+            (cpu_at(cpu_ns_per_operation) - cpu_at(100.0)) / (cpu_at(400.0) - cpu_at(100.0)),
+            0.5
+        ));
+    }
+
+    /// A planner-sized KLL carries the failure probability it was sized for;
+    /// the converter's entry has none. They are the same configuration, so
+    /// the entry matches, while another `k` does not (no interpolation).
+    #[test]
+    fn lookup_ignores_the_kll_failure_probability() {
+        let table = [MeasuredOperationCost {
+            sketch: SketchParams::Kll {
+                k: 331,
+                failure_probability: None,
+            },
+            operation: SummaryOperation::Update,
+            cpu_ns_per_operation: 85.0,
+        }];
+        let sized = |k| SketchParams::Kll {
+            k,
+            failure_probability: Some(0.001),
+        };
+        assert_eq!(
+            measured_cpu_ns(&table, &sized(331), SummaryOperation::Update),
+            Some(85.0)
+        );
+        assert_eq!(
+            measured_cpu_ns(&table, &sized(330), SummaryOperation::Update),
+            None
+        );
+    }
+
+    /// With no measured entry for its sketch, or an entry for another
+    /// operation, every node is priced from the formulas, as without a table.
+    #[test]
+    fn entries_for_other_sketches_or_operations_change_nothing() {
+        let (candidate, _, sketch) = kll_build();
+        let before = price(
+            &candidate.dag,
+            &recurrences(1),
+            &data(),
+            &PlanSelectionSettings::default(),
+        )
+        .unwrap();
+        let other = PlanSelectionSettings {
+            measured_operation_costs: vec![
+                MeasuredOperationCost {
+                    sketch: SketchParams::Cms {
+                        width: 1024,
+                        depth: 3,
+                    },
+                    operation: SummaryOperation::Update,
+                    cpu_ns_per_operation: 50.0,
+                },
+                MeasuredOperationCost {
+                    sketch,
+                    operation: SummaryOperation::Merge,
+                    cpu_ns_per_operation: 50.0,
+                },
+            ],
+            ..PlanSelectionSettings::default()
+        };
+        let after = price(&candidate.dag, &recurrences(1), &data(), &other).unwrap();
+        assert_eq!(after, before);
+    }
+
+    /// Bad input: a negative measured time, two entries for one sketch and
+    /// operation, or a table with `ms_per_cpu_op` 0.
+    #[test]
+    fn invalid_measured_tables_are_rejected() {
+        let entry = |cpu_ns_per_operation| MeasuredOperationCost {
+            sketch: SketchParams::Cms {
+                width: 1024,
+                depth: 3,
+            },
+            operation: SummaryOperation::Update,
+            cpu_ns_per_operation,
+        };
+        let validate = |table, ms_per_cpu_op| {
+            let mut settings = PlanSelectionSettings {
+                measured_operation_costs: table,
+                ..PlanSelectionSettings::default()
+            };
+            settings.resource_speed.ms_per_cpu_op = ms_per_cpu_op;
+            settings.validate()
+        };
+        for ns in [-1.0, f64::NAN] {
+            assert!(matches!(
+                validate(vec![entry(ns)], 1e-6),
+                Err(AnalyticalCostError::InvalidCalibration(..))
+            ));
+        }
+        let duplicate = validate(vec![entry(1.0), entry(2.0)], 1e-6).unwrap_err();
+        assert_eq!(
+            duplicate,
+            AnalyticalCostError::DuplicateMeasuredOperationCost {
+                sketch: entry(1.0).sketch,
+                operation: SummaryOperation::Update,
+            }
+        );
+        assert!(
+            duplicate.to_string().contains("Update on Cms"),
+            "{duplicate}"
+        );
+        assert_eq!(
+            validate(vec![entry(1.0)], 0.0),
+            Err(AnalyticalCostError::MeasuredCostsWithoutCpuSpeed(0.0))
+        );
+        let mut empty = PlanSelectionSettings::default();
+        empty.resource_speed.ms_per_cpu_op = 0.0;
+        assert!(
+            empty.validate().is_ok(),
+            "no table, no positive speed needed"
+        );
     }
 }

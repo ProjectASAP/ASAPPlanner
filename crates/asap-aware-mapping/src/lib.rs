@@ -149,8 +149,6 @@ pub mod analytical_cost;
 pub mod cost_model;
 /// The deployment's capabilities: supported summaries and what it retains.
 pub mod deployment_capabilities;
-pub mod empirical_cost;
-pub mod empirical_resources;
 pub mod exact_composition;
 pub mod explanation;
 mod function_rules;
@@ -159,7 +157,6 @@ pub mod pane_sharing;
 pub mod pass;
 pub mod physical_handoff_cost;
 pub mod physical_operator_statistics;
-pub mod physical_plan_cost_model;
 pub mod query_physical_lowering;
 pub mod realization;
 pub mod recurrence;
