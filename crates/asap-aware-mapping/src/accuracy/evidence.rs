@@ -20,29 +20,6 @@ pub struct OperandDomain {
     pub contract: String,
 }
 
-impl OperandDomain {
-    pub(crate) fn supports_ddsketch(&self, alpha: f64) -> bool {
-        if !alpha.is_finite()
-            || alpha <= 0.0
-            || alpha >= 1.0
-            || !self.lower.is_finite()
-            || !self.upper.is_finite()
-            || self.lower > self.upper
-            || self.max_samples == 0
-            || self.max_samples > (1u64 << 53)
-            || self.contract.trim().is_empty()
-        {
-            return false;
-        }
-        let (min, max) = asap_sketchlib::sketches::ddsketch::ddsketch_indexable_bounds(alpha);
-        // Same-sign interpolation preserves relative error. Zero alone is
-        // exact; an interval touching zero also admits tiny zero-mapped values.
-        (self.lower >= min && self.upper <= max)
-            || (self.upper <= -min && self.lower >= -max)
-            || (self.lower == 0.0 && self.upper == 0.0)
-    }
-}
-
 /// Statistics a propagation rule may consult. Every field is optional and
 /// defaults to "unknown": a rule that needs a missing statistic emits a
 /// [`BoundExpr::Unknown`] leaf (or rejects) rather than guessing.
@@ -81,21 +58,10 @@ pub struct PropagationStats {
     /// Union-bound failure probability of all intervals used by the margin
     /// certificate.
     pub topk_interval_failure_probability: Option<f64>,
-    /// Hydra shared-grid collision error in the inner guarantee's metric.
-    pub hydra_shared_grid_collision_bound: Option<f64>,
-    /// Failure probability assigned to the Hydra shared-grid term.
-    pub hydra_shared_grid_failure_probability: Option<f64>,
 }
 
 /// Supplies typed planning-time evidence required by propagation rules.
 pub trait AccuracyEvidenceProvider {
-    /// Enforced upper bound on distinct (partition, item) identities across a
-    /// complete TopK evaluation. Used to union-bound score errors for adaptively
-    /// selected candidates. Observed cardinality is not sufficient evidence.
-    fn topk_max_distinct_items(&self, _expression: &OperatorNode) -> Option<u64> {
-        None
-    }
-
     /// Enforced domain of `operand`'s true values ([`OperandDomain`]), scoped
     /// to this complete expression, including its source, filters, grouping
     /// and window: a quantile ratio's operands, or the operands of a
@@ -114,15 +80,6 @@ pub trait AccuracyEvidenceProvider {
     /// means no evidence.
     fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
         None
-    }
-
-    fn propagation_stats(
-        &self,
-        _op: &CompositionOperator,
-        _family: &FieldDataType,
-        _query: Option<&SketchStatistic>,
-    ) -> PropagationStats {
-        PropagationStats::default()
     }
 }
 

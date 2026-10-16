@@ -10,7 +10,6 @@ pub mod budget;
 pub mod composition;
 pub mod estimators;
 pub mod evidence;
-pub mod reconciliation;
 
 pub use budget::per_input_target;
 pub use evidence::{AccuracyEvidenceProvider, NoAccuracyEvidence, OperandDomain, PropagationStats};
@@ -23,21 +22,12 @@ use asap_types::post_asap::{
 };
 use asap_types::types::{AccuracyScope, AccuracyTarget};
 
-use crate::exact_composition::ExactOperation;
-
 /// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
 /// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
 /// default rejects (a registered cross-metric conversion, say) implements
-/// this trait and passes it to
-/// [`crate::replacement::ASAPStrategies::new_with_planning_inputs`].
+/// this trait and passes it to plan selection in
+/// [`crate::PlanningModels::accuracy`].
 pub trait AccuracyModel {
-    /// The definition-registered rule for applying `operation` to an
-    /// approximate input. `None` means the function is exact only over exact
-    /// inputs; callers must fail closed for approximate input.
-    fn exact_operation_rule(&self, _operation: &ExactOperation) -> Option<CompositionOperator> {
-        None
-    }
-
     /// The guarantee of reading `query` out of a summary of family `family`
     /// built over an **exact** input — derived from the family's committed
     /// parameters by inverting the same sizing formulas
@@ -93,9 +83,6 @@ impl DefaultAccuracyModel {
 }
 
 impl AccuracyModel for DefaultAccuracyModel {
-    fn exact_operation_rule(&self, operation: &ExactOperation) -> Option<CompositionOperator> {
-        composition::exact_operation_rule(operation)
-    }
     fn local_guarantee(
         &self,
         family: &FieldDataType,
@@ -170,8 +157,6 @@ pub fn native_target(target: &AccuracyTarget, guarantee: &AccuracyGuarantee) -> 
         .accuracy_metric(guarantee.spec.accuracy_metric)
         .accuracy_scope(AccuracyScope::PerValue)
 }
-
-pub(crate) use estimators::topk_capacity;
 
 #[cfg(test)]
 mod tests {

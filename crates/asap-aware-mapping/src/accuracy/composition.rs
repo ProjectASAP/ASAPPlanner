@@ -697,16 +697,6 @@ fn composed_provenance(
     provenance
 }
 
-pub(super) fn exact_operation_rule(operation: &ExactOperation) -> Option<CompositionOperator> {
-    let ExactOperation::Aggregate { measures, .. } = operation;
-    match measures.as_slice() {
-        [intent] => crate::function_rules::function_rules(intent).map(|rules| rules.accuracy),
-        // The remaining functions are exact over exact samples, but have
-        // no definition-backed rule over approximate values yet.
-        _ => None,
-    }
-}
-
 pub(super) fn propagate(
     op: &CompositionOperator,
     inputs: &[AccuracyGuarantee],
@@ -1002,7 +992,6 @@ mod tests {
             assert_eq!(parse_source_norm_statistic(other), None, "{other}");
         }
     }
-    use asap_types::pre_asap::AggIntent;
     fn abs(bound: f64, delta: f64) -> AccuracyGuarantee {
         AccuracyGuarantee::new(
             AccuracyMetric::ABSOLUTE,
@@ -1409,28 +1398,6 @@ mod tests {
         assert_eq!(out.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
         assert_eq!(out.spec.error.evaluate(), Some(0.25));
         assert_eq!(out.spec.failure_probability.evaluate(), Some(0.04));
-    }
-    #[test]
-    fn counter_functions_have_distinct_definition_rules() {
-        let operation = |intent| ExactOperation::Aggregate {
-            reduction: asap_types::pre_asap::Reduction::PerEntity,
-            measures: vec![intent],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-        };
-        assert_eq!(
-            DefaultAccuracyModel.exact_operation_rule(&operation(AggIntent::Rate)),
-            Some(CompositionOperator::CounterRate)
-        );
-        assert_eq!(
-            DefaultAccuracyModel.exact_operation_rule(&operation(AggIntent::IRate)),
-            Some(CompositionOperator::InstantCounterRate)
-        );
-        assert_eq!(
-            DefaultAccuracyModel.exact_operation_rule(&operation(AggIntent::Increase)),
-            Some(CompositionOperator::CounterIncrease)
-        );
     }
     #[test]
     fn topk_selection_requires_a_separated_margin_certificate() {

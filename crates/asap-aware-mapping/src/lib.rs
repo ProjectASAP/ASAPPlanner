@@ -5,19 +5,10 @@
 //! DAGs and makes the cost-aware decisions the pre-ASAP IR deliberately
 //! leaves open — which sketch (if any) realises each approximate intent.
 //!
-//! **Common sub-expression elimination (CSE) is not this crate's job.**
-//! Detection is a primary pass over the pre-ASAP operator IR itself
-//! (`asap_types::ir::cse`, design tracked in issue #223), run before a
-//! tree ever reaches [`replacement::ASAPStrategies`] — see issue #222
-//! for why (batch query optimization needs to see shared work across a
-//! `QueryWorkload` before summary binding, not after). This crate may
-//! eventually run a second, narrower CSE pass of its own over an
-//! already-bound post-ASAP `OperatorNode` DAG, recognizing sharing that's invisible
-//! at the pre-ASAP level by construction — e.g. `Quantile(x, 0.99)` and
-//! `Quantile(x, 0.95)` are structurally distinct `AggIntent`s but can
-//! still share one built sketch, read out twice. That post-ASAP pass is
-//! secondary to, and downstream of, the primary pre-ASAP pass, not a
-//! replacement for it.
+//! Identical-sub-DAG sharing over the pre-ASAP IR (`asap_types::ir::cse`)
+//! runs before the stages; the stages add the ASAP-aware sharing that is
+//! invisible at the pre-ASAP level ([`asap_aware_cse`], Pass 2), e.g.
+//! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
 //!
 //! It depends only on the IR crate, never on a front end — the layering
 //! invariant (arrows point up) holds here too.
@@ -30,8 +21,8 @@
 //! ## Planning workflows
 //!
 //! The planner runs Stage 1 to Stage 3 in order: Stage 1, logical ASAP-aware
-//! optimization ([`per_computation_candidates`]: Pass 1 and composition);
-//! Stage 2, physical ASAP-aware optimization
+//! optimization ([`per_computation_candidates`]: Pass 1 and composition;
+//! [`asap_aware_cse`]: Pass 2); Stage 2, physical ASAP-aware optimization
 //! ([`stage2_physical_asap_optimization`]); Stage 3, plan selection
 //! ([`stage3_plan_selection`]).
 //!
@@ -40,11 +31,6 @@
 //! - Call [`run_stage1_to_stage3`] over the frontends' roots to read every stage's
 //!   candidates as well as the selected plan.
 //!
-//! The planner no longer calls the legacy candidate search
-//! ([`replacement::search_workload`] and
-//! [`CandidateLogicalASAPDAGs::global_selection`]); it remains only until its
-//! removal.
-//!
 //! Models and evidence determine which choices the helpers can justify.
 //! Physical operator binding, placement, storage, deployment, and execution
 //! remain downstream responsibilities. Neither taking the first candidate nor
@@ -52,164 +38,50 @@
 //!
 //! ## Supporting components
 //!
-//! - [`cost_model`] — the [`CostModel`](cost_model::CostModel) trait every
-//!   deployment's cost-based sketch selection plugs into (issues #6, #33).
-//!   `asap-plan` itself only ships [`DefaultCostModel`](cost_model::DefaultCostModel),
-//!   which preserves [`replacement`]'s built-in static preference order and
-//!   — via [`CostModel::estimate_cost`](cost_model::CostModel::estimate_cost)
-//!   — exposes an actual numeric cost per candidate, not just a relative
-//!   rank, for a caller (e.g. a DAG-visualization view) that wants to show
-//!   "candidate A costs ≈ X" next to "candidate B costs ≈ Y".
-//! - [`explanation`] — this crate's explanation of a replacement: a
-//!   reporting *view* over [`replacement`]'s candidate-plan space (issue
-//!   #257, part of #33) that translates every discovered `TargetSubDAG` with
-//!   a non-trivial candidate list into an
-//!   [`explanation::ReplacementExplanation`] (why a replacement exists,
-//!   where, reusing the candidate's own rationale rather than inventing new
-//!   prose), meant for the same downstream consumer (e.g. a
-//!   DAG-visualization view) the crate doc's planning workflows section above
-//!   already names for [`replacement::CandidateLogicalASAPDAGs`] itself. Superseded PR
-//!   #247's own rule-based traversal, which re-walked the DAG once per
-//!   optimization before [`replacement::search_workload`] existed to read
-//!   from instead — see that module's docs for the full reframing.
-//! - [`rollup`] — [`rollup::RollupStrategy`] wraps group-by-lattice roll-up
-//!   reuse (issue #254, part of #33) as a [`ReplacementStrategy`]: given a
-//!   coarser `Aggregate` target and a caller-supplied sibling set, proposes
-//!   re-deriving it from an already-computed, strictly finer sibling
-//!   `Aggregate` over identical child IR instead of an independent pass
-//!   over the raw source — the cross-aggregate sibling of
-//!   `ir::cse::share_common_sub_dags`'s identical-sub-DAG sharing.
-//!   [`rollup::is_legal_rollup_source`] is the standalone legality predicate
-//!   other axes (e.g. issue #256's `GroupingStrategy`) are expected to
-//!   consult directly, so it and this module's `RollupStrategy` can never
-//!   disagree about which siblings qualify.
-//! - [`grouping`] — [`grouping::HydraGroupingStrategy`] (issue #256, part of
-//!   #33) is an additional `ReplacementStrategy`: the orthogonal
-//!   `GroupingStrategy` axis (one summary instance per `by` subpopulation
-//!   versus one shared Hydra-family structure serving all of them), offered
-//!   alongside the candidates [`replacement::ASAPStrategies`]
-//!   enumerates for the same target.
-//! - [`rewrite`] — the "semantic-equivalent rewriting (e.g. `avg` →
-//!   `sum`/`count`) to increase how often the [sharing/sketch] optimizations
-//!   above apply" degree of freedom `docs/design_docs/asap_aware_mapping.md`
-//!   names (issue #253, part of #33): [`rewrite::AvgToSumOverCountStrategy`]
-//!   is a [`replacement::ReplacementStrategy`] that reshapes a bare `avg`
-//!   node — which [`replacement::realizations_for_intent`] can only
-//!   dispatch to `Realization::PassThrough`, so it can never be a
-//!   [`replacement::SharedSubDAGStrategy`] target — into a `sum`/`count`
-//!   pair under the same grouping, re-divided back by a wrapping `Project`,
-//!   so those *are* ordinary mergeable accumulators sharing/sketching can
-//!   reach. It only reshapes; [`replacement::search_workload`]'s cost-based
-//!   ranking (or a downstream consumer reading [`replacement::CandidateLogicalASAPDAGs`])
-//!   is what decides whether the reshaped form is actually worth picking,
-//!   the same propose-don't-decide split every other strategy here keeps.
-//!
-//! ## Terminology
-//!
-//! Schema resolution, candidate realization, and runtime placement are distinct stages.
-//!
-//! | Term | Meaning | Entry point |
-//! |---|---|---|
-//! | Schema resolution | Derive input schemas and resolve column names to positions | `asap_frontend_common::schema_resolver::SchemaResolver::resolve_schema`, `asap_frontend_common::resolve::resolve_root` |
-//! | Realization | Enumerate ranked physical forms for one aggregate intent | `replacement::realizations_for_intent` |
-//! | Replacement | Construct each candidate summary sub-DAG | [`replacement::ASAPStrategies`] |
-//! | Search | Enumerate and compare alternatives across a workload | [`replacement::search_workload`] |
-//! | Runtime placement | Choose deployment locations and concrete executors | Downstream physical plan providers |
-//!
-//! A related question (tracked alongside issues #6/#33): whether this
-//! crate should also own a **matching** predicate — "does an already
-//! *available* `Realization` satisfy a *required* one" — the way a
-//! database's materialized-view matching / "answering queries using
-//! views" layer does. It owns the *question*, not an *answer*:
-//! [`replacement::Matcher`] is a trait with no default implementation and
-//! no shipped instance, the same shape as [`cost_model::CostModel`] and for
-//! the same reason — which `Realization`s are actually *available*
-//! anywhere is entirely a downstream deployment's concern (an inventory
-//! this crate has no way to see), and even the pure sketch-algebra
-//! compatibility rules (e.g. a heap-bearing top-k sketch also satisfying a
-//! bare frequency point-query) turned out to have deployment-specific
-//! competitors (e.g. single-vs-multi-population re-aggregation) that
-//! don't reduce to a fact about a summary family's kind alone. `control_plane`'s own
-//! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
-//! reference downstream implementation.
-//!
+//! - [`realization`] — the summary families that can serve an aggregate
+//!   intent, the intent's accuracy target and `(ε, δ)` budget, and default
+//!   sketch sizing, shared by Pass 1 and Pass 2.
 //! - [`accuracy`] — the [`AccuracyModel`](accuracy::AccuracyModel)
 //!   extension point (issue #172): the planning-time algebra that derives
 //!   a machine-readable [`AccuracyGuarantee`](asap_types::post_asap::AccuracyGuarantee)
-//!   for every finalized post-ASAP value, propagates it through
+//!   for every finalized post-ASAP value and propagates it through
 //!   approximate-over-approximate compositions under conservative rules
-//!   (no independence assumptions, unknown statistics stay unknown), and
-//!   rejects — before any `CostModel` ranks anything — every candidate with
-//!   no sound rule or one that misses the applicable `AccuracyTarget`.
-//!   Legality and cost are separate responsibilities; see that module's
-//!   docs for the pipeline order and the root-vs-per-node precedence rules.
+//!   (no independence assumptions, unknown statistics stay unknown). Plan
+//!   selection checks each candidate's guarantee against its query's
+//!   `AccuracyTarget` before pricing it.
+//! - [`analytical_cost`] and [`physical_operator_statistics`] — the
+//!   analytical per-operator resource model Stage 3 prices with.
+//! - [`maintained_population`] — builds a maintained-population sub-DAG for
+//!   an instant top-k/quantile/sum query; Pass 1 does not offer it yet (#681).
 
 pub mod accuracy;
 pub mod analytical_cost;
-pub mod cost_model;
 /// The deployment's capabilities: supported summaries and what it retains.
 pub mod deployment_capabilities;
-pub mod empirical_cost;
-pub mod empirical_resources;
-pub mod exact_composition;
-pub mod explanation;
 mod function_rules;
-pub mod grouping;
 pub mod pane_sharing;
 pub mod pass;
 pub mod physical_handoff_cost;
 pub mod physical_operator_statistics;
-pub mod physical_plan_cost_model;
 pub mod query_physical_lowering;
 pub mod realization;
-pub mod recurrence;
-pub mod replacement;
-pub mod rewrite;
-pub mod rollup;
 pub mod storage_io;
 #[cfg(test)]
 mod test_support;
-pub mod topk_reuse;
 
-pub use accuracy::reconciliation::AccuracyReconciliationStrategy;
 pub use accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
     PropagationStats,
 };
-pub use cost_model::{
-    maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,
-    CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
-    ExactCompositionCostRequest, ValueOperationCapabilities,
-};
 pub use deployment_capabilities::{
     DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
 };
-pub use exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
-pub use explanation::{
-    explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
-};
-pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use pass::{
     optimize, run_stage1_to_stage3, OptimizationInput, OptimizationInputError, OptimizationPass,
     OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
     Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 pub use realization::summary_candidates;
-pub use recurrence::{
-    evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
-    Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
-    UpdateRate,
-};
-pub use replacement::{
-    default_strategies, default_strategies_with, search_workload, search_workload_with,
-    search_workload_with_targets, ASAPStrategies, CandidateLogicalASAPDAGs, CompositionDecision,
-    GlobalSelection, Matcher, Proposals, RankedTargetSubDAGCandidates, Realization,
-    RealizationError, RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
-    ReplacementStrategy, ReplacementSubDAG, SearchError, SharedSubDAGStrategy, TargetSubDAG,
-    TargetSubDAGCandidates, TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
-};
-pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
-pub use topk_reuse::TopKLimitReuseStrategy;
 
 pub mod maintained_population;
 
