@@ -80,6 +80,7 @@ use asap_types::pre_asap::{
     ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
 };
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::WorkloadError;
 
 /// Every scalar expression this front end builds follows PromQL's numeric rules.
 const PROMQL: ExprSemantics = ExprSemantics::Promql;
@@ -181,13 +182,16 @@ struct Inner {
 const MAX_DEPTH: usize = 256;
 
 impl PromqlLowerer {
-    pub(crate) fn lower_query_with_ingestion_interval(
+    /// Lower `query`; a bare instant selector reads the latest sample within
+    /// `sample_interval`, and fails with
+    /// [`WorkloadError::MissingSampleInterval`] when it is `None`.
+    pub(crate) fn lower_query_with_sample_interval(
         query: &str,
         accuracy: &AccuracyTarget,
-        interval: Duration,
+        sample_interval: Option<Duration>,
     ) -> Result<asap_types::ir::QueryRoot> {
         let _guard = AccuracyGuard::install(accuracy.clone());
-        let _interval = IngestionIntervalGuard::install(interval);
+        let _interval = SampleIntervalGuard::install(sample_interval);
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
         check_depth(&ast, MAX_DEPTH)?;
         let mut metrics = Vec::new();
@@ -216,7 +220,7 @@ impl PromqlLowerer {
 std::thread_local! {
     static ACCURACY: std::cell::RefCell<AccuracyTarget> =
         const { std::cell::RefCell::new(AccuracyTarget::exact()) };
-    static INGESTION_INTERVAL: std::cell::RefCell<Option<Duration>> = const { std::cell::RefCell::new(None) };
+    static SAMPLE_INTERVAL: std::cell::RefCell<Option<Duration>> = const { std::cell::RefCell::new(None) };
 }
 
 /// RAII guard installing `accuracy` as the ambient accuracy target for the
@@ -243,26 +247,29 @@ fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
 
-struct IngestionIntervalGuard(Option<Duration>);
+/// RAII guard installing the workload's sample interval (`None` when it
+/// declares none) for the current thread's lowering.
+struct SampleIntervalGuard(Option<Duration>);
 
-impl IngestionIntervalGuard {
-    fn install(interval: Duration) -> Self {
-        Self(INGESTION_INTERVAL.with(|current| current.replace(Some(interval))))
+impl SampleIntervalGuard {
+    fn install(sample_interval: Option<Duration>) -> Self {
+        Self(SAMPLE_INTERVAL.with(|current| current.replace(sample_interval)))
     }
 }
 
-impl Drop for IngestionIntervalGuard {
+impl Drop for SampleIntervalGuard {
     fn drop(&mut self) {
-        INGESTION_INTERVAL.with(|current| *current.borrow_mut() = self.0.take());
+        SAMPLE_INTERVAL.with(|current| *current.borrow_mut() = self.0.take());
     }
 }
 
-fn current_ingestion_interval() -> Duration {
-    INGESTION_INTERVAL.with(|current| {
-        current
-            .borrow()
-            .expect("ingestion interval is installed for workload lowering")
-    })
+/// The installed sample interval, which a bare instant selector needs.
+fn current_sample_interval() -> Result<Duration> {
+    SAMPLE_INTERVAL
+        .with(|current| *current.borrow())
+        .ok_or(LoweringError::InvalidWorkload(
+            WorkloadError::MissingSampleInterval,
+        ))
 }
 
 /// Bounded depth check over the parser AST: errors once nesting would exceed
@@ -354,7 +361,7 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         }
         Expr::VectorSelector(vs) => {
             let (metric, matchers, shift) = vs_parts(vs)?;
-            Ok(instant_source(metric, matchers, shift))
+            instant_source(metric, matchers, shift)
         }
         Expr::MatrixSelector(ms) => {
             let (metric, matchers, shift) = vs_parts(&ms.vs)?;
@@ -1630,10 +1637,10 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
 fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
     match outer {
         Outer::None => match &inner.func {
-            None => Ok(instant_source(inner.metric, inner.matchers, inner.shift)),
+            None => instant_source(inner.metric, inner.matchers, inner.shift),
             Some(f) => {
                 let intent = inner_intent(f);
-                Ok(windowed_aggregate(inner, keys, intent))
+                windowed_aggregate(inner, keys, intent)
             }
         },
         // An OUTER aggregation operator (`sum`/`avg`/…/`count`) over an inner
@@ -1642,26 +1649,26 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
         // then aggregates across series. Collapsing them into one aggregate
         // silently drops a level — e.g. `sum(rate(m[w]))` must keep the `sum`.
         Outer::Plain(intent) => Ok(match &inner.func {
-            None => windowed_aggregate(inner, keys, outer_intent(&intent)),
+            None => windowed_aggregate(inner, keys, outer_intent(&intent))?,
             Some(f) => {
                 let inner_i = inner_intent(f);
-                let inner_agg = windowed_aggregate(inner, vec![], inner_i);
+                let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
                 outer_aggregate(keys, outer_intent(&intent), inner_agg)
             }
         }),
         Outer::Count => Ok(match &inner.func {
-            None => windowed_aggregate(inner, keys, count()),
+            None => windowed_aggregate(inner, keys, count())?,
             Some(f) => {
                 let inner_i = inner_intent(f);
-                let inner_agg = windowed_aggregate(inner, vec![], inner_i);
+                let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
                 outer_aggregate(keys, count(), inner_agg)
             }
         }),
         Outer::CountValues { label } => Ok(match &inner.func {
-            None => windowed_aggregate(inner, keys, AggIntent::CountValues { label }),
+            None => windowed_aggregate(inner, keys, AggIntent::CountValues { label })?,
             Some(f) => {
                 let inner_i = inner_intent(f);
-                let inner_agg = windowed_aggregate(inner, vec![], inner_i);
+                let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
                 outer_aggregate(keys, AggIntent::CountValues { label }, inner_agg)
             }
         }),
@@ -1671,8 +1678,8 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // preserving), a bare selector is sampled directly; neither is
             // wrapped in a reducing aggregate (issue #86).
             let base = match inner.func.as_ref().map(inner_intent) {
-                Some(intent) => windowed_aggregate(inner, vec![], intent),
-                None => instant_source(inner.metric, inner.matchers, inner.shift),
+                Some(intent) => windowed_aggregate(inner, vec![], intent)?,
+                None => instant_source(inner.metric, inner.matchers, inner.shift)?,
             };
             Ok(Unresolved::PromqlSeriesSample {
                 by: keys.into(),
@@ -1686,7 +1693,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // neither is allowed to sum raw counter samples as ranking weights.
             if descending && matches!(inner.func, Some(InnerFunc::Rate | InnerFunc::Increase)) {
                 let intent = inner_intent(inner.func.as_ref().expect("counter function"));
-                let ranked = windowed_aggregate(inner, vec![], intent);
+                let ranked = windowed_aggregate(inner, vec![], intent)?;
                 return Ok(Unresolved::Aggregate {
                     reduction: Reduction::Reduce(keys.into()),
                     measures: vec![AggIntent::TopK {
@@ -1726,7 +1733,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                         unreachable!("heavy-hitter gate rejected non-additive ranking")
                     }
                 };
-                let ranked_agg = windowed_aggregate(inner, vec![], inner_intent(&ranked));
+                let ranked_agg = windowed_aggregate(inner, vec![], inner_intent(&ranked))?;
                 Ok(Unresolved::Aggregate {
                     // A ranking always reduces (a `by`-empty TopK ranks the
                     // whole input into one ordering, never per-entity).
@@ -1753,8 +1760,8 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                 // resolve (issue #30). Keep the selector label-preserving so
                 // `Sort.partition_by` can rank within each group (issue #12).
                 let base = match inner.func.as_ref().map(inner_intent) {
-                    Some(intent) => windowed_aggregate(inner, vec![], intent),
-                    None => instant_source(inner.metric, inner.matchers, inner.shift),
+                    Some(intent) => windowed_aggregate(inner, vec![], intent)?,
+                    None => instant_source(inner.metric, inner.matchers, inner.shift)?,
                 };
                 Ok(ranked_by_value(keys, k, descending, base))
             }
@@ -1787,7 +1794,7 @@ fn windowed_aggregate(
     inner: Inner,
     keys: Vec<ColumnRef>,
     intent: AggIntent<ColumnRef>,
-) -> Unresolved {
+) -> Result<Unresolved> {
     let base = filtered_source(inner.metric, inner.matchers, inner.shift);
     let child = match inner.window {
         Some(w) => Unresolved::TimeRange {
@@ -1795,10 +1802,10 @@ fn windowed_aggregate(
             kind: TimeRangeKind::Range,
             child: Rc::new(base),
         },
-        None => ingestion_lookback(base),
+        None => sample_lookback(base)?,
     };
     let reduction = reduction_for(&keys, inner.window.is_some() || intent.is_per_series());
-    Unresolved::Aggregate {
+    Ok(Unresolved::Aggregate {
         reduction,
         measures: vec![intent],
         // A single empty entry — never an override — so the resolver keeps
@@ -1808,7 +1815,7 @@ fn windowed_aggregate(
         filters: vec![],
         having: None,
         child: Rc::new(child),
-    }
+    })
 }
 
 /// `Aggregate{reduction, [intent]}` directly over an existing Unresolved sub-DAG — the
@@ -1868,17 +1875,17 @@ fn filtered_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> U
 }
 
 /// An instant selector: the latest sample per series within the workload's
-/// ingestion interval, so the lookback is an `Instant` `TimeRange`.
-fn instant_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Unresolved {
-    ingestion_lookback(filtered_source(metric, matchers, shift))
+/// sample interval, so the lookback is an `Instant` `TimeRange`.
+fn instant_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Result<Unresolved> {
+    sample_lookback(filtered_source(metric, matchers, shift))
 }
 
-fn ingestion_lookback(child: Unresolved) -> Unresolved {
-    Unresolved::TimeRange {
-        range: current_ingestion_interval(),
+fn sample_lookback(child: Unresolved) -> Result<Unresolved> {
+    Ok(Unresolved::TimeRange {
+        range: current_sample_interval()?,
         kind: TimeRangeKind::Instant,
         child: Rc::new(child),
-    }
+    })
 }
 
 /// Count vector elements regardless of their sample values.

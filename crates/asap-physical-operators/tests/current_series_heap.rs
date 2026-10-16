@@ -315,14 +315,14 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(60_000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(60_000)),
             },
             ..Default::default()
         }),
     };
-    let original = asap_frontend_promql::lower_promql_workload(&workload, 0)
+    let original = asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
         .remove(0);
     let open_root = Rc::new(original.clone());

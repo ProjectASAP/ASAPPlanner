@@ -47,10 +47,10 @@ impl Tally {
 fn tally(corpus: &str) -> Tally {
     let mut t = Tally::default();
     for q in queries(corpus) {
-        match asap_frontend_promql::lower_promql_query_workload(
-            &support::workload(q, AccuracyTarget::exact()),
-            0,
-        ) {
+        match asap_frontend_promql::lower_promql_query_workload(&support::workload(
+            q,
+            AccuracyTarget::exact(),
+        )) {
             Ok(_) => t.lowered += 1,
             Err(LoweringError::Parse(_)) => t.unparseable += 1,
             Err(_) => t.rejected += 1,

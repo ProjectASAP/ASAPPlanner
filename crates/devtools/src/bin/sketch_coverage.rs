@@ -14,7 +14,7 @@
 use asap_aware_mapping::per_computation_candidates::{
     generate_per_computation_candidates, ComputationCandidate,
 };
-use asap_devtools::lower_promql_with_data_ingestion_interval;
+use asap_devtools::lower_promql_with_sample_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
@@ -251,7 +251,7 @@ async fn main() {
         let mut roots = Vec::new();
         let mut failed = 0;
         for (i, q) in promql_lines(corpus).enumerate() {
-            match lower_promql_with_data_ingestion_interval(q, accuracy.clone(), interval_ms) {
+            match lower_promql_with_sample_interval(q, accuracy.clone(), interval_ms) {
                 Ok(qe) => roots.push((format!("q{i}"), qe)),
                 Err(_) => failed += 1,
             }

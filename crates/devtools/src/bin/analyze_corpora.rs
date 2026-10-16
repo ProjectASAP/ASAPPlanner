@@ -4,7 +4,7 @@
 // Corpus mode dumps all four PromQL corpora as JSONL and writes a heuristic
 // anomaly report. The default mode remains the ad-hoc SQL/PromQL inspector.
 
-use asap_devtools::{lower_promql_with_data_ingestion_interval, SqlCatalog};
+use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
@@ -206,11 +206,7 @@ fn run_corpus(name: &str, source: &str, interval_ms: u64) -> CorpusResult {
     for (index, expression) in corpus_lines(source).into_iter().enumerate() {
         let normalized_expression = normalize(expression);
         let structural_shape = structural_shape(expression);
-        match lower_promql_with_data_ingestion_interval(
-            expression,
-            AccuracyTarget::exact(),
-            interval_ms,
-        ) {
+        match lower_promql_with_sample_interval(expression, AccuracyTarget::exact(), interval_ms) {
             Ok(ir) => result.lowered.push(DumpRecord {
                 corpus: name.to_string(),
                 query_number: index + 1,

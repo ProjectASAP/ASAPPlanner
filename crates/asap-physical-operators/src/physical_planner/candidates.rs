@@ -360,14 +360,14 @@ mod tests {
                 repeating_queries: None,
             },
             data_workload: Some(DataWorkload {
-                data_ingestion_interval: Evidence {
-                    value: Some(DurationMs(1000)),
-                    ..Default::default()
+                arrival: DataArrival::Ingesting {
+                    rows_per_second: 1_000.0,
+                    sample_interval: Some(DurationMs(1000)),
                 },
                 ..Default::default()
             }),
         };
-        let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
+        let root = asap_frontend_promql::lower_promql_workload(&workload)
             .unwrap()
             .remove(0);
         let root = promql_rows::with_series_identity(&root).unwrap();

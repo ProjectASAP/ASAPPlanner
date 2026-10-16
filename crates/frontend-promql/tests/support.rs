@@ -7,7 +7,7 @@ use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::pre_asap::ScalarValue;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
@@ -28,9 +28,9 @@ pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(1_000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(1_000)),
             },
             ..Default::default()
         }),
@@ -42,7 +42,7 @@ pub fn lower_promql(
     query: &str,
     accuracy: AccuracyTarget,
 ) -> Result<Rc<OperatorNode>, PromqlError> {
-    let mut lowered = lower_promql_workload(&workload(query, accuracy), 0)?;
+    let mut lowered = lower_promql_workload(&workload(query, accuracy))?;
     Ok(lowered.remove(0))
 }
 
@@ -53,7 +53,7 @@ pub fn lower_promql_with_histograms(
     histograms: HistogramCatalog,
 ) -> Result<Rc<OperatorNode>, PromqlError> {
     let mut lowered =
-        lower_promql_workload_with_histograms(&workload(query, accuracy), histograms, 0)?;
+        lower_promql_workload_with_histograms(&workload(query, accuracy), histograms)?;
     Ok(lowered.remove(0))
 }
 
@@ -86,10 +86,10 @@ pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::physical_export
 
 #[allow(dead_code)]
 pub fn scalar_root(query: &str) -> ScalarExpr {
-    match asap_frontend_promql::lower_promql_query_workload(
-        &workload(query, AccuracyTarget::exact()),
-        0,
-    )
+    match asap_frontend_promql::lower_promql_query_workload(&workload(
+        query,
+        AccuracyTarget::exact(),
+    ))
     .unwrap()
     .remove(0)
     {

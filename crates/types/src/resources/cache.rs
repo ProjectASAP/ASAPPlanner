@@ -25,7 +25,7 @@ pub struct CacheEvidence {
     pub result_cache: CacheCapacityEvidence,
     pub buffer_cache: CacheCapacityEvidence,
     /// Fraction of otherwise-resident result entries invalidated by arriving
-    /// data. Required for continuously ingesting data; `AtRest` permits only
+    /// data. Required for ingesting data; `AtRest` permits only
     /// zero or omitted invalidation evidence.
     pub result_invalidation_ratio: Option<f64>,
 }

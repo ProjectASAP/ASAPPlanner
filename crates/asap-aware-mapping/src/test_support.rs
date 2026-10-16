@@ -6,7 +6,7 @@ use std::rc::Rc;
 use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
@@ -27,14 +27,14 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(1_000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(1_000)),
             },
             ..Default::default()
         }),
     };
-    asap_frontend_promql::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
         .pop()
         .unwrap()

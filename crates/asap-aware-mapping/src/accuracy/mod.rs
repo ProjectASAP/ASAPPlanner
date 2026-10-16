@@ -13,10 +13,7 @@ pub mod evidence;
 pub mod reconciliation;
 
 pub use budget::per_input_target;
-pub use evidence::{
-    AccuracyEvidenceProvider, NoAccuracyEvidence, OperandDomain, PropagationStats,
-    WorkloadAccuracyEvidence,
-};
+pub use evidence::{AccuracyEvidenceProvider, NoAccuracyEvidence, OperandDomain, PropagationStats};
 
 use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{

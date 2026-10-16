@@ -9,8 +9,8 @@ use asap_physical_operators::physical_planner::promql_rows::SERIES_IDENTITY_COLU
 use planner_types::{
     types::AccuracyTarget,
     workload::{
-        BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence, PlanningWorkload,
-        Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
+        BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
+        QueryLanguage, QueryRequirements, QueryWorkload,
     },
 };
 use std::rc::Rc;
@@ -32,14 +32,14 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<OperatorNode> {
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: WorkloadEvidence {
-                value: Some(DurationMs(1_000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(1_000)),
             },
             ..Default::default()
         }),
     };
-    asap_frontend_promql::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
         .remove(0)
 }

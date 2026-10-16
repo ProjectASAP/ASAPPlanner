@@ -26,15 +26,16 @@ pub use asap_frontend_promql::{
 };
 pub use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlError, SqlLowerer};
 
-/// Lower one developer-supplied PromQL query with an explicit source cadence.
-/// Tools intentionally require the cadence rather than choosing a default.
-pub fn lower_promql_with_data_ingestion_interval(
+/// Lower one developer-supplied PromQL query over ingesting data whose
+/// series are sampled every `interval_ms`. Tools intentionally require the
+/// sample interval rather than choosing a default.
+pub fn lower_promql_with_sample_interval(
     query: &str,
     accuracy: asap_types::types::AccuracyTarget,
     interval_ms: u64,
 ) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, PromqlError> {
     use asap_types::workload::{
-        BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+        BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
         QueryRequirements, QueryWorkload,
     };
 
@@ -54,19 +55,13 @@ pub fn lower_promql_with_data_ingestion_interval(
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(interval_ms)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(interval_ms)),
             },
             ..Default::default()
         }),
     };
-    lower_promql_workload(&workload, 0)?
-        .into_iter()
-        .next()
-        .ok_or({
-            PromqlError::InvalidWorkload(
-                asap_types::workload::WorkloadError::MissingPromqlDataWorkload,
-            )
-        })
+    // One workload entry lowers to one root.
+    Ok(lower_promql_workload(&workload)?.remove(0))
 }

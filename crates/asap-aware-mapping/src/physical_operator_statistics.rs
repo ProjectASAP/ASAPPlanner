@@ -71,7 +71,7 @@ impl ComparisonScope {
     pub fn validate(&self) -> Result<u64, AnalyticalCostError> {
         if !matches!(
             self.data_arrival,
-            DataArrival::AtRest | DataArrival::ContinuouslyIngesting
+            DataArrival::AtRest | DataArrival::Ingesting { .. }
         ) {
             return Err(AnalyticalCostError::UnsupportedDataArrival(
                 self.data_arrival,

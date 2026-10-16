@@ -79,8 +79,8 @@
 //!   for a whole workload). A one-shot ([`asap_types::workload::BatchEntry`])
 //!   consumer contributes to [`RecurrenceProfile::one_shot_consumers`]
 //!   instead, never to this rate.
-//! - [`UpdateRate`]: read from workload-level
-//!   [`asap_types::workload::DataWorkload::ingestion_rate`] via
+//! - [`UpdateRate`]: read from the workload-level arrival's
+//!   [`asap_types::workload::DataArrival::rows_per_second`] via
 //!   [`update_rate_from_data_workload`]. Missing evidence remains unknown;
 //!   data at rest is not assigned a fabricated update rate.
 //! - `maintenance_cost_per_update` / `summary_read_cost` /
@@ -112,7 +112,7 @@ use crate::cost_model::{Cost, CostModel, CseCandidate, ShareDecision};
 
 /// How often the *raw* data underlying a maintained summary changes —
 /// ingest/update events per second (Hz). See the module docs' provenance
-/// table: normally read from [`DataWorkload::ingestion_rate`] via
+/// table: normally read from the arrival's `rows_per_second` via
 /// [`update_rate_from_data_workload`].
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct UpdateRate(pub f64);
@@ -295,9 +295,9 @@ pub fn update_rate_from_data_workload(
     workload: &DataWorkload,
 ) -> Result<Option<UpdateRate>, RecurrenceError> {
     workload
-        .ingestion_rate
-        .value
-        .map(|rate| validate_update_rate(UpdateRate(rate.0)))
+        .arrival
+        .rows_per_second()
+        .map(|rate| validate_update_rate(UpdateRate(rate)))
         .transpose()
 }
 
@@ -323,7 +323,7 @@ pub struct RecurrenceProfile {
     pub one_shot_consumers: usize,
     /// The ingest/update rate of the raw data this target (if maintained)
     /// would be kept up to date against. `None` when no
-    /// [`DataWorkload::ingestion_rate`] evidence was available.
+    /// arrival rate (`DataArrival::rows_per_second`) was declared.
     pub update_rate: Option<UpdateRate>,
 }
 
@@ -674,11 +674,11 @@ mod tests {
     // ── update_rate_from_data_workload ───────────────────────────────────
 
     #[test]
-    fn update_rate_from_data_workload_reads_ingestion_rate_evidence() {
+    fn update_rate_from_data_workload_reads_the_arrival_rate() {
         let workload = DataWorkload {
-            ingestion_rate: asap_types::workload::Evidence {
-                value: Some(asap_types::workload::Rate(100.0)),
-                ..Default::default()
+            arrival: asap_types::workload::DataArrival::Ingesting {
+                rows_per_second: 100.0,
+                sample_interval: None,
             },
             ..Default::default()
         };
@@ -689,9 +689,9 @@ mod tests {
     #[test]
     fn update_rate_from_data_workload_rejects_a_negative_rate() {
         let workload = DataWorkload {
-            ingestion_rate: asap_types::workload::Evidence {
-                value: Some(asap_types::workload::Rate(-0.1)),
-                ..Default::default()
+            arrival: asap_types::workload::DataArrival::Mixed {
+                rows_per_second: -0.1,
+                sample_interval: None,
             },
             ..Default::default()
         };

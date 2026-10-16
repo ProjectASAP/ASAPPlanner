@@ -4,18 +4,10 @@
 
 use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence, EvidenceSource, MetricType,
-    PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, SqlDialect, TimestampMs,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload,
+    Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand,
+    RepeatingEntry, RepetitionInterval, SourceFacts, SqlDialect, TimestampMs,
 };
-
-pub fn declared<T>(value: T) -> Evidence<T> {
-    Evidence {
-        value: Some(value),
-        source: EvidenceSource::Declared,
-        ..Default::default()
-    }
-}
 
 pub const MINUTE_MS: u64 = 60_000;
 /// PromQL's `y` is 365 days.
@@ -23,23 +15,46 @@ pub const YEAR_MS: u64 = 365 * 24 * 60 * MINUTE_MS;
 /// Pattern A's batch execution time T (2026-01-01T00:00:00Z).
 pub const T_MS: u64 = 1_767_225_600_000;
 
-/// The #509 shared data workload with `arrival`.
-pub fn shared_data_workload(arrival: DataArrival) -> DataWorkload {
+/// How the #509 shared data workload arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedArrival {
+    /// Stored, nothing arriving.
+    AtRest,
+    /// Arriving while the queries run.
+    Ingesting,
+    /// Stored history with new rows arriving.
+    Mixed,
+}
+
+/// The #509 shared data: one million series of `source`, each sampled
+/// every 15 s, so 1,000,000 / 15 rows per second arrive while ingesting.
+pub fn shared_data_workload(arrival: SharedArrival, source: &str) -> DataWorkload {
+    let (rows_per_second, sample_interval) = (1_000_000.0 / 15.0, Some(DurationMs(15_000)));
     DataWorkload {
-        data_ingestion_interval: declared(DurationMs(15_000)),
-        // Data at rest has no ingestion (`validate` rejects a positive rate).
-        ingestion_rate: match arrival {
-            DataArrival::AtRest => Evidence::default(),
-            _ => declared(Rate(1_000_000.0 / 15.0)),
+        arrival: match arrival {
+            SharedArrival::AtRest => DataArrival::AtRest,
+            SharedArrival::Ingesting => DataArrival::Ingesting {
+                rows_per_second,
+                sample_interval,
+            },
+            SharedArrival::Mixed => DataArrival::Mixed {
+                rows_per_second,
+                sample_interval,
+            },
         },
-        input_cardinality: declared(1_000_000),
-        stream_norms: Evidence::default(),
-        max_distinct_per_evaluation: Evidence::default(),
-        arrival,
-        metric_types: Default::default(),
+        sources: [(
+            source.to_string(),
+            SourceFacts {
+                series: Some(1_000_000),
+                ..SourceFacts::default()
+            },
+        )]
+        .into(),
     }
 }
 
+/// The metric both Example 1 queries read.
+pub const EXAMPLE1_METRIC: &str = "http_requests_total";
 pub const EXAMPLE1_Q1: &str = "sum by (job) (rate(http_requests_total[1m]))";
 pub const EXAMPLE1_Q2: &str = "topk by (job) (10, sum_over_time(http_requests_total[1m]))";
 
@@ -69,9 +84,13 @@ pub fn example1() -> PlanningWorkload {
                 ),
             ]),
         },
-        data_workload: Some(DataWorkload {
-            metric_types: [("http_requests_total".to_string(), MetricType::Counter)].into(),
-            ..shared_data_workload(DataArrival::ContinuouslyIngesting)
+        data_workload: Some({
+            let mut data = shared_data_workload(SharedArrival::Ingesting, EXAMPLE1_METRIC);
+            data.sources
+                .get_mut(EXAMPLE1_METRIC)
+                .expect("the shared source")
+                .metric_type = Some(MetricType::Counter);
+            data
         }),
     }
 }
@@ -127,10 +146,20 @@ pub fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
                     .collect(),
             ),
         },
+        // SQL needs no sample interval; `flows` has 10,000,000 sources.
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence::default(),
-            input_cardinality: declared(10_000_000),
-            ..shared_data_workload(DataArrival::ContinuouslyIngesting)
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000_000.0 / 15.0,
+                sample_interval: None,
+            },
+            sources: [(
+                "flows".to_string(),
+                SourceFacts {
+                    series: Some(10_000_000),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into(),
         }),
     };
     let catalog = asap_frontend_sql::SqlCatalog::new().with_table(
@@ -146,6 +175,9 @@ pub fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
     );
     (workload, catalog)
 }
+
+/// The metric Example 3's Patterns A and B read.
+pub const PATTERN_METRIC: &str = "latency_ms";
 
 /// Pattern A's five queries: (PromQL, its range window in ms, its offset
 /// before T in ms); the window and offset restate the query text.
@@ -189,7 +221,7 @@ fn pattern_a_requirements() -> QueryRequirements {
 }
 
 /// Example 3, Pattern A: p99 over five historical intervals.
-pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> PlanningWorkload {
+pub fn pattern_a(recurrence: PatternARecurrence, arrival: SharedArrival) -> PlanningWorkload {
     let (batch, repeating) = match recurrence {
         PatternARecurrence::OnceAdHoc => (
             Some(
@@ -231,7 +263,7 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
             query_batch: batch,
             repeating_queries: repeating,
         },
-        data_workload: Some(shared_data_workload(arrival)),
+        data_workload: Some(shared_data_workload(arrival, PATTERN_METRIC)),
     }
 }
 
@@ -259,7 +291,10 @@ pub fn pattern_b() -> PlanningWorkload {
                 predictability: Predictability::Predictable { known_at: None },
             }]),
         },
-        data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
+        data_workload: Some(shared_data_workload(
+            SharedArrival::Ingesting,
+            PATTERN_METRIC,
+        )),
     }
 }
 
@@ -267,15 +302,21 @@ pub fn pattern_b() -> PlanningWorkload {
 mod tests {
     use super::*;
 
-    /// Data at rest has no ingestion rate, so the at-rest shared data
-    /// workload validates.
+    /// Every shared arrival validates, at rest included: Pattern A reads
+    /// only explicit ranges, so it needs no sample interval.
     #[test]
-    fn at_rest_shared_data_workload_is_valid() {
-        shared_data_workload(DataArrival::AtRest)
-            .validate()
-            .unwrap();
-        pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::AtRest)
-            .validate()
-            .unwrap();
+    fn shared_data_workloads_are_valid() {
+        for arrival in [
+            SharedArrival::AtRest,
+            SharedArrival::Ingesting,
+            SharedArrival::Mixed,
+        ] {
+            shared_data_workload(arrival, PATTERN_METRIC)
+                .validate()
+                .unwrap();
+            pattern_a(PatternARecurrence::OnceAdHoc, arrival)
+                .validate()
+                .unwrap();
+        }
     }
 }

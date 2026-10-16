@@ -68,8 +68,9 @@
 // `pareto-front`). Cost models 1 and 2 use the illustrative unit costs.
 // Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
 // cost model 3, and `front` lists the Pareto front under `pareto-front`.
-// `--interval-ms` is the source cadence (default 15000). `--table '<json>'`
-// (repeatable) declares a table the SQL queries read: `{"name": ...,
+// `--interval-ms` is the PromQL sample interval (default 15000); the data
+// is taken as ingesting at 1,000 rows per second, with no source facts.
+// `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
 // int64|bigint", "nullable": true}], "time_index": 0}` (`nullable` defaults
 // to true; without `time_index` the table has no time column; a
@@ -83,7 +84,7 @@ use asap_aware_mapping::stage3_plan_selection::{
 };
 use asap_devtools::candidate_labels::candidate_labels;
 use asap_devtools::planner_layering_examples::{
-    declared, example1, example2, pattern_a, pattern_b, PatternARecurrence,
+    example1, example2, pattern_a, pattern_b, PatternARecurrence, SharedArrival,
 };
 use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_planning_stages_over, PlanningStagesError,
@@ -291,7 +292,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 "planner-layering-1" => (example1(), SqlCatalog::new()),
                 "planner-layering-2" => example2(),
                 "planner-layering-3a" => (
-                    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed),
+                    pattern_a(PatternARecurrence::OnceAdHoc, SharedArrival::Mixed),
                     SqlCatalog::new(),
                 ),
                 "planner-layering-3b" => (pattern_b(), SqlCatalog::new()),
@@ -356,10 +357,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 query["id"] = json!(name);
                 described.push(query);
             }
-            let data = DataWorkload {
-                data_ingestion_interval: declared(DurationMs(interval_ms)),
-                ..Default::default()
-            };
+            let data = adhoc_data_workload(interval_ms);
             let result = run_planning_stages_over(
                 roots.clone(),
                 &entries,
@@ -678,10 +676,20 @@ fn query_batch(
             ),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            data_ingestion_interval: declared(DurationMs(interval_ms)),
-            ..Default::default()
-        }),
+        data_workload: Some(adhoc_data_workload(interval_ms)),
+    }
+}
+
+/// The data `--promql`/`--sql` queries read: ingesting, each series
+/// sampled every `interval_ms` (`--interval-ms`), at Stage 3's default rate
+/// of 1,000 rows per second, with no source facts.
+fn adhoc_data_workload(interval_ms: u64) -> DataWorkload {
+    DataWorkload {
+        arrival: DataArrival::Ingesting {
+            rows_per_second: 1_000.0,
+            sample_interval: Some(DurationMs(interval_ms)),
+        },
+        ..Default::default()
     }
 }
 

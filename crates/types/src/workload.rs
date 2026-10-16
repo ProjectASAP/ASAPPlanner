@@ -349,16 +349,71 @@ impl From<&RepeatingEntry> for QueryWorkloadEntry {
 
 // ── Data workload ─────────────────────────────────────────────────────────────
 
-/// Whether the data queried by this workload is static, still arriving, or a
-/// mixture of both. This is independent of whether queries repeat.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// How the queried data arrives: already stored, still arriving, or both,
+/// with the facts about its arrival. This is independent of whether queries
+/// repeat.
+///
+/// JSON: `"at_rest"`, `{"ingesting": {"rows_per_second": 1000.0,
+/// "sample_interval": 15000}}`, `{"mixed": {...}}` or `"unknown"` (the
+/// default). `sample_interval` may be omitted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DataArrival {
+    /// Every row is already stored; nothing arrives, so no summary can be
+    /// built at ingestion time.
     AtRest,
-    ContinuouslyIngesting,
-    Mixed,
+    /// Rows keep arriving while the queries run.
+    Ingesting {
+        /// Rows (PromQL samples) arriving per second over all sources.
+        /// Plan selection prices scans and ingestion-time work with it.
+        rows_per_second: f64,
+        /// PromQL and MetricsQL only: how often each series receives a
+        /// sample. A bare instant selector reads the latest sample within
+        /// it; `None` when no query needs it.
+        #[serde(default)]
+        sample_interval: Option<DurationMs>,
+    },
+    /// Older rows are stored and new rows keep arriving; the fields are
+    /// those of [`DataArrival::Ingesting`].
+    Mixed {
+        /// As for [`DataArrival::Ingesting`].
+        rows_per_second: f64,
+        /// As for [`DataArrival::Ingesting`].
+        #[serde(default)]
+        sample_interval: Option<DurationMs>,
+    },
+    /// Not declared: no summary is built at ingestion time.
     #[default]
     Unknown,
+}
+
+impl DataArrival {
+    /// Rows arriving per second, when the data is ingesting or mixed.
+    pub fn rows_per_second(&self) -> Option<f64> {
+        match self {
+            Self::Ingesting {
+                rows_per_second, ..
+            }
+            | Self::Mixed {
+                rows_per_second, ..
+            } => Some(*rows_per_second),
+            Self::AtRest | Self::Unknown => None,
+        }
+    }
+
+    /// The PromQL sample interval, when the data is ingesting or mixed and
+    /// declares one.
+    pub fn sample_interval(&self) -> Option<DurationMs> {
+        match self {
+            Self::Ingesting {
+                sample_interval, ..
+            }
+            | Self::Mixed {
+                sample_interval, ..
+            } => *sample_interval,
+            Self::AtRest | Self::Unknown => None,
+        }
+    }
 }
 
 /// Where an empirical workload value came from.
@@ -372,40 +427,30 @@ pub enum EvidenceSource {
     Unknown,
 }
 
-/// A workload value together with the provenance and freshness needed to
-/// decide whether it is safe to use. Times and durations are milliseconds.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// When one source's facts were observed and how long they stay valid, in
+/// milliseconds. The default (neither set) never expires: a declared fact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Evidence<T> {
-    pub value: Option<T>,
-    pub source: EvidenceSource,
+pub struct Evidence {
+    /// When the facts were observed (Unix ms); `None` for declared facts.
+    #[serde(default)]
     pub observed_at_ms: Option<u64>,
+    /// How long after `observed_at_ms` they stay valid; `None` for no
+    /// expiry.
+    #[serde(default)]
     pub valid_for_ms: Option<u64>,
 }
 
-impl<T> Default for Evidence<T> {
-    fn default() -> Self {
-        Self {
-            value: None,
-            source: EvidenceSource::Unknown,
-            observed_at_ms: None,
-            valid_for_ms: None,
-        }
-    }
-}
-
-impl<T> Evidence<T> {
-    /// Return the value only while its freshness contract holds. Declared or
-    /// timeless evidence with no `valid_for_ms` does not expire.
-    pub fn value_at(&self, now_ms: u64) -> Option<&T> {
-        let value = self.value.as_ref()?;
+impl Evidence {
+    /// Whether facts with this evidence may be used at `now_ms`: observed
+    /// no later than `now_ms` and not expired (expiry is inclusive). A
+    /// validity duration without an observation time is never usable.
+    pub fn is_fresh_at(&self, now_ms: u64) -> bool {
         match (self.observed_at_ms, self.valid_for_ms) {
-            (Some(observed), _) if observed > now_ms => None,
-            (Some(observed), Some(valid_for)) if now_ms > observed.saturating_add(valid_for) => {
-                None
-            }
-            (None, Some(_)) => None,
-            _ => Some(value),
+            (Some(observed), _) if observed > now_ms => false,
+            (Some(observed), Some(valid_for)) => now_ms <= observed.saturating_add(valid_for),
+            (None, Some(_)) => false,
+            _ => true,
         }
     }
 }
@@ -430,42 +475,65 @@ impl DemandEstimate {
 #[serde(transparent)]
 pub struct Rate(pub f64);
 
-/// Workload-level facts about the data being queried. Unlike the former
-/// ingestion-only `DataCharacteristics`, this also represents data at rest.
+/// Facts about the data being queried: how it arrives, and what is known
+/// about each source.
+///
+/// JSON: `{"arrival": {"ingesting": {"rows_per_second": 66666.7,
+/// "sample_interval": 15000}}, "sources": {"http_requests_total":
+/// {"series": 1000000, "metric_type": "counter"}}}`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataWorkload {
+    /// How the data arrives (default: unknown).
     pub arrival: DataArrival,
-    /// Cadence at which each PromQL source supplies a sample. PromQL instant
-    /// selectors use this as their explicit selection horizon.
+    /// Facts per source, keyed by PromQL metric name or SQL table name
+    /// (default: none). A source without an entry has no known facts.
     #[serde(default)]
-    pub data_ingestion_interval: Evidence<DurationMs>,
-    pub ingestion_rate: Evidence<Rate>,
-    pub input_cardinality: Evidence<u64>,
-    /// Stream norms per source (PromQL metric or SQL table name): the
-    /// inputs Count-Min and Count Sketch additive error bounds are
-    /// normalized by. Plan selection binds them to turn those bounds into
-    /// absolute errors; a source without a norm leaves that bound unmet.
+    pub sources: BTreeMap<String, SourceFacts>,
+}
+
+/// What is known about one source (a PromQL metric or a SQL table). Every
+/// fact is optional; an unknown fact is never read as zero.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFacts {
+    /// How many series (PromQL) or groups of rows (SQL) the source holds.
+    /// Plan selection splits a whole-result failure probability over the
+    /// values a query returns (`G`), at most the series of the sources it
+    /// reads, and prices scans and selectors with it (default 1,000 when
+    /// unknown).
     #[serde(default)]
-    pub stream_norms: Evidence<BTreeMap<String, StreamNorms>>,
-    /// Upper bound per source (PromQL metric or SQL table name) on the
-    /// distinct items any one distinct-count summary over the source's own
-    /// rows counts in one complete evaluation, including every merged pane.
-    /// One bound serves every query over the source, so it must hold for
-    /// the longest evaluation window any of them uses; a filter or a
-    /// shorter window only lowers it. Each group's own items count
-    /// separately: the bound is per output row. The deployment must
-    /// enforce it; an observed distinct count is not a bound. Plan selection
-    /// binds it to give classic HLL (and a distinct-count UnivMon) its
-    /// failure probability per output row; a source without a bound leaves
-    /// that probability unknown. KMV's guarantee needs no bound.
+    pub series: Option<u64>,
+    /// Declared Prometheus type of the metric (`# TYPE` metadata). The
+    /// planner never infers a type from a name such as `_total`; an
+    /// undeclared metric's samples may take any value.
     #[serde(default)]
-    pub max_distinct_per_evaluation: Evidence<BTreeMap<String, u64>>,
-    /// Declared type of each metric, by metric name (Prometheus `# TYPE`
-    /// metadata). The planner never infers a type from a name such as
-    /// `_total`; an undeclared metric's samples may take any value.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metric_types: BTreeMap<String, MetricType>,
+    pub metric_type: Option<MetricType>,
+    /// Bounds on the source's stream norms: the inputs Count-Min and Count
+    /// Sketch additive error bounds are normalized by. Plan selection binds
+    /// them to turn those bounds into absolute errors; without them that
+    /// bound is unmet.
+    #[serde(default)]
+    pub stream_norms: Option<StreamNorms>,
+    /// Upper bound on the distinct items any one distinct-count summary over
+    /// the source's own rows counts in one complete evaluation, including
+    /// every merged pane. One bound serves every query over the source, so
+    /// it must hold for the longest evaluation window any of them uses; a
+    /// filter or a shorter window only lowers it. Each group's own items
+    /// count separately: the bound is per output row. The deployment must
+    /// enforce it; an observed distinct count is not a bound. Plan
+    /// selection binds it to give classic HLL (and a distinct-count UnivMon)
+    /// its failure probability per output row; without it that probability
+    /// is unknown. KMV's guarantee needs no bound.
+    #[serde(default)]
+    pub max_distinct_per_evaluation: Option<u64>,
+    /// When `series`, `stream_norms` and `max_distinct_per_evaluation` were
+    /// observed and how long they hold (default: declared, never expires).
+    /// Plan selection binds them into accuracy guarantees only while they
+    /// hold at any planning time. `metric_type` is a declaration and does
+    /// not expire.
+    #[serde(default)]
+    pub evidence: Evidence,
 }
 
 /// Upper bounds on the norms of the frequency (weight) vector any one
@@ -542,54 +610,47 @@ impl QueryWorkload {
 }
 
 impl DataWorkload {
-    /// Validate source facts independently of query demand or language.
+    /// Validate the arrival and source facts independently of query demand
+    /// or language.
     pub fn validate(&self) -> Result<(), WorkloadError> {
-        if matches!(self.arrival, DataArrival::AtRest)
-            && self.ingestion_rate.value.is_some_and(|rate| rate.0 > 0.0)
-        {
-            return Err(WorkloadError::AtRestWithPositiveIngestionRate);
+        validate_optional_rate(self.arrival.rows_per_second().map(Rate))?;
+        if self.arrival.sample_interval() == Some(DurationMs(0)) {
+            return Err(WorkloadError::ZeroSampleInterval);
         }
-        validate_optional_rate(self.ingestion_rate.value)?;
-        for norms in self.stream_norms.value.iter().flat_map(BTreeMap::values) {
-            for value in [norms.l1, norms.l2].into_iter().flatten() {
-                if !(value.is_finite() && value >= 0.0) {
-                    return Err(WorkloadError::InvalidStreamNorm(value));
+        for facts in self.sources.values() {
+            if let Some(norms) = &facts.stream_norms {
+                for value in [norms.l1, norms.l2].into_iter().flatten() {
+                    if !(value.is_finite() && value >= 0.0) {
+                        return Err(WorkloadError::InvalidStreamNorm(value));
+                    }
                 }
             }
-        }
-        let bounds = self.max_distinct_per_evaluation.value.iter();
-        if bounds.flat_map(BTreeMap::values).any(|bound| *bound == 0) {
-            return Err(WorkloadError::ZeroMaxDistinct);
+            if facts.max_distinct_per_evaluation == Some(0) {
+                return Err(WorkloadError::ZeroMaxDistinct);
+            }
         }
         Ok(())
     }
 }
 
 impl PlanningWorkload {
+    /// Validate the query workload and, when present, the data workload. A
+    /// PromQL or MetricsQL sample interval is checked by the frontend, only
+    /// for a query with a bare instant selector
+    /// ([`WorkloadError::MissingSampleInterval`]).
     pub fn validate(&self) -> Result<(), WorkloadError> {
         self.query_workload.validate()?;
         if let Some(data) = &self.data_workload {
             data.validate()?;
         }
-        // Both read the latest sample of a bare selector within the ingestion
-        // interval.
-        if matches!(
-            self.query_workload.language,
-            QueryLanguage::PromQL | QueryLanguage::MetricsQL
-        ) {
-            let data = self
-                .data_workload
-                .as_ref()
-                .ok_or(WorkloadError::MissingPromqlDataWorkload)?;
-            let interval = data
-                .data_ingestion_interval
-                .value
-                .ok_or(WorkloadError::MissingDataIngestionInterval)?;
-            if interval.0 == 0 {
-                return Err(WorkloadError::ZeroDataIngestionInterval);
-            }
-        }
         Ok(())
+    }
+
+    /// The PromQL sample interval the data workload declares, if any.
+    pub fn sample_interval(&self) -> Option<DurationMs> {
+        self.data_workload
+            .as_ref()
+            .and_then(|data| data.arrival.sample_interval())
     }
 }
 
@@ -641,14 +702,18 @@ fn validate_rate(rate: Rate) -> Result<Rate, WorkloadError> {
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum WorkloadError {
-    #[error("data_ingestion_interval evidence is unavailable at planning time")]
-    UnavailableDataIngestionInterval,
-    #[error("a PromQL or MetricsQL workload requires data_workload")]
-    MissingPromqlDataWorkload,
-    #[error("a PromQL or MetricsQL workload requires data_ingestion_interval")]
-    MissingDataIngestionInterval,
-    #[error("data_ingestion_interval must be greater than zero")]
-    ZeroDataIngestionInterval,
+    /// Bad input: a PromQL or MetricsQL query has a bare instant selector,
+    /// which reads the latest sample within the sample interval, but the
+    /// data workload declares none (data at rest, unknown arrival, or
+    /// ingesting without `sample_interval`).
+    #[error(
+        "a PromQL or MetricsQL instant selector needs data_workload.arrival to be \
+         ingesting or mixed with a sample_interval"
+    )]
+    MissingSampleInterval,
+    /// Bad input: a declared sample interval of zero.
+    #[error("sample_interval must be greater than zero")]
+    ZeroSampleInterval,
     #[error("a one-time query must have at least one invocation")]
     ZeroInvocations,
     #[error("a fixed repetition interval must be greater than zero")]
@@ -663,8 +728,6 @@ pub enum WorkloadError {
     InvalidRate(f64),
     #[error("response latency must be finite and non-negative, got {0} ms")]
     InvalidLatency(f64),
-    #[error("data at rest cannot have a positive ingestion rate")]
-    AtRestWithPositiveIngestionRate,
     #[error("a stream norm must be finite and non-negative, got {0}")]
     InvalidStreamNorm(f64),
     #[error("a source's max_distinct_per_evaluation must be greater than zero")]
@@ -707,16 +770,16 @@ mod tests {
     #[test]
     fn stream_norms_must_be_finite_and_non_negative() {
         let with = |l1: f64| DataWorkload {
-            stream_norms: Evidence {
-                value: Some(BTreeMap::from([(
-                    "m".to_string(),
-                    StreamNorms {
+            sources: BTreeMap::from([(
+                "m".to_string(),
+                SourceFacts {
+                    stream_norms: Some(StreamNorms {
                         l1: Some(l1),
                         l2: None,
-                    },
-                )])),
-                ..Evidence::default()
-            },
+                    }),
+                    ..SourceFacts::default()
+                },
+            )]),
             ..DataWorkload::default()
         };
         assert!(with(10.0).validate().is_ok());
@@ -735,14 +798,40 @@ mod tests {
     #[test]
     fn max_distinct_per_evaluation_must_be_positive() {
         let with = |bound: u64| DataWorkload {
-            max_distinct_per_evaluation: Evidence {
-                value: Some(BTreeMap::from([("m".to_string(), bound)])),
-                ..Evidence::default()
-            },
+            sources: BTreeMap::from([(
+                "m".to_string(),
+                SourceFacts {
+                    max_distinct_per_evaluation: Some(bound),
+                    ..SourceFacts::default()
+                },
+            )]),
             ..DataWorkload::default()
         };
         assert!(with(1).validate().is_ok());
         assert_eq!(with(0).validate(), Err(WorkloadError::ZeroMaxDistinct));
+    }
+
+    /// The arrival's rate is finite and non-negative, and a declared sample
+    /// interval is positive.
+    #[test]
+    fn arrival_rate_and_sample_interval_are_validated() {
+        let with = |rows_per_second: f64, sample_interval: Option<u64>| DataWorkload {
+            arrival: DataArrival::Mixed {
+                rows_per_second,
+                sample_interval: sample_interval.map(DurationMs),
+            },
+            ..DataWorkload::default()
+        };
+        assert!(with(10.0, Some(15_000)).validate().is_ok());
+        assert!(with(0.0, None).validate().is_ok());
+        assert_eq!(
+            with(-1.0, None).validate(),
+            Err(WorkloadError::InvalidRate(-1.0))
+        );
+        assert_eq!(
+            with(1.0, Some(0)).validate(),
+            Err(WorkloadError::ZeroSampleInterval)
+        );
     }
 
     fn base_workload() -> QueryWorkload {
@@ -784,27 +873,31 @@ mod tests {
     }
 
     #[test]
-    fn stale_evidence_is_unknown_at_planning_time() {
+    fn stale_evidence_is_not_fresh_at_planning_time() {
         let evidence = Evidence {
-            value: Some(Rate(10.0)),
-            source: EvidenceSource::Observed,
             observed_at_ms: Some(1_000),
             valid_for_ms: Some(500),
         };
-        assert_eq!(evidence.value_at(1_500), Some(&Rate(10.0)));
-        assert_eq!(evidence.value_at(1_501), None);
+        assert!(evidence.is_fresh_at(1_500));
+        assert!(!evidence.is_fresh_at(1_501));
+        // Declared facts never expire; a validity without an observation
+        // time is never usable.
+        assert!(Evidence::default().is_fresh_at(u64::MAX));
+        let unanchored = Evidence {
+            observed_at_ms: None,
+            valid_for_ms: Some(1),
+        };
+        assert!(!unanchored.is_fresh_at(0));
     }
 
     #[test]
     fn future_evidence_and_demand_estimates_are_not_fresh() {
         let evidence = Evidence {
-            value: Some(Rate(2.0)),
-            source: EvidenceSource::Observed,
             observed_at_ms: Some(2_000),
             valid_for_ms: Some(1_000),
         };
-        assert_eq!(evidence.value_at(1_999), None);
-        assert_eq!(evidence.value_at(2_000), Some(&Rate(2.0)));
+        assert!(!evidence.is_fresh_at(1_999));
+        assert!(evidence.is_fresh_at(2_000));
 
         let estimate = DemandEstimate {
             observation_window: ObservationWindow {
@@ -824,25 +917,6 @@ mod tests {
     }
 
     #[test]
-    fn at_rest_rejects_a_positive_ingestion_rate() {
-        let workload = PlanningWorkload {
-            query_workload: base_workload(),
-            data_workload: Some(DataWorkload {
-                arrival: DataArrival::AtRest,
-                ingestion_rate: Evidence {
-                    value: Some(Rate(1.0)),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-        };
-        assert_eq!(
-            workload.validate(),
-            Err(WorkloadError::AtRestWithPositiveIngestionRate)
-        );
-    }
-
-    #[test]
     fn canonical_workloads_have_a_strict_json_round_trip() {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
@@ -859,30 +933,88 @@ mod tests {
                 }]),
             },
             data_workload: Some(DataWorkload {
-                arrival: DataArrival::ContinuouslyIngesting,
-                ingestion_rate: Evidence {
-                    value: Some(Rate(1_000.0)),
-                    source: EvidenceSource::Declared,
-                    observed_at_ms: None,
-                    valid_for_ms: None,
+                arrival: DataArrival::Ingesting {
+                    rows_per_second: 1_000.0,
+                    sample_interval: Some(DurationMs(15_000)),
                 },
-                input_cardinality: Evidence {
-                    value: Some(10_000),
-                    source: EvidenceSource::Declared,
-                    observed_at_ms: None,
-                    valid_for_ms: None,
-                },
-                ..Default::default()
+                sources: BTreeMap::from([(
+                    "requests_total".to_string(),
+                    SourceFacts {
+                        series: Some(10_000),
+                        metric_type: Some(MetricType::Counter),
+                        stream_norms: Some(StreamNorms {
+                            l1: Some(1e9),
+                            l2: None,
+                        }),
+                        max_distinct_per_evaluation: Some(100),
+                        evidence: Evidence {
+                            observed_at_ms: Some(1_000),
+                            valid_for_ms: Some(60_000),
+                        },
+                    },
+                )]),
             }),
         };
 
-        let json = serde_json::to_string_pretty(&workload).expect("serialize workload");
-        let decoded: PlanningWorkload = serde_json::from_str(&json).expect("deserialize workload");
+        let json = serde_json::to_value(&workload).expect("serialize workload");
+        assert_eq!(
+            json["data_workload"],
+            serde_json::json!({
+                "arrival": {"ingesting": {"rows_per_second": 1000.0, "sample_interval": 15000}},
+                "sources": {"requests_total": {
+                    "series": 10000,
+                    "metric_type": "counter",
+                    "stream_norms": {"l1": 1e9, "l2": null},
+                    "max_distinct_per_evaluation": 100,
+                    "evidence": {"observed_at_ms": 1000, "valid_for_ms": 60000}
+                }}
+            })
+        );
+        let decoded: PlanningWorkload = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(decoded, workload);
-        assert!(json.contains("\"continuously_ingesting\""));
 
-        let with_unknown = json.replacen("{", "{\"unknown\":true,", 1);
+        let text = serde_json::to_string(&workload).unwrap();
+        let with_unknown = text.replacen("{", "{\"unknown\":true,", 1);
         assert!(serde_json::from_str::<PlanningWorkload>(&with_unknown).is_err());
+
+        // Omitted facts default to unknown; the sample interval is optional.
+        let minimal: DataWorkload = serde_json::from_value(serde_json::json!({
+            "arrival": {"mixed": {"rows_per_second": 5.0}},
+            "sources": {"flows": {"series": 7}}
+        }))
+        .unwrap();
+        assert_eq!(minimal.arrival.sample_interval(), None);
+        assert_eq!(minimal.sources["flows"].evidence, Evidence::default());
+    }
+
+    /// The former flat shape (per-field evidence, one global cardinality,
+    /// per-fact source maps, `continuously_ingesting`) is rejected.
+    #[test]
+    fn the_former_data_workload_shape_is_rejected() {
+        let declared = |value: serde_json::Value| {
+            serde_json::json!({"value": value, "source": "declared",
+                "observed_at_ms": null, "valid_for_ms": null})
+        };
+        for old in [
+            serde_json::json!({
+                "arrival": "continuously_ingesting",
+                "data_ingestion_interval": declared(15000.into()),
+                "ingestion_rate": declared(1000.0.into()),
+                "input_cardinality": declared(10000.into()),
+            }),
+            serde_json::json!({"arrival": "continuously_ingesting"}),
+            serde_json::json!({"arrival": "at_rest", "input_cardinality": declared(1.into())}),
+            serde_json::json!({"arrival": "at_rest",
+                "metric_types": {"m": "counter"}}),
+            serde_json::json!({"arrival": "at_rest",
+                "sources": {"m": {"series": 1, "evidence": {"source": "declared"}}}}),
+            serde_json::json!({"arrival": {"at_rest": {"rows_per_second": 1.0}}}),
+        ] {
+            assert!(
+                serde_json::from_value::<DataWorkload>(old.clone()).is_err(),
+                "{old}"
+            );
+        }
     }
 
     #[test]

@@ -15,23 +15,23 @@ pub mod promql;
 use std::rc::Rc;
 
 use asap_types::ir::OperatorNode;
-use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
+use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage};
 
 pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};
 
 /// Lower every normalized PromQL workload entry to a plan-ready operator DAG.
 ///
-/// PromQL workloads must declare a non-zero `data_ingestion_interval`; it is
-/// injected around each bare instant selector. Explicit range selectors keep
-/// their query-specified range.
-/// `now_ms` is the planning time in Unix milliseconds; cadence evidence must
-/// be valid at that time, using the same clock as downstream planning.
+/// A bare instant selector reads the latest sample within the data
+/// workload's `sample_interval` (declared by an `Ingesting` or `Mixed`
+/// [`DataArrival`](asap_types::workload::DataArrival)); a query with one
+/// fails with `WorkloadError::MissingSampleInterval` when none is declared.
+/// Explicit range selectors keep their query-specified range and need no
+/// interval.
 pub fn lower_promql_workload(
     workload: &PlanningWorkload,
-    now_ms: u64,
 ) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
-    lower_promql_workload_inner(workload, now_ms)
+    lower_promql_workload_inner(workload)
 }
 
 /// Like [`lower_promql_workload`], but uses `histograms` to distinguish classic
@@ -39,34 +39,30 @@ pub fn lower_promql_workload(
 pub fn lower_promql_workload_with_histograms(
     workload: &PlanningWorkload,
     histograms: HistogramCatalog,
-    now_ms: u64,
 ) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
     let _guard = histogram::CatalogGuard::install(histograms);
-    lower_promql_workload_inner(workload, now_ms)
+    lower_promql_workload_inner(workload)
 }
 
 /// Lower scalar and vector query roots without introducing constant operators.
 pub fn lower_promql_query_workload(
     workload: &PlanningWorkload,
-    now_ms: u64,
 ) -> Result<Vec<asap_types::ir::QueryRoot>, PromqlError> {
-    lower_promql_query_workload_inner(workload, now_ms)
+    lower_promql_query_workload_inner(workload)
 }
 
 pub fn lower_promql_query_workload_with_histograms(
     workload: &PlanningWorkload,
     histograms: HistogramCatalog,
-    now_ms: u64,
 ) -> Result<Vec<asap_types::ir::QueryRoot>, PromqlError> {
     let _guard = histogram::CatalogGuard::install(histograms);
-    lower_promql_query_workload_inner(workload, now_ms)
+    lower_promql_query_workload_inner(workload)
 }
 
 fn lower_promql_workload_inner(
     workload: &PlanningWorkload,
-    now_ms: u64,
 ) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
-    lower_promql_query_workload_inner(workload, now_ms)?
+    lower_promql_query_workload_inner(workload)?
         .into_iter()
         .map(|root| match root {
             asap_types::ir::QueryRoot::Operator(node) => Ok(node),
@@ -79,7 +75,6 @@ fn lower_promql_workload_inner(
 
 fn lower_promql_query_workload_inner(
     workload: &PlanningWorkload,
-    now_ms: u64,
 ) -> Result<Vec<asap_types::ir::QueryRoot>, PromqlError> {
     if !matches!(workload.query_workload.language, QueryLanguage::PromQL) {
         return Err(PromqlError::WrongLanguage(format!(
@@ -88,21 +83,17 @@ fn lower_promql_query_workload_inner(
         )));
     }
     workload.validate()?;
-    let &DurationMs(interval_ms) = workload
-        .data_workload
-        .as_ref()
-        .expect("validated PromQL workload has data_workload")
-        .data_ingestion_interval
-        .value_at(now_ms)
-        .ok_or(WorkloadError::UnavailableDataIngestionInterval)?;
+    let sample_interval = workload
+        .sample_interval()
+        .map(|DurationMs(ms)| std::time::Duration::from_millis(ms));
     workload
         .query_workload
         .entries()
         .map(|entry| {
-            let root = promql::PromqlLowerer::lower_query_with_ingestion_interval(
+            let root = promql::PromqlLowerer::lower_query_with_sample_interval(
                 &entry.query.0,
                 &entry.requirements.accuracy.clone(),
-                std::time::Duration::from_millis(interval_ms),
+                sample_interval,
             )?;
             Ok(root)
         })
@@ -111,55 +102,12 @@ fn lower_promql_query_workload_inner(
 
 #[cfg(test)]
 mod tests {
-    // Expiring evidence without an observation timestamp is never usable.
-    #[test]
-    fn rejects_unusable_ingestion_evidence() {
-        let mut input = workload("sum(data)");
-        input
-            .data_workload
-            .as_mut()
-            .unwrap()
-            .data_ingestion_interval
-            .valid_for_ms = Some(100);
-        assert!(lower_promql_workload(&input, 0).is_err());
-    }
-
-    // Cadence expiry is inclusive; future and expired evidence cannot set a horizon.
-    #[test]
-    fn ingestion_evidence_respects_planning_time_with_and_without_histograms() {
-        let mut input = workload("sum(data)");
-        let evidence = &mut input
-            .data_workload
-            .as_mut()
-            .unwrap()
-            .data_ingestion_interval;
-        evidence.observed_at_ms = Some(1_000);
-        evidence.valid_for_ms = Some(100);
-        for (now_ms, usable) in [(999, false), (1_000, true), (1_100, true), (1_101, false)] {
-            assert_eq!(lower_promql_workload(&input, now_ms).is_ok(), usable);
-            assert_eq!(
-                lower_promql_workload_with_histograms(&input, HistogramCatalog::default(), now_ms)
-                    .is_ok(),
-                usable
-            );
-        }
-        input
-            .data_workload
-            .as_mut()
-            .unwrap()
-            .data_ingestion_interval
-            .observed_at_ms = None;
-        assert!(
-            lower_promql_workload_with_histograms(&input, HistogramCatalog::default(), 1_000)
-                .is_err()
-        );
-    }
     use std::time::Duration;
 
     use asap_types::ir::{NonASAPOp, TimeRangeKind};
     use asap_types::workload::{
-        BatchEntry, DataWorkload, Evidence, PlanningWorkload, Query, QueryRequirements,
-        QueryWorkload,
+        BatchEntry, DataArrival, DataWorkload, PlanningWorkload, Query, QueryRequirements,
+        QueryWorkload, WorkloadError,
     };
 
     use super::*;
@@ -178,9 +126,9 @@ mod tests {
                 repeating_queries: None,
             },
             data_workload: Some(DataWorkload {
-                data_ingestion_interval: Evidence {
-                    value: Some(DurationMs(1_000)),
-                    ..Default::default()
+                arrival: DataArrival::Ingesting {
+                    rows_per_second: 1_000.0,
+                    sample_interval: Some(DurationMs(1_000)),
                 },
                 ..Default::default()
             }),
@@ -188,10 +136,10 @@ mod tests {
     }
 
     // A bare instant selector reads the latest sample within the declared
-    // ingestion interval: an `Instant` lookback of that length.
+    // sample interval: an `Instant` lookback of that length.
     #[test]
-    fn instant_selector_uses_declared_ingestion_interval() {
-        let query = lower_promql_workload(&workload("sum by (job) (data)"), 0).unwrap();
+    fn instant_selector_uses_declared_sample_interval() {
+        let query = lower_promql_workload(&workload("sum by (job) (data)")).unwrap();
         let NonASAPOp::Aggregate { child, .. } = query[0].expect_non_asap() else {
             panic!("expected aggregate")
         };
@@ -206,7 +154,7 @@ mod tests {
     // An explicit `m[5m]` keeps its own window as a `Range` selection.
     #[test]
     fn explicit_range_selector_keeps_its_query_range() {
-        let query = lower_promql_workload(&workload("sum_over_time(data[5m])"), 0).unwrap();
+        let query = lower_promql_workload(&workload("sum_over_time(data[5m])")).unwrap();
         let NonASAPOp::Aggregate { child, .. } = query[0].expect_non_asap() else {
             panic!("expected aggregate")
         };
@@ -218,15 +166,51 @@ mod tests {
         );
     }
 
+    // Data at rest, an unknown arrival, no data workload, or an ingesting
+    // arrival without `sample_interval` declare no interval: an instant
+    // selector (bare, under an aggregation, or inside a subquery) fails,
+    // with and without histograms, while range-only queries still lower.
     #[test]
-    fn workload_without_interval_fails_loudly() {
-        let mut workload = workload("sum(data)");
-        workload.data_workload = Some(DataWorkload::default());
-        assert!(matches!(
-            lower_promql_workload(&workload, 0),
-            Err(PromqlError::InvalidWorkload(
-                asap_types::workload::WorkloadError::MissingDataIngestionInterval
-            ))
-        ));
+    fn instant_selector_needs_a_sample_interval() {
+        let arrivals = [
+            Some(DataArrival::AtRest),
+            Some(DataArrival::Unknown),
+            Some(DataArrival::Ingesting {
+                rows_per_second: 1.0,
+                sample_interval: None,
+            }),
+            None,
+        ];
+        for arrival in arrivals {
+            let with = |query: &str| {
+                let mut input = workload(query);
+                input.data_workload = arrival.map(|arrival| DataWorkload {
+                    arrival,
+                    ..Default::default()
+                });
+                input
+            };
+            for query in ["data", "sum(data)", "max_over_time(data[5m:1m])"] {
+                assert!(
+                    matches!(
+                        lower_promql_workload(&with(query)),
+                        Err(PromqlError::InvalidWorkload(
+                            WorkloadError::MissingSampleInterval
+                        ))
+                    ),
+                    "{arrival:?} {query}"
+                );
+                assert!(matches!(
+                    lower_promql_workload_with_histograms(
+                        &with(query),
+                        HistogramCatalog::default()
+                    ),
+                    Err(PromqlError::InvalidWorkload(
+                        WorkloadError::MissingSampleInterval
+                    ))
+                ));
+            }
+            lower_promql_workload(&with("quantile_over_time(0.99, data[5y] offset 1y)")).unwrap();
+        }
     }
 }

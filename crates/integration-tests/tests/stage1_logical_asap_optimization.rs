@@ -25,7 +25,7 @@ use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query, QueryLanguage,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
 };
 use futures::StreamExt;
@@ -68,14 +68,14 @@ fn promql(query: &str) -> QueryRoot {
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(1000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(1000)),
             },
             ..Default::default()
         }),
     };
-    asap_frontend_promql::lower_promql_query_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_query_workload(&workload)
         .unwrap_or_else(|e| panic!("lower failed for {query:?}: {e}"))
         .remove(0)
 }

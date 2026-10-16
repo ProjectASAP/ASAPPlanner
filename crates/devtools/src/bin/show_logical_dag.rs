@@ -17,7 +17,7 @@
 // SQL queries run against a fixed `metrics(ts, service, region, latency,
 // bytes)` catalog — the same table used in cross_language.rs and topk_ir.rs.
 
-use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
+use asap_devtools::{lower_promql_with_sample_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
@@ -82,11 +82,8 @@ async fn main() {
                 Err(e) => println!("ERR: {e}"),
             }
         } else if let Some(q) = line.strip_prefix("promql>") {
-            match lower_promql_with_data_ingestion_interval(
-                q.trim(),
-                AccuracyTarget::exact(),
-                interval_ms,
-            ) {
+            match lower_promql_with_sample_interval(q.trim(), AccuracyTarget::exact(), interval_ms)
+            {
                 Ok(qe) => println!("{qe:#?}"),
                 Err(e) => println!("ERR: {e}"),
             }

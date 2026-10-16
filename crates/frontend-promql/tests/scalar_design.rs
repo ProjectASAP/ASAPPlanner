@@ -5,10 +5,10 @@ use asap_types::pre_asap::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 
 fn root(query: &str) -> QueryRoot {
-    asap_frontend_promql::lower_promql_query_workload(
-        &support::workload(query, AccuracyTarget::exact()),
-        0,
-    )
+    asap_frontend_promql::lower_promql_query_workload(&support::workload(
+        query,
+        AccuracyTarget::exact(),
+    ))
     .unwrap()
     .remove(0)
 }

@@ -19,12 +19,10 @@ use asap_types::pre_asap::agg_intent::default_quantile;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
-    DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
-    RepetitionInterval, SqlDialect,
+    DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
+    QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+    SqlDialect,
 };
-
-const NOW_MS: u64 = 1_700_000_000_000;
 
 /// `epsilon` as a query's requested accuracy; a quantile query's target
 /// names its metric (a rank error).
@@ -67,14 +65,9 @@ fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
             ),
         },
         data_workload: Some(DataWorkload {
-            arrival: DataArrival::ContinuouslyIngesting,
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(15_000)),
-                ..Default::default()
-            },
-            ingestion_rate: Evidence {
-                value: Some(Rate(1.0)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1.0,
+                sample_interval: Some(DurationMs(15_000)),
             },
             ..Default::default()
         }),
@@ -85,10 +78,7 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
     let workload = promql_workload(queries);
     let input = UserInput::new(
         &workload,
-        FrontendInput::Promql {
-            now_ms: NOW_MS,
-            histograms: None,
-        },
+        FrontendInput::Promql { histograms: None },
         PlanningModels::builtin(),
     );
     e2e_plan(input).await.expect("workload plans")
@@ -97,7 +87,7 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
 /// Every planning stage's output for `queries`, run over the frontend's roots.
 fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
     let workload = promql_workload(queries);
-    let roots = lower_promql_query_workload(&workload, NOW_MS).expect("lowers");
+    let roots = lower_promql_query_workload(&workload).expect("lowers");
     run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
         &workload.query_workload.entries().collect::<Vec<_>>(),

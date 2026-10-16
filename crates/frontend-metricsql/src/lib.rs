@@ -43,10 +43,10 @@ pub fn canonical_metricsql(query: &str) -> Result<String, MetricsqlError> {
 
 /// Lower every MetricsQL workload entry, as `lower_promql_query_workload`
 /// does for PromQL: a bare instant selector reads the latest sample within
-/// the workload's `data_ingestion_interval`, valid at `now_ms`.
+/// the data workload's `sample_interval`, and fails with
+/// [`WorkloadError::MissingSampleInterval`] when none is declared.
 pub fn lower_metricsql_query_workload(
     workload: &PlanningWorkload,
-    now_ms: u64,
 ) -> Result<Vec<asap_types::ir::QueryRoot>, MetricsqlError> {
     if !matches!(workload.query_workload.language, QueryLanguage::MetricsQL) {
         return Err(MetricsqlError::WrongLanguage(format!(
@@ -55,21 +55,17 @@ pub fn lower_metricsql_query_workload(
         )));
     }
     workload.validate()?;
-    let &DurationMs(interval_ms) = workload
-        .data_workload
-        .as_ref()
-        .expect("validated MetricsQL workload has data_workload")
-        .data_ingestion_interval
-        .value_at(now_ms)
-        .ok_or(WorkloadError::UnavailableDataIngestionInterval)?;
+    let sample_interval = workload
+        .sample_interval()
+        .map(|DurationMs(ms)| Duration::from_millis(ms));
     workload
         .query_workload
         .entries()
         .map(|entry| {
-            lower_metricsql_query(
+            lower_with_sample_interval(
                 &entry.query.0,
                 entry.requirements.accuracy.clone(),
-                Duration::from_millis(interval_ms),
+                sample_interval,
             )
         })
         .collect()
@@ -93,6 +89,17 @@ pub fn lower_metricsql_query(
     accuracy: AccuracyTarget,
     ingestion_interval: Duration,
 ) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
+    lower_with_sample_interval(query, accuracy, Some(ingestion_interval))
+}
+
+/// [`lower_metricsql_query`] with the sample interval the data workload
+/// declares, `None` when it declares none: a bare instant selector then
+/// fails with [`WorkloadError::MissingSampleInterval`].
+fn lower_with_sample_interval(
+    query: &str,
+    accuracy: AccuracyTarget,
+    sample_interval: Option<Duration>,
+) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
     let ast = parse_metricsql(query)?;
     if let Expr::NumberLiteral(number) = &ast {
         return Ok(asap_types::ir::QueryRoot::Scalar(
@@ -101,7 +108,7 @@ pub fn lower_metricsql_query(
     }
     let unresolved = Lowerer {
         accuracy,
-        ingestion_interval,
+        sample_interval,
     }
     .lower(&ast)?;
     resolve_root(&unresolved)
@@ -111,7 +118,8 @@ pub fn lower_metricsql_query(
 
 struct Lowerer {
     accuracy: AccuracyTarget,
-    ingestion_interval: Duration,
+    /// What a bare instant selector looks back; `None` when undeclared.
+    sample_interval: Option<Duration>,
 }
 
 impl Lowerer {
@@ -119,7 +127,9 @@ impl Lowerer {
         match expr {
             // An instant selector: the latest sample within the interval.
             Expr::MetricExpression(e) => Ok(U::TimeRange {
-                range: self.ingestion_interval,
+                range: self
+                    .sample_interval
+                    .ok_or(WorkloadError::MissingSampleInterval)?,
                 kind: TimeRangeKind::Instant,
                 child: Rc::new(self.metric(e)?),
             }),
