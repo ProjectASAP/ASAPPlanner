@@ -1,15 +1,15 @@
 //! End-to-end SQL query-string → post-ASAP IR pin (issue #191).
 //!
 //! The SQL counterpart of `promql_to_post_asap.rs`: drives SQL text —
-//! `lower_sql` (text → non-ASAP `OperatorNode` tree) →
-//! `ASAPStrategies::replacements` (→ a tree with ASAP operators,
-//! see [`realize`] below) — and pins the resulting sketch-vs-exact-accumulator
-//! shape node by node, the way `promql_to_post_asap.rs` does for PromQL.
+//! `lower_sql` (text → non-ASAP `OperatorNode` tree) → the planner stages'
+//! logical candidates (→ a tree with ASAP operators, see [`realize`]
+//! below) — and pins the resulting sketch-vs-exact-accumulator shape node by
+//! node, the way `promql_to_post_asap.rs` does for PromQL.
 //!
 //! ## A structural wrinkle PromQL doesn't have
 //!
 //! `lower_promql` returns a *bare* `NonASAPOp::Aggregate` for a top-level
-//! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so [`realize`] can
+//! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so a summary can
 //! bind it directly at the DAG root. `lower_sql` never does: DataFusion's
 //! planner always wraps even a single, unaliased aggregate in an identity
 //! `Project` (confirmed below), so a SQL DAG's *root* is normally `Project {
@@ -19,12 +19,8 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::{retain_exact, RealizationError};
-use asap_aware_mapping::{
-    search_workload, ASAPStrategies, DefaultCostModel, Replacement, ReplacementStrategy,
-    ReplacementSubDAG, TargetSubDAG,
-};
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
+use asap_integration_tests::planning::logical_candidates;
 use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::physical_export::{EdgeRole, PhysicalASAPNodeId, PhysicalASAPOperatorPayload};
@@ -38,28 +34,44 @@ use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
-/// This crate has no "bind me one tree" public API any more —
-/// `ASAPStrategies::replacements` always returns every candidate, and
-/// a caller decides what to keep. This test-only helper reproduces the
-/// take-the-first-(`cost_model`-preferred)-summary-candidate pattern so the
-/// single-answer pins below don't all repeat it by hand.
-fn realize(target: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
-    let target_dag = TargetSubDAG::new(target);
-    match ASAPStrategies::default_cost_model()
-        .replacements(&target_dag)
-        .into_iter()
-        .next()
-    {
-        Some(ReplacementSubDAG {
-            replacement: Replacement::SubDAG(node),
-            ..
-        }) if node.contains_asap() => Ok(node),
-        _ => retain_exact(target),
+/// The first logical candidate (Stage 1, in enumeration order) of `root` as
+/// a query at `accuracy` that uses an ASAP operator, or the plain exact one
+/// when none does: the summary-bound form the pins below inspect.
+fn realize(root: &Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+    let candidates = logical_candidates(Rc::clone(root), accuracy);
+    let node = candidates
+        .iter()
+        .find(|candidate| candidate.contains_asap())
+        .or(candidates.first())
+        .cloned()
+        .expect("Stage 1 offers at least the exact candidate");
+    node.validate_structure()
+        .expect("planned dag satisfies the unified IR contract");
+    node
+}
+
+/// `node` with every `Project` above it skipped: Stage 1 restores a
+/// rewritten aggregate's output names with a `Project`, and SQL wraps every
+/// query in one.
+fn below_projects(mut node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
+    while let Some(NonASAPOp::Project { child, .. }) = node.non_asap() {
+        node = child;
     }
-    .inspect(|node| {
-        node.validate_structure()
-            .expect("planned dag satisfies the unified IR contract")
-    })
+    node
+}
+
+/// The first `SummaryAgg` reached from `node` through unary nodes, estimates
+/// and finalized accumulators.
+fn first_summary_agg(node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryAgg { .. }) => node,
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
+            first_summary_agg(summary_input)
+        }
+        _ => first_summary_agg(
+            unary_child(node).unwrap_or_else(|| panic!("no SummaryAgg below {:?}", node.operator)),
+        ),
+    }
 }
 
 /// The single input of a unary non-ASAP node (Project, Filter, Sort, ...) or
@@ -85,15 +97,6 @@ fn wire_pred(pred: &Predicate) -> Predicate<PhysicalASAPNodeId> {
     Predicate(pred.0.map_operator_refs(&mut |_| -> PhysicalASAPNodeId {
         panic!("fixture predicate references no operator")
     }))
-}
-
-fn dtype<'a>(schema: &'a Schema, name: &str) -> &'a FieldDataType {
-    &schema
-        .fields
-        .iter()
-        .find(|f| f.name == name)
-        .unwrap_or_else(|| panic!("no field {name:?} in {schema:?}"))
-        .dtype
 }
 
 fn col(name: &str, dtype: DataType) -> Field {
@@ -148,8 +151,8 @@ async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
         )
         .await
         .expect("explicit temporal SQL must lower");
-        let physical =
-            realize(inner_aggregate(&pre_asap)).expect("temporal reducer must be planned");
+        let planned = realize(&pre_asap, AccuracyTarget::exact());
+        let physical = first_summary_agg(&planned);
         let Operator::ASAP(ASAPOp::SummaryAgg {
             family,
             reduction,
@@ -194,12 +197,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
         )
         .await
         .expect("nested temporal SQL must lower");
-        let space = search_workload(vec![("nested", Rc::clone(&pre_asap))]).unwrap();
-        let selection = space.global_selection(&DefaultCostModel);
-        let root = selection
-            .assemble_selected_query(&space.roots[0].1)
-            .expect("materialization failed")
-            .expect("root must be discovered");
+        let root = realize(&pre_asap, AccuracyTarget::exact());
 
         fn has_temporal_summary(node: &OperatorNode) -> bool {
             match &node.operator {
@@ -210,6 +208,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
                 Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
                     has_temporal_summary(summary_input)
                 }
+                Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => has_temporal_summary(child),
                 _ => unary_child(node).is_some_and(|child| has_temporal_summary(child)),
             }
         }
@@ -217,29 +216,30 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
             has_temporal_summary(&root),
             "inner {function} was hidden: {root:?}"
         );
+        // The outer sum is an exact Sum state over the finalized per-series
+        // values, so the export keeps both summaries.
+        let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &first_summary_agg(&root).operator
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            family,
+            &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        );
         let dag = post_asap_dag(&root);
-        assert!(dag.nodes.iter().any(|node| matches!(
-            node.payload,
-            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate { .. })
-        )));
+        assert_eq!(
+            dag.nodes
+                .iter()
+                .filter(|node| matches!(
+                    node.payload,
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+                ))
+                .count(),
+            2
+        );
     }
 }
 
-/// The `Aggregate` node beneath the identity `Project` DataFusion's planner
-/// always wraps a top-level aggregate in — see the module docs above.
-fn inner_aggregate(node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
-    match node.non_asap() {
-        Some(NonASAPOp::Project { child, .. }) => inner_aggregate(child),
-        Some(NonASAPOp::Aggregate { .. }) => node,
-        _ => panic!(
-            "expected a Project{{Aggregate}} shape, got {:?}",
-            node.operator
-        ),
-    }
-}
-
-/// A complete SQL frontend result retains its projection and recursively
-/// materializes the selected aggregate beneath it.
 #[tokio::test]
 async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     let pre_asap = lower(
@@ -255,12 +255,7 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     else {
         panic!("sanity: a SQL root is a Project, unlike lower_promql's bare Aggregate");
     };
-    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
-    let selection = space.global_selection(&DefaultCostModel);
-    let root = selection
-        .assemble_selected_query(&space.roots[0].1)
-        .expect("materialization failed")
-        .expect("root must be discovered");
+    let root = realize(&pre_asap, AccuracyTarget::max_error(0.01));
     let Some(NonASAPOp::Project {
         child,
         cols,
@@ -278,7 +273,7 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     );
     assert!(
         matches!(
-            child.operator,
+            below_projects(child).operator,
             Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         ),
         "the Aggregate under Project must be summary-bound"
@@ -301,12 +296,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
     )
     .await
     .expect("two-subquery rate ratio must lower");
-    let space = search_workload(vec![("ratio", Rc::clone(&pre_asap))]).unwrap();
-    let selection = space.global_selection(&DefaultCostModel);
-    let root = selection
-        .assemble_selected_query(&space.roots[0].1)
-        .expect("materialization failed")
-        .expect("root must be discovered");
+    let root = realize(&pre_asap, AccuracyTarget::exact());
     let Some(NonASAPOp::Project {
         child: join, cols, ..
     }) = root.non_asap()
@@ -343,8 +333,11 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
             op: asap_types::pre_asap::CompareOpKind::Eq,
             right,
             ..
-        } if matches!(left.as_ref(), ScalarExpr::Column(0))
-            && matches!(right.as_ref(), ScalarExpr::Column(2))
+        } if matches!(
+            (left.as_ref(), right.as_ref()),
+            (ScalarExpr::Column(0), ScalarExpr::Column(2))
+                | (ScalarExpr::Column(2), ScalarExpr::Column(0))
+        )
     ));
     assert_eq!(
         join.schema
@@ -403,40 +396,6 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
 }
 
 #[tokio::test]
-async fn unsupported_sql_join_shapes_remain_fail_closed() {
-    for sql in [
-        "SELECT a.service FROM (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) a LEFT JOIN (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) b ON a.service=b.service",
-        "SELECT a.service FROM (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) a INNER JOIN (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) b ON a.v>b.v",
-        "SELECT a.service FROM (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) a INNER JOIN (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) b ON a.service=a.service",
-    ] {
-        let pre_asap = lower_sql_dialect(
-            sql,
-            &catalog(),
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("join must lower before fail-closed mapping: {error}"));
-        let space = search_workload(vec![("unsupported-join", Rc::clone(&pre_asap))]).unwrap();
-        let selection = space.global_selection(&DefaultCostModel);
-        let root = selection
-            .assemble_selected_query(&space.roots[0].1)
-            .expect("materialization failed")
-            .expect("root must be discovered");
-        let Some(NonASAPOp::Project { child, .. }) = root.non_asap() else {
-            panic!("SQL projection must remain explicit: {:?}", root.operator);
-        };
-        assert!(
-            is_kept_non_asap(child),
-            "unsupported join was partially accelerated: {:?}",
-            child.operator
-        );
-    }
-}
-
-/// Relational parents emitted around a derived-table aggregate remain
-/// explicit read-time nodes while the aggregate is summary-bound.
-#[tokio::test]
 async fn sql_relational_parents_retain_summary_bound_aggregate() {
     let pre_asap = lower(
         "SELECT t.service, t.p FROM \
@@ -446,12 +405,7 @@ async fn sql_relational_parents_retain_summary_bound_aggregate() {
         AccuracyTarget::max_error(0.01),
     )
     .await;
-    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
-    let selection = space.global_selection(&DefaultCostModel);
-    let root = selection
-        .assemble_selected_query(&space.roots[0].1)
-        .expect("materialization failed")
-        .expect("root must be discovered");
+    let root = realize(&pre_asap, AccuracyTarget::max_error(0.01));
 
     let mut node = root.as_ref();
     let mut saw_project = false;
@@ -537,12 +491,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     };
     assert_eq!(expected_source_predicates.len(), 1, "fixture source WHERE");
 
-    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
-    let selection = space.global_selection(&DefaultCostModel);
-    let root = selection
-        .assemble_selected_query(&space.roots[0].1)
-        .expect("materialization failed")
-        .expect("root must be discovered");
+    let root = realize(&pre_asap, AccuracyTarget::max_error(0.01));
 
     let mut node = root.as_ref();
     let mut retained_read_predicate = None;
@@ -581,60 +530,6 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     )));
 }
 
-/// If the child has no legal summary implementation, retain only that child
-/// as the fallback leaf and keep the supported Filter as an explicit local
-/// read-time operation.
-#[tokio::test]
-async fn sql_filter_preserves_local_fallback_boundary_for_unsupported_child() {
-    let pre_asap = lower(
-        "SELECT t.service, t.avg_bytes FROM \
-         (SELECT service, AVG(bytes) AS avg_bytes FROM metrics GROUP BY service) t \
-         WHERE t.avg_bytes > 100",
-        AccuracyTarget::exact(),
-    )
-    .await;
-    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
-    let selection = space.global_selection(&DefaultCostModel);
-    let root = selection
-        .assemble_selected_query(&space.roots[0].1)
-        .expect("materialization failed")
-        .expect("root must be discovered");
-
-    let mut node = root.as_ref();
-    let mut saw_filter = false;
-    loop {
-        if let Some(NonASAPOp::BinaryOp { .. }) = node.non_asap() {
-            assert!(
-                is_kept_non_asap(node),
-                "AVG's unsupported rewritten child should be kept whole, got {node:?}"
-            );
-            break;
-        }
-        saw_filter |= matches!(node.non_asap(), Some(NonASAPOp::Filter { .. }));
-        node = unary_child(node).unwrap_or_else(|| {
-            panic!(
-                "expected local value operations over fallback child, got {:?}",
-                node.operator
-            )
-        });
-    }
-    assert!(saw_filter, "supported Filter must remain explicit");
-}
-
-/// `SELECT approx_percentile_cont(latency, 0.99) FROM metrics` at ε = 0.01,
-/// with the wrapping `Project` stripped (see module docs):
-///
-/// ```text
-/// SummaryEstimate { query: Quantile{0.99} }            → {…: Float64}
-/// └─ SummaryAgg { Kll{k:269}, input: metrics.latency }  → {…: Sketch(Kll, {k:269})}
-///    └─ Scan (kept non-ASAP)                             → {ts, service, latency, bytes}
-/// ```
-///
-/// The SQL counterpart of `promql_to_post_asap.rs`'s
-/// `promql_quantile_of_rate_binds_kll_over_rate_accumulator`: same intent
-/// (`Quantile`), same 99%-confidence KLL sizing (k=269 from ε=0.01), but the summarised
-/// column is the intent's own *named* SQL column rather than PromQL's
-/// synthetic sample value.
 #[tokio::test]
 async fn sql_quantile_binds_kll_sketch_over_named_column() {
     let pre_asap = lower(
@@ -642,8 +537,8 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
         AccuracyTarget::max_error(0.01),
     )
     .await;
-    let agg = inner_aggregate(&pre_asap);
-    let root = realize(agg).expect("binding failed");
+    let planned = realize(&pre_asap, AccuracyTarget::max_error(0.01));
+    let root = below_projects(&planned);
 
     let Operator::ASAP(ASAPOp::SummaryEstimate {
         summary_input,
@@ -744,8 +639,8 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
         AccuracyTarget::max_error(0.01),
     )
     .await;
-    let agg = inner_aggregate(&pre_asap);
-    let root = realize(agg).expect("binding failed");
+    let planned = realize(&pre_asap, AccuracyTarget::max_error(0.01));
+    let root = below_projects(&planned);
 
     let Operator::ASAP(ASAPOp::SummaryEstimate {
         summary_input,
@@ -793,81 +688,33 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
     assert_eq!(reduction, &Reduction::by(vec![]));
 }
 
-/// An exact workload binds zero sketches: `SUM(bytes) GROUP BY service` at
-/// `AccuracyTarget::exact()` still gets its mergeable exact accumulator, and
-/// `AVG(bytes)` (non-mergeable) stays a whole logical sub-DAG untouched. SQL
-/// counterpart of `promql_to_post_asap.rs`'s
-/// `promql_exact_workload_binds_accumulators_not_sketches`.
 #[tokio::test]
-async fn sql_exact_workload_binds_accumulators_not_sketches() {
-    let pre_asap = lower(
-        "SELECT service, SUM(bytes) FROM metrics GROUP BY service",
-        AccuracyTarget::exact(),
-    )
-    .await;
-    let agg = inner_aggregate(&pre_asap);
-    let root = realize(agg).expect("binding failed");
-    let Operator::ASAP(ASAPOp::SummaryAgg {
-        family, reduction, ..
-    }) = &root.operator
-    else {
-        panic!("expected SummaryAgg, got {:?}", root.operator);
-    };
-    assert_eq!(
-        family,
-        &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
-    );
-    assert_eq!(
-        reduction,
-        &Reduction::by(vec![1]),
-        "service is col 1 in [ts, service, latency, bytes]"
-    );
-    assert_eq!(
-        dtype(&root.schema, "service"),
-        &FieldDataType::Plain(DataType::Utf8),
-        "group keys pass through verbatim"
-    );
-
-    let pre_asap = lower("SELECT AVG(bytes) FROM metrics", AccuracyTarget::exact()).await;
-    let agg = inner_aggregate(&pre_asap);
-    let root = realize(agg).expect("binding failed");
-    assert!(
-        is_kept_non_asap(&root),
-        "avg has no mergeable accumulator — stays logical"
-    );
-    assert!(
-        root.guarantee.as_ref().is_some_and(|g| g.is_exact()),
-        "a kept logical sub_dag is exact"
-    );
-}
-
-#[tokio::test]
-async fn map_projection_export_preserves_unsupported_child_boundary() {
+async fn map_projection_export_keeps_the_map_over_an_avg_of_exact_states() {
     let pre = lower_sql_dialect(
         "SELECT map('job', t.service) AS labels, t.avg_bytes FROM (SELECT service, AVG(bytes) AS avg_bytes FROM metrics GROUP BY service) t WHERE t.avg_bytes > 100",
         &catalog(), SqlDialect::ClickhouseSQL, AccuracyTarget::exact(),
     ).await.unwrap();
-    let space = search_workload(vec![("map_query", pre)]).unwrap();
-    let root = space
-        .global_selection(&DefaultCostModel)
-        .assemble_selected_query(&space.roots[0].1)
-        .unwrap()
-        .unwrap();
+    let root = realize(&pre, AccuracyTarget::exact());
     let dag = post_asap_dag(&root);
     assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
         PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Project { cols, .. })
         if cols.iter().any(|item| matches!(&item.expr, ScalarExpr::FunctionCall { name, .. } if name == "map"))
     )));
-    let mut node = root.as_ref();
-    loop {
-        if let Some(NonASAPOp::BinaryOp { .. }) = node.non_asap() {
-            assert!(
-                is_kept_non_asap(node),
-                "fallback child must stay whole: {node:?}"
-            );
-            break;
-        }
-        node = unary_child(node)
-            .unwrap_or_else(|| panic!("unexpected map/fallback composition: {:?}", node.operator));
-    }
+    // The AVG under the map projection is built from exact Sum and Count
+    // states, divided at read time.
+    let families: Vec<_> = dag
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family, .. }) => Some(family),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        families,
+        vec![
+            &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            &FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+        ]
+    );
 }

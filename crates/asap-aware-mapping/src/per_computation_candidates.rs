@@ -120,7 +120,7 @@ use crate::accuracy::composition::{
 use crate::accuracy::estimators::{hll, univmon};
 use crate::accuracy::{per_input_target, AccuracyModel, DefaultAccuracyModel, PropagationStats};
 use crate::deployment_capabilities::DeploymentCapabilities;
-use crate::function_rules::function_rules;
+use crate::function_rules::approximate_input_composition;
 use crate::realization::{
     accuracy_budget, accuracy_target, default_size_params, summary_candidates,
 };
@@ -839,9 +839,7 @@ fn add_whole_expression_targets(
 fn whole_expression_input(
     target: &OperatorNode,
 ) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
-    use crate::realization::{
-        realize_keyed_additive_summary_input, PhysicalSummaryInputRuleResult,
-    };
+    use crate::realization::realize_keyed_additive_summary_input;
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,
@@ -874,11 +872,7 @@ fn whole_expression_input(
         ),
         GroupingStrategy::default(),
     );
-    let PhysicalSummaryInputRuleResult::Realized(realized) =
-        realize_keyed_additive_summary_input(intent, &family, reduction, child)
-    else {
-        return None;
-    };
+    let realized = realize_keyed_additive_summary_input(intent, &family, reduction, child)?;
     let mut input = realized.input;
     let per_series = matches!(
         child.non_asap(),
@@ -1361,7 +1355,7 @@ fn with_guarantees(
 /// inputs; a summary estimate has its sized family's bound when
 /// [`estimate_has_bound`], composed with its input's when that is
 /// approximate; an exact aggregation or accumulator over approximate values
-/// uses its function's rule ([`function_rules`]); arithmetic composes as
+/// uses its function's rule ([`approximate_input_composition`]); arithmetic composes as
 /// [`arithmetic_guarantee`]. A rule that needs a statistic leaves it
 /// symbolic (`BoundExpr::Unknown`), and plan selection (Stage 3) binds it.
 /// `None` where no rule applies: a comparison, a value `HAVING` or any other
@@ -1495,7 +1489,7 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
             match measures.as_slice() {
                 [intent] => DefaultAccuracyModel
                     .propagate(
-                        &function_rules(intent)?.accuracy,
+                        &approximate_input_composition(intent)?,
                         &[operand_guarantee(child)?],
                         None,
                         &fold_stats(reduction, child)?,
@@ -3091,9 +3085,9 @@ fn measure_input(
                 })?
                 .1,
         ),
-        _ => crate::realization::summarised_input(intent, schema).map_err(|_| {
-            PerComputationCandidateError::Unsupported("input column outside child schema")
-        })?,
+        _ => crate::realization::summarised_input(intent, schema).ok_or(
+            PerComputationCandidateError::Unsupported("input column outside child schema"),
+        )?,
     };
     if let SummaryInputExpr::Column(column) = &read {
         resolve_column_ref(column, schema).map_err(|_| {
@@ -4722,5 +4716,369 @@ mod tests {
             [ComputationCandidate::Exact]
         );
         assert_eq!(none.combinations(), 1);
+    }
+
+    /// Mergeable intents give exactly their accumulator (`avg`: sum, count); other exact-only intents give `Exact`.
+    #[test]
+    fn intent_candidate_matrix() {
+        use asap_types::pre_asap::agg_intent::{MathFunc, TimeFunc};
+        use AggIntent as A;
+        use ExactKind as E;
+        let accumulator = |kinds: Vec<E>| ComputationCandidate::ExactAccumulator(kinds);
+        let exact_count = A::Count {
+            accuracy: AccuracyTarget::exact(),
+        };
+        let mut matrix: Vec<(A, ComputationChoices)> = [
+            (A::Min { col: None }, vec![E::Min]),
+            (A::Max { col: None }, vec![E::Max]),
+            (A::IRate, vec![E::IRate]),
+            (A::Increase, vec![E::Increase]),
+            (A::Sum { col: None }, vec![E::Sum]),
+            (A::Rate, vec![E::Rate]),
+            (A::Avg { col: None }, vec![E::Sum, E::Count]),
+        ]
+        .into_iter()
+        .map(|(intent, kinds)| {
+            (
+                intent,
+                ComputationChoices {
+                    candidates: vec![accumulator(kinds)],
+                    pruned: vec![],
+                },
+            )
+        })
+        .collect();
+        // An exact count prunes its summaries for requiring an exact answer.
+        matrix.push((
+            exact_count.clone(),
+            ComputationChoices {
+                candidates: vec![accumulator(vec![E::Count])],
+                pruned: summary_candidates(&exact_count)
+                    .iter()
+                    .map(|a| {
+                        (
+                            ComputationCandidate::Summary(a.clone()),
+                            PruneReason::RequiresExact,
+                        )
+                    })
+                    .collect(),
+            },
+        ));
+        let exact_only = [
+            A::PearsonCorr { left: 0, right: 1 },
+            A::Extension {
+                ext_kind: "frequency".into(),
+                payload: serde_json::json!({ "item": "checkout" }),
+            },
+            A::HistogramQuantile { q: 0.99, le: 0 },
+            A::Changes,
+            A::Delta,
+            A::IDelta,
+            A::Deriv,
+            A::Resets,
+            A::PredictLinear { seconds: 60.0 },
+            A::DoubleExpSmoothing {
+                smoothing: 0.5,
+                trend: 0.5,
+            },
+            A::HistogramCount,
+            A::HistogramSum,
+            A::HistogramAvg,
+            A::HistogramStdDev,
+            A::HistogramStdVar,
+            A::HistogramFraction {
+                lower: 0.0,
+                upper: 1.0,
+            },
+            A::Math(MathFunc::Abs),
+            A::TimeFn(TimeFunc::Hour),
+            A::Absent,
+            A::AbsentOverTime,
+            A::PresentOverTime,
+            A::Group,
+            A::CountValues { label: "v".into() },
+            A::LastOverTime,
+            A::FirstOverTime,
+            A::MadOverTime,
+            A::TsOfMinOverTime,
+            A::TsOfMaxOverTime,
+            A::TsOfFirstOverTime,
+            A::TsOfLastOverTime,
+        ];
+        matrix.extend(exact_only.into_iter().map(|intent| {
+            (
+                intent,
+                ComputationChoices {
+                    candidates: vec![ComputationCandidate::Exact],
+                    pruned: vec![],
+                },
+            )
+        }));
+        for (intent, expected) in &matrix {
+            assert_eq!(
+                &computation_candidates_for_intent(intent).unwrap(),
+                expected,
+                "{intent:?}"
+            );
+        }
+        // Correlation never gets a single-input summary.
+        assert!(summary_candidates(&A::PearsonCorr { left: 0, right: 1 }).is_empty());
+    }
+
+    /// `avg_over_time` divides with a finite-division guard; a grouped `avg` does not.
+    #[test]
+    fn temporal_average_divides_with_a_finite_division_guard() {
+        let division_guard = |query: &str| {
+            let root = inventory_root(query);
+            let divisions: Vec<bool> = OperatorNode::reachable(&root)
+                .iter()
+                .filter_map(|node| match node.non_asap() {
+                    Some(NonASAPOp::BinaryOp { operator, .. })
+                        if operator.kind == BinaryOpKind::Arithmetic(ArithmeticOpKind::Div) =>
+                    {
+                        Some(operator.checked_finite_division)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let [guarded] = divisions[..] else {
+                panic!("{query}: one sum / count division: {root:#?}")
+            };
+            guarded
+        };
+        assert!(division_guard("avg_over_time(a[5m])"));
+        assert!(!division_guard("avg by (job) (m)"));
+    }
+
+    /// The candidates of `query` lowered at `accuracy`, over rows without the
+    /// series-identity column (open PromQL schemas): over identity-carrying
+    /// (closed) rows a grouped top-k gets no whole-expression heap.
+    fn inventory_at(query: &str, accuracy: AccuracyTarget) -> PerComputationCandidates<usize> {
+        let root = crate::test_support::lower_promql(query, accuracy);
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap()
+    }
+
+    fn open_inventory(query: &str) -> PerComputationCandidates<usize> {
+        inventory_at(
+            query,
+            AccuracyTarget::max_error(0.01).failure_probability(0.001),
+        )
+    }
+
+    /// The estimate and state of the top-k's fused whole-expression heap of
+    /// `algorithm`.
+    fn fused_heap(
+        inventory: &PerComputationCandidates<usize>,
+        algorithm: SketchAlgorithm,
+    ) -> (SketchStatistic, Rc<OperatorNode>) {
+        let topk = topk_target(inventory);
+        let own = inventory.targets[topk].choices.candidates.len();
+        let (_, root) = composed_with(inventory, topk)
+            .into_iter()
+            .skip(own)
+            .find(|(candidate, _)| *candidate == ComputationCandidate::Summary(algorithm.clone()))
+            .unwrap_or_else(|| panic!("a fused {algorithm:?} candidate"));
+        let [state] = &heap_states(&root)[..] else {
+            panic!("one heap: {root:#?}")
+        };
+        let estimate = OperatorNode::reachable(&root)
+            .into_iter()
+            .find_map(|node| match node.asap() {
+                Some(ASAPOp::SummaryEstimate {
+                    summary_input,
+                    query,
+                }) if Rc::ptr_eq(summary_input, state) => Some(query.clone()),
+                _ => None,
+            })
+            .expect("the heap's estimate");
+        (estimate, state.clone())
+    }
+
+    fn heap_update(state: &OperatorNode) -> &SummaryUpdate {
+        match state.asap() {
+            Some(ASAPOp::SummaryAgg { input, .. }) => input,
+            _ => unreachable!(),
+        }
+    }
+
+    /// A top-k over a `count` fuses into one global unit-weight heap over the raw rows, ranking the label.
+    #[test]
+    fn count_ranked_topk_fuses_to_one_global_heap_sketch() {
+        let inventory = open_inventory("topk(10, count by (service) (m))");
+        let topk = topk_target(&inventory);
+        let fused = inventory.targets[topk]
+            .fused
+            .as_ref()
+            .expect("a fused heap");
+        assert!(fused
+            .candidates
+            .contains(&ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap)));
+        let (estimate, state) = fused_heap(&inventory, SketchAlgorithm::CmsWithHeap);
+        assert_eq!(estimate, SketchStatistic::TopK { k: 10 });
+        let update = heap_update(&state);
+        assert_eq!(
+            update.item,
+            Some(SummaryInputExpr::Column(ColumnRef::Named("service".into())))
+        );
+        assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
+        assert_eq!(
+            update.weight_domain,
+            WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::UnitCount,
+            }
+        );
+        let Some(ASAPOp::SummaryAgg { child, .. }) = state.asap() else {
+            unreachable!()
+        };
+        assert!(!child.contains_asap());
+    }
+
+    /// The ranked item over several group keys is their tuple, in the lowered (name-sorted) key order.
+    #[test]
+    fn multidimensional_ranked_item_is_a_structured_tuple() {
+        let inventory = open_inventory("topk(10, count by (service, region) (m))");
+        let (_, state) = fused_heap(&inventory, SketchAlgorithm::CmsWithHeap);
+        let column = |name: &str| SummaryInputExpr::Column(ColumnRef::Named(name.into()));
+        assert_eq!(
+            heap_update(&state).item,
+            Some(SummaryInputExpr::Tuple(vec![
+                column("region"),
+                column("service")
+            ]))
+        );
+    }
+
+    /// The top-k's own partition keys partition the heap and are left out of the ranked tuple.
+    #[test]
+    fn subpopulation_columns_are_not_part_of_the_ranked_item_tuple() {
+        let inventory =
+            open_inventory("topk by (region) (10, count by (service, method, region) (m))");
+        let (_, state) = fused_heap(&inventory, SketchAlgorithm::CmsWithHeap);
+        let column = |name: &str| SummaryInputExpr::Column(ColumnRef::Named(name.into()));
+        assert_eq!(
+            heap_update(&state).item,
+            Some(SummaryInputExpr::Tuple(vec![
+                column("method"),
+                column("service")
+            ]))
+        );
+        let Some(ASAPOp::SummaryAgg {
+            child, reduction, ..
+        }) = state.asap()
+        else {
+            unreachable!()
+        };
+        let keys: Vec<_> = reduction
+            .group_keys()
+            .expect("partitioned by region")
+            .keys()
+            .iter()
+            .map(|&k| child.schema.fields[k].name.as_str())
+            .collect();
+        assert_eq!(keys, ["region"]);
+    }
+
+    /// A per-series top-k ranks series identity (column, else label set) weighted by sample value.
+    #[test]
+    fn temporal_per_entity_topk_uses_series_identity_and_sample_value() {
+        let query = "topk by (service) (5, sum_over_time(m[1m]))";
+        let with_identity = inventory(query);
+        let without_identity = open_inventory(query);
+        for (inventory, item) in [
+            (
+                with_identity,
+                SummaryInputExpr::Column(ColumnRef::Named(
+                    asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
+                )),
+            ),
+            (
+                without_identity,
+                SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet {
+                    excluding: vec![ColumnRef::Named("service".into())],
+                }),
+            ),
+        ] {
+            let (_, state) = fused_heap(&inventory, SketchAlgorithm::CountSketchWithHeap);
+            let update = heap_update(&state);
+            assert_eq!(update.item, Some(item));
+            assert_eq!(
+                update.weight,
+                SummaryInputExpr::Column(ColumnRef::SampleValue)
+            );
+        }
+    }
+
+    /// A KLL quantile over an exact sum accumulator composes per node, the sum adding no error.
+    #[test]
+    fn nested_quantile_over_an_exact_sum_composes_per_node() {
+        let sum = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
+        let kll = ComputationCandidate::Summary(SketchAlgorithm::Kll);
+        let inventory = inventory_at(
+            "quantile(0.9, sum by (job) (m))",
+            AccuracyTarget::max_error(0.01).failure_probability(0.01),
+        );
+        let choice: Vec<usize> = inventory
+            .targets
+            .iter()
+            .map(|target| {
+                let candidates = &target.choices.candidates;
+                if candidates.contains(&kll) {
+                    position_of(candidates, kll.clone())
+                } else {
+                    position_of(candidates, sum.clone())
+                }
+            })
+            .collect();
+        let composed = compose_logical_candidate(&inventory, &choice).unwrap();
+        let QueryRoot::Operator(root) = &composed[0].1 else {
+            panic!("operator root")
+        };
+        let estimate = OperatorNode::reachable(root)
+            .into_iter()
+            .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. })))
+            .expect("a quantile estimate");
+        let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
+            unreachable!()
+        };
+        let Some(ASAPOp::SummaryAgg { child, family, .. }) = summary_input.asap() else {
+            panic!("a KLL state: {summary_input:#?}")
+        };
+        let FieldDataType::Sketch(kind, _) = family else {
+            panic!("a sketch: {family:?}")
+        };
+        assert_eq!(kind.algorithm(), &SketchAlgorithm::Kll);
+        assert_eq!(
+            kind.params(),
+            &SketchParams::Kll {
+                k: 269,
+                failure_probability: None
+            }
+        );
+        let Some(ASAPOp::FinalizeExactAccumulator { child: sum_state }) = child.asap() else {
+            panic!("the finalized sum: {child:#?}")
+        };
+        let Some(ASAPOp::SummaryAgg {
+            family: sum_family,
+            child: leaf,
+            ..
+        }) = sum_state.asap()
+        else {
+            panic!("the sum's accumulator: {sum_state:#?}")
+        };
+        assert_eq!(
+            sum_family,
+            &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        );
+        assert!(!leaf.contains_asap());
+        assert!(child
+            .guarantee
+            .as_ref()
+            .is_some_and(AccuracyGuarantee::is_exact));
+        let guarantee = root.guarantee.as_ref().expect("a rank bound");
+        assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Rank);
+        assert_eq!(
+            guarantee.spec.error.evaluate(),
+            Some(crate::accuracy::estimators::kll::kll_rank_error_99(269))
+        );
     }
 }

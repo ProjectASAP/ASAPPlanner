@@ -15,8 +15,8 @@
 //!
 //! [`sketch::GroupingStrategy`] is a second, orthogonal axis: how many
 //! physical instances of a summary exist across a grouped aggregate's `by`
-//! subpopulations (per-subpopulation vs. one shared Hydra instance — see
-//! `asap_aware_mapping::grouping`). It rides on `ASAPOp::SummaryAgg` and on
+//! subpopulations (per-subpopulation vs. one shared Hydra instance; the
+//! planner does not offer Hydra yet, #703). It rides on `ASAPOp::SummaryAgg` and on
 //! sketch-valued edge types.
 //!
 //! The rest: what each family can do ([`family_capability`]), accuracy

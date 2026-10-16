@@ -425,9 +425,9 @@ pub enum StatModelParams {
 // family/kind answers an intent — any family could in principle grow its own
 // per-subpopulation vs. shared-multi-subpopulation variant, so it is a
 // second, independent axis, not a member of any one family's own kind
-// vocabulary. See `asap_aware_mapping::grouping`'s module docs for where this
-// axis actually plugs into the post-ASAP IR and the legality rules gating
-// when `SharedMultiSubpopulation` is offered as a candidate at all.
+// vocabulary. It is legal only for a grouped aggregate (a non-empty `by`)
+// whose family has a Hydra variant ([`hydra_kind_for`]); the planner does
+// not offer it as a candidate yet (#703).
 
 /// A shared-multi-subpopulation summary family — one physical structure
 /// serving every subpopulation of a grouped aggregate instead of one
@@ -513,8 +513,7 @@ pub enum HydraParams {
         /// Sizing knob for the one physical structure shared across every
         /// subpopulation. Correctly sizing this against an estimated
         /// subpopulation cardinality is a cost-model concern — out of scope
-        /// for the legality axis this type lives on (see
-        /// `asap_aware_mapping::grouping`'s module docs) — so this is
+        /// for the legality axis this type lives on — so this is
         /// deliberately not derived from any cardinality estimate here.
         shared_buckets: u32,
     },
@@ -570,9 +569,7 @@ pub fn hydra_kind_for(algorithm: &SketchAlgorithm) -> Option<HydraKind> {
 /// `HydraParams` fields. `None` when `per_subpopulation_params` doesn't
 /// belong to the [`SketchAlgorithm`] `kind` wraps: a caller bug, since
 /// [`hydra_kind_for`] and the algorithm a `SketchParams` came from must
-/// agree; callers that got both from the same already-ranked
-/// `Realization` (as `asap_aware_mapping::grouping` does) cannot hit
-/// this.
+/// agree.
 ///
 /// This function is generic over which inner sketch type `kind` wraps
 /// precisely because [`SketchParams`] already is: it destructures whichever
@@ -761,8 +758,8 @@ pub enum SketchStatistic {
     /// `value: Some(v)` is a per-item point lookup (e.g.
     /// `count(cms_metric{item="checkout"})` — `key` is `item`, `value` is
     /// `"checkout"`). `value` is carried here rather than resolved by the
-    /// `SummaryExecutor` from a `Filter` predicate because `evaluation`'s
-    /// trait signature has no dag access — see `CostModel::evaluation_extension`.
+    /// `SummaryExecutor` from a `Filter` predicate because a summary
+    /// evaluation is read without access to the rest of the DAG.
     PointCount {
         key: ColumnRef,
         value: Option<String>,
