@@ -86,7 +86,8 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
                                   "average_memory_bytes": 0.0, "peak_memory_bytes": 16481088,
                                   "disk_bytes": 192000000, "peak_cpu_cores": 2,
                                   "latency_per_query": [{ "compaction_ms": 0.0, "query_ms": 33.2 }] },
-                       "per_node": { "<node id>": { "cost_per_second": 2.3, "multiplier": 1, "detail": "..." } } } },
+                       "per_node": { "<node id>": { "cost_per_second": 2.3, "multiplier": 1, "detail": "...",
+                                                     "price_source": "analytical" } } } },
     "accepted": { "P1": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
                            "summary": "metric not set; accepted rank (Kll)" }] },
     "selected": "P1",
@@ -122,8 +123,9 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
   each pruned candidate of the target (`pruned`) and of its fused
   computation (`fused_pruned`) with the reason. The page does not show
   either section yet.
-- A node's `per_node` entry holds only `cost_per_second`, `multiplier` and
-  `detail`.
+- A node's `per_node` entry holds `cost_per_second`, `multiplier`,
+  `detail` and `price_source` (`measured` when `--measured-operation-costs`
+  priced it, else `analytical`).
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
 

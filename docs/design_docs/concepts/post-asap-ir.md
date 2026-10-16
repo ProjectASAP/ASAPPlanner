@@ -148,7 +148,7 @@ The pass then validates every edge (rows or exact-accumulator state into a
 `SummaryAgg`, state into an evaluation, a timed `MaintainPopulation` under
 an `EvaluatePopulation`, no ingestion work reading a query-time value) and rejects a
 node reached from two consumers that need different timings;
-`split_shared_by_phase` copies such a sub-DAG for one side before the
+`split_shared_by_timing` copies such a sub-DAG for one side before the
 assignment is applied. How long a materialized output is kept (retention) is
 also Stage 2's decision and is not in the assignment.
 

@@ -15,6 +15,7 @@ tool on first use.
 | Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
 | --- | --- | --- |
 | `stage_pipeline --promql "<query>" --out plan.json` | One or more `--promql` / `--sql` queries, or `--example <name>` | Plans the workload through Stages 0–3 and writes the stage document the [Stage Viewer](stage-viewer.md) shows |
+| `convert_rqe_atomic_costs <rqe_atomic_costs.json> <out.json>` | sketch-bench's per-operation cost table | Writes the measured table `stage_pipeline --measured-operation-costs` reads; skipped rows are listed on stderr |
 | `show_logical_dag --sample-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints each query's logical DAG (Pre-ASAP IR) |
 | `analyze_corpora --corpora --sample-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
