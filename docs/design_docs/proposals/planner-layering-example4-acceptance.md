@@ -53,9 +53,13 @@ separate option.
 ASAP-aware optimization enumerates `NotMaterialized`, `MatAtIngestion` and
 `MatAtQuery` (state reused within one evaluation) for every summary build.
 B1 and B2 exist. B3 (panes built at query time and kept across
-evaluations) needs query-time state kept across evaluations, which is not
-on main yet, and Pattern A's shared EH needs window segments shared across
-queries (#628, #634), so A1–A3 do not exist yet.
+evaluations) is offered when the deployment declares
+`query_time_results_retained` in its `deployment_capabilities`: Stage 2 then
+adds `MatAtQueryKeptAcrossEvaluations` for a tumbling-pane chain that builds
+one new pane per evaluation. Pattern A's shared EH needs window segments shared across
+queries (#628, #634), so A1–A3 do not exist yet. B3's
+4 kept panes plus the newest cost 8,884.53 per second under cost model 1,
+between B2 (2.183) and B1 (13,326.53).
 
 ## Invariants and tests
 
@@ -93,12 +97,12 @@ it.
 
 | Invariant | Test | Status |
 |---|---|---|
-| The tumbling KLL candidate yields exactly B1, B2, B3 | `stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options` | ignored: B3 (query-time state kept across evaluations) |
+| The tumbling KLL candidate yields exactly B1, B2, B3 | `stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options` | passes (with `query_time_results_retained`) |
 | Until B3: the tumbling KLL candidate yields B1 and B2, both priced within the 200 ms latency bound (implementer test) | `stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2` | passes |
 | B1 builds at ingestion time; its merge and estimate run at query time | `stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time` | passes |
-| B3 runs nothing at ingestion time | `stage2_physical_asap_optimization_b_b3_keeps_query_time_windows` | ignored: B3 (query-time state kept across evaluations) |
+| B3 runs nothing at ingestion time | `stage2_physical_asap_optimization_b_b3_keeps_query_time_windows` | passes |
 | The sliding KLL yields exactly ingestion time and query time, kept | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (no PR yet) |
-| B2 costs at least B1 and B3 | `stage3_plan_selection_b_rebuilding_every_window_costs_most` | ignored: B3 (query-time state kept across evaluations) |
+| B2 costs at least B1 and B3 | `stage3_plan_selection_b_rebuilding_every_window_costs_most` | ignored: cost model 1 contradicts it. With query-time results retained, B3 keeps 4 panes for 8,884.5 cost/s and B1 6 for 13,326.5, while B2 rebuilds them for 2.183. Needs a rewrite relative to the cost model |
 | With the built-in models, B1 is the cheapest of the three | `stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows` | ignored: cost model 1 contradicts it. B1 keeps 6 panes of 1M per-series KLLs (about 107 GB) for 13,326.5 cost/s; B2 rebuilds them for 2.183, and the whole-window KLL (P2, 2.100) is selected. Needs B3 and a rewrite relative to the cost model |
 | Each cost model chooses what its deployment pays for: cost model 1 the whole-window KLL; cost model 2 the exact plan (smallest peak memory); cost model 3 with lowest latency B1 in 256 GB, and the whole-window KLL in 64 GB, where B1 is invalid on peak memory | `stage3_plan_selection_b_cost_models_choose_differently` | passes |
 | Under cost model 3, the Pareto front over peak memory, disk and latency is {exact, whole-window KLL, B1} and B1 is selected; B2 is dominated by the whole-window KLL; least memory selects the exact plan | `stage3_plan_selection_b_pareto_front_over_memory_disk_and_latency` | passes |
@@ -155,7 +159,9 @@ it.
 
 No `--example planner-layering-4`. Pattern A and B run as
 `planner-layering-3a` and `3b`, and Pattern B's materialization choices
-(B1, B2) appear in the `3b` document; `--cost-model` selects cost model 1, 2
+(B1, B2, and B3 with
+`--deployment-capabilities '{"query_time_results_retained": true}'`) appear in
+the `3b` document; `--cost-model` selects cost model 1, 2
 or 3 (with `--cluster-memory-bytes`, `--cluster-disk-bytes` and
 `--cluster-objective` for cost model 3). A useful id still needs:
 

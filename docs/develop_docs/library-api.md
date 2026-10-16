@@ -170,7 +170,8 @@ asap_aware_mapping::run_stage1_to_stage3<Id>(
 
 | Input or output | Meaning |
 | --- | --- |
-| `PlanningModels::builtin()` | Built-in accuracy model and no extra evidence. `with_plan_selection(&settings)` sets the deployment's `PlanSelectionSettings` |
+| `PlanningModels::builtin()` | Built-in accuracy model and no extra evidence. `with_plan_selection(&settings)` sets the deployment's `PlanSelectionSettings`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
+| `DeploymentCapabilities` (`asap_aware_mapping::deployment_capabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is invalid, and stored data is refused with `SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling panes) |
 | `PlanSelectionSettings` (`asap_aware_mapping::stage3_plan_selection`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`) and `non_repeating_query_horizon_seconds` (default 3,600) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |

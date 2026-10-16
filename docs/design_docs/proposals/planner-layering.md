@@ -781,8 +781,11 @@ The planner implements a subset of these options today. Stage 2 enumerates
 materialization only for summary builds (`SummaryAgg` and `PaneChain`); each
 gets `NotMaterialized`, `MatAtIngestion(Memory)` when it is eligible to run
 at ingestion time, and `MatAtQuery(Memory)` when two or more queries read
-it. A `MatAtQuery` state is reused within one evaluation only, and nothing
-is placed on disk yet.
+it. A `MatAtQuery` state is reused within one evaluation only. When the
+deployment's capabilities declare `query_time_results_retained`, a
+tumbling-pane chain that builds exactly one new pane per evaluation also gets
+`MatAtQueryKeptAcrossEvaluations(Memory)`: the panes built at query time are
+kept for the next evaluations. Nothing is placed on disk yet.
 
 #### Physical operator implementation
 
