@@ -28,7 +28,7 @@ aggregate intent and AccuracyTarget
 
 For a single summary, the child is exact and propagation leaves the local
 summary guarantee as the final guarantee. For nested summaries, child and local
-guarantees are combined. `AccuracyTarget` is the requirement; `ResultGuarantee`
+guarantees are combined. `AccuracyTarget` is the requirement; `AccuracyGuarantee`
 is the evidence produced for one concrete candidate.
 
 The design document's
@@ -44,7 +44,7 @@ The main implementation locations are:
 | Accuracy model and built-in propagation | `asap_aware_mapping::accuracy` |
 | Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
 | Parameter sizing hooks | `asap_aware_mapping::cost_model` |
-| Guarantee and rejection export | `asap_types::dag_export` and the `dag_export` devtool |
+| Guarantee and rejection export | The `stage_pipeline` devtool's document (`crates/devtools/src/bin/stage_pipeline.rs`) |
 
 Read the sections below when changing one of those contracts.
 
@@ -55,26 +55,27 @@ Accuracy reasoning and allocation are separate from cost modeling:
 ```rust
 trait AccuracyModel {
     fn local_guarantee(/* family, query, parameters */)
-        -> Option<ResultGuarantee>;
+        -> Option<AccuracyGuarantee>;
 
     fn propagate(
         &self,
         op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
+        inputs: &[AccuracyGuarantee],
+        local: Option<&AccuracyGuarantee>,
         stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError>;
+    ) -> Result<AccuracyGuarantee, AccuracyError>;
 
     fn satisfies(
         &self,
-        guarantee: &ResultGuarantee,
+        guarantee: &AccuracyGuarantee,
         target: &AccuracyTarget,
     ) -> bool;
 }
 ```
 
-`AccuracyBudgetAllocator` proposes finite parameter allocations for nested
-approximate layers. Every candidate must then be resized, propagated, and
+`accuracy::budget::per_input_target` splits a target equally among the
+approximate inputs of one composition (ε / n for an additive metric,
+(1 + ε)^(1/n) − 1 for a relative one, δ / n). Every candidate must then be resized, propagated, and
 checked before being treated as satisfying the target. This is distinct from
 candidate visibility: direct DDSketch ratios lacking domain evidence remain in
 `CandidateLogicalASAPDAGs` with `guarantee: None` and can appear in `cost_sorted`, but automatic
@@ -184,10 +185,17 @@ delta = unknown
 ```
 
 Sizing inverts the magnitude. HLL's current parameter model contains precision
-only; it does not encode a confidence-level budget. HLL may therefore satisfy
-`Epsilon` but cannot satisfy `EpsilonDelta`. Supporting a confidence target
-would require an explicitly identified estimator contract and corresponding
-parameters whose semantics prove the requested failure probability.
+only; it does not encode a confidence-level budget. Generic HLL may therefore
+satisfy a target with only `error` set, but not one that also sets
+`failure_probability`.
+
+Classic HLL (its linear-counting branch) has an estimator-specific confidence
+bound (`accuracy/estimators/hll.rs`). Its precision is sized from (ε, δ), and
+its failure probability stays symbolic,
+`classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`, until
+plan selection binds it with the source's
+`DataWorkload.sources[source].max_distinct_per_evaluation`. A missing bound
+leaves the target unmet.
 
 ### KMV and Theta
 
@@ -280,8 +288,10 @@ accuracy-targeted candidate. Never copy the inner guarantee onto Hydra alone.
 
 ## Adding or changing an accuracy target
 
-`Exact`, `Epsilon`, and `EpsilonDelta` are the current vocabulary, not a closed
-set. If a new summary has a final-result requirement they cannot express:
+`AccuracyTarget`'s fields (`error`, an optional `failure_probability`, an
+optional `accuracy_metric` and an `accuracy_scope`; built with `exact()` or
+`max_error(ε)` plus `.failure_probability(δ)`, `.accuracy_metric(m)` and
+`.accuracy_scope(s)`) are the current vocabulary, not a closed set. If a new summary has a final-result requirement they cannot express:
 
 1. Define the target's result semantics and compatible `AccuracyMetric`.
 2. Define the parameters and evidence needed to prove satisfaction.

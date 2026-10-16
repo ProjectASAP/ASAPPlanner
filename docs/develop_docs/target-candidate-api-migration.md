@@ -25,7 +25,7 @@ counterpart) are prerequisites, not additional changes here.
 
 The workflow remains one selection call per workload followed by one assembly
 call per query root. The summary-maintenance lifecycle API named above was later
-removed; Stage 2 materialization (#509) will own maintenance decisions.
+removed; Stage 2 materialization (#509) owns maintenance decisions.
 
 ## Later: unified operator IR (operator flattening)
 

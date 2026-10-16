@@ -12,8 +12,8 @@ is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
 collapsed into the generic CPU/byte resource container.
 
 The physical-plan adapter accepts an optional `PhysicalHandoffProfile` in the
-immutable `PhysicalEvidenceSnapshot`. `dag_export --planner-cost-json` accepts
-the same profile in a top-level `boundaries` field. With no profile, these
+immutable `PhysicalEvidenceSnapshot`. No devtool reads the profile; a caller
+supplies it through the library. With no profile, these
 dimensions remain unestimated and the existing resource objective is preserved.
 
 The profile's `plans` list binds handoffs to complete physical alternatives.
@@ -87,7 +87,7 @@ traffic is inferred from logical edges, operator buffers, or scan bytes.
 
 Unknown endpoints, mismatched payloads, absent node evidence, duplicate IDs,
 stale evidence, invalid coefficients, and integer overflow return typed errors;
-ranking/export report the comparison as unavailable. This extends the physical
+ranking reports the comparison as unavailable. This extends the physical
 plan adapter; summary-maintenance costing for Stage 2 materialization (#509) is
 a separate follow-up integration point.
 
@@ -95,6 +95,4 @@ Verification:
 
 ```sh
 cargo test -p asap-aware-mapping --test physical_handoff_cost
-cargo test -p asap-devtools --bin dag_export handoff_bytes_export_and_change_plan_selection
-python3 -m unittest discover -s tools/dag-viewer -p 'test_render.py'
 ```
