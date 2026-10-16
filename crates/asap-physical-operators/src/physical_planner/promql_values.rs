@@ -221,6 +221,9 @@ pub fn exact_state_schema(family: SummaryFamilyType) -> Result<SchemaRef, Error>
 }
 
 /// Retain exact evaluation semantics before any deployment state is opened.
+/// A counter (`Rate`, `Increase`) is evaluated over the `lookback_ms`
+/// window ending at the evaluation time: this entry point takes no
+/// offset, so its counter window has offset 0.
 pub fn compile_exact_evaluation(
     family: SummaryFamilyType,
     lookback_ms: u64,

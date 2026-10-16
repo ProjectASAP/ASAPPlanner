@@ -15,7 +15,7 @@
 //! itself, not just in prose: it holds pure, sketch-object-agnostic *math*
 //! (given a sketch's real counter values, compute a tighter posterior
 //! error bound) that only makes sense to invoke *after* a real sketch has
-//! ingested data and is being read out — a downstream runtime's job, not
+//! ingested data and is being evaluated — a downstream runtime's job, not
 //! this crate's. Nothing in `asap-types` or `asap-aware-mapping` calls
 //! into this module today; it is a library waiting for a runtime that
 //! doesn't exist yet in this workspace (see [`error_estimation`]'s own

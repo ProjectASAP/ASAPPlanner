@@ -245,11 +245,12 @@ impl AccumulatorUpdater for CmsAccumulatorUpdater {
 // ---------------------------------------------------------------------------
 
 /// Keyed frequency updater backed by sketchlib's per-row-seeded weighted
-/// frequency kernel, the state the DAG's keyed summary build produces: plain
-/// CountSketch (no candidate heap), Count-Min with a top-k heap, or
-/// CountSketch with a top-k heap. Each row hashes with its own seed, so rows
-/// stay independent at any depth. Each label value of the key is one `Utf8`
-/// identity, as in the DAG's keyed build.
+/// frequency kernel: plain CountSketch (no candidate heap), Count-Min with a
+/// top-k heap, or CountSketch with a top-k heap. For the two heap families
+/// this is the state the DAG's keyed summary build produces; plain
+/// CountSketch uses the same kernel without a heap. Each row hashes with
+/// its own seed, so rows stay independent at any depth. Each label value of
+/// the key is one `Utf8` identity, as in the DAG's keyed build.
 ///
 /// Each raw Prometheus sample contributes its `value` as a Float64 weight,
 /// kept exactly (no rounding). CountSketch accepts signed weights; Count-Min

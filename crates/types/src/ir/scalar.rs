@@ -358,7 +358,7 @@ impl ScalarExpr {
     /// Infer the `(DataType, nullable)` this expression produces against the
     /// input schema its owner evaluates it in. Unregistered functions are
     /// rejected. A reference to a field carrying summary state is an error:
-    /// state must be read out before an expression can use it.
+    /// state must be evaluated before an expression can use it.
     pub fn scalar_type(&self, schema: &Schema) -> Result<(DataType, bool), SchemaDerivationError> {
         Ok(match self {
             ScalarExpr::CurrentTimestamp => (DataType::Timestamp, false),

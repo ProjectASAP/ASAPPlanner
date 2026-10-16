@@ -654,7 +654,7 @@ impl Default for GroupingStrategy {
     }
 }
 
-// ── Sketch read-out queries ───────────────────────────────────────────────────
+// ── Sketch evaluation queries ─────────────────────────────────────────────────
 
 /// One summary-state update. `item` identifies a keyed item when the family
 /// is keyed; `weight` is the observation/update expression applied to state.

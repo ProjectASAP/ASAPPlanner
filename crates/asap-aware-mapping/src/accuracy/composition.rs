@@ -263,7 +263,7 @@ impl DefaultAccuracyModel {
                 operator: op.clone(),
                 input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
                 local_metric: None,
-                reason: "exact average requires AbsoluteValue input guarantees".into(),
+                reason: "exact average requires absolute-error input guarantees".into(),
             });
         }
         let mut provenance = Vec::new();
@@ -315,7 +315,7 @@ impl DefaultAccuracyModel {
                 operator: op.clone(),
                 input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
                 local_metric: None,
-                reason: "exact max/min requires AbsoluteValue input guarantees".into(),
+                reason: "exact max/min requires absolute-error input guarantees".into(),
             });
         }
         let mut provenance = Vec::new();
@@ -869,12 +869,12 @@ pub(super) fn propagate(
             }
             if inputs.len() != 1 || !same_metric(AccuracyMetric::ABSOLUTE) {
                 return Err(unsupported(
-                    "Lipschitz rule is registered for exactly one AbsoluteValue input".into(),
+                    "Lipschitz rule is registered for exactly one absolute-error input".into(),
                 ));
             }
             if local.is_some_and(|g| g.spec.accuracy_metric != AccuracyMetric::ABSOLUTE) {
                 return Err(unsupported(
-                    "Lipschitz rule needs an AbsoluteValue local guarantee".into(),
+                    "Lipschitz rule needs an absolute-error local guarantee".into(),
                 ));
             }
             Ok(DefaultAccuracyModel::lipschitz(

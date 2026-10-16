@@ -151,9 +151,9 @@ fn reads_ddsketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
 }
 
 /// A SQL fold over the groups of an approximate subquery counts rows the
-/// series count of its source does not bound, so
-/// it leaves its own row-count statistic, which plan selection does not
-/// bind: the target stays unmet.
+/// series count of its source does not bound, so its δ names its own
+/// row-count statistic (`group_row_count`), not the source's
+/// `input_row_count`.
 #[tokio::test]
 async fn a_sql_fold_over_estimates_leaves_its_row_count_unbound() {
     let catalog = SqlCatalog::new().with_table(
