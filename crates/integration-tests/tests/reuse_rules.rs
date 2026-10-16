@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use asap_aware_mapping::pass::Pass2Candidate;
 use asap_aware_mapping::stage3_plan_selection::select_plan;
 use asap_aware_mapping::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
+use asap_devtools::candidate_labels::pass2_label;
 use asap_devtools::planner_layering_examples::shared_data_workload;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_physical_operators::physical_planner::{compile, promql_rows, InputContract};
@@ -250,10 +252,64 @@ fn materialize_shared(run: &Stage1ToStage3Run<usize>) -> Vec<String> {
         .find(|c| c.id == selection.selected)
         .unwrap()
         .from_logical;
-    run.stage1_pass2
+    reused(run, from)
+}
+
+/// What the logical candidate `id` of `run` answers from another
+/// computation: one devtools label per rollup or exact top-k reuse
+/// candidate it applies (e.g. "Sum acc for Q1 rolled up from Q2"); empty
+/// when it reuses nothing.
+fn reused(run: &Stage1ToStage3Run<usize>, id: &str) -> Vec<String> {
+    let logical = &run.stage1_logical_asap_optimization;
+    let Some(pass2) = logical
         .iter()
-        .find(|p| &p.id == from)
-        .map_or_else(Vec::new, |p| p.reused.clone())
+        .find(|c| c.id == id)
+        .and_then(|c| c.pass2.as_ref())
+    else {
+        return Vec::new();
+    };
+    let pass1_roots = logical[pass2.from_pass1_position]
+        .roots
+        .as_deref()
+        .unwrap_or_default();
+    let roots = logical
+        .iter()
+        .find(|c| c.id == id)
+        .and_then(|c| c.roots.as_deref().ok())
+        .unwrap_or_default();
+    // A Pass 2 candidate with only one reuse candidate, labelled alone.
+    let only = |rollup_candidates, topk_reuse_candidates| Pass2Candidate {
+        shared_builds: Vec::new(),
+        pane_candidates: Vec::new(),
+        rollup_candidates,
+        topk_reuse_candidates,
+        sharing_candidates: Vec::new(),
+        ..pass2.clone()
+    };
+    pass2
+        .rollup_candidates
+        .iter()
+        .map(|c| only(vec![c.clone()], Vec::new()))
+        .chain(
+            pass2
+                .topk_reuse_candidates
+                .iter()
+                .map(|c| only(Vec::new(), vec![c.clone()])),
+        )
+        .map(|p| {
+            pass2_label(&p, pass1_roots, roots)
+                .trim_start_matches(" · ")
+                .to_string()
+        })
+        .collect()
+}
+
+/// Whether some Pass 2 candidate of `run` reuses a computation.
+fn any_reuse(run: &Stage1ToStage3Run<usize>) -> bool {
+    run.stage1_logical_asap_optimization
+        .iter()
+        .filter_map(|c| c.pass2.as_ref())
+        .any(|p| !p.rollup_candidates.is_empty() || !p.topk_reuse_candidates.is_empty())
 }
 
 /// The reuse candidates of `queries`, and what the selected candidate
@@ -262,10 +318,7 @@ fn materialize_shared(run: &Stage1ToStage3Run<usize>) -> Vec<String> {
 fn selected_reuse(queries: &[&str]) -> Vec<String> {
     let run = plan(queries, repeating());
     assert!(run.stage2_pruned.is_empty(), "{:?}", run.stage2_pruned);
-    assert!(
-        run.stage1_pass2.iter().any(|p| !p.reused.is_empty()),
-        "{queries:?}"
-    );
+    assert!(any_reuse(&run), "{queries:?}");
     let selected = run.selected().unwrap();
     assert!(
         selected
@@ -275,10 +328,7 @@ fn selected_reuse(queries: &[&str]) -> Vec<String> {
         "{queries:?}: {} computes its shared state once",
         selected.id
     );
-    run.stage1_pass2
-        .iter()
-        .find(|p| p.id == selected.from_logical)
-        .map_or_else(Vec::new, |p| p.reused.clone())
+    reused(&run, &selected.from_logical)
 }
 
 /// `sum by (job)` beside `sum by (job, instance)`: with the finer sums
@@ -350,20 +400,28 @@ fn nested_sum_by_the_metric_name_answers_as_the_nested_sums() {
 fn reuse_answers_alike(queries: &[&str]) {
     let run = plan(queries, repeating());
     assert!(run.stage2_pruned.is_empty(), "{:?}", run.stage2_pruned);
-    let reused: Vec<_> = run
-        .stage1_pass2
+    // `(reuse candidate id, the id of the Pass 1 candidate it derives from)`.
+    let reusing: Vec<(String, String)> = run
+        .stage1_logical_asap_optimization
         .iter()
-        .filter(|p| !p.reused.is_empty())
+        .filter(|c| !reused(&run, &c.id).is_empty())
+        .map(|c| {
+            let from = c.pass2.as_ref().unwrap().from_pass1_position;
+            (
+                c.id.clone(),
+                run.stage1_logical_asap_optimization[from].id.clone(),
+            )
+        })
         .collect();
-    assert!(!reused.is_empty(), "{queries:?}");
-    for candidate in reused {
+    assert!(!reusing.is_empty(), "{queries:?}");
+    for (id, from) in &reusing {
         for q in 0..queries.len() {
             assert_eq!(
-                execute(&physical_root(&run, &candidate.id, q)),
-                execute(&physical_root(&run, &candidate.from_logical, q)),
+                execute(&physical_root(&run, id, q)),
+                execute(&physical_root(&run, from, q)),
                 "{queries:?} Q{}: {:?}",
                 q + 1,
-                candidate.reused
+                reused(&run, id)
             );
         }
     }

@@ -1190,7 +1190,7 @@ fn rewrite(
 /// ([`composed_guarantee`]), children first; a sub-DAG shared between roots
 /// stays shared. Pass 2 calls it after re-sizing a shared summary, so each
 /// consumer's guarantee is the shared state's.
-pub(crate) fn with_composed_guarantees(
+pub(crate) fn recompose_guarantees(
     roots: &[QueryRoot],
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
     let mut memo = HashMap::new();
@@ -1419,13 +1419,15 @@ fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarante
         }
         ASAPOp::FinalizeExactAccumulator { child } => {
             let family = merged_chain(child)?.asap()?.produced_state()?;
-            (child, FamilyCapability::of(family).merge.map(|m| m.error))
+            // An exact accumulator's merged state is exact.
+            let merged = FamilyCapability::of(family).merge_inputs;
+            (child, merged.map(|_| MergedError::Exact))
         }
         _ => return None,
     };
     if !matches!(
         merged,
-        Some(MergedError::Exact | MergedError::SameAsUnionBuild)
+        Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
     ) {
         return Some(None);
     }

@@ -36,7 +36,7 @@ use crate::stage3_plan_selection::{PlanSelectionSettings, Selection, SelectionEr
 
 pub use stage1_to_stage3::{
     run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage2_and_stage3,
-    stage1_logical_asap_optimization, LogicalCandidate, Pass2Candidate, Pass2Of, PrunedCandidate,
+    stage1_logical_asap_optimization, LogicalCandidate, Pass2Candidate, PrunedCandidate,
     Stage1Candidate, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 

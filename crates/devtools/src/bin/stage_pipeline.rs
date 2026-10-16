@@ -16,7 +16,7 @@
 //   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
 //     product), each followed by its Pass 2 candidates (the
-//     identical-expression rule's, one per subset of its sharing groups,
+//     identical-expression rule's, one per subset of its sharing candidates,
 //     then the summary-capability rule's, one per choice of shared summary
 //     builds), in enumeration order. Every candidate is optimized and
 //     priced; the document shows the first `--max-displayed` (default 64)
@@ -83,7 +83,7 @@ use asap_aware_mapping::stage3_plan_selection::{
 };
 use asap_devtools::candidate_labels::candidate_labels;
 use asap_devtools::planner_layering_examples::{
-    declared, example1, example2, example2_catalog, pattern_a, pattern_b, PatternARecurrence,
+    declared, example1, example2, pattern_a, pattern_b, PatternARecurrence,
 };
 use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_planning_stages_over, PlanningStagesError,
@@ -287,18 +287,19 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     };
     let document = match (example.as_deref(), queries.is_empty()) {
         (Some(example), true) => {
-            let workload = match example {
-                "planner-layering-1" => example1(),
+            let (workload, catalog) = match example {
+                "planner-layering-1" => (example1(), SqlCatalog::new()),
                 "planner-layering-2" => example2(),
-                "planner-layering-3a" => {
-                    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed)
-                }
-                "planner-layering-3b" => pattern_b(),
+                "planner-layering-3a" => (
+                    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed),
+                    SqlCatalog::new(),
+                ),
+                "planner-layering-3b" => (pattern_b(), SqlCatalog::new()),
                 other => return Err(format!("unknown example {other}").into()),
             };
             let roots = match workload.query_workload.language {
                 QueryLanguage::PromQL => lower_promql_roots(&workload)?,
-                _ => lower_sql_roots(&workload, &example2_catalog())?,
+                _ => lower_sql_roots(&workload, &catalog)?,
             };
             let entries: Vec<_> = workload.query_workload.entries().collect();
             let data = workload.data_workload.clone().unwrap_or_default();

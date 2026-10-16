@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_aware_mapping::asap_aware_cse::{pane_sites, window_composition_variants};
+use asap_aware_mapping::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::selected_dag;
 use asap_physical_operators::physical_planner::{
@@ -87,12 +87,12 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
 /// into the panes the executor runs.
 fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let roots = [QueryRoot::Operator(Rc::clone(root))];
-    let sites = pane_sites(&roots, &[Some(PANE_MS as u64)]);
+    let sites = pane_candidates(&roots, &[Some(PANE_MS as u64)]);
     let [site] = sites.as_slice() else {
         panic!("one build to split: {sites:?}")
     };
     assert_eq!((site.pane_width_ms, site.pane_count), (PANE_MS as u64, 5));
-    let mut variants = window_composition_variants(&roots, &sites).unwrap();
+    let mut variants = window_composition_pass2_candidates(&roots, &sites).unwrap();
     let variant = variants.pop().unwrap();
     assert!(variants.is_empty());
     let QueryRoot::Operator(planned) = variant.roots.unwrap().remove(0) else {

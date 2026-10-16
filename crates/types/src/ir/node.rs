@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
-use super::summary_coverage::SummaryCoverage;
+use super::summary_coverage::{CoverageMemo, SummaryCoverage};
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::{ExecutionTiming, Materialization};
 use crate::post_asap::guarantee::AccuracyGuarantee;
@@ -112,7 +112,7 @@ impl OperatorNode {
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
         let node = Self::with_schema(operator, schema);
-        node.check_merge()?;
+        node.check_merge(&mut CoverageMemo::new())?;
         Ok(node)
     }
 
@@ -173,10 +173,11 @@ impl OperatorNode {
     }
 
     /// A `SummaryMerge` is valid only over inputs with the same definition
-    /// and disjoint selections.
-    fn check_merge(&self) -> Result<(), SchemaDerivationError> {
+    /// and disjoint selections. `memo` holds the coverage already derived
+    /// for nodes of the DAG being validated.
+    fn check_merge(&self, memo: &mut CoverageMemo) -> Result<(), SchemaDerivationError> {
         if matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. })) {
-            SummaryCoverage::derive(self)?;
+            SummaryCoverage::derive_memoized(self, memo)?;
         }
         Ok(())
     }
@@ -316,6 +317,9 @@ impl OperatorNode {
     /// names and qualifiers; all structural metadata must match derivation.
     /// `timing` may be `None`.
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
+        // Each summary state's coverage is derived once, not once per merge
+        // above it; `reachable` keeps every node alive while it is used.
+        let mut coverage = CoverageMemo::new();
         for node in Self::reachable(self) {
             if node.schema.time_index.is_some_and(|i| {
                 node.schema
@@ -334,7 +338,7 @@ impl OperatorNode {
                 ));
             }
             node.operator.validate_inputs()?;
-            node.check_merge()?;
+            node.check_merge(&mut coverage)?;
             if node.result_kind != node.operator.output_kind() {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
                     "retained result kind disagrees with operation".into(),

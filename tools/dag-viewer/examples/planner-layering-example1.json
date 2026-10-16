@@ -2322,7 +2322,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared Scan (Q1, Q2)",
         "id": "L2"
       },
       {
@@ -3042,7 +3042,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared Scan #1, TimeRange #2",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared Scan (Q1, Q2), TimeRange (Q1, Q2)",
         "id": "L3"
       },
       {
@@ -4733,7 +4733,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L5"
       },
       {
@@ -6424,7 +6424,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Sum acc for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Sum acc for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L7"
       },
       {
@@ -8085,7 +8085,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L9"
       },
       {
@@ -9730,7 +9730,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared Scan (Q1, Q2)",
         "id": "L11"
       },
       {
@@ -10412,7 +10412,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared Scan #1, TimeRange #2",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared Scan (Q1, Q2), TimeRange (Q1, Q2)",
         "id": "L12"
       },
       {
@@ -12027,7 +12027,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L14"
       },
       {
@@ -13628,7 +13628,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · CMS+heap for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · CMS+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L16"
       },
       {
@@ -15199,7 +15199,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L18"
       },
       {
@@ -16844,7 +16844,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared Scan (Q1, Q2)",
         "id": "L20"
       },
       {
@@ -17526,7 +17526,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared Scan #1, TimeRange #2",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared Scan (Q1, Q2), TimeRange (Q1, Q2)",
         "id": "L21"
       },
       {
@@ -19141,7 +19141,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L23"
       },
       {
@@ -20742,7 +20742,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · CountSketch+heap for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · CountSketch+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L25"
       },
       {
@@ -22313,7 +22313,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "id": "L27"
       }
     ],
@@ -25622,7 +25622,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared Scan (Q1, Q2)",
         "from_logical": "L2",
         "id": "P2"
       },
@@ -27074,7 +27074,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared Scan #1, TimeRange #2",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared Scan (Q1, Q2), TimeRange (Q1, Q2)",
         "from_logical": "L3",
         "id": "P3"
       },
@@ -32059,7 +32059,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L5",
         "id": "P5"
       },
@@ -33764,7 +33764,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes",
         "from_logical": "L5",
         "id": "P5-m1"
       },
@@ -38749,7 +38749,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Sum acc for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Sum acc for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L7",
         "id": "P7"
       },
@@ -40454,7 +40454,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Sum acc for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: Sum acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Sum acc for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Sum acc ×6 panes",
         "from_logical": "L7",
         "id": "P7-m1"
       },
@@ -48791,7 +48791,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L9",
         "id": "P9"
       },
@@ -50484,7 +50484,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: Sum acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Sum acc ×6 panes",
         "from_logical": "L9",
         "id": "P9-m1"
       },
@@ -52177,7 +52177,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes",
         "from_logical": "L9",
         "id": "P9-m2"
       },
@@ -53746,7 +53746,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes, Sum acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · Rate acc for Q1 in 6 × 10s panes, Sum acc for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes, Sum acc ×6 panes",
         "from_logical": "L9",
         "id": "P9-m3"
       },
@@ -56380,7 +56380,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared Scan (Q1, Q2)",
         "from_logical": "L11",
         "id": "P11"
       },
@@ -57497,7 +57497,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared Scan #1, TimeRange #2",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared Scan (Q1, Q2), TimeRange (Q1, Q2)",
         "from_logical": "L12",
         "id": "P12"
       },
@@ -61477,7 +61477,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L14",
         "id": "P14"
       },
@@ -62847,7 +62847,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes",
         "from_logical": "L14",
         "id": "P14-m1"
       },
@@ -66785,7 +66785,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · CMS+heap for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · CMS+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L16",
         "id": "P16"
       },
@@ -68141,7 +68141,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · CMS+heap for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: CMS+heap ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · CMS+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: CMS+heap ×6 panes",
         "from_logical": "L16",
         "id": "P16-m1"
       },
@@ -74733,7 +74733,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L18",
         "id": "P18"
       },
@@ -76077,7 +76077,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: CMS+heap ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: CMS+heap ×6 panes",
         "from_logical": "L18",
         "id": "P18-m1"
       },
@@ -77421,7 +77421,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes",
         "from_logical": "L18",
         "id": "P18-m2"
       },
@@ -78641,7 +78641,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes, CMS+heap ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · Rate acc for Q1 in 6 × 10s panes, CMS+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes, CMS+heap ×6 panes",
         "from_logical": "L18",
         "id": "P18-m3"
       },
@@ -81275,7 +81275,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared Scan (Q1, Q2)",
         "from_logical": "L20",
         "id": "P20"
       },
@@ -82392,7 +82392,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared Scan #1, TimeRange #2",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared Scan (Q1, Q2), TimeRange (Q1, Q2)",
         "from_logical": "L21",
         "id": "P21"
       },
@@ -86372,7 +86372,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L23",
         "id": "P23"
       },
@@ -87742,7 +87742,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes",
         "from_logical": "L23",
         "id": "P23-m1"
       },
@@ -91680,7 +91680,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · CountSketch+heap for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · CountSketch+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L25",
         "id": "P25"
       },
@@ -93036,7 +93036,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · CountSketch+heap for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: CountSketch+heap ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · CountSketch+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: CountSketch+heap ×6 panes",
         "from_logical": "L25",
         "id": "P25-m1"
       },
@@ -99628,7 +99628,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan #1",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2)",
         "from_logical": "L27",
         "id": "P27"
       },
@@ -100972,7 +100972,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: CountSketch+heap ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: CountSketch+heap ×6 panes",
         "from_logical": "L27",
         "id": "P27-m1"
       },
@@ -102316,7 +102316,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes",
         "from_logical": "L27",
         "id": "P27-m2"
       },
@@ -103536,7 +103536,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan #1 · ingestion time: Rate acc ×6 panes, CountSketch+heap ×6 panes",
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · Rate acc for Q1 in 6 × 10s panes, CountSketch+heap for Q2 in 6 × 10s panes · shared Scan (Q1, Q2) · ingestion time: Rate acc ×6 panes, CountSketch+heap ×6 panes",
         "from_logical": "L27",
         "id": "P27-m3"
       }

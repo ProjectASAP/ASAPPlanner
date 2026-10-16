@@ -22,8 +22,6 @@ pub struct PlanningStagesRun {
     /// Stage 1, Pass 1: the per-computation candidates the logical
     /// candidates' `choice` indexes (query `i` has id `i`).
     pub stage1_pass1_per_computation: PerComputationCandidates<usize>,
-    /// Stage 1, Pass 2: the rules each Pass 2 candidate applied.
-    pub stage1_pass2: Vec<Pass2Candidate>,
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
     /// `P<n>` implements `L<n>`.
     pub stage2_physical_asap_optimization: Vec<PhysicalCandidate>,
@@ -203,7 +201,6 @@ pub fn run_planning_stages_over(
     Ok(PlanningStagesRun {
         stage0_query_language_frontends: roots,
         stage1_pass1_per_computation: run.stage1_pass1_per_computation,
-        stage1_pass2: run.stage1_pass2,
         stage1_logical_asap_optimization: run.stage1_logical_asap_optimization,
         stage2_physical_asap_optimization: run.stage2_physical_asap_optimization,
         stage2_pruned: run.stage2_pruned,

@@ -5,8 +5,9 @@ use asap_types::{
     ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr},
     post_asap::{
         ExactKind, ExactParams, ExecutionTiming, FamilyCapability, GroupingStrategy, HydraKind,
-        HydraParams, Materialization, Medium, MergedError, SelectionRelation, SketchAlgorithm,
-        SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
+        HydraParams, Materialization, Medium, MergeInputRule, MergedError, SamplingKind,
+        SamplingParams, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, StatModelKind,
+        StatModelParams, StatisticKind, SummaryUpdate, WaveletKind, WaveletParams,
     },
     pre_asap::expr_ir::{CompareOpKind, ScalarValue},
     pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema},
@@ -139,69 +140,78 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// The family-capability table: which families merge, how their inputs'
-/// selections must relate, how the merged error relates to the parts', and
-/// which subtract.
+/// The family-capability table, row by row: how each family's merge
+/// inputs must relate, and which statistics one state answers with the
+/// error of each from a merged state. Every statistic kind is probed
+/// through `answers` and `merged_error`, so the table and both lookups are
+/// pinned together.
 #[test]
 fn family_capability_table() {
-    use MergedError::{Exact, SameAsUnionBuild};
-    use SelectionRelation::{Disjoint, DisjointInTime, OverlapAllowed};
+    use MergeInputRule::{Disjoint, DisjointInTime, MayOverlap};
+    use MergedError::{Approximate, AsIfBuiltOverUnion as Union};
+    use StatisticKind::*;
     let (width, depth, heap_size) = (64, 4, 10);
-    for (family, merge, subtractable) in [
+    // (family, how its merge inputs must relate, its readouts).
+    type Row = (
+        FieldDataType,
+        Option<MergeInputRule>,
+        Vec<(StatisticKind, MergedError)>,
+    );
+    let rows: Vec<Row> = vec![
         (
             exact(ExactKind::Sum, ExactParams::Sum),
-            Some((Disjoint, Exact)),
-            true,
+            Some(Disjoint),
+            vec![],
         ),
         (
             exact(ExactKind::Count, ExactParams::Count),
-            Some((Disjoint, Exact)),
-            true,
+            Some(Disjoint),
+            vec![],
         ),
         (
             exact(ExactKind::Min, ExactParams::Min),
-            Some((OverlapAllowed, Exact)),
-            false,
+            Some(MayOverlap),
+            vec![],
         ),
         (
             exact(ExactKind::Max, ExactParams::Max),
-            Some((OverlapAllowed, Exact)),
-            false,
+            Some(MayOverlap),
+            vec![],
         ),
         // Counter panes merge exactly when ordered and disjoint in time.
         (
             exact(ExactKind::Rate, ExactParams::Rate),
-            Some((DisjointInTime, Exact)),
-            false,
+            Some(DisjointInTime),
+            vec![],
         ),
         (
             exact(ExactKind::Increase, ExactParams::Increase),
-            Some((DisjointInTime, Exact)),
-            false,
+            Some(DisjointInTime),
+            vec![],
         ),
-        (exact(ExactKind::IRate, ExactParams::IRate), None, false),
-        (kll(), Some((Disjoint, SameAsUnionBuild)), false),
+        (exact(ExactKind::IRate, ExactParams::IRate), None, vec![]),
+        (kll(), Some(Disjoint), vec![(Quantile, Union)]),
         (
             sketch(
                 SketchAlgorithm::DDSketch,
                 SketchParams::DDSketch { alpha: 0.01 },
             ),
-            Some((Disjoint, SameAsUnionBuild)),
-            false,
+            Some(Disjoint),
+            vec![(Quantile, Union), (Total, Union)],
         ),
-        (hll(), Some((OverlapAllowed, SameAsUnionBuild)), false),
+        (hll(), Some(MayOverlap), vec![(Distinct, Union)]),
         (
             sketch(SketchAlgorithm::Cms, SketchParams::Cms { width, depth }),
-            Some((Disjoint, SameAsUnionBuild)),
-            true,
+            Some(Disjoint),
+            vec![(ItemFrequency, Union), (Total, Union)],
         ),
         (
             sketch(
                 SketchAlgorithm::CountSketch,
                 SketchParams::CountSketch { width, depth },
             ),
-            Some((Disjoint, SameAsUnionBuild)),
-            true,
+            Some(Disjoint),
+            vec![(ItemFrequency, Union), (FrequencyL2, Union)],
         ),
         (
             sketch(
@@ -214,8 +224,13 @@ fn family_capability_table() {
                     distinct_failure_probability: None,
                 },
             ),
-            Some((Disjoint, SameAsUnionBuild)),
-            false,
+            Some(Disjoint),
+            vec![
+                (Total, Union),
+                (Distinct, Union),
+                (FrequencyL2, Union),
+                (FrequencyEntropy, Approximate),
+            ],
         ),
         // KMV keeps the k smallest hashes under one shared seed: the merge
         // is the k smallest of the union and ignores repeated hashes.
@@ -227,15 +242,19 @@ fn family_capability_table() {
                     relative_error: None,
                 },
             ),
-            Some((OverlapAllowed, SameAsUnionBuild)),
-            false,
+            Some(MayOverlap),
+            vec![(Distinct, Union)],
         ),
         (
             sketch(SketchAlgorithm::Theta, SketchParams::Theta { k: 1024 }),
             None,
-            false,
+            vec![(Distinct, Approximate)],
         ),
-        (cms_with_heap(), Some((Disjoint, SameAsUnionBuild)), false),
+        (
+            cms_with_heap(),
+            Some(Disjoint),
+            vec![(TopK, Approximate), (ItemFrequency, Union)],
+        ),
         (
             sketch(
                 SketchAlgorithm::CountSketchWithHeap,
@@ -245,8 +264,8 @@ fn family_capability_table() {
                     heap_size,
                 },
             ),
-            Some((Disjoint, SameAsUnionBuild)),
-            false,
+            Some(Disjoint),
+            vec![(TopK, Approximate), (ItemFrequency, Union)],
         ),
         // Hydra over a linear sketch is a grid of linear sketches; Hydra
         // over KLL has no accuracy model and fails closed.
@@ -262,8 +281,8 @@ fn family_capability_table() {
                     shared_columns: width,
                 },
             ),
-            Some((Disjoint, SameAsUnionBuild)),
-            true,
+            Some(Disjoint),
+            vec![(ItemFrequency, Union)],
         ),
         (
             hydra(
@@ -277,8 +296,8 @@ fn family_capability_table() {
                     shared_columns: width,
                 },
             ),
-            Some((Disjoint, SameAsUnionBuild)),
-            true,
+            Some(Disjoint),
+            vec![(ItemFrequency, Union)],
         ),
         (
             hydra(
@@ -294,17 +313,73 @@ fn family_capability_table() {
                 },
             ),
             None,
-            false,
+            vec![(Quantile, Approximate)],
         ),
-        (FieldDataType::Plain(DataType::Float64), None, false),
-    ] {
+        (FieldDataType::Plain(DataType::Float64), None, vec![]),
+        (
+            FieldDataType::Sample(
+                SamplingKind::Reservoir,
+                SamplingParams::Reservoir { size: 64 },
+            ),
+            None,
+            vec![],
+        ),
+        (
+            FieldDataType::Wavelet(WaveletKind::Haar, WaveletParams::Haar { coefficients: 16 }),
+            None,
+            vec![],
+        ),
+        (
+            FieldDataType::StatModel(
+                StatModelKind::Parametric,
+                StatModelParams::Parametric {
+                    family: "gaussian_mixture".into(),
+                },
+            ),
+            None,
+            vec![],
+        ),
+    ];
+    // One statistic of every kind.
+    let statistics = [
+        SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        },
+        SketchStatistic::PointCount {
+            key: ColumnRef::Named("item".into()),
+            value: Some("a".into()),
+        },
+        SketchStatistic::Quantile { q: 0.99 },
+        SketchStatistic::Cardinality,
+        SketchStatistic::FrequencyL2,
+        SketchStatistic::FrequencyEntropy,
+        SketchStatistic::TopK { k: 5 },
+    ];
+    for (family, merge_inputs, readouts) in rows {
         let capability = FamilyCapability::of(&family);
-        assert_eq!(
-            capability.merge.map(|m| (m.inputs, m.error)),
-            merge,
-            "{family:?}"
-        );
-        assert_eq!(capability.subtractable, subtractable, "{family:?}");
+        assert_eq!(capability.merge_inputs, merge_inputs, "{family:?}");
+        assert_eq!(capability.readouts, readouts.as_slice(), "{family:?}");
+        for statistic in &statistics {
+            let row = readouts
+                .iter()
+                .find(|(kind, _)| *kind == statistic.kind())
+                .map(|&(_, error)| error);
+            assert_eq!(
+                capability.answers(statistic),
+                row.is_some(),
+                "{family:?} {statistic:?}"
+            );
+            // An answered statistic's merged error is its row's; the
+            // default for the others is pinned below.
+            if row.is_some() || merge_inputs.is_none() {
+                assert_eq!(
+                    capability.merged_error(statistic),
+                    merge_inputs.and(row),
+                    "{family:?} {statistic:?}"
+                );
+            }
+        }
     }
 }
 
@@ -313,7 +388,8 @@ fn family_capability_table() {
 /// 0's Count Sketch, which adds, and its distinct count's bound holds for
 /// any heap that keeps `min(|S_j|, k)` of a layer's keys, as the merge's
 /// does, so both keep the guarantee of one build over the union. Counter
-/// readouts of a heap family (point counts) keep their guarantee.
+/// readouts of a heap family (item frequencies) keep their guarantee. A
+/// statistic the family does not answer takes the family's default.
 #[test]
 fn merged_error_depends_on_the_readout() {
     use SketchStatistic::{Cardinality, FrequencyEntropy, FrequencyL2, TopK};
@@ -332,30 +408,65 @@ fn merged_error_depends_on_the_readout() {
         },
     ));
     for (readout, error) in [
-        (FrequencyL2, MergedError::SameAsUnionBuild),
-        (point(), MergedError::SameAsUnionBuild),
-        (Cardinality, MergedError::SameAsUnionBuild),
+        (FrequencyL2, MergedError::AsIfBuiltOverUnion),
+        (point(), MergedError::AsIfBuiltOverUnion),
+        (Cardinality, MergedError::AsIfBuiltOverUnion),
         (FrequencyEntropy, MergedError::Approximate),
-        (TopK { k: 5 }, MergedError::Approximate),
     ] {
         assert_eq!(univmon.merged_error(&readout), Some(error), "{readout:?}");
     }
+    // A statistic the family does not answer takes its default: a heavy
+    // item readout of a family with heaps is approximate.
+    assert_eq!(
+        univmon.merged_error(&TopK { k: 5 }),
+        Some(MergedError::Approximate)
+    );
     let heap = FamilyCapability::of(&cms_with_heap());
     assert_eq!(
         heap.merged_error(&TopK { k: 5 }),
         Some(MergedError::Approximate)
     );
+    let item = SketchStatistic::PointCount {
+        key: ColumnRef::Named("k".into()),
+        value: Some("a".into()),
+    };
+    assert_eq!(
+        heap.merged_error(&item),
+        Some(MergedError::AsIfBuiltOverUnion)
+    );
+    // A CMS with a heap answers item frequencies, not its total, whose
+    // default is the guarantee of one build over the union.
     assert_eq!(
         heap.merged_error(&point()),
-        Some(MergedError::SameAsUnionBuild)
+        Some(MergedError::AsIfBuiltOverUnion)
+    );
+    // Pass 1 offers CountSketch for a count (a bare point count), which
+    // its row does not answer: merged panes keep one build's guarantee.
+    let count_sketch = FamilyCapability::of(&sketch(
+        SketchAlgorithm::CountSketch,
+        SketchParams::CountSketch {
+            width: 64,
+            depth: 5,
+        },
+    ));
+    assert!(!count_sketch.answers(&point()));
+    assert_eq!(
+        count_sketch.merged_error(&point()),
+        Some(MergedError::AsIfBuiltOverUnion)
+    );
+    // An exact accumulator's merged state is exact.
+    let sum = exact(ExactKind::Sum, ExactParams::Sum);
+    assert_eq!(
+        FamilyCapability::of(&sum).merged_error(&point()),
+        Some(MergedError::Exact)
     );
     assert_eq!(
         FamilyCapability::of(&hll()).merged_error(&Cardinality),
-        Some(MergedError::SameAsUnionBuild)
+        Some(MergedError::AsIfBuiltOverUnion)
     );
     assert_eq!(
         FamilyCapability::of(&kll()).merged_error(&SketchStatistic::Quantile { q: 0.99 }),
-        Some(MergedError::SameAsUnionBuild)
+        Some(MergedError::AsIfBuiltOverUnion)
     );
     let irate = exact(ExactKind::IRate, ExactParams::IRate);
     assert_eq!(FamilyCapability::of(&irate).merged_error(&point()), None);
@@ -373,7 +484,7 @@ fn summary_merge_is_permissive_about_the_family() {
     ])
     .unwrap();
     merged.validate_structure().unwrap();
-    assert_eq!(FamilyCapability::of(&irate()).merge, None);
+    assert_eq!(FamilyCapability::of(&irate()).merge_inputs, None);
 }
 
 /// Idempotent families (HLL, exact Min/Max) merge states that may share

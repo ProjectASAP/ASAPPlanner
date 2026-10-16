@@ -703,3 +703,22 @@ fn cluster_flags_and_cost_model_3_go_together() {
     assert_eq!(code, Some(2));
     assert!(stderr.contains("needs --cluster-memory-bytes"), "{stderr}");
 }
+
+/// Two sums and two maxima over two metrics share each metric's scan and
+/// range between its own pair of queries: every logical candidate's label
+/// names which queries share each node, so no two labels are the same.
+#[test]
+fn logical_candidate_labels_are_distinct() {
+    let document = document_of(&[
+        "--promql", "sum(a)", "--promql", "max(a)", "--promql", "sum(b)", "--promql", "max(b)",
+    ]);
+    let labels: Vec<&str> = document["stage1_logical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["display_name"].as_str().unwrap())
+        .collect();
+    let distinct: std::collections::HashSet<&str> = labels.iter().copied().collect();
+    assert_eq!(labels.len(), 9, "{labels:#?}");
+    assert_eq!(distinct.len(), 9, "{labels:#?}");
+}
