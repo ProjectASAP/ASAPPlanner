@@ -12,12 +12,10 @@ use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability,
-    Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
     RepetitionInterval, SqlDialect,
 };
-
-const NOW_MS: u64 = 1_700_000_000_000;
 
 fn approximate() -> QueryRequirements {
     QueryRequirements {
@@ -289,10 +287,7 @@ async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
     );
     let input = UserInput::new(
         &workload,
-        FrontendInput::Promql {
-            now_ms: NOW_MS,
-            histograms: None,
-        },
+        FrontendInput::Promql { histograms: None },
         PlanningModels::builtin(),
     );
 
@@ -318,20 +313,16 @@ async fn each_plan_carries_its_selected_root() {
             }]),
         },
         data_workload: Some(DataWorkload {
-            arrival: DataArrival::ContinuouslyIngesting,
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(15_000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(15_000)),
             },
             ..Default::default()
         }),
     };
     let input = UserInput::new(
         &workload,
-        FrontendInput::Promql {
-            now_ms: NOW_MS,
-            histograms: None,
-        },
+        FrontendInput::Promql { histograms: None },
         PlanningModels::builtin(),
     );
 
@@ -356,19 +347,16 @@ async fn scalar_roots_survive_planning_in_workload_order() {
                 repeating_queries: None,
             },
             data_workload: Some(DataWorkload {
-                data_ingestion_interval: Evidence {
-                    value: Some(DurationMs(1000)),
-                    ..Default::default()
+                arrival: DataArrival::Ingesting {
+                    rows_per_second: 1_000.0,
+                    sample_interval: Some(DurationMs(1000)),
                 },
                 ..Default::default()
             }),
         };
         let output = e2e_plan(UserInput::new(
             &workload,
-            FrontendInput::Promql {
-                now_ms: NOW_MS,
-                histograms: None,
-            },
+            FrontendInput::Promql { histograms: None },
             PlanningModels::builtin(),
         ))
         .await

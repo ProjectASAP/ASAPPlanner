@@ -176,8 +176,8 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
 
 use asap_frontend_promql::lower_promql_workload;
 use planner_types::workload::{
-    BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence, PlanningWorkload,
-    Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload,
 };
 pub fn lower_promql(
     query: &str,
@@ -199,14 +199,14 @@ pub fn lower_promql(
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: WorkloadEvidence {
-                value: Some(DurationMs(1_000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(1_000)),
             },
             ..Default::default()
         }),
     };
-    let mut lowered = lower_promql_workload(&workload, 0)?;
+    let mut lowered = lower_promql_workload(&workload)?;
     Ok(lowered.remove(0))
 }
 

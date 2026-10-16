@@ -4455,8 +4455,8 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
             recurrences.push(recurrence);
         }
         let update_rate = data_workload
-            .and_then(|data| data.ingestion_rate.value_at(now_ms))
-            .map(|rate| UpdateRate(rate.0));
+            .and_then(|data| data.arrival.rows_per_second())
+            .map(UpdateRate);
         self.recurrence_profiles(&recurrences, update_rate)
     }
 }

@@ -32,7 +32,7 @@ pub struct PlanningStagesRun {
 /// Lower a PromQL workload, each series' identity as a column (the row
 /// representation per-series state needs at runtime).
 pub fn lower_promql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>, String> {
-    asap_frontend_promql::lower_promql_query_workload(workload, 0)
+    asap_frontend_promql::lower_promql_query_workload(workload)
         .map_err(|e| format!("lowering: {e}"))?
         .into_iter()
         .map(|root| match root {

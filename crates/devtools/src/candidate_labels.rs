@@ -447,10 +447,10 @@ mod tests {
     /// once per build with both readers each time.
     #[test]
     fn identical_pane_chains_in_two_queries_are_listed_once() {
-        use crate::planner_layering_examples::shared_data_workload;
+        use crate::planner_layering_examples::{shared_data_workload, SharedArrival};
         use asap_types::types::AccuracyTarget;
         use asap_types::workload::{
-            DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
+            PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
             QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
         };
         let panel = |query: &str| RepeatingEntry {
@@ -472,7 +472,7 @@ mod tests {
                     panel("max_over_time(a[1m])"),
                 ]),
             },
-            data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
+            data_workload: Some(shared_data_workload(SharedArrival::Ingesting, "a")),
         };
         let run =
             run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();

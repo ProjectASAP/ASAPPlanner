@@ -35,14 +35,14 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::Op
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(60_000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(60_000)),
             },
             ..Default::default()
         }),
     };
-    asap_frontend_promql::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
         .remove(0)
 }

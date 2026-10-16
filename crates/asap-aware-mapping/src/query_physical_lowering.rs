@@ -2867,7 +2867,7 @@ mod tests {
     ) {
         use crate::physical_operator_statistics::ScalarInputStatistics;
         use asap_types::workload::{
-            BatchEntry, DataWorkload, Evidence, PlanningWorkload, Predictability, Query,
+            BatchEntry, DataArrival, DataWorkload, PlanningWorkload, Predictability, Query,
             QueryLanguage, QueryRequirements, QueryWorkload,
         };
         use std::cell::RefCell;
@@ -2888,14 +2888,14 @@ mod tests {
                 repeating_queries: None,
             },
             data_workload: Some(DataWorkload {
-                data_ingestion_interval: Evidence {
-                    value: Some(DurationMs(1_000)),
-                    ..Default::default()
+                arrival: DataArrival::Ingesting {
+                    rows_per_second: 1_000.0,
+                    sample_interval: Some(DurationMs(1_000)),
                 },
                 ..Default::default()
             }),
         };
-        let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
+        let root = asap_frontend_promql::lower_promql_workload(&workload)
             .unwrap()
             .remove(0);
         // Read one node through every reference (as a planner that shares

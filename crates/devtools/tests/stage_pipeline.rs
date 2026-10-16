@@ -3,14 +3,16 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
-use asap_devtools::planner_layering_examples::{example1, pattern_a, PatternARecurrence};
+use asap_devtools::planner_layering_examples::{
+    example1, pattern_a, PatternARecurrence, SharedArrival,
+};
 use asap_devtools::planning_stages::{
     lower_promql_roots, run_planning_stages, PlanningStagesError,
 };
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
 use asap_types::ir::QueryRoot;
-use asap_types::workload::DataArrival;
+
 use serde_json::Value;
 
 const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.json";
@@ -203,7 +205,7 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
 /// displayed with its cost.
 #[test]
 fn example3a_selects_the_cheapest_of_all_candidates() {
-    let workload = pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed);
+    let workload = pattern_a(PatternARecurrence::OnceAdHoc, SharedArrival::Mixed);
     let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
     assert_eq!(run.stage1_logical_asap_optimization.len(), 972);
     let expected = run.stage3_plan_selection.unwrap().selected;

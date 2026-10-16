@@ -17,7 +17,7 @@ pub mod fixtures {
     use asap_types::pre_asap::schema::{DataType, Field, Schema};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
-        BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+        BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
         QueryLanguage, QueryRequirements, QueryWorkload,
     };
     use std::rc::Rc;
@@ -56,14 +56,14 @@ pub mod fixtures {
                 repeating_queries: None,
             },
             data_workload: Some(DataWorkload {
-                data_ingestion_interval: Evidence {
-                    value: Some(DurationMs(1_000)),
-                    ..Default::default()
+                arrival: DataArrival::Ingesting {
+                    rows_per_second: 1_000.0,
+                    sample_interval: Some(DurationMs(1_000)),
                 },
                 ..Default::default()
             }),
         };
-        let mut lowered = asap_frontend_promql::lower_promql_query_workload(&workload, 0)?;
+        let mut lowered = asap_frontend_promql::lower_promql_query_workload(&workload)?;
         Ok(lowered.remove(0))
     }
 

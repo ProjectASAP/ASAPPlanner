@@ -142,10 +142,10 @@ use asap_types::post_asap::{
     AccuracyGuarantee, AccuracyMetric, CompositionOperator, ExecutionTiming, FieldDataType,
     Materialization, Medium, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
-use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
+use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema, Source};
 use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
-    DataWorkload, MetricType, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
+    DataWorkload, MetricType, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand, SourceFacts,
 };
 use thiserror::Error;
 
@@ -899,21 +899,64 @@ fn describe_usage(usage: &ResourceUsage) -> String {
 /// Without a planning time, only evidence that cannot expire is fresh.
 const ANY_TIME: u64 = u64::MAX;
 
+/// `source`'s facts in `data` while their evidence holds at any planning
+/// time (no validity window): the facts accuracy guarantees may bind.
+fn fresh_source_facts<'a>(data: &'a DataWorkload, source: &str) -> Option<&'a SourceFacts> {
+    data.sources
+        .get(source)
+        .filter(|facts| facts.evidence.is_fresh_at(ANY_TIME))
+}
+
+/// The sources (PromQL metric or SQL table names) the scans under `nodes`
+/// read.
+fn sources_read<'a>(nodes: impl IntoIterator<Item = &'a Rc<OperatorNode>>) -> BTreeSet<String> {
+    nodes
+        .into_iter()
+        .flat_map(OperatorNode::reachable)
+        .filter_map(|node| match node.non_asap() {
+            Some(NonASAPOp::Scan { source, .. }) => Some(source_name(source).to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A scan source's name: its PromQL metric or SQL table.
+fn source_name(source: &Source) -> &str {
+    match source {
+        Source::TimeSeries { metric } => metric,
+        Source::Table { table_ref } => table_ref,
+    }
+}
+
+/// The series the sources `root` reads hold together, from fresh source
+/// facts: an upper bound on the series (and rows per evaluation) any of
+/// its folds sees. `None` when it reads no source or any source's series
+/// is unknown or not fresh.
+fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
+    let sources = sources_read(root_operators(root));
+    if sources.is_empty() {
+        return None;
+    }
+    sources
+        .iter()
+        .map(|source| fresh_source_facts(data, source)?.series)
+        .sum()
+}
+
 /// How many values one evaluation of `root` returns at most (`G`): one for
 /// a scalar root and for a root of at most one row ([`at_most_one_row`]),
-/// provable from the query; otherwise, from `data`, at most the input
-/// cardinality (the series) for a PromQL instant vector, whose groups and
-/// series never outnumber its input series. `None` when unbound: any other
-/// SQL result, until a bound on the groups of its source is an input, and a
-/// range vector.
+/// provable from the query; otherwise, from `data`, at most the series of
+/// the sources it reads ([`series_read`]) for a PromQL instant vector,
+/// whose groups and series never outnumber its input series. `None` when
+/// unbound: any other SQL result, until a bound on the groups of its source
+/// is an input, and a range vector.
 fn values_per_result(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
     match root {
         QueryRoot::Scalar(_) => Some(1),
         QueryRoot::Operator(node) if at_most_one_row(node) => Some(1),
-        QueryRoot::Operator(node) if node.result_kind == OperatorResultKind::InstantVector => data
-            .input_cardinality
-            .value_at(ANY_TIME)
-            .map(|series| (*series).max(1)),
+        QueryRoot::Operator(node) if node.result_kind == OperatorResultKind::InstantVector => {
+            series_read(root, data).map(|series| series.max(1))
+        }
         QueryRoot::Operator(_) => None,
     }
 }
@@ -1067,16 +1110,11 @@ pub fn resize_for_failure_probability(
                 relative_error,
             } => {
                 let source = distinct_bound_source(state)?;
-                let bound = data.max_distinct_per_evaluation.value_at(ANY_TIME)?;
+                let bound = fresh_source_facts(data, &source)?.max_distinct_per_evaluation?;
                 // The guarantee keeps the relative error Pass 1 sized for.
                 let relative_error = hll::classic_relative_error(*precision, *relative_error);
                 SketchParams::Hll {
-                    precision: hll::min_precision(
-                        relative_error,
-                        delta,
-                        *bound.get(&source)?,
-                        *precision,
-                    ),
+                    precision: hll::min_precision(relative_error, delta, bound, *precision),
                     relative_error: Some(relative_error),
                 }
             }
@@ -1208,7 +1246,15 @@ fn accuracy_check(
 /// answered from `data`'s declared metric types: proven when the metric is
 /// declared a counter, unknown otherwise. No type is inferred from a name.
 pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDomain {
-    domain.confirmed(|metric| data.metric_types.get(metric) == Some(&MetricType::Counter))
+    domain.confirmed(|metric| declared_counter(data, metric))
+}
+
+/// Whether `data` declares `metric` a counter. A declared type does not
+/// expire, so its evidence is not checked.
+fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
+    data.sources
+        .get(metric)
+        .is_some_and(|facts| facts.metric_type == Some(MetricType::Counter))
 }
 
 /// `roots` with every open [`WeightDomain::SamplesOfMetric`] requirement
@@ -1273,7 +1319,8 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 }
 
 /// [`root_guarantee`] with the statistics Stage 1 left symbolic bound:
-/// - the input row count, from the data workload's input cardinality;
+/// - the input row count, from the series of the sources `root` reads
+///   ([`series_read`]);
 /// - each source's stream norm ([`source_norm_statistic`]), from the data
 ///   workload's per-source `stream_norms`;
 /// - classic HLL's failure probability and the chance a UnivMon's top layer
@@ -1293,9 +1340,11 @@ fn bound_root_guarantee(
     models: &PlanningModels<'_>,
 ) -> Option<AccuracyGuarantee> {
     let guarantee = root_guarantee(root)?;
-    let domains = operand_domain_bounds(root, data, models);
+    let series = series_read(root, data);
+    let domains = operand_domain_bounds(root, series, data, models);
     Some(bind_statistics(&guarantee, &|statistic| {
-        workload_statistic(statistic, data).or_else(|| domains.get(statistic).copied().flatten())
+        workload_statistic(statistic, series, data)
+            .or_else(|| domains.get(statistic).copied().flatten())
     }))
 }
 
@@ -1316,45 +1365,41 @@ fn bind_statistics(
     })
 }
 
-/// A data-workload statistic Stage 1 left symbolic: the input row count,
-/// one source's stream norm, or classic HLL's failure probability or a
-/// UnivMon's incomplete-top-layer probability given one source's distinct
-/// bound, from evidence that holds at any planning time, or the sign of
-/// one metric's samples, from its declared type.
-fn workload_statistic(statistic: &str, data: &DataWorkload) -> Option<f64> {
+/// A data-workload statistic Stage 1 left symbolic: the input row count
+/// (`series`, the series of the sources the query reads), one source's
+/// stream norm, or classic HLL's failure probability or a UnivMon's
+/// incomplete-top-layer probability given one source's distinct bound,
+/// from source facts that hold at any planning time, or the sign of one
+/// metric's samples, from its declared type.
+fn workload_statistic(statistic: &str, series: Option<u64>, data: &DataWorkload) -> Option<f64> {
     // The sign of one metric's samples: proven (1) when the metric is
     // declared a counter; no type is inferred from its name.
     if let Some(metric) = parse_samples_sign_statistic(statistic) {
-        return (data.metric_types.get(metric) == Some(&MetricType::Counter)).then_some(1.0);
+        return declared_counter(data, metric).then_some(1.0);
     }
     if statistic == INPUT_ROW_COUNT {
-        return data
-            .input_cardinality
-            .value_at(ANY_TIME)
-            .map(|rows| *rows as f64);
+        return series.map(|rows| rows as f64);
     }
     if let Some((precision, relative_error, source)) =
         hll::parse_classic_failure_statistic(statistic)
     {
-        let bound = data.max_distinct_per_evaluation.value_at(ANY_TIME)?;
+        let bound = fresh_source_facts(data, source)?.max_distinct_per_evaluation?;
         return Some(hll::classic_failure_probability(
             precision,
             relative_error,
-            *bound.get(source)?,
+            bound,
         ));
     }
     if let Some((heap_size, layers, source)) =
         univmon::parse_incomplete_top_layer_statistic(statistic)
     {
-        let bound = data.max_distinct_per_evaluation.value_at(ANY_TIME)?;
+        let bound = fresh_source_facts(data, source)?.max_distinct_per_evaluation?;
         return Some(univmon::incomplete_top_layer_probability(
-            heap_size,
-            layers,
-            *bound.get(source)?,
+            heap_size, layers, bound,
         ));
     }
     let (norm, source) = parse_source_norm_statistic(statistic)?;
-    let norms = data.stream_norms.value_at(ANY_TIME)?.get(source)?;
+    let norms = fresh_source_facts(data, source)?.stream_norms?;
     match norm {
         STREAM_L1_NORM => norms.l1,
         _ => norms.l2,
@@ -1408,9 +1453,11 @@ struct DomainOperation<'a> {
 /// among the operations that leave it symbolic, or `None` (unbound) when
 /// any of them has no bound. Operations are found where the bound
 /// originates (the same rule Stage 1 uses), in vector arithmetic, a scalar
-/// root, and projection expressions.
+/// root, and projection expressions. `series` is the root's input row
+/// count ([`series_read`]).
 fn operand_domain_bounds(
     root: &QueryRoot,
+    series: Option<u64>,
     data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> HashMap<&'static str, Option<f64>> {
@@ -1458,7 +1505,7 @@ fn operand_domain_bounds(
     }
     let mut bounds: HashMap<&'static str, Option<f64>> = HashMap::new();
     for operation in &operations {
-        let bound = domain_bound(operation, data, models);
+        let bound = domain_bound(operation, series, data, models);
         let entry = bounds.entry(operation.statistic).or_insert(Some(0.0));
         *entry = entry.zip(bound).map(|(a, b)| a.max(b));
     }
@@ -1499,16 +1546,19 @@ fn scalar_domain_operations<'a>(
 ///
 /// `|x|`, `|y|` are the domains' largest magnitudes, and `e` each
 /// operand's absolute error (a relative or cardinality bound times that
-/// magnitude) after binding its data-workload statistics. `None` when an
-/// operand has no domain or an unbound error.
+/// magnitude) after binding its data-workload statistics (`series`, the
+/// root's input row count). `None` when an operand has no domain or an
+/// unbound error.
 fn domain_bound(
     operation: &DomainOperation<'_>,
+    series: Option<u64>,
     data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> Option<f64> {
     let [(x, gx), (y, gy)] = &operation.operands;
     let (dx, dy) = (x.domain(models)?, y.domain(models)?);
-    let bind = |g: &AccuracyGuarantee| g.bind(&|statistic| workload_statistic(statistic, data));
+    let bind =
+        |g: &AccuracyGuarantee| g.bind(&|statistic| workload_statistic(statistic, series, data));
     let (gx, gy) = (bind(gx), bind(gy));
     if operation.statistic == DIVISION_OPERAND_DOMAINS {
         let stats = PropagationStats {
@@ -1566,10 +1616,24 @@ fn family_name(family: &FieldDataType) -> String {
     }
 }
 
-/// Statistics the analytical model needs, derived once per workload.
-struct Shape {
-    series: u64,
-    rows_per_ms: f64,
+/// The series pricing assumes a node reading `sources` sees: the sum of
+/// their declared series, [`DEFAULT_SERIES`] for each source without one
+/// and for a node that reads none. Pricing reads a source's series whatever
+/// its evidence's freshness.
+fn priced_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> u64 {
+    if sources.is_empty() {
+        return DEFAULT_SERIES;
+    }
+    sources
+        .iter()
+        .map(|source| {
+            data.sources
+                .get(*source)
+                .and_then(|facts| facts.series)
+                .unwrap_or(DEFAULT_SERIES)
+        })
+        .sum::<u64>()
+        .max(1)
 }
 
 /// Evaluations per second of a node computed once for `queries` together.
@@ -1746,19 +1810,13 @@ fn price(
         CostModel::UsageOverTime(prices) => Some(prices),
         _ => None,
     };
-    let series = data
-        .input_cardinality
-        .value
-        .unwrap_or(DEFAULT_SERIES)
-        .max(1);
-    let shape = Shape {
-        series,
-        rows_per_ms: data
-            .ingestion_rate
-            .value
-            .map_or(DEFAULT_ROWS_PER_SECOND, |rate| rate.0)
-            / 1_000.0,
-    };
+    let rows_per_ms = data
+        .arrival
+        .rows_per_second()
+        .unwrap_or(DEFAULT_ROWS_PER_SECOND)
+        / 1_000.0;
+    // The sources each node reads, filled children first.
+    let mut sources_read_by: HashMap<PhysicalASAPNodeId, BTreeSet<&str>> = HashMap::new();
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
     let multipliers = computations(
         dag,
@@ -1788,6 +1846,17 @@ fn price(
             .filter(|e| e.consumer == node.id)
             .map(|e| output[&e.producer])
             .collect();
+        let sources: BTreeSet<&str> = match &node.payload {
+            Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
+            _ => dag
+                .edges
+                .iter()
+                .filter(|e| e.consumer == node.id)
+                .flat_map(|e| sources_read_by[&e.producer].iter().copied())
+                .collect(),
+        };
+        let series = priced_series(&sources, data);
+        sources_read_by.insert(node.id, sources);
         let input = inputs
             .first()
             .copied()
@@ -1806,7 +1875,7 @@ fn price(
             let groups = match reduction {
                 Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => 1,
                 Reduction::Reduce(keys) if !keys.is_without() => DEFAULT_GROUP_COUNT,
-                _ => shape.series,
+                _ => series,
             };
             // One second of arriving rows does not bound the groups a
             // maintained state holds.
@@ -1825,7 +1894,7 @@ fn price(
                         .max()
                         .unwrap_or(DEFAULT_LOOKBACK_MS);
                     let lookback = if ingestion { 1_000 } else { lookback };
-                    let out = edge(((shape.rows_per_ms * lookback as f64).round() as u64).max(1));
+                    let out = edge(((rows_per_ms * lookback as f64).round() as u64).max(1));
                     let estimate = estimate_operator(
                         PhysicalOperator::Scan,
                         OperatorStatistics::Scan {
@@ -1935,9 +2004,9 @@ fn price(
                     // selector the latest sample of each series.
                     let kept = match kind {
                         TimeRangeKind::Range => {
-                            (shape.rows_per_ms * range.as_millis() as f64).round() as u64
+                            (rows_per_ms * range.as_millis() as f64).round() as u64
                         }
-                        TimeRangeKind::Instant => shape.series,
+                        TimeRangeKind::Instant => series,
                     };
                     let out = edge(input.rows.min(kept.max(1)));
                     let out = EdgeStatistics {
@@ -2570,7 +2639,7 @@ mod tests {
     };
     use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
     use asap_types::types::AccuracyTarget;
-    use asap_types::workload::{Evidence, Rate};
+    use asap_types::workload::{DataArrival, Evidence, MetricType};
 
     /// `n` queries repeating every 10 s, as Example 1's panels do.
     fn recurrences(n: usize) -> Vec<QueryRecurrence> {
@@ -2584,18 +2653,44 @@ mod tests {
         ))
     }
 
+    /// The metrics and tables the tests' queries read.
+    const TEST_SOURCES: [&str; 5] = ["m", "x", "a", "b", "t"];
+
+    /// Data arriving at 10 000 rows per second, each test source holding
+    /// 10 000 series.
     fn data() -> DataWorkload {
+        with_series(Some(10_000))
+    }
+
+    /// [`data`] with every test source holding `series` (`None`: unknown).
+    fn with_series(series: Option<u64>) -> DataWorkload {
         DataWorkload {
-            ingestion_rate: Evidence {
-                value: Some(Rate(10_000.0)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 10_000.0,
+                sample_interval: None,
             },
-            input_cardinality: Evidence {
-                value: Some(10_000),
-                ..Default::default()
-            },
-            ..Default::default()
+            sources: TEST_SOURCES
+                .iter()
+                .map(|source| {
+                    let facts = SourceFacts {
+                        series,
+                        ..SourceFacts::default()
+                    };
+                    (source.to_string(), facts)
+                })
+                .collect(),
         }
+    }
+
+    /// `data` with each of `types`' metrics declared of its type.
+    fn with_metric_types(mut data: DataWorkload, types: &[(&str, MetricType)]) -> DataWorkload {
+        for (metric, metric_type) in types {
+            data.sources
+                .entry(metric.to_string())
+                .or_default()
+                .metric_type = Some(*metric_type);
+        }
+        data
     }
 
     /// Classic HLL's failure probability over a source binds only that
@@ -2604,16 +2699,17 @@ mod tests {
     #[test]
     fn classic_hll_failure_probability_binds_only_its_own_sources_bound() {
         let statistic = hll::classic_failure_statistic(15, 0.05, "a");
-        let bounded = |source: &str| DataWorkload {
-            max_distinct_per_evaluation: Evidence {
-                value: Some(std::collections::BTreeMap::from([(source.into(), 100)])),
-                ..Default::default()
-            },
-            ..data()
+        let bounded = |source: &str| {
+            let mut data = data();
+            data.sources
+                .get_mut(source)
+                .unwrap()
+                .max_distinct_per_evaluation = Some(100);
+            data
         };
-        assert_eq!(workload_statistic(&statistic, &bounded("b")), None);
+        assert_eq!(workload_statistic(&statistic, None, &bounded("b")), None);
         assert_eq!(
-            workload_statistic(&statistic, &bounded("a")),
+            workload_statistic(&statistic, None, &bounded("a")),
             Some(hll::classic_failure_probability(15, 0.05, 100))
         );
         assert!(hll::classic_failure_probability(15, 0.05, 100) <= 0.01);
@@ -2734,10 +2830,7 @@ mod tests {
     fn count_min_over_samples_needs_a_declared_counter() {
         use asap_types::workload::MetricType;
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
-        let with_types = |types: &[(&str, MetricType)]| DataWorkload {
-            metric_types: types.iter().map(|(m, t)| (m.to_string(), *t)).collect(),
-            ..data()
-        };
+        let with_types = |types: &[(&str, MetricType)]| with_metric_types(data(), types);
         for (types, admitted) in [
             (vec![("m", MetricType::Counter)], true),
             (vec![("m", MetricType::Gauge)], false),
@@ -2845,10 +2938,7 @@ mod tests {
         );
         let node = lower_promql("sum(m)", AccuracyTarget::exact());
         let root = QueryRoot::Operator(Rc::new((*node).clone().with_guarantee(Some(gated))));
-        let with = |types: &[(&str, MetricType)]| DataWorkload {
-            metric_types: types.iter().map(|(m, t)| (m.to_string(), *t)).collect(),
-            ..data()
-        };
+        let with = |types: &[(&str, MetricType)]| with_metric_types(data(), types);
         let bound = |data: &DataWorkload| {
             bound_root_guarantee(&root, data, &PlanningModels::builtin())
                 .unwrap()
@@ -2876,14 +2966,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
         let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
-        let data = DataWorkload {
-            metric_types: [("m".to_string(), MetricType::Counter)].into(),
-            input_cardinality: Evidence {
-                value: Some(10_000_000),
-                ..Default::default()
-            },
-            ..data()
-        };
+        let data = with_metric_types(with_series(Some(10_000_000)), &[("m", MetricType::Counter)]);
         let run = crate::pass::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
             &[entry_with(target, repeating(10_000))],
@@ -2938,10 +3021,7 @@ mod tests {
             domains(&p2.roots),
             [WeightDomain::SamplesOfMetric { metric: "m".into() }]
         );
-        let counter = DataWorkload {
-            metric_types: [("m".to_string(), MetricType::Counter)].into(),
-            ..data()
-        };
+        let counter = with_metric_types(data(), &[("m", MetricType::Counter)]);
         let confirmed = with_confirmed_weights(&p2.roots, &counter);
         assert_eq!(
             domains(&confirmed),
@@ -3245,10 +3325,7 @@ mod tests {
     #[test]
     fn an_unbound_number_of_values_leaves_a_whole_result_target_unmet() {
         let (candidates, whole) = per_series_kll(AccuracyScope::WholeResult);
-        let no_cardinality = DataWorkload {
-            input_cardinality: Evidence::default(),
-            ..data()
-        };
+        let no_cardinality = with_series(None);
         let Err(SelectionError::NoValidCandidate(rejected)) = select_plan(
             &candidates,
             &[entry_with(whole, repeating(10_000))],
@@ -3345,6 +3422,54 @@ mod tests {
         );
     }
 
+    /// `G` and the input row count are bound per query from the sources
+    /// it reads: another source's series do not count, a query over two
+    /// sources is bound by their sum, and one unknown or expired source
+    /// leaves it unbound. Pricing reads the same per-source series, with
+    /// the default for an undeclared source.
+    #[test]
+    fn values_per_result_is_bound_by_the_series_of_the_sources_read() {
+        let root =
+            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::max_error(0.01)));
+        let series = |declared: &[(&str, u64)]| DataWorkload {
+            sources: declared
+                .iter()
+                .map(|(source, series)| {
+                    let facts = SourceFacts {
+                        series: Some(*series),
+                        ..SourceFacts::default()
+                    };
+                    (source.to_string(), facts)
+                })
+                .collect(),
+            ..DataWorkload::default()
+        };
+        let x = root("sum by (job) (rate(x[5m]))");
+        let both = root("sum by (job) (rate(x[5m])) + sum by (job) (rate(m[5m]))");
+        assert_eq!(values_per_result(&x, &series(&[("x", 10)])), Some(10));
+        assert_eq!(values_per_result(&x, &series(&[("m", 10)])), None);
+        let declared = series(&[("x", 10), ("m", 20)]);
+        assert_eq!(values_per_result(&x, &declared), Some(10));
+        assert_eq!(values_per_result(&both, &declared), Some(30));
+        assert_eq!(series_read(&both, &declared), Some(30));
+        assert_eq!(values_per_result(&both, &series(&[("x", 10)])), None);
+        let mut expired = declared.clone();
+        expired.sources.get_mut("m").unwrap().evidence = Evidence {
+            observed_at_ms: Some(0),
+            valid_for_ms: Some(1),
+        };
+        assert_eq!(values_per_result(&x, &expired), Some(10));
+        assert_eq!(values_per_result(&both, &expired), None);
+        // Pricing sums the series of the sources a node reads; an
+        // undeclared source counts the default.
+        assert_eq!(priced_series(&["x", "m"].into(), &declared), 30);
+        assert_eq!(
+            priced_series(&["x", "y"].into(), &declared),
+            10 + DEFAULT_SERIES
+        );
+        assert_eq!(priced_series(&BTreeSet::new(), &declared), DEFAULT_SERIES);
+    }
+
     /// Deployment evidence that every output was measured exact.
     struct EveryOutputMeasuredExact;
 
@@ -3375,10 +3500,7 @@ mod tests {
     /// the target's metric admits the sketches.
     #[test]
     fn a_bound_in_another_metric_misses_the_target() {
-        let counter = DataWorkload {
-            metric_types: [("m".to_string(), asap_types::workload::MetricType::Counter)].into(),
-            ..data()
-        };
+        let counter = with_metric_types(data(), &[("m", MetricType::Counter)]);
         let target = AccuracyTarget::max_error(0.5)
             .failure_probability(0.5)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
@@ -3693,13 +3815,7 @@ mod tests {
     #[test]
     fn exact_distinct_count_beats_a_sketch_over_small_groups() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-        let one_series = DataWorkload {
-            input_cardinality: Evidence {
-                value: Some(1),
-                ..Default::default()
-            },
-            ..data()
-        };
+        let one_series = with_series(Some(1));
         for (data, sketch_wins) in [(data(), false), (one_series, true)] {
             let candidates = keeping_state(all_candidates("distinct_over_time(x[5m])", &target));
             let selection = select_plan(
@@ -4069,10 +4185,7 @@ mod tests {
         let ids = ddsketch(&candidates);
         assert!(!ids.is_empty());
         assert!(ids.iter().all(|id| with.costs.contains_key(id)));
-        let unknown = DataWorkload {
-            input_cardinality: Evidence::default(),
-            ..data()
-        };
+        let unknown = with_series(None);
         let (_, without) = run(query, &target, &unknown, PlanningModels::builtin());
         assert!(ids.iter().all(|id| !without.costs.contains_key(id)));
     }
@@ -4144,26 +4257,17 @@ mod tests {
     }
 
     fn norms(sources: &[(&str, f64)]) -> DataWorkload {
-        DataWorkload {
-            stream_norms: Evidence {
-                value: Some(
-                    sources
-                        .iter()
-                        .map(|(source, l1)| {
-                            (
-                                source.to_string(),
-                                asap_types::workload::StreamNorms {
-                                    l1: Some(*l1),
-                                    l2: None,
-                                },
-                            )
-                        })
-                        .collect(),
-                ),
-                ..Evidence::default()
-            },
-            ..data()
+        let mut data = data();
+        for (source, l1) in sources {
+            data.sources
+                .entry(source.to_string())
+                .or_default()
+                .stream_norms = Some(asap_types::workload::StreamNorms {
+                l1: Some(*l1),
+                l2: None,
+            });
         }
+        data
     }
 
     /// A difference of two Count-Min estimates of the raw values of
@@ -4324,15 +4428,13 @@ mod tests {
     fn stage3_binds_only_fresh_input_cardinality() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
-        let expiring = DataWorkload {
-            input_cardinality: Evidence {
-                value: Some(10_000),
+        let mut expiring = data();
+        for facts in expiring.sources.values_mut() {
+            facts.evidence = Evidence {
                 observed_at_ms: Some(1_000),
                 valid_for_ms: Some(1_000),
-                ..Evidence::default()
-            },
-            ..data()
-        };
+            };
+        }
         let (candidates, selection) = run(query, &target, &expiring, PlanningModels::builtin());
         let ddsketch: Vec<_> = candidates
             .iter()
@@ -4772,10 +4874,9 @@ mod tests {
     /// [`data`] arriving at `rows_per_s`.
     fn arriving(rows_per_s: f64) -> DataWorkload {
         DataWorkload {
-            arrival: asap_types::workload::DataArrival::ContinuouslyIngesting,
-            ingestion_rate: Evidence {
-                value: Some(Rate(rows_per_s)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: rows_per_s,
+                sample_interval: None,
             },
             ..data()
         }

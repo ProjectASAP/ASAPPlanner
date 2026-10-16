@@ -58,13 +58,11 @@ fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: planner_types::types::AccuracyTarget,
 ) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
-    use planner_types::workload::{DataArrival, DataWorkload, Evidence, EvidenceSource, Rate};
+    use planner_types::workload::{DataArrival, DataWorkload};
     let data = DataWorkload {
-        arrival: DataArrival::ContinuouslyIngesting,
-        ingestion_rate: Evidence {
-            value: Some(Rate(1_000.0)),
-            source: EvidenceSource::Declared,
-            ..Default::default()
+        arrival: DataArrival::Ingesting {
+            rows_per_second: 1_000.0,
+            sample_interval: None,
         },
         ..Default::default()
     };

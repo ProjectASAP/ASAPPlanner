@@ -96,12 +96,12 @@ fn resolve_cache_profile(
                 }
                 0.0
             }
-            DataArrival::ContinuouslyIngesting => evidence.result_invalidation_ratio.ok_or(
+            DataArrival::Ingesting { .. } => evidence.result_invalidation_ratio.ok_or(
                 AnalyticalCostError::InvalidCacheEvidence(
                     "continuous ingestion requires result-cache invalidation evidence",
                 ),
             )?,
-            DataArrival::Mixed | DataArrival::Unknown => {
+            DataArrival::Mixed { .. } | DataArrival::Unknown => {
                 return Err(AnalyticalCostError::InvalidCacheEvidence(
                     "cache invalidation cannot be derived for mixed or unknown data arrival",
                 ));
@@ -3811,7 +3811,14 @@ mod tests {
 
         let profile = cache_profile(100, 100);
         assert!(matches!(
-            cache_hit_ratios(&profile, 6, DataArrival::ContinuouslyIngesting),
+            cache_hit_ratios(
+                &profile,
+                6,
+                DataArrival::Ingesting {
+                    rows_per_second: 1_000.0,
+                    sample_interval: None
+                }
+            ),
             Err(AnalyticalCostError::InvalidCacheEvidence(_))
         ));
     }
@@ -4009,7 +4016,10 @@ mod tests {
     fn streaming_invalidation_bounds_result_hits_and_changes_physical_work() {
         let (nodes, evidence) = cache_test_scan();
         let mut scope = comparison_scope();
-        scope.data_arrival = DataArrival::ContinuouslyIngesting;
+        scope.data_arrival = DataArrival::Ingesting {
+            rows_per_second: 1_000.0,
+            sample_interval: None,
+        };
         let mut profile = cache_profile(100, 50);
         let CacheProfile::Evidence(inputs) = &mut profile else {
             unreachable!()

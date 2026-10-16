@@ -11,7 +11,7 @@ use asap_types::pre_asap::{
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
@@ -1189,14 +1189,14 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(1_000)),
-                ..Default::default()
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+                sample_interval: Some(DurationMs(1_000)),
             },
             ..Default::default()
         }),
     };
-    let results = lower_promql_workload(&workload, 0).expect("valid workload");
+    let results = lower_promql_workload(&workload).expect("valid workload");
     assert_eq!(results.len(), 2);
 }
 
@@ -1218,7 +1218,7 @@ fn batch_rejects_non_promql_language() {
         data_workload: None,
     };
     assert!(matches!(
-        lower_promql_workload(&workload, 0),
+        lower_promql_workload(&workload),
         Err(LoweringError::WrongLanguage(_))
     ));
 }

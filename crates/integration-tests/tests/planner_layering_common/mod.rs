@@ -11,7 +11,7 @@
 //! only possible answer; the implementer of each feature replaces the body
 //! with a read of the new IR. Tests that depend on them are `#[ignore]`d
 //! with the feature.
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 

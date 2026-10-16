@@ -44,16 +44,9 @@ pub enum FrontendInput<'a> {
         catalog: &'a SqlCatalog,
     },
     Promql {
-        /// Planning clock. PromQL lowering resolves selection horizons against
-        /// it and checks the ingestion-interval evidence's freshness at it.
-        now_ms: u64,
         histograms: Option<HistogramCatalog>,
     },
-    Metricsql {
-        /// Planning clock, as for PromQL: the ingestion-interval evidence
-        /// must be valid at it.
-        now_ms: u64,
-    },
+    Metricsql,
 }
 
 #[non_exhaustive]
@@ -96,7 +89,7 @@ impl<'a> UserInput<'a> {
                 QueryLanguage::SQL(_) | QueryLanguage::DataFusion,
                 FrontendInput::Sql { .. }
             ) | (QueryLanguage::PromQL, FrontendInput::Promql { .. })
-                | (QueryLanguage::MetricsQL, FrontendInput::Metricsql { .. })
+                | (QueryLanguage::MetricsQL, FrontendInput::Metricsql)
         );
         if !matches_frontend {
             return Err(UserInputError::FrontendMismatch {
@@ -217,16 +210,12 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
             }
             Ok(lowered)
         }
-        FrontendInput::Promql {
-            now_ms, histograms, ..
-        } => {
+        FrontendInput::Promql { histograms, .. } => {
             let lowered = match histograms {
-                Some(histograms) => lower_promql_query_workload_with_histograms(
-                    input.workload,
-                    histograms.clone(),
-                    *now_ms,
-                ),
-                None => lower_promql_query_workload(input.workload, *now_ms),
+                Some(histograms) => {
+                    lower_promql_query_workload_with_histograms(input.workload, histograms.clone())
+                }
+                None => lower_promql_query_workload(input.workload),
             }
             .map_err(|source| PlanError::Lowering {
                 entry_index: None,
@@ -234,12 +223,10 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
             })?;
             Ok(lowered)
         }
-        FrontendInput::Metricsql { now_ms } => {
-            lower_metricsql_query_workload(input.workload, *now_ms).map_err(|source| {
-                PlanError::Lowering {
-                    entry_index: None,
-                    source: LoweringError::Metricsql(source),
-                }
+        FrontendInput::Metricsql => {
+            lower_metricsql_query_workload(input.workload).map_err(|source| PlanError::Lowering {
+                entry_index: None,
+                source: LoweringError::Metricsql(source),
             })
         }
     }

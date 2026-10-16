@@ -626,8 +626,10 @@ fn stage3_plan_selection_count_min_needs_the_counter_declaration() {
         .data_workload
         .as_mut()
         .unwrap()
-        .metric_types
-        .clear();
+        .sources
+        .get_mut(EXAMPLE1_METRIC)
+        .unwrap()
+        .metric_type = None;
     let run = run_promql(&workload);
     let invalid = run.invalid();
     let cms = &physical_with(&run, Q2Option::CountMinHeapPerJob).id;

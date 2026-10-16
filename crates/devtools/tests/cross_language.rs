@@ -13,7 +13,7 @@
 //! match is the **shape above the leaf**: an outer `Aggregate([TopK{k}])` over an
 //! explicit inner `Aggregate([Count])`.
 
-use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
+use asap_devtools::{lower_promql_with_sample_interval, lower_sql, SqlCatalog};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys};
@@ -48,7 +48,7 @@ async fn sql(q: &str) -> Rc<OperatorNode> {
 }
 
 fn promql(q: &str) -> Rc<OperatorNode> {
-    lower_promql_with_data_ingestion_interval(q, AccuracyTarget::exact(), 1_000)
+    lower_promql_with_sample_interval(q, AccuracyTarget::exact(), 1_000)
         .unwrap_or_else(|e| panic!("PromQL {q:?} failed to lower: {e:?}"))
 }
 

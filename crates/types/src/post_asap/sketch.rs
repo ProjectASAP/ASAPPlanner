@@ -692,7 +692,7 @@ pub enum WeightDomain {
     /// are non-negative exactly when `metric` is a counter. Logical
     /// optimization records it without reading the data workload; plan
     /// selection confirms it from the declared metric types
-    /// ([`DataWorkload::metric_types`](crate::workload::DataWorkload::metric_types)).
+    /// ([`SourceFacts::metric_type`](crate::workload::SourceFacts::metric_type)).
     /// Unconfirmed, it counts as not proven.
     SamplesOfMetric {
         metric: String,

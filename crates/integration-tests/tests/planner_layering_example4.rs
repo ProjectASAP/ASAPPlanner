@@ -20,20 +20,20 @@ use asap_aware_mapping::stage3_plan_selection::{
 };
 use asap_types::ir::flat::NodeId;
 use asap_types::post_asap::SketchAlgorithm;
-use asap_types::workload::{DataArrival, PlanningWorkload};
+use asap_types::workload::PlanningWorkload;
 use planner_layering_common::*;
 
 /// Pattern A as given: one ad hoc batch at T over mixed data.
 fn once() -> PlanningWorkload {
-    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed)
+    pattern_a(PatternARecurrence::OnceAdHoc, SharedArrival::Mixed)
 }
 
 fn monthly() -> PlanningWorkload {
-    pattern_a(PatternARecurrence::MonthlyPredictable, DataArrival::Mixed)
+    pattern_a(PatternARecurrence::MonthlyPredictable, SharedArrival::Mixed)
 }
 
 fn at_rest() -> PlanningWorkload {
-    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::AtRest)
+    pattern_a(PatternARecurrence::OnceAdHoc, SharedArrival::AtRest)
 }
 
 /// The window-summary build of `c` with form `want` (`Some(form)` matches
