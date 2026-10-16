@@ -46,8 +46,8 @@ pub fn lower_promql_workload_with_histograms(
 }
 
 /// The metrics `query`'s selectors read, by name: the sources whose facts
-/// (such as `sample_interval`) its lowering looks up. A selector with no
-/// metric name reads the source named `""`, as its scan does.
+/// (such as `sample_interval`) its lowering looks up. Selectors that
+/// lowering rejects, such as one with no metric name, are skipped.
 pub fn promql_metric_names(query: &str) -> Result<BTreeSet<String>, PromqlError> {
     promql::metric_names(query)
 }

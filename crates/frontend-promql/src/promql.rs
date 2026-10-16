@@ -1382,12 +1382,13 @@ fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
     }
 }
 
-/// Collect the metric names of every vector/matrix selector reachable in `expr`
-/// (for the metadata lookup in [`histogram_arg_is_sketchable`]). Skips
-/// name-less selectors like `{le="…"}`.
+/// Collect the metric names of every vector/matrix selector reachable in
+/// `expr`: the metrics whose histogram kind ([`histogram_arg_is_sketchable`])
+/// and sample interval (`lower_query_with_sample_intervals`) lowering looks
+/// up. Skips selectors that lowering rejects, such as `{le="…"}` with no
+/// metric name.
 fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
     match expr {
-        // A selector without a metric name scans the source named "".
         Expr::VectorSelector(vs) => {
             if let Ok((metric, ..)) = vs_parts(vs) {
                 out.push(metric);
@@ -2056,14 +2057,23 @@ fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<Scalar>, TimeShift)> {
             m.name, m.op
         )));
     }
-    let metric = vs.name.clone().unwrap_or_else(|| {
-        vs.matchers
-            .matchers
-            .iter()
-            .find(|m| m.name == "__name__")
-            .map(|m| m.value.clone())
-            .unwrap_or_default()
-    });
+    // A selector with no metric name (`{job="a"}`) selects across every
+    // metric, which one `Source::TimeSeries { metric }` cannot represent
+    // either; reject it, as the MetricsQL frontend does.
+    let metric = vs
+        .name
+        .clone()
+        .or_else(|| {
+            vs.matchers
+                .matchers
+                .iter()
+                .find(|m| m.name == "__name__")
+                .map(|m| m.value.clone())
+        })
+        .filter(|metric| !metric.is_empty())
+        .ok_or_else(|| {
+            LoweringError::UnsupportedFeature("selector without one exact metric name".into())
+        })?;
     // Label matchers are an unordered set: `{a="1",b="2"}` and `{b="2",a="1"}`
     // select the same series. Canonicalise by (name, value) so equivalent
     // selectors lower to identical predicates.

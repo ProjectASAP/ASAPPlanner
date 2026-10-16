@@ -30,16 +30,23 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
 }
 
+/// The lowering error of a selector with no metric name (`{job="a"}`).
+const NO_METRIC_NAME: &str = "selector without one exact metric name";
+
 #[derive(Default, Debug)]
 struct Tally {
     lowered: usize,
+    /// Rejected because a selector has no metric name: expected, since a
+    /// `Source::TimeSeries` names exactly one metric.
+    no_metric_name: usize,
+    /// Rejected for any other unsupported feature.
     rejected: usize,
     unparseable: usize,
 }
 
 impl Tally {
     fn total(&self) -> usize {
-        self.lowered + self.rejected + self.unparseable
+        self.lowered + self.no_metric_name + self.rejected + self.unparseable
     }
 }
 
@@ -53,6 +60,7 @@ fn tally(corpus: &str) -> Tally {
         )) {
             Ok(_) => t.lowered += 1,
             Err(LoweringError::Parse(_)) => t.unparseable += 1,
+            Err(e) if e.to_string().contains(NO_METRIC_NAME) => t.no_metric_name += 1,
             Err(_) => t.rejected += 1,
         }
     }
@@ -123,16 +131,25 @@ fn lowering_is_total_over_the_entire_corpus() {
     );
 
     // Coverage tripwire after rejecting unrepresented native histogram samples:
-    // docs 48 lowered / 1 rejected; testdata 1121 lowered / 469 rejected /
-    // 233 parser gaps. Earlier coverage counted native histogram operations
-    // incorrectly treated as float quantiles. Keep the rejection cases in the
-    // corpus: accepting them requires a native histogram sample representation.
+    // docs 48 lowered / 1 rejected; testdata 1097 lowered / 29 without a
+    // metric name / 464 rejected / 233 parser gaps. Earlier coverage counted
+    // native histogram operations incorrectly treated as float quantiles. Keep
+    // the rejection cases in the corpus: accepting them requires a native
+    // histogram sample representation.
+    //
+    // Expected unsupported: the 29 testdata queries whose selectors name no
+    // metric (`sum({idx="0"})`, `absent_over_time({job="grok"}[20m])`,
+    // `rate({env="1"}[10m])`, ...). Such a selector reads every metric, and a
+    // `Source::TimeSeries` names exactly one, so lowering rejects it as the
+    // MetricsQL frontend does.
+    assert_eq!(docs.no_metric_name, 0, "{docs:?}");
+    assert_eq!(td.no_metric_name, 29, "{td:?}");
     assert!(
         docs.lowered >= 47,
         "docs lowering coverage regressed: {docs:?}"
     );
     assert!(
-        td.lowered >= 1121,
+        td.lowered >= 1097,
         "testdata lowering coverage regressed: {td:?}"
     );
 }
