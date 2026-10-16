@@ -112,48 +112,20 @@ pub enum Predictability {
     Unknown,
 }
 
-/// Confidence assigned to an estimated demand value, expressed in `[0, 1]`.
-/// Validation rejects values outside that range.
-///
-/// For example, `Confidence(0.95)` says the demand estimate is supplied with
-/// 95% confidence.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Confidence(pub f64);
-
-/// Event-time interval from which a demand estimate was learned.
-///
-/// For example, `{ start: TimestampMs(0), end: TimestampMs(60_000) }`
-/// describes an estimate based on the first minute of observations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ObservationWindow {
-    pub start: TimestampMs,
-    pub end: TimestampMs,
-}
-
 /// Evidence-backed forecast used when recurrence is not a fixed interval or
 /// an explicit schedule. Demand is normalized to invocations per second at
 /// the input boundary, so this type never mixes counts and rates.
 ///
 /// # Example
 ///
-/// This estimate predicts ten executions per second, based on one minute of
-/// observed data. It is usable for five minutes
-/// after `observed_at`.
+/// This estimate predicts ten executions per second. It is usable for five
+/// minutes after `observed_at`.
 ///
 /// ```
-/// use asap_types::workload::{
-///     Confidence, DemandEstimate, DurationMs, ObservationWindow, Rate, TimestampMs,
-/// };
+/// use asap_types::workload::{DemandEstimate, DurationMs, Rate, TimestampMs};
 ///
 /// let estimate = DemandEstimate {
-///     observation_window: ObservationWindow {
-///         start: TimestampMs(0),
-///         end: TimestampMs(60_000),
-///     },
 ///     expected_rate: Rate(10.0),
-///     confidence: Confidence(0.95),
 ///     observed_at: Some(TimestampMs(60_000)),
 ///     valid_for: Some(DurationMs(5 * 60 * 1_000)),
 /// };
@@ -161,9 +133,7 @@ pub struct ObservationWindow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DemandEstimate {
-    pub observation_window: ObservationWindow,
     pub expected_rate: Rate,
-    pub confidence: Confidence,
     pub observed_at: Option<TimestampMs>,
     pub valid_for: Option<DurationMs>,
 }
@@ -625,13 +595,6 @@ fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
             return Err(WorkloadError::EmptySchedule)
         }
         QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
-            if estimate.observation_window.start >= estimate.observation_window.end {
-                return Err(WorkloadError::EmptyObservationWindow);
-            }
-            if !(estimate.confidence.0.is_finite() && (0.0..=1.0).contains(&estimate.confidence.0))
-            {
-                return Err(WorkloadError::InvalidConfidence(estimate.confidence.0));
-            }
             validate_rate(estimate.expected_rate)?;
         }
         _ => {}
@@ -674,14 +637,6 @@ pub enum WorkloadError {
     /// Bad input: a scheduled repeating query with no timestamps.
     #[error("a repeated-query schedule must not be empty")]
     EmptySchedule,
-    /// Bad input: a demand estimate whose observation window does not
-    /// start before it ends.
-    #[error("a demand-estimate observation window must have start < end")]
-    EmptyObservationWindow,
-    /// Bad input: a demand estimate's confidence outside `[0, 1]` or not
-    /// finite.
-    #[error("confidence must be finite and in [0, 1], got {0}")]
-    InvalidConfidence(f64),
     /// Bad input: a rate (a demand estimate's, or the arrival's
     /// `rows_per_second`) that is negative or not finite.
     #[error("rate must be finite and non-negative, got {0}")]
@@ -866,12 +821,7 @@ mod tests {
     #[test]
     fn future_demand_estimates_are_not_fresh() {
         let estimate = DemandEstimate {
-            observation_window: ObservationWindow {
-                start: TimestampMs(0),
-                end: TimestampMs(1_000),
-            },
             expected_rate: Rate(1.0),
-            confidence: Confidence(1.0),
             observed_at: Some(TimestampMs(2_000)),
             valid_for: Some(DurationMs(1_000)),
         };
@@ -1024,26 +974,18 @@ mod tests {
     }
 
     #[test]
-    fn estimated_demand_validates_window_rate_and_confidence() {
+    fn estimated_demand_validates_its_rate() {
         let mut workload = base_workload();
         workload.repeating_queries = Some(vec![RepeatingEntry {
             query: Query("estimated".into()),
             demand: RepeatedDemand::EstimatedRate(DemandEstimate {
-                observation_window: ObservationWindow {
-                    start: TimestampMs(10),
-                    end: TimestampMs(10),
-                },
-                expected_rate: Rate(1.0),
-                confidence: Confidence(0.9),
+                expected_rate: Rate(-1.0),
                 observed_at: None,
                 valid_for: None,
             }),
             requirements: QueryRequirements::default(),
             predictability: Predictability::Unknown,
         }]);
-        assert_eq!(
-            workload.validate(),
-            Err(WorkloadError::EmptyObservationWindow)
-        );
+        assert_eq!(workload.validate(), Err(WorkloadError::InvalidRate(-1.0)));
     }
 }
