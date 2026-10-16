@@ -37,7 +37,7 @@ asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2
 
 | Public function | Required input | Output |
 | --- | --- | --- |
-| `asap_frontend_promql::lower_promql_workload` | PromQL `PlanningWorkload`; one with a bare instant selector needs a nonzero `sample_interval` in its `DataArrival` | All-or-nothing `Result<Vec<Rc<OperatorNode>>, PromqlError>` for normalized batch and repeating entries |
+| `asap_frontend_promql::lower_promql_workload` | PromQL `PlanningWorkload`; a bare instant selector needs its metric's nonzero `sample_interval` in `DataWorkload.sources` | All-or-nothing `Result<Vec<Rc<OperatorNode>>, PromqlError>` for normalized batch and repeating entries |
 | `asap_frontend_metricsql::lower_metricsql` | Query string, `AccuracyTarget` | `Result<Rc<OperatorNode>, MetricsqlError>` |
 | `asap_frontend_sql::lower_sql` | Query string, `SqlCatalog`, accuracy | Async `Result<Rc<OperatorNode>, SqlError>`; default SQL dialect is DataFusionSQL |
 | `asap_frontend_sql::lower_sql_dialect` | Same inputs plus `SqlDialect` | Async resolved Pre-ASAP query or error |
@@ -63,11 +63,11 @@ lower_promql_workload(workload: &PlanningWorkload)
 ```
 
 A bare instant selector reads the latest sample within the sample interval
-that `DataWorkload.arrival` declares (`DataArrival::Ingesting` or `Mixed`
-with `sample_interval: Some(DurationMs(..))`, nonzero). A query with one
-fails with `WorkloadError::MissingSampleInterval` when the data is at rest,
-its arrival is unknown, or no interval is declared. Explicit range selectors
-retain their query-specified range and need no interval. Use `lower_promql_workload_with_histograms`
+its metric declares (`DataWorkload.sources[metric].sample_interval`,
+nonzero), whatever the arrival. A query with one fails with
+`WorkloadError::MissingSampleInterval` when that metric declares no
+interval. Explicit range selectors retain their query-specified range and
+need no interval. Use `lower_promql_workload_with_histograms`
 to supply a histogram catalog for the whole workload. Each entry carries its
 own accuracy requirement, with these explicit target choices:
 
@@ -84,7 +84,7 @@ that a supported candidate exists.
 ```rust
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, Query,
+    BatchEntry, DataWorkload, DurationMs, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_types::types::AccuracyTarget;
@@ -105,13 +105,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(1_000)),
-            },
-            ..Default::default()
-        }),
+        // `latency` is sampled every second.
+        data_workload: Some(DataWorkload::sampled_every(
+            ["latency".to_string()],
+            DurationMs(1_000),
+        )),
     };
     let pre_asap = lower_promql_workload(&workload)?;
     println!("{pre_asap:#?}");
@@ -197,7 +195,7 @@ The default cost model is suitable for inspection, not deployment calibration.
 ```rust
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, Query,
+    BatchEntry, DataWorkload, DurationMs, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::{
@@ -223,13 +221,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(1_000)),
-            },
-            ..Default::default()
-        }),
+        // `latency` is sampled every second.
+        data_workload: Some(DataWorkload::sampled_every(
+            ["latency".to_string()],
+            DurationMs(1_000),
+        )),
     };
     let root = lower_promql_workload(&workload)?.remove(0);
     let cost_model = DefaultCostModel;
@@ -344,7 +340,7 @@ replacement::default_strategies_with_evidence<'a>(
 ```rust
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, Query,
+    BatchEntry, DataWorkload, DurationMs, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::{
@@ -370,13 +366,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(1_000)),
-            },
-            ..Default::default()
-        }),
+        // `latency` is sampled every second.
+        data_workload: Some(DataWorkload::sampled_every(
+            ["latency".to_string()],
+            DurationMs(1_000),
+        )),
     };
     let root = lower_promql_workload(&workload)?.remove(0);
     let model = DefaultCostModel;
@@ -492,28 +486,29 @@ inputs. `QueryWorkload` contains the language and optional batch/repeating
 entries. Entries carry requirements, predictability, recurrence and time
 selection. These facts are separate: repeated queries can read data at rest.
 `DataWorkload` holds `arrival` (`DataArrival`: `AtRest`, `Ingesting` or
-`Mixed` with `rows_per_second` and the PromQL-only `sample_interval`, or
-`Unknown`) and `sources`, a map from PromQL metric or SQL table name to
-`SourceFacts`: `series`, `metric_type`, `stream_norms`,
-`max_distinct_per_evaluation`, and one `evidence` (when the facts were
-observed and how long they hold). Plan selection binds a query's number of
-values `G` and input row count to the summed `series` of the sources it
-reads, and binds measured facts only while their evidence never expires.
-`DataWorkload::validate()` checks the data facts: the arrival rate must be
-finite and nonnegative, a sample interval nonzero, stream norms finite and
-nonnegative, and distinct bounds positive. `PlanningWorkload::validate()`
-shares these checks.
+`Mixed` with `rows_per_second`, or `Unknown`) and `sources`, a map from
+PromQL metric or SQL table name to `SourceFacts`: `series_count`,
+`metric_type`, `sample_interval` (PromQL and MetricsQL), `stream_norms` and
+`max_distinct_per_evaluation`. Every fact is declared: the planner has no
+clock, so a caller drops facts that no longer hold before planning. Plan
+selection bounds a query's number of values `G`, and its input row count,
+by the `series_count` of the sources it reads, counting each branch of an
+`or` or union. `DataWorkload::validate()` checks the data facts: the
+arrival rate must be finite and nonnegative, a sample interval nonzero,
+stream norms finite and nonnegative, and distinct bounds positive.
+`PlanningWorkload::validate()` shares these checks.
 
 ```json
-{"arrival": {"ingesting": {"rows_per_second": 66666.7, "sample_interval": 15000}},
- "sources": {"http_requests_total": {"series": 1000000, "metric_type": "counter"}}}
+{"arrival": {"ingesting": {"rows_per_second": 66666.7}},
+ "sources": {"http_requests_total":
+   {"series_count": 1000000, "metric_type": "counter", "sample_interval": 15000}}}
 ```
 
 | Type/input | Current behavior | Caller responsibility |
 | --- | --- | --- |
 | `QueryRequirements::default()` | `AccuracyTarget::exact()`, no latency bound (`max_latency_ms: None`) | Pass approximation explicitly and thread per-root requirements into search |
 | `DataWorkload::default()` | Unknown arrival, no source facts | Supply facts needed for the requested comparisons |
-| `SourceFacts::default()` | Every fact unknown; declared evidence that never expires | Unknown facts are not zero; give observed facts their observation time and validity |
+| `SourceFacts::default()` | Every fact unknown | Unknown facts are not zero; drop facts that no longer hold before planning |
 | `DefaultCostModel` | Built-in ordering/sizing and structural cost hooks | Supply deployment evidence for calibrated comparisons |
 
 `Default` is a Rust constructor contract, not a general serde omission rule.
@@ -586,7 +581,7 @@ planning.
 ```rust
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, Query,
+    BatchEntry, DataWorkload, DurationMs, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::{search_workload, DefaultCostModel};
@@ -608,13 +603,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(1_000)),
-            },
-            ..Default::default()
-        }),
+        // `latency` is sampled every second.
+        data_workload: Some(DataWorkload::sampled_every(
+            ["latency".to_string()],
+            DurationMs(1_000),
+        )),
     };
     let root = lower_promql_workload(&workload)?.remove(0);
     let space = search_workload(vec![("q1", root)]);
