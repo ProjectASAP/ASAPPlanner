@@ -29,7 +29,7 @@ pub struct FamilyCapability {
 /// The kind of a `SummaryEstimate` statistic, without its arguments: the
 /// readout vocabulary of this table and of a deployment's supported
 /// summaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StatisticKind {
     /// The total of the updates: a bare `PointCount` (no item value).
     Total,

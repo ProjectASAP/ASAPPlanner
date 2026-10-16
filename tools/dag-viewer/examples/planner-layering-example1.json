@@ -1,6 +1,6 @@
 {
-  "deployment": {
-    "query_time_retention": false,
+  "deployment_capabilities": {
+    "query_time_results_retained": false,
     "raw_data_retained": true,
     "supported_summaries": null
   },
@@ -22323,7 +22323,8 @@
       }
     ],
     "capped": false,
-    "combinations": 27
+    "combinations": 27,
+    "pass1_pruned": []
   },
   "stage2_physical_asap_optimization": {
     "candidates": [

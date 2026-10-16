@@ -58,13 +58,14 @@
 //! `MatAtQuery` node's state is reused only within one evaluation, so it is
 //! held only while that evaluation runs: its bytes times the latency of the
 //! longest query reading it, once per evaluation, which is close to nothing.
-//! When the deployment keeps query-time results
-//! ([`DeploymentCapabilities::query_time_retention`]), a `MatAtQuery`
-//! tumbling-pane chain whose every reader repeats at its pane width is kept
-//! across evaluations (#509 Example 4's B3): each evaluation scans one pane
-//! of raw data and builds the newest pane, and the `N − 1` older panes,
-//! which complete the readers' look-back, are kept in memory every second
-//! (all `N` at the peak).
+//! A `MatAtQueryKeptAcrossEvaluations` tumbling-pane chain (#509 Example
+//! 4's B3, offered by Stage 2 when the deployment keeps query-time results,
+//! [`crate::DeploymentCapabilities::query_time_results_retained`]) is kept across
+//! evaluations: each evaluation scans one pane of raw data and builds the
+//! newest pane, and the `N − 1` older panes, which complete the readers'
+//! look-back, are kept every second (in memory, all `N` at the peak). When
+//! Stage 2 offers both query-time options for a chain, plan selection
+//! prices each and the cheaper wins.
 //! Memory a computation
 //! holds only while it runs is not charged under cost model 1: it counts in
 //! [`ResourceUsage::peak_memory_bytes`], which cost models 2 and 3 read. A
@@ -114,7 +115,7 @@
 //! Disk holds state materialized on `Medium::Disk` (Stage 2 places none
 //! there yet) and the raw data query-time scans read: per source, the
 //! longest window a scan reads. A deployment that does not retain raw data
-//! ([`DeploymentCapabilities::raw_data_retained`]) keeps no raw samples
+//! ([`crate::DeploymentCapabilities::raw_data_retained`]) keeps no raw samples
 //! after they arrive, so a candidate with a query-time scan is invalid,
 //! with the window it would read as the reason.
 //!
@@ -170,7 +171,7 @@ use crate::accuracy::{OperandDomain, PropagationStats};
 use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
-use crate::deployment_capabilities::DeploymentCapabilities;
+use crate::deployment_capabilities::DeploymentCapabilitiesError;
 use crate::per_computation_candidates::{
     approximate_inputs, distinct_bound_source, operand_domain_statistic, operand_guarantee,
     operand_of, project_column_guarantee, root_guarantee, with_resized_summaries,
@@ -178,7 +179,7 @@ use crate::per_computation_candidates::{
 use crate::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
-use crate::stage2_physical_asap_optimization::{builds_one_pane_per_evaluation, PhysicalCandidate};
+use crate::stage2_physical_asap_optimization::PhysicalCandidate;
 use crate::PlanningModels;
 
 /// Groups assumed for every `by (...)` reduction, absent group-count evidence.
@@ -198,8 +199,8 @@ pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
 pub const DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS: f64 = 3_600.0;
 
 /// What one candidate uses, per second of wall time unless the name says
-/// otherwise, without prices: its nodes' [`NodeUsage`] summed, with the
-/// candidate's peak cores and per-query latency. Every [`CostModel`] reads
+/// otherwise, without prices: its nodes' CPU, scans, kept memory and disk
+/// added up, with the candidate's peak cores and per-query latency. Every [`CostModel`] reads
 /// it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResourceUsage {
@@ -223,22 +224,6 @@ pub struct ResourceUsage {
     pub peak_cpu_cores: u32,
     /// One per query, in workload order: its latency per evaluation.
     pub latency_per_query: Vec<QueryLatency>,
-}
-
-/// What one node of a candidate uses: the [`ResourceUsage`] fields that add
-/// up over nodes. Cores and latency are the whole candidate's.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct NodeUsage {
-    /// CPU operations per second.
-    pub cpu_ops_per_second: f64,
-    /// Bytes scanned per second.
-    pub scanned_bytes_per_second: f64,
-    /// Kept memory averaged over time, in byte-seconds per second.
-    pub average_memory_bytes: f64,
-    /// The most memory the node holds at once (every evaluation overlapping).
-    pub peak_memory_bytes: u64,
-    /// Bytes the node keeps on disk.
-    pub disk_bytes: u64,
 }
 
 /// The price of one unit of each resource, per second of wall time. Cost
@@ -421,23 +406,23 @@ impl PlanSelectionSettings {
     }
 }
 
-/// One node's usage and price, per second of wall time. `multiplier` is the
-/// number of consumers it is computed for (1 when materialized) and
-/// `per_second` the times it is computed per second ([`computations`]).
+/// One node's price per second of wall time, with how it was measured.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeCost {
-    pub usage: NodeUsage,
     /// Its price per second under cost model 1; `None` under cost models 2
     /// and 3, which price (or limit) the whole candidate's peaks.
     pub cost_per_second: Option<f64>,
+    /// The number of consumers it is computed for (1 when materialized,
+    /// [`computations`]).
     pub multiplier: u64,
-    pub per_second: f64,
+    /// How it was measured, e.g. "scan 1000 samples; x 1.0000/s; keeps
+    /// ... bytes": one computation's work, the times it is computed per
+    /// second and what it keeps.
     pub detail: String,
 }
 
-/// One candidate's usage and price over the whole workload: one entry per
-/// DAG node; `usage` sums them, with the candidate's peak cores and
-/// per-query latency.
+/// One candidate's usage and price over the whole workload: `usage` is
+/// the whole candidate's, `per_node` one price per DAG node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateCost {
     pub usage: ResourceUsage,
@@ -588,6 +573,10 @@ pub enum SelectionError {
         roots: usize,
         entries: usize,
     },
+    /// Bad input: the deployment's capabilities contradict the data
+    /// workload ([`crate::DeploymentCapabilities::validate`]).
+    #[error("deployment capabilities: {0}")]
+    InvalidDeploymentCapabilities(DeploymentCapabilitiesError),
     #[error("candidate {candidate}, node {node:?}: {error}")]
     Cost {
         candidate: String,
@@ -616,6 +605,10 @@ pub fn select_plan(
     settings
         .validate()
         .map_err(SelectionError::InvalidSettings)?;
+    models
+        .deployment_capabilities
+        .validate(data)
+        .map_err(SelectionError::InvalidDeploymentCapabilities)?;
     let targets = &accuracy_targets(entries);
     let mut costs = BTreeMap::new();
     let mut accepted = BTreeMap::new();
@@ -654,20 +647,26 @@ pub fn select_plan(
                 continue;
             }
         };
-        if let Some(reason) = raw_data_violation(&candidate.dag, &recurrence, models.deployment) {
-            rejected.push(Rejection {
-                id: candidate.id.clone(),
-                valid: false,
-                reason,
-            });
-            continue;
+        // Built once per candidate for the raw-data check and pricing.
+        let nodes = node_map(&candidate.dag);
+        let kept_chains = kept_pane_chains(&candidate.dag);
+        if !models.deployment_capabilities.raw_data_retained {
+            if let Some(reason) = raw_data_violation(&candidate.dag, &nodes, &kept_chains) {
+                rejected.push(Rejection {
+                    id: candidate.id.clone(),
+                    valid: false,
+                    reason,
+                });
+                continue;
+            }
         }
         let cost = price(
             &candidate.dag,
+            &nodes,
+            &kept_chains,
             &recurrence,
             data,
             settings,
-            models.deployment,
         )
         .map_err(|(node, error)| SelectionError::Cost {
             candidate: candidate.id.clone(),
@@ -1892,14 +1891,15 @@ fn computations(
 /// time ranges keep, times how often it is computed per second
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's kept state is counted in byte-seconds per
-/// second. `deployment` says whether a query-time pane chain is kept across
-/// evaluations ([`kept_pane_chains`]).
+/// second. `nodes` and `kept_chains` are `dag`'s ([`node_map`],
+/// [`kept_pane_chains`]).
 fn price(
     dag: &PhysicalASAPDAG,
+    nodes: &NodeMap<'_>,
+    kept_chains: &HashSet<PhysicalASAPNodeId>,
     recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     settings: &PlanSelectionSettings,
-    deployment: &DeploymentCapabilities,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let speed = settings.resource_speed;
@@ -1915,8 +1915,6 @@ fn price(
         / 1_000.0;
     // The sources each node reads, filled children first.
     let mut sources_read_by: HashMap<PhysicalASAPNodeId, BTreeSet<&str>> = HashMap::new();
-    let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
-    let kept_chains = kept_pane_chains(dag, &nodes, recurrence, deployment);
     let multipliers = computations(
         dag,
         recurrence,
@@ -1925,6 +1923,9 @@ fn price(
     .map_err(|error| (first, error))?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
+    // The candidate's usage, accumulated node by node; peak cores and
+    // latency are filled in once every node is measured.
+    let mut usage = ResourceUsage::default();
     // Each node's work in ms on one core: one computation at query time,
     // one second of arriving rows at ingestion time.
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
@@ -1989,7 +1990,7 @@ fn price(
                     // query time, the longest window read above it.
                     let lookback = match ingestion {
                         true => 1_000,
-                        false => query_time_lookback_ms(dag, &nodes, node.id, &kept_chains),
+                        false => query_time_lookback_ms(dag, nodes, node.id, kept_chains),
                     };
                     let out = edge(((rows_per_ms * lookback as f64).round() as u64).max(1));
                     let estimate = estimate_operator(
@@ -2242,11 +2243,14 @@ fn price(
                 + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte,
         );
         let (multiplier, per_second) = multipliers[&node.id];
-        let mut usage = NodeUsage {
-            cpu_ops_per_second: estimate.cpu_ops() * per_second,
-            scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
-            ..NodeUsage::default()
-        };
+        usage.cpu_ops_per_second += estimate.cpu_ops() * per_second;
+        usage.scanned_bytes_per_second += estimate.scan_bytes() as f64 * per_second;
+        // What this node keeps: memory averaged over time (byte-seconds per
+        // second), its peak memory and its disk bytes, added to the
+        // candidate's usage below.
+        let mut average_memory_bytes = 0.0;
+        let mut peak_memory_bytes = 0u64;
+        let mut disk_bytes = 0u64;
         let mut detail = format!("{detail}; x {per_second:.4}/s");
         // State kept between computations: at ingestion time, the window
         // being built and the completed ones queries read (a chain of N
@@ -2260,21 +2264,21 @@ fn price(
         let state = out.bytes.max(estimate.peak_memory_bytes());
         let (kept, medium) = match (node.materialization, &node.payload) {
             (Materialization::NotMaterialized, _) => {
-                usage.peak_memory_bytes = estimate.peak_memory_bytes().saturating_mul(multiplier);
+                peak_memory_bytes = estimate.peak_memory_bytes().saturating_mul(multiplier);
                 (0, Medium::Memory)
             }
             // A pane chain kept across evaluations holds its N − 1 older
             // panes between evaluations, for the next ones, and all N
             // while one runs.
-            (Materialization::MatAtQuery(medium), _) if kept_chains.contains(&node.id) => {
+            (Materialization::MatAtQueryKeptAcrossEvaluations(medium), _) => {
                 let panes = panes_of(node);
                 let between = state / panes * (panes - 1);
                 match medium {
                     Medium::Memory => {
-                        usage.average_memory_bytes = between as f64;
-                        usage.peak_memory_bytes = state;
+                        average_memory_bytes = between as f64;
+                        peak_memory_bytes = state;
                     }
-                    Medium::Disk => usage.disk_bytes = state,
+                    Medium::Disk => disk_bytes = between,
                 }
                 detail += &format!("; keeps {between} bytes across evaluations");
                 (0, medium)
@@ -2283,9 +2287,9 @@ fn price(
                 match medium {
                     Medium::Memory => {
                         held.insert(node.id, (state, per_second));
-                        usage.peak_memory_bytes = state;
+                        peak_memory_bytes = state;
                     }
-                    Medium::Disk => usage.disk_bytes = state,
+                    Medium::Disk => disk_bytes = state,
                 }
                 (0, medium)
             }
@@ -2304,10 +2308,10 @@ fn price(
         if kept > 0 {
             match medium {
                 Medium::Memory => {
-                    usage.average_memory_bytes = kept as f64;
-                    usage.peak_memory_bytes = kept;
+                    average_memory_bytes = kept as f64;
+                    peak_memory_bytes = kept;
                 }
-                Medium::Disk => usage.disk_bytes = kept,
+                Medium::Disk => disk_bytes = kept,
             }
             detail += &format!("; keeps {kept} bytes");
         }
@@ -2327,9 +2331,12 @@ fn price(
             (estimate.cpu_ops() * prices.cost_per_cpu_op
                 + estimate.scan_bytes() as f64 * prices.cost_per_scanned_byte)
                 * per_second
-                + prices.cost_per_memory_byte_second * usage.average_memory_bytes
-                + prices.cost_per_disk_byte_second * usage.disk_bytes as f64
+                + prices.cost_per_memory_byte_second * average_memory_bytes
+                + prices.cost_per_disk_byte_second * disk_bytes as f64
         });
+        usage.average_memory_bytes += average_memory_bytes;
+        usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(peak_memory_bytes);
+        usage.disk_bytes = usage.disk_bytes.saturating_add(disk_bytes);
         if cost.is_some_and(|cost| !cost.is_finite()) {
             return Err((node.id, AnalyticalCostError::Overflow));
         }
@@ -2337,17 +2344,15 @@ fn price(
         per_node.insert(
             node.id,
             NodeCost {
-                usage,
                 cost_per_second: cost,
                 multiplier,
-                per_second,
                 detail,
             },
         );
     }
     for (bytes, id) in raw_data.into_values() {
         let node = per_node.get_mut(&id).expect("every node is measured");
-        node.usage.disk_bytes += bytes;
+        usage.disk_bytes = usage.disk_bytes.saturating_add(bytes);
         node.detail += &format!("; keeps {bytes} bytes of raw data on disk");
         if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
             *cost += prices.cost_per_disk_byte_second * bytes as f64;
@@ -2363,14 +2368,14 @@ fn price(
         }
         let bytes = copies.saturating_mul(window);
         let measured = per_node.get_mut(&id).expect("every node is measured");
-        measured.usage.peak_memory_bytes = measured.usage.peak_memory_bytes.saturating_add(bytes);
+        usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes);
         measured.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
     }
-    let latency = query_latencies(dag, &nodes, &output, &work_ms, &speed);
+    let latency = query_latencies(dag, nodes, &output, &work_ms, &speed);
     // A MatAtQuery state is held for one evaluation: from its build until
     // the longest query reading it finishes, about that query's latency.
-    let reach = query_reach(dag, &nodes);
+    let reach = query_reach(dag, nodes);
     for (id, (state, per_second)) in held {
         let evaluation_ms = reach
             .iter()
@@ -2380,7 +2385,7 @@ fn price(
             .fold(0.0, f64::max);
         let byte_seconds = state as f64 * evaluation_ms / 1_000.0 * per_second;
         let node = per_node.get_mut(&id).expect("every node is measured");
-        node.usage.average_memory_bytes += byte_seconds;
+        usage.average_memory_bytes += byte_seconds;
         node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
         if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
             *cost += prices.cost_per_memory_byte_second * byte_seconds;
@@ -2389,17 +2394,7 @@ fn price(
             }
         }
     }
-    let mut usage = ResourceUsage::default();
-    for node in per_node.values() {
-        usage.cpu_ops_per_second += node.usage.cpu_ops_per_second;
-        usage.scanned_bytes_per_second += node.usage.scanned_bytes_per_second;
-        usage.average_memory_bytes += node.usage.average_memory_bytes;
-        usage.peak_memory_bytes = usage
-            .peak_memory_bytes
-            .saturating_add(node.usage.peak_memory_bytes);
-        usage.disk_bytes = usage.disk_bytes.saturating_add(node.usage.disk_bytes);
-    }
-    usage.peak_cpu_cores = peak_cpu_cores(dag, &nodes, &work_ms, &multipliers, &latency);
+    usage.peak_cpu_cores = peak_cpu_cores(dag, nodes, &work_ms, &multipliers, &latency);
     usage.latency_per_query = latency;
     let cost = match &settings.cost_model {
         CostModel::UsageOverTime(_) => per_node.values().map(|node| node.cost_per_second).sum(),
@@ -2566,7 +2561,7 @@ fn query_reach(
 /// [`DEFAULT_LOOKBACK_MS`] without one.
 fn query_time_lookback_ms(
     dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
+    nodes: &NodeMap<'_>,
     scan: PhysicalASAPNodeId,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
 ) -> u64 {
@@ -2576,67 +2571,69 @@ fn query_time_lookback_ms(
         .unwrap_or(DEFAULT_LOOKBACK_MS)
 }
 
-/// The `MatAtQuery` tumbling-pane chains of `dag` kept across evaluations:
-/// none unless the deployment keeps query-time results; otherwise each one
-/// that builds one new pane per evaluation, every query reaching it
-/// repeating at its pane width (`builds_one_pane_per_evaluation`). Its
-/// retention is derived from those readers: the newest pane is built at
-/// each evaluation, and the older ones, which complete the readers'
-/// longest look-back, are kept from earlier evaluations.
-fn kept_pane_chains(
-    dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
-    recurrence: &[QueryRecurrence],
-    deployment: &DeploymentCapabilities,
-) -> HashSet<PhysicalASAPNodeId> {
-    if !deployment.query_time_retention {
-        return HashSet::new();
-    }
-    let reach = query_reach(dag, nodes);
+/// The nodes of `dag` by id.
+fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
+    dag.nodes.iter().map(|n| (n.id, n)).collect()
+}
+
+/// The nodes of a physical DAG by id.
+type NodeMap<'a> =
+    HashMap<PhysicalASAPNodeId, &'a asap_types::ir::physical_export::PhysicalASAPDAGNode>;
+
+/// The tumbling-pane chains of `dag` kept across evaluations
+/// (`MatAtQueryKeptAcrossEvaluations`, which Stage 2 offers only when the
+/// deployment keeps query-time results and every reader builds one new
+/// pane per evaluation). Each evaluation builds the newest pane, and the
+/// older ones, which complete the readers' look-back, are kept from
+/// earlier evaluations.
+fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
     dag.nodes
         .iter()
-        .filter_map(|node| match (&node.payload, node.materialization) {
-            (
-                Payload::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }),
-                Materialization::MatAtQuery(_),
-            ) => {
-                let readers = reach
-                    .iter()
-                    .zip(recurrence)
-                    .filter(|(reached, _)| reached.contains(&node.id))
-                    .map(|(_, recurrence)| recurrence);
-                builds_one_pane_per_evaluation(*pane_width_ms, readers).then_some(node.id)
-            }
-            _ => None,
+        .filter(|node| {
+            matches!(
+                (&node.payload, node.materialization),
+                (
+                    Payload::ASAP(ASAPOp::PaneChain { .. }),
+                    Materialization::MatAtQueryKeptAcrossEvaluations(_),
+                )
+            )
         })
+        .map(|node| node.id)
         .collect()
 }
 
-/// When the deployment does not retain raw data, the first query-time scan
-/// of `dag` as a rejection reason. Raw samples are then not kept after they
-/// arrive, so no window of them is there to scan at query time: only
-/// ingestion-time work reads raw rows.
+/// For a deployment that does not retain raw data, every query-time scan
+/// of `dag` with the window it would read, as a rejection reason (`None`
+/// without one). Raw samples are then not kept after they arrive, so no
+/// window of them is there to scan at query time: only ingestion-time work
+/// reads raw rows. `nodes` and `kept_chains` are `dag`'s ([`node_map`],
+/// [`kept_pane_chains`]).
 fn raw_data_violation(
     dag: &PhysicalASAPDAG,
-    recurrence: &[QueryRecurrence],
-    deployment: &DeploymentCapabilities,
+    nodes: &NodeMap<'_>,
+    kept_chains: &HashSet<PhysicalASAPNodeId>,
 ) -> Option<String> {
-    if deployment.raw_data_retained {
-        return None;
-    }
-    let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
-    let kept_chains = kept_pane_chains(dag, &nodes, recurrence, deployment);
-    dag.nodes.iter().find_map(|node| match &node.payload {
-        Payload::NonASAP(NonASAPOp::Scan { source, .. })
-            if node.output_state.timing != ExecutionTiming::IngestionTime =>
-        {
-            Some(format!(
-                "scans {} ms of raw {} at query time, but the deployment does not retain raw data",
-                query_time_lookback_ms(dag, &nodes, node.id, &kept_chains),
-                source_name(source)
-            ))
-        }
-        _ => None,
+    let scans: Vec<String> = dag
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            Payload::NonASAP(NonASAPOp::Scan { source, .. })
+                if node.output_state.timing != ExecutionTiming::IngestionTime =>
+            {
+                Some(format!(
+                    "{} ms of raw {}",
+                    query_time_lookback_ms(dag, nodes, node.id, kept_chains),
+                    source_name(source)
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    (!scans.is_empty()).then(|| {
+        format!(
+            "scans {} at query time, but the deployment does not retain raw data",
+            scans.join(", ")
+        )
     })
 }
 
@@ -2830,7 +2827,7 @@ fn ddsketch_bins(alpha: f64) -> u64 {
 mod tests {
     use super::*;
 
-    /// [`super::price`] under the default deployment capabilities.
+    /// [`super::price`] with `dag`'s node map and kept pane chains.
     fn price(
         dag: &PhysicalASAPDAG,
         recurrence: &[QueryRecurrence],
@@ -2839,13 +2836,15 @@ mod tests {
     ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
         super::price(
             dag,
+            &node_map(dag),
+            &kept_pane_chains(dag),
             recurrence,
             data,
             settings,
-            &DeploymentCapabilities::default(),
         )
     }
     use crate::accuracy::AccuracyEvidenceProvider;
+    use crate::deployment_capabilities::DeploymentCapabilities;
     use crate::stage2_physical_asap_optimization::optimize_physical_asap;
     use crate::test_support::{entry, entry_with, lower_promql};
     use asap_types::ir::{ExprSemantics, ScalarExpr};
@@ -4858,7 +4857,7 @@ mod tests {
                 fast.per_node[&id].cost_per_second,
                 slow.per_node[&id].cost_per_second
             );
-            assert_eq!(fast.per_node[&id].per_second, 1.0);
+            assert!(fast.per_node[&id].detail.contains("; x 1.0000/s"));
         }
         let estimate = dag.roots[0];
         assert!(close(
@@ -4895,7 +4894,9 @@ mod tests {
             } else {
                 let evaluation_s = with.usage.latency_per_query[0].total_ms() / 1_000.0;
                 assert!(evaluation_s > 0.0 && evaluation_s < 1.0, "{evaluation_s}");
-                state * evaluation_s * with.per_node[&build].per_second
+                // Once per evaluation of the query repeating every 10 s.
+                assert!(with.per_node[&build].detail.contains("; x 0.1000/s"));
+                state * evaluation_s * 0.1
             };
             let term = with.per_node[&build].cost_per_second.unwrap()
                 - without.per_node[&build].cost_per_second.unwrap();
@@ -5243,45 +5244,45 @@ mod tests {
     /// A deployment that keeps query-time results across evaluations.
     fn keeping_query_time_results() -> DeploymentCapabilities {
         DeploymentCapabilities {
-            query_time_retention: true,
+            query_time_results_retained: true,
             ..DeploymentCapabilities::default()
         }
     }
 
-    /// `query_time_retention` gates keeping a query-time result across
+    /// `query_time_results_retained` gates keeping a query-time result across
     /// evaluations, and only that. Without it, Stage 2 offers the 1-min
     /// panes of a query repeating every minute rebuilt (B2) or maintained
-    /// (B1); with it, also built at query time and kept (B3, `MatAtQuery`).
-    /// B3 is computed once per evaluation, reads one pane (1 min) of raw
-    /// data, keeps that much raw data on disk, and holds its 4 older panes
-    /// in memory between evaluations. The same DAG priced for a deployment
-    /// that keeps no query-time result is reused only within one
-    /// evaluation: the scan reads the 5-min window and nothing is kept.
+    /// (B1); with it, also built at query time and kept (B3,
+    /// `MatAtQueryKeptAcrossEvaluations`). B3 is computed once per
+    /// evaluation, reads one pane (1 min) of raw data, keeps that much raw
+    /// data on disk, and holds its 4 older panes in memory between
+    /// evaluations (on disk, if it were placed there). The same chain
+    /// `MatAtQuery` is reused only within one evaluation: the scan reads the
+    /// 5-min window and nothing is kept between evaluations.
     #[test]
-    fn query_time_retention_keeps_a_pane_chain_across_evaluations() {
+    fn query_time_results_retained_keeps_a_pane_chain_across_evaluations() {
+        assert_eq!(pane_candidates(10_000.0).len(), 2);
         let candidates = pane_candidates_for(10_000.0, &keeping_query_time_results());
         assert_eq!(candidates.len(), 3);
         let b2 = &candidates[0].dag;
         let b3 = &candidates[2].dag;
         let chain = node_of(b3, is_chain);
+        let with_chain = |materialization: Materialization| {
+            let mut dag = b3.clone();
+            for node in dag.nodes.iter_mut().filter(|n| n.id == chain) {
+                node.materialization = materialization;
+            }
+            dag
+        };
         assert_eq!(
-            b3.nodes
-                .iter()
-                .find(|n| n.id == chain)
-                .unwrap()
-                .materialization,
-            Materialization::MatAtQuery(Medium::Memory)
+            *b3,
+            with_chain(Materialization::MatAtQueryKeptAcrossEvaluations(
+                Medium::Memory
+            ))
         );
         let recurrence = [repeating(MINUTE)];
         let settings = PlanSelectionSettings::default();
-        let kept = super::price(
-            b3,
-            &recurrence,
-            &arriving(10_000.0),
-            &settings,
-            &keeping_query_time_results(),
-        )
-        .unwrap();
+        let kept = price(b3, &recurrence, &arriving(10_000.0), &settings).unwrap();
         let rebuilt = price(b2, &recurrence, &arriving(10_000.0), &settings).unwrap();
         let scan = node_of(b3, is_scan);
         assert_eq!(scanned_samples(&kept, scan), 10_000 * 60);
@@ -5297,19 +5298,30 @@ mod tests {
         };
         let (_, state_bytes) = summary_shape(family);
         let chain_cost = &kept.per_node[&chain];
-        assert!(close(chain_cost.per_second, 1.0 / 60.0), "{chain_cost:?}");
-        let groups = chain_cost.usage.peak_memory_bytes / (5 * state_bytes);
-        let between = 4 * groups * state_bytes;
-        assert_eq!(chain_cost.usage.average_memory_bytes, between as f64);
+        assert!(chain_cost.detail.contains("; x 0.0167/s"), "{chain_cost:?}");
+        // One state per series: arriving() declares 10 000.
+        let between = 4 * 10_000 * state_bytes;
         assert!(chain_cost
             .detail
             .contains(&format!("keeps {between} bytes across evaluations")));
-        let within_one = price(b3, &recurrence, &arriving(10_000.0), &settings).unwrap();
+        // On disk, the same N − 1 older panes are kept.
+        let on_disk = with_chain(Materialization::MatAtQueryKeptAcrossEvaluations(
+            Medium::Disk,
+        ));
+        let on_disk = price(&on_disk, &recurrence, &arriving(10_000.0), &settings).unwrap();
+        assert_eq!(
+            on_disk.usage.disk_bytes,
+            kept.usage.disk_bytes + between,
+            "{on_disk:?}"
+        );
+        // Shared within one evaluation, nothing is kept between them.
+        let shared = with_chain(Materialization::MatAtQuery(Medium::Memory));
+        let within_one = price(&shared, &recurrence, &arriving(10_000.0), &settings).unwrap();
         assert_eq!(scanned_samples(&within_one, scan), 10_000 * 300);
         assert!(!within_one.per_node[&chain]
             .detail
             .contains("across evaluations"));
-        assert!(within_one.per_node[&chain].usage.average_memory_bytes < between as f64);
+        assert!(within_one.usage.average_memory_bytes < kept.usage.average_memory_bytes);
     }
 
     /// Without raw data retained, a candidate that scans raw data at query
@@ -5325,7 +5337,7 @@ mod tests {
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                PlanningModels::builtin().with_deployment(deployment),
+                PlanningModels::builtin().with_deployment_capabilities(deployment),
             )
             .unwrap()
         };
@@ -5358,6 +5370,100 @@ mod tests {
         );
     }
 
+    /// Without raw data retained, the rejection lists every query-time
+    /// scan with the window it would read, not just the first.
+    #[test]
+    fn without_raw_data_every_query_time_scan_is_listed() {
+        let roots: Vec<(usize, QueryRoot)> = ["sum_over_time(a[5m])", "sum_over_time(b[1m])"]
+            .into_iter()
+            .map(|q| QueryRoot::Operator(lower_promql(q, AccuracyTarget::exact())))
+            .enumerate()
+            .collect();
+        // The exact candidate of each query.
+        let inventory =
+            crate::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let exact = vec![0; inventory.targets.len()];
+        let roots: Vec<QueryRoot> =
+            crate::per_computation_candidates::compose_logical_candidate(&inventory, &exact)
+                .unwrap()
+                .into_iter()
+                .map(|(_, root)| root)
+                .collect();
+        let mut candidate = optimize_physical_asap(
+            "L1",
+            &roots,
+            &[],
+            &data(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap()
+        .remove(0);
+        candidate.id = "P1".into();
+        let entries = [entry(repeating(MINUTE)), entry(repeating(MINUTE))];
+        let no_raw_data = DeploymentCapabilities {
+            raw_data_retained: false,
+            ..DeploymentCapabilities::default()
+        };
+        let error = select_plan(
+            &[candidate],
+            &entries,
+            &data(),
+            PlanningModels::builtin().with_deployment_capabilities(&no_raw_data),
+        )
+        .unwrap_err();
+        let SelectionError::NoValidCandidate(rejected) = error else {
+            panic!("{error}")
+        };
+        assert_eq!(
+            rejected[0].reason,
+            "scans 300000 ms of raw a, 60000 ms of raw b at query time, \
+             but the deployment does not retain raw data"
+        );
+    }
+
+    /// Stored data (at rest, or mixed) with no raw data retained is a
+    /// contradiction in the inputs, refused before any candidate is
+    /// measured; arriving or undeclared data is not.
+    #[test]
+    fn stored_data_without_raw_data_retained_is_bad_input() {
+        let candidates = pane_candidates(10_000.0);
+        let no_raw_data = DeploymentCapabilities {
+            raw_data_retained: false,
+            ..DeploymentCapabilities::default()
+        };
+        let select = |arrival: DataArrival| {
+            select_plan(
+                &candidates,
+                &[every_minute()],
+                &DataWorkload { arrival, ..data() },
+                PlanningModels::builtin().with_deployment_capabilities(&no_raw_data),
+            )
+        };
+        for arrival in [
+            DataArrival::AtRest,
+            DataArrival::Mixed {
+                rows_per_second: 10_000.0,
+            },
+        ] {
+            let error = select(arrival).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "deployment capabilities: the data is stored ({arrival:?}), \
+                     but the deployment does not retain raw data"
+                ),
+            );
+        }
+        for arrival in [
+            DataArrival::Ingesting {
+                rows_per_second: 10_000.0,
+            },
+            DataArrival::Unknown,
+        ] {
+            assert!(select(arrival).is_ok());
+        }
+    }
+
     fn is_chain(payload: &Payload) -> bool {
         matches!(payload, Payload::ASAP(ASAPOp::PaneChain { .. }))
     }
@@ -5384,7 +5490,7 @@ mod tests {
         let work = &price(dag, &recurrence, &arriving(10_000.0), &without_memory)
             .unwrap()
             .per_node[&chain];
-        assert_eq!(work.per_second, 1.0);
+        assert!(work.detail.contains("; x 1.0000/s"), "{work:?}");
         assert!(
             close(
                 work.cost_per_second.unwrap(),
@@ -5497,42 +5603,66 @@ mod tests {
         }
     }
 
-    /// A node's usage adds up to its candidate's: CPU, scanned bytes,
-    /// average and peak memory and disk; peak cores and latency are the
-    /// candidate's own.
+    /// The candidate's usage is what its nodes are charged for: priced at
+    /// one unit for a single resource under cost model 1 (CPU, scanned
+    /// bytes, memory byte-seconds or disk), the nodes' prices add up to the
+    /// candidate's usage of it.
     #[test]
-    fn node_usage_adds_up_to_the_candidates() {
+    fn node_prices_add_up_to_the_candidates_usage() {
+        let only = |set: fn(&mut ResourceUnitCost)| {
+            let mut prices = ResourceUnitCost {
+                cost_per_cpu_op: 0.0,
+                cost_per_scanned_byte: 0.0,
+                cost_per_memory_byte_second: 0.0,
+                cost_per_provisioned_memory_byte_second: 0.0,
+                cost_per_provisioned_cpu_core_second: 0.0,
+                cost_per_disk_byte_second: 0.0,
+            };
+            set(&mut prices);
+            PlanSelectionSettings {
+                cost_model: CostModel::UsageOverTime(prices),
+                ..PlanSelectionSettings::default()
+            }
+        };
+        // Each resource's unit price and the candidate's usage of it.
+        type Resource = (fn(&mut ResourceUnitCost), fn(&ResourceUsage) -> f64);
+        let resources: [Resource; 4] = [
+            (|p| p.cost_per_cpu_op = 1.0, |u| u.cpu_ops_per_second),
+            (
+                |p| p.cost_per_scanned_byte = 1.0,
+                |u| u.scanned_bytes_per_second,
+            ),
+            (
+                |p| p.cost_per_memory_byte_second = 1.0,
+                |u| u.average_memory_bytes,
+            ),
+            (
+                |p| p.cost_per_disk_byte_second = 1.0,
+                |u| u.disk_bytes as f64,
+            ),
+        ];
         for candidate in pane_candidates(10_000.0) {
-            let cost = price(
-                &candidate.dag,
-                &[repeating(MINUTE)],
-                &arriving(10_000.0),
-                &PlanSelectionSettings::default(),
-            )
-            .unwrap();
-            let nodes = cost.per_node.values().map(|n| &n.usage);
-            let sum = |f: fn(&NodeUsage) -> f64| nodes.clone().map(f).sum::<f64>();
-            assert!(close(
-                cost.usage.cpu_ops_per_second,
-                sum(|u| u.cpu_ops_per_second)
-            ));
-            assert!(close(
-                cost.usage.scanned_bytes_per_second,
-                sum(|u| u.scanned_bytes_per_second)
-            ));
-            assert!(close(
-                cost.usage.average_memory_bytes,
-                sum(|u| u.average_memory_bytes)
-            ));
-            assert_eq!(
-                cost.usage.peak_memory_bytes,
-                nodes.clone().map(|u| u.peak_memory_bytes).sum::<u64>()
-            );
-            assert_eq!(
-                cost.usage.disk_bytes,
-                nodes.clone().map(|u| u.disk_bytes).sum::<u64>()
-            );
-            assert_eq!(cost.usage.latency_per_query.len(), 1);
+            for (set, used) in resources {
+                let cost = price(
+                    &candidate.dag,
+                    &[repeating(MINUTE)],
+                    &arriving(10_000.0),
+                    &only(set),
+                )
+                .unwrap();
+                let charged: f64 = cost
+                    .per_node
+                    .values()
+                    .filter_map(|n| n.cost_per_second)
+                    .sum();
+                assert!(
+                    close(charged, used(&cost.usage)),
+                    "{}: {charged} vs {}",
+                    candidate.id,
+                    used(&cost.usage)
+                );
+                assert_eq!(cost.usage.latency_per_query.len(), 1);
+            }
         }
     }
 
@@ -5704,6 +5834,7 @@ mod tests {
     fn state_on_disk_is_counted_as_disk_not_memory() {
         use asap_types::ir::Medium;
         let settings = unit_costs(|c| c.cost_per_disk_byte_second = 1e-9);
+        let work_only = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let state = |dag: &PhysicalASAPDAG| node_of(dag, is_build);
         for (on_disk, in_memory) in [
             (Materialization::MatAtIngestion(Medium::Disk), AT_INGESTION),
@@ -5712,22 +5843,31 @@ mod tests {
             let (disk_dag, memory_dag) = (kll_dag(on_disk), kll_dag(in_memory));
             let disk = price(&disk_dag, &recurrences(1), &data(), &settings).unwrap();
             let memory = price(&memory_dag, &recurrences(1), &data(), &settings).unwrap();
-            let (on_disk_node, in_memory_node) = (
-                &disk.per_node[&state(&disk_dag)],
-                &memory.per_node[&state(&memory_dag)],
-            );
-            assert_eq!(on_disk_node.usage.average_memory_bytes, 0.0, "{on_disk:?}");
-            assert_eq!(on_disk_node.usage.peak_memory_bytes, 0, "{on_disk:?}");
-            assert!(
-                in_memory_node.usage.average_memory_bytes > 0.0,
-                "{in_memory:?}"
-            );
             // The bytes kept are the same, on disk instead of in memory.
-            let bytes = on_disk_node.usage.disk_bytes;
+            let bytes = disk.usage.disk_bytes - memory.usage.disk_bytes;
             assert!(bytes > 0);
-            assert_eq!(bytes, in_memory_node.usage.peak_memory_bytes, "{on_disk:?}");
-            let work = on_disk_node.usage.cpu_ops_per_second * 1e-6
-                + on_disk_node.usage.scanned_bytes_per_second * 1e-7;
+            assert!(
+                memory.per_node[&state(&memory_dag)]
+                    .detail
+                    .contains(&format!(" {bytes} bytes")),
+                "{in_memory:?}: {bytes}"
+            );
+            assert!(
+                disk.usage.average_memory_bytes < memory.usage.average_memory_bytes,
+                "{on_disk:?}"
+            );
+            assert_eq!(
+                disk.usage.peak_memory_bytes + bytes,
+                memory.usage.peak_memory_bytes,
+                "{on_disk:?}"
+            );
+            // On disk, the state costs only its disk price beside the work.
+            let work = price(&memory_dag, &recurrences(1), &data(), &work_only)
+                .unwrap()
+                .per_node[&state(&memory_dag)]
+                .cost_per_second
+                .unwrap();
+            let on_disk_node = &disk.per_node[&state(&disk_dag)];
             assert!(
                 close(
                     on_disk_node.cost_per_second.unwrap(),
@@ -5805,17 +5945,28 @@ mod tests {
             &PlanSelectionSettings::default(),
         )
         .unwrap();
-        let node = &cost.per_node[&chain];
+        let detail = &cost.per_node[&chain].detail;
         let workers = cost.usage.peak_cpu_cores - 1;
         assert!(workers > 1, "{workers}");
-        let kept = node.usage.average_memory_bytes as u64;
-        let window = kept / 6;
-        assert_eq!(
-            node.usage.peak_memory_bytes,
-            kept + u64::from(workers - 1) * window,
-            "{}",
-            node.detail
+        // The chain keeps 6 panes (5 read and the one being built).
+        let kept: u64 = detail
+            .split("; keeps ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|bytes| bytes.parse().ok())
+            .unwrap_or_else(|| panic!("{detail}"));
+        let copies = workers - 1;
+        let bytes = u64::from(copies) * (kept / 6);
+        assert!(
+            detail.contains(&format!(
+                "; {copies} partial copies of its newest window, {bytes} bytes"
+            )),
+            "{detail}"
         );
+        // At the peak, not on average: the kept bytes are B1's only
+        // averaged memory beside negligible query-time holds.
+        assert!(cost.usage.peak_memory_bytes >= kept + bytes);
+        assert!(cost.usage.average_memory_bytes < (kept + bytes) as f64);
     }
 
     /// A candidate with the given latency, peak memory and disk under cost

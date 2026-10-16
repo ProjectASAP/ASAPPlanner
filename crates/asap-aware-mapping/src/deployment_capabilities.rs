@@ -14,26 +14,32 @@
 //! * whether raw samples are retained. If they are, Stage 3 counts them on
 //!   disk once per source, at the longest window a query-time scan of it
 //!   reads. If they are not, raw samples are not kept after they arrive, so
-//!   a candidate that scans raw data at query time is invalid: only
-//!   ingestion-time work reads raw rows;
-//! * whether a query-time result (`MatAtQuery`) may be kept across
-//!   evaluations. Its retention is derived from its consumers: a
-//!   tumbling-pane chain whose every reader repeats at the pane width
-//!   builds one new pane per evaluation and keeps the others for the next
-//!   ones, covering the readers' longest look-back. Without it, a
-//!   `MatAtQuery` result is reused only within one evaluation.
+//!   a candidate that scans raw data at query time is invalid (the
+//!   rejection lists every such scan): only ingestion-time work reads raw
+//!   rows. Stored data (at rest or mixed) with no raw data retained is a
+//!   contradiction, refused as bad input ([`DeploymentCapabilities::validate`]);
+//! * whether query-time results are retained across evaluations. If they
+//!   are, Stage 2 also offers a tumbling-pane chain whose readers evaluate
+//!   together at its pane width as `MatAtQueryKeptAcrossEvaluations`: each
+//!   evaluation builds one new pane and keeps the others for the next ones,
+//!   covering the readers' longest look-back. A chain two or more queries
+//!   read keeps its `MatAtQuery` option too (shared within one evaluation),
+//!   and Stage 3 picks the cheaper. If they are not, a query-time result is
+//!   reused only within one evaluation.
 //!
 //! The default supports everything the planner can build, retains raw data
 //! and keeps no query-time result across evaluations, which is the
 //! planner's behavior without deployment inputs.
 
 use asap_types::post_asap::{SketchAlgorithm, StatisticKind};
+use asap_types::workload::{DataArrival, DataWorkload};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// What the deployment's executor can run and keep. Planning reads it in
-/// Stage 1 (`supported_summaries`), Stage 2 and Stage 3 (the two
-/// retention switches). It is data only; `stage_pipeline` reads it from
-/// `--deployment <json>` and shows it in the stage document.
+/// Stage 1 (`supported_summaries`), Stage 2 (`query_time_results_retained`)
+/// and Stage 3 (`raw_data_retained`). It is data only; `stage_pipeline` reads it from
+/// `--deployment-capabilities <json>` and shows it in the stage document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeploymentCapabilities {
@@ -43,9 +49,9 @@ pub struct DeploymentCapabilities {
     pub supported_summaries: Option<Vec<SupportedSummary>>,
     /// Whether raw samples are kept for query-time scans; default `true`.
     pub raw_data_retained: bool,
-    /// Whether a query-time (`MatAtQuery`) result may be kept across
-    /// evaluations; default `false`.
-    pub query_time_retention: bool,
+    /// Whether a query-time result may be kept across evaluations
+    /// (`MatAtQueryKeptAcrossEvaluations`); default `false`.
+    pub query_time_results_retained: bool,
 }
 
 /// One sketch family the executor can build, with the readouts it can
@@ -64,7 +70,7 @@ impl Default for DeploymentCapabilities {
         Self {
             supported_summaries: None,
             raw_data_retained: true,
-            query_time_retention: false,
+            query_time_results_retained: false,
         }
     }
 }
@@ -78,6 +84,34 @@ impl DeploymentCapabilities {
                 .any(|s| s.family == *family && s.readouts.contains(&readout))
         })
     }
+
+    /// Checks these capabilities against the data workload: stored data
+    /// (at rest, or mixed) is raw data the deployment keeps, so it
+    /// contradicts `raw_data_retained: false`. Plan selection refuses such
+    /// inputs before measuring any candidate.
+    pub fn validate(&self, data: &DataWorkload) -> Result<(), DeploymentCapabilitiesError> {
+        match &data.arrival {
+            DataArrival::AtRest | DataArrival::Mixed { .. } if !self.raw_data_retained => {
+                Err(DeploymentCapabilitiesError::StoredDataNotRetained {
+                    arrival: data.arrival,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Deployment capabilities that contradict the other planning inputs
+/// ([`DeploymentCapabilities::validate`]); always bad input.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum DeploymentCapabilitiesError {
+    /// Bad input: the data workload declares stored raw data (`AtRest` or
+    /// `Mixed`), but the deployment says it retains none.
+    #[error("the data is stored ({arrival:?}), but the deployment does not retain raw data")]
+    StoredDataNotRetained {
+        /// The declared arrival that stores raw data.
+        arrival: DataArrival,
+    },
 }
 
 #[cfg(test)]
@@ -91,7 +125,7 @@ mod tests {
     fn default_supports_everything_and_json_fills_the_rest() {
         let default = DeploymentCapabilities::default();
         assert!(default.supports(&SketchAlgorithm::Theta, StatisticKind::TopK));
-        assert!(default.raw_data_retained && !default.query_time_retention);
+        assert!(default.raw_data_retained && !default.query_time_results_retained);
         let parsed: DeploymentCapabilities = serde_json::from_str(
             r#"{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}]}"#,
         )
@@ -99,7 +133,7 @@ mod tests {
         assert!(parsed.supports(&SketchAlgorithm::Kll, StatisticKind::Quantile));
         assert!(!parsed.supports(&SketchAlgorithm::Kll, StatisticKind::Total));
         assert!(!parsed.supports(&SketchAlgorithm::DDSketch, StatisticKind::Quantile));
-        assert!(parsed.raw_data_retained && !parsed.query_time_retention);
+        assert!(parsed.raw_data_retained && !parsed.query_time_results_retained);
         assert!(serde_json::from_str::<DeploymentCapabilities>(r#"{"raw_data": false}"#).is_err());
     }
 }

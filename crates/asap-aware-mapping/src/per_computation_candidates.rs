@@ -272,8 +272,14 @@ pub struct FusedComputation {
     /// The index in [`PerComputationCandidates::targets`] of the inner
     /// target it absorbs.
     pub absorbs: usize,
-    /// How the fused computation is computed: exact or a summary.
+    /// How the fused computation is computed: exact or a summary. Empty
+    /// when Pass 1 pruned every one ([`Self::pruned`]); the fusion is then
+    /// not offered.
     pub candidates: Vec<ComputationCandidate>,
+    /// The candidates Pass 1 pruned from the fused computation, with their
+    /// reasons (today only [`PruneReason::UnsupportedByDeployment`]); empty
+    /// by default.
+    pub pruned: Vec<(ComputationCandidate, PruneReason)>,
 }
 
 impl ComputationTarget {
@@ -355,8 +361,9 @@ impl<Id> PerComputationCandidates<Id> {
 
     /// This inventory without the summary candidates `deployment` does not
     /// support: a target's own are moved to its pruned candidates with
-    /// [`PruneReason::UnsupportedByDeployment`], and a fused computation's
-    /// are dropped (with all of them, the fusion is). The readout is the
+    /// [`PruneReason::UnsupportedByDeployment`], and so are a fused
+    /// computation's (with all of them pruned, the fusion is not offered).
+    /// The readout is the
     /// statistic the measure's estimate reads (the outer measure's for a
     /// fused computation). With every summary supported it is unchanged.
     pub fn without_unsupported_summaries(mut self, deployment: &DeploymentCapabilities) -> Self {
@@ -375,10 +382,15 @@ impl<Id> PerComputationCandidates<Id> {
                 .choices
                 .prune(PruneReason::UnsupportedByDeployment, unsupported);
             if let Some(fused) = &mut target.fused {
-                fused.candidates.retain(|candidate| !unsupported(candidate));
-                if fused.candidates.is_empty() {
-                    target.fused = None;
-                }
+                let (pruned, kept): (Vec<_>, _) = std::mem::take(&mut fused.candidates)
+                    .into_iter()
+                    .partition(unsupported);
+                fused.candidates = kept;
+                fused.pruned.extend(
+                    pruned
+                        .into_iter()
+                        .map(|candidate| (candidate, PruneReason::UnsupportedByDeployment)),
+                );
             }
         }
         self
@@ -683,6 +695,7 @@ fn add_nested_sum_targets(
         targets[t].fused = Some(FusedComputation {
             absorbs: inner,
             candidates: vec![merge],
+            pruned: Vec::new(),
         });
     }
 }
@@ -813,6 +826,7 @@ fn add_whole_expression_targets(
         target.fused = Some(FusedComputation {
             absorbs: inner,
             candidates: heaps,
+            pruned: Vec::new(),
         });
     }
 }
@@ -4657,8 +4671,9 @@ mod tests {
     }
 
     /// A fused whole-expression top-k loses the heap families the
-    /// deployment cannot answer top-k from, and the fusion goes with the
-    /// last of them: the target and the inner sum keep their exact options.
+    /// deployment cannot answer top-k from, each recorded with its reason,
+    /// and is not offered once it has none left: the target and the inner
+    /// sum keep their exact options.
     #[test]
     fn a_fused_computation_loses_its_unsupported_heaps() {
         let query = "topk by (job) (10, sum_over_time(m[1m]))";
@@ -4673,6 +4688,13 @@ mod tests {
                 SketchAlgorithm::CountSketchWithHeap
             )]
         );
+        assert_eq!(
+            one_heap.targets[topk].fused.as_ref().unwrap().pruned,
+            [(
+                ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap),
+                PruneReason::UnsupportedByDeployment
+            )]
+        );
         assert_eq!(one_heap.combinations(), 2);
         // Count-Min with a heap answers item frequencies, not top-k.
         let none = inventory(query).without_unsupported_summaries(&supporting(&[(
@@ -4680,7 +4702,21 @@ mod tests {
             &[StatisticKind::ItemFrequency],
         )]));
         let topk = topk_target(&none);
-        assert!(none.targets[topk].fused.is_none());
+        let fused = none.targets[topk].fused.as_ref().unwrap();
+        assert!(fused.candidates.is_empty());
+        assert_eq!(
+            fused.pruned,
+            [
+                (
+                    ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap),
+                    PruneReason::UnsupportedByDeployment
+                ),
+                (
+                    ComputationCandidate::Summary(SketchAlgorithm::CountSketchWithHeap),
+                    PruneReason::UnsupportedByDeployment
+                ),
+            ]
+        );
         assert_eq!(
             none.targets[topk].choices.candidates,
             [ComputationCandidate::Exact]

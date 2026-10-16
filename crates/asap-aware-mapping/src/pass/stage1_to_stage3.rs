@@ -489,7 +489,8 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
-    let per_computation = per_computation.without_unsupported_summaries(models.deployment);
+    let per_computation =
+        per_computation.without_unsupported_summaries(models.deployment_capabilities);
     let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let stage1 = stage1_logical_asap_optimization(&per_computation, &recurrence).collect();
     run_stage2_and_stage3(per_computation, stage1, entries, data, models)
@@ -500,6 +501,15 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
 /// enumerated): candidate `n` (from 1) is `L<n>`, implemented as `P<n>`
 /// with nothing materialized and as `P<n>-m<k>` (`k` from 1) for each other
 /// materialization assignment.
+///
+/// It does not prune: `per_computation` must already be pruned for
+/// `models.deployment_capabilities`
+/// ([`PerComputationCandidates::without_unsupported_summaries`]), with
+/// `stage1` enumerated from that pruned inventory, as
+/// [`run_stage1_to_stage3_from_pass1`] does. Pruning here would come too
+/// late: each of `stage1`'s choices indexes the inventory it was enumerated
+/// from, so a candidate with an unsupported summary would already be in
+/// `stage1`.
 pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     stage1: Vec<Stage1Candidate>,
@@ -515,7 +525,8 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         let number = index + 1;
         let id = format!("L{number}");
         if let Ok(roots) = &candidate.roots {
-            match optimize_physical_asap(&id, roots, entries, data, models.deployment) {
+            match optimize_physical_asap(&id, roots, entries, data, models.deployment_capabilities)
+            {
                 Ok(implemented) => {
                     for (k, mut p) in implemented.into_iter().enumerate() {
                         p.id = match k {

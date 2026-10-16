@@ -8,6 +8,7 @@ use asap_aware_mapping::stage3_plan_selection::PlanSelectionSettings;
 use asap_aware_mapping::{DeploymentCapabilities, SupportedSummary};
 use asap_devtools::planning_stages::lower_sql_roots;
 use asap_types::ir::flat::FlatDag;
+use asap_types::ir::{ASAPOp, Materialization, Operator};
 use asap_types::post_asap::{SketchAlgorithm, StatisticKind};
 use planner_layering_common::*;
 
@@ -128,4 +129,94 @@ fn assert_removes_exactly(
     );
     assert_eq!(found, expected, "{name}");
     assert_selects_cheapest_valid(restricted);
+}
+
+/// Pattern B with a p50 panel beside its p99, both every minute over the
+/// same 5-min window. One 1-min tumbling KLL chain serves both panels.
+fn pattern_b_with_p50() -> asap_types::workload::PlanningWorkload {
+    let mut workload = pattern_b();
+    let repeating = workload
+        .query_workload
+        .repeating_queries
+        .as_mut()
+        .expect("pattern B repeats");
+    let mut p50 = repeating[0].clone();
+    p50.query = asap_types::workload::Query("quantile_over_time(0.5, latency_ms[5m])".into());
+    repeating.push(p50);
+    workload
+}
+
+/// Physical candidate ids with their cost per second.
+type CandidateCosts = Vec<(String, f64)>;
+
+/// The per-second cost of every physical candidate whose pane chain both
+/// panels read is materialized at query time: shared within one evaluation
+/// (`MatAtQuery`), and kept across evaluations
+/// (`MatAtQueryKeptAcrossEvaluations`, which Stage 3 prices as such).
+fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
+    let (mut within_one, mut kept) = (Vec::new(), Vec::new());
+    for p in &run.physical {
+        for n in &p.dag().nodes {
+            let shared_chain = matches!(n.payload, Operator::ASAP(ASAPOp::PaneChain { .. }))
+                && readers(p.dag(), &p.query_roots, n.id).len() == 2;
+            let Some(cost) = run.selection.costs.get(&p.id).filter(|_| shared_chain) else {
+                continue;
+            };
+            let entry = (p.id.clone(), cost.cost_per_second.expect("cost model 1"));
+            let kept_detail = cost.per_node[&n.id].detail.contains("across evaluations");
+            match n.materialization {
+                Materialization::MatAtQuery(_) => within_one.push(entry),
+                Materialization::MatAtQueryKeptAcrossEvaluations(_) if kept_detail => {
+                    kept.push(entry)
+                }
+                Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
+                    panic!("{}: a kept chain priced as not kept", p.id)
+                }
+                _ => {}
+            }
+        }
+    }
+    (within_one, kept)
+}
+
+/// With query-time results retained, a chain two panels read is offered
+/// both ways: shared within one evaluation (rebuilt from the 5-min window
+/// every minute, then reused by both panels) and kept across evaluations
+/// (B3: one new pane per evaluation, the 4 older panes held in memory
+/// between evaluations). Holding 1M per-series KLLs between evaluations
+/// costs far more than rebuilding them, so the shared option is cheaper
+/// and the kept one is not selected. Without query-time retention, the
+/// kept option is not offered.
+#[test]
+fn query_time_results_retained_still_offers_the_chain_shared_within_one_evaluation() {
+    let keeping = DeploymentCapabilities {
+        query_time_results_retained: true,
+        ..DeploymentCapabilities::default()
+    };
+    let run = run_promql_for(&pattern_b_with_p50(), &keeping);
+    let (within_one, kept) = shared_chain_costs(&run);
+    assert!(!within_one.is_empty(), "no shared option: kept {kept:?}");
+    assert!(!kept.is_empty(), "no kept option: shared {within_one:?}");
+    let cheapest = |options: &[(String, f64)]| {
+        options
+            .iter()
+            .map(|(_, cost)| *cost)
+            .fold(f64::INFINITY, f64::min)
+    };
+    assert!(
+        cheapest(&within_one) < cheapest(&kept),
+        "shared {within_one:?}, kept {kept:?}"
+    );
+    assert!(
+        kept.iter().all(|(id, _)| *id != run.selection.selected),
+        "{}",
+        run.selection.selected
+    );
+    assert_selects_cheapest_valid(&run);
+
+    let (_, kept) = shared_chain_costs(&run_promql_for(
+        &pattern_b_with_p50(),
+        &DeploymentCapabilities::default(),
+    ));
+    assert!(kept.is_empty(), "{kept:?}");
 }

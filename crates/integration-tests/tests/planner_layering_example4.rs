@@ -273,7 +273,7 @@ fn stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
 /// needs; the default deployment keeps none.
 fn keeping_query_time_results() -> DeploymentCapabilities {
     DeploymentCapabilities {
-        query_time_retention: true,
+        query_time_results_retained: true,
         ..DeploymentCapabilities::default()
     }
 }

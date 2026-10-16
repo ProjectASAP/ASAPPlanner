@@ -7,21 +7,22 @@
 //! Each summary build (a `SummaryAgg` or a `PaneChain`) is one
 //! materialization candidate ([`MaterializationCandidate`]) whose
 //! output materialization may store (#509 §Materialization, Algorithm 3).
-//! Each has up to three options:
+//! Each has up to four options:
 //!
 //! * `NotMaterialized`: rebuilt at query time by every query that reads it;
 //! * `MatAtIngestion(Memory)`: maintained as data arrives and kept for the
 //!   queries, when the build is eligible ([`IngestionPruneReason`]);
-//! * `MatAtQuery(Memory)`: built at query time for every query that reads
-//!   it, offered for a build two or more queries read, and, when the
-//!   deployment keeps query-time results across evaluations
-//!   ([`DeploymentCapabilities::query_time_retention`]), for a
+//! * `MatAtQuery(Memory)`: built once at query time for every query of one
+//!   evaluation that reads it and reused only within that evaluation,
+//!   offered for a build two or more queries read;
+//! * `MatAtQueryKeptAcrossEvaluations(Memory)`: built at query time and
+//!   kept across evaluations (#509 Example 4's B3), offered when the
+//!   deployment keeps query-time results
+//!   ([`DeploymentCapabilities::query_time_results_retained`]) for a
 //!   tumbling-pane chain that builds one new pane per evaluation
-//!   ([`builds_one_pane_per_evaluation`]): every reader repeats at the pane
-//!   width. Such a chain is kept across evaluations (#509 Example 4's B3):
-//!   each evaluation builds the newest pane and reuses the others. Any
-//!   other `MatAtQuery` state is reused only within one evaluation. The IR
-//!   records no retention: Stage 3 derives it from the readers the same way.
+//!   ([`builds_one_pane_per_evaluation`]): each evaluation builds the
+//!   newest pane and reuses the others. Both query-time options are offered
+//!   when both apply, and Stage 3 prices each.
 //!
 //! A build at ingestion time needs every build below it at ingestion time too
 //! (#509 Algorithm 3, line 13); such assignments are not generated. Every
@@ -189,23 +190,29 @@ pub(crate) struct MaterializationCandidate {
     pub(crate) readers: Vec<usize>,
     /// `Ok` when `MatAtIngestion` is an option.
     pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
-    /// Whether it may be kept from query time across evaluations: the
+    /// Whether `MatAtQueryKeptAcrossEvaluations` is an option: the
     /// deployment keeps query-time results and it is a tumbling-pane chain
     /// that builds one new pane per evaluation.
-    pub(crate) kept_across_evaluations: bool,
+    pub(crate) may_keep_across_evaluations: bool,
 }
 
 impl MaterializationCandidate {
     /// Its options, `NotMaterialized` first: `MatAtIngestion` when eligible,
-    /// `MatAtQuery` when two or more queries read it or it may be kept
-    /// across evaluations.
+    /// `MatAtQuery` when two or more queries read it, and
+    /// `MatAtQueryKeptAcrossEvaluations` when it may be kept across
+    /// evaluations.
     pub(crate) fn options(&self) -> Vec<Materialization> {
         let mut options = vec![Materialization::NotMaterialized];
         if self.at_ingestion.is_ok() {
             options.push(Materialization::MatAtIngestion(Medium::Memory));
         }
-        if self.readers.len() > 1 || self.kept_across_evaluations {
+        if self.readers.len() > 1 {
             options.push(Materialization::MatAtQuery(Medium::Memory));
+        }
+        if self.may_keep_across_evaluations {
+            options.push(Materialization::MatAtQueryKeptAcrossEvaluations(
+                Medium::Memory,
+            ));
         }
         options
     }
@@ -224,17 +231,39 @@ pub(crate) fn fixed_interval_ms(recurrence: &QueryRecurrence) -> Option<u64> {
 
 /// Whether a tumbling-pane chain of `pane_width_ms`-wide panes read by
 /// queries repeating as `readers` builds exactly one new pane per
-/// evaluation: there is a reader, and every reader repeats at a fixed
-/// interval equal to the pane width. Its other panes are the previous
+/// evaluation: there is a reader, every reader repeats at a fixed interval
+/// equal to the pane width, and the readers whose evaluation phase is known
+/// share one phase (modulo the interval). Its other panes are the previous
 /// evaluations' newest, so a deployment that keeps query-time results
 /// reuses them (#509 Example 4's B3).
+///
+/// Co-scheduling assumption: readers with the same interval and no known
+/// phase run at the same instants as each other and as the readers with a
+/// known phase, as [`crate::stage3_plan_selection`] assumes when it counts
+/// one evaluation per interval. Readers at different known phases would
+/// each need their own newest pane, so they do not share one kept chain.
 pub(crate) fn builds_one_pane_per_evaluation<'a>(
     pane_width_ms: u64,
     readers: impl IntoIterator<Item = &'a QueryRecurrence>,
 ) -> bool {
-    let mut readers = readers.into_iter().peekable();
-    readers.peek().is_some()
-        && readers.all(|recurrence| fixed_interval_ms(recurrence) == Some(pane_width_ms))
+    let mut phase_ms = None;
+    let mut any_reader = false;
+    for recurrence in readers {
+        any_reader = true;
+        if fixed_interval_ms(recurrence) != Some(pane_width_ms) {
+            return false;
+        }
+        if let QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            evaluation_phase, ..
+        }) = recurrence
+        {
+            let phase = evaluation_phase.0 % pane_width_ms;
+            if *phase_ms.get_or_insert(phase) != phase {
+                return false;
+            }
+        }
+    }
+    any_reader
 }
 
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
@@ -384,7 +413,7 @@ pub(crate) fn materialization_candidates(
                 .iter()
                 .map(|&q| entries.get(q).map(|e| &e.recurrence))
                 .collect();
-            let kept_across_evaluations = deployment.query_time_retention
+            let may_keep_across_evaluations = deployment.query_time_results_retained
                 && match (node.asap(), recurrences) {
                     (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
                         builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
@@ -395,7 +424,7 @@ pub(crate) fn materialization_candidates(
                 node: Rc::clone(node),
                 readers,
                 at_ingestion,
-                kept_across_evaluations,
+                may_keep_across_evaluations,
             }
         })
         .collect()
@@ -1420,5 +1449,37 @@ mod tests {
             scans(&candidates[1]),
             [ExecutionTiming::IngestionTime, ExecutionTiming::QueryTime]
         );
+    }
+
+    /// Readers share one kept pane chain only when they evaluate at the
+    /// same instants: two readers every minute at phases 0 and 2 min do,
+    /// at phases 0 and 30 s they do not (each would need its own newest
+    /// pane). A reader with no known phase is assumed to run with the
+    /// others.
+    #[test]
+    fn readers_at_different_phases_do_not_build_one_pane_per_evaluation() {
+        let at = |phase_ms: u64| {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(MINUTE as u32),
+                evaluation_phase: TimestampMs(phase_ms),
+            })
+        };
+        let unknown_phase = every_minute().recurrence;
+        assert!(builds_one_pane_per_evaluation(
+            MINUTE,
+            [&at(0), &at(2 * MINUTE)]
+        ));
+        assert!(!builds_one_pane_per_evaluation(
+            MINUTE,
+            [&at(0), &at(30_000)]
+        ));
+        assert!(builds_one_pane_per_evaluation(
+            MINUTE,
+            [&at(30_000), &unknown_phase]
+        ));
+        assert!(!builds_one_pane_per_evaluation(
+            MINUTE,
+            [&at(0), &unknown_phase, &at(30_000)]
+        ));
     }
 }

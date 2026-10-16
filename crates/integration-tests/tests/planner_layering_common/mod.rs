@@ -620,8 +620,9 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
 pub enum MaterializationOption {
     /// Runs as data arrives; output stored before any query asks.
     MatAtIngestion,
-    /// Runs when a query first needs it; output kept for later executions
-    /// and other queries of the batch.
+    /// Runs when a query first needs it; output reused by the other
+    /// queries of the evaluation, or, as `MatAtQueryKeptAcrossEvaluations`,
+    /// kept for later evaluations.
     MatAtQuery,
     /// Runs at query time for each execution; output discarded.
     NotMaterialized,
@@ -633,7 +634,9 @@ pub fn materialization(p: &Physical, node: NodeId) -> MaterializationOption {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
     match n.materialization {
         Materialization::MatAtIngestion(_) => MaterializationOption::MatAtIngestion,
-        Materialization::MatAtQuery(_) => MaterializationOption::MatAtQuery,
+        Materialization::MatAtQuery(_) | Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
+            MaterializationOption::MatAtQuery
+        }
         Materialization::NotMaterialized => MaterializationOption::NotMaterialized,
     }
 }
@@ -693,7 +696,7 @@ pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
 
 /// How far back from an evaluation a materialized node's kept output
 /// reaches in event time, derived the way plan selection prices what it
-/// keeps (the IR does not record retention): a pane chain keeps its `N`
+/// keeps: a pane chain keeps its `N`
 /// panes of width `w`, plus the one being built when maintained at
 /// ingestion time; a whole-window build keeps its window, and the next one
 /// being built at ingestion time; each plus the offset of the time shifts

@@ -3,8 +3,9 @@
 //! edges.
 //!
 //! The logical DAG carries no timing. Materialization (#509
-//! §Materialization) gives each sub-DAG one of three options:
-//! `NotMaterialized`, `MatAtIngestion(medium)` or `MatAtQuery(medium)`.
+//! §Materialization) gives each sub-DAG one of its options:
+//! `NotMaterialized`, `MatAtIngestion(medium)`, `MatAtQuery(medium)` or
+//! `MatAtQueryKeptAcrossEvaluations(medium)`.
 //! [`MaterializationAssignment`] records that option per sub-DAG, named by
 //! the node whose output would be stored (any node: a summary state, a
 //! population, or e.g. the tumbling-window panes of #509 Example 4), and
@@ -12,7 +13,8 @@
 //!
 //! - `SummaryEstimate` and `EvaluatePopulation` run at query time;
 //! - a node assigned `MatAtIngestion` runs at ingestion time, and one
-//!   assigned `MatAtQuery` at query time. A `SummaryAgg` or
+//!   assigned `MatAtQuery` or `MatAtQueryKeptAcrossEvaluations` at query
+//!   time. A `SummaryAgg` or
 //!   `MaintainPopulation` without an assignment is `NotMaterialized` and runs
 //!   at query time. Every node upstream of an ingestion-time node also runs
 //!   at ingestion time, so `MatAtIngestion` (or an ingestion timing fixed by

@@ -198,7 +198,7 @@ pub fn run_planning_stages_over(
         data,
         PlanningModels::builtin()
             .with_plan_selection(plan_selection)
-            .with_deployment(deployment),
+            .with_deployment_capabilities(deployment),
     );
     for candidate in &run.stage1_logical_asap_optimization {
         if let Ok(roots) = &candidate.roots {

@@ -181,7 +181,9 @@ pub use cost_model::{
     CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
     ExactCompositionCostRequest, ValueOperationCapabilities,
 };
-pub use deployment_capabilities::{DeploymentCapabilities, SupportedSummary};
+pub use deployment_capabilities::{
+    DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
+};
 pub use exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,

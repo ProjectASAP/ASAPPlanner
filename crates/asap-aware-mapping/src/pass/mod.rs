@@ -55,10 +55,10 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 /// a built-in default, evidence about a particular deployment cannot.
 ///
 /// Plan selection reads `accuracy`, `evidence`, `plan_selection` and
-/// `deployment`. It measures candidates with its own analytical model and
-/// compares them under `plan_selection`'s cost model, so
-/// [`Stage1ToStage3Pass`] does not read `cost`. Stage 1 and Stage 2 read
-/// `deployment` too.
+/// `deployment_capabilities`. It measures candidates with its own
+/// analytical model and compares them under `plan_selection`'s cost model,
+/// so [`Stage1ToStage3Pass`] does not read `cost`. Stage 1 and Stage 2 read
+/// `deployment_capabilities` too.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
@@ -71,9 +71,9 @@ pub struct PlanningModels<'a> {
     pub plan_selection: &'a PlanSelectionSettings,
     /// What the deployment's executor can run and keep: the summaries it
     /// supports (Stage 1), whether it retains raw data (Stage 3) and
-    /// whether it keeps query-time results across evaluations (Stages 2
-    /// and 3); default [`DeploymentCapabilities::default`].
-    pub deployment: &'a DeploymentCapabilities,
+    /// whether it keeps query-time results across evaluations (Stage 2);
+    /// default [`DeploymentCapabilities::default`].
+    pub deployment_capabilities: &'a DeploymentCapabilities,
 }
 
 impl<'a> PlanningModels<'a> {
@@ -87,7 +87,7 @@ impl<'a> PlanningModels<'a> {
             accuracy,
             evidence,
             plan_selection: &DEFAULT_PLAN_SELECTION,
-            deployment: &DEFAULT_DEPLOYMENT,
+            deployment_capabilities: &DEFAULT_DEPLOYMENT,
         }
     }
 
@@ -98,7 +98,7 @@ impl<'a> PlanningModels<'a> {
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
             plan_selection: &DEFAULT_PLAN_SELECTION,
-            deployment: &DEFAULT_DEPLOYMENT,
+            deployment_capabilities: &DEFAULT_DEPLOYMENT,
         }
     }
 
@@ -126,8 +126,11 @@ impl<'a> PlanningModels<'a> {
 
     /// These models with the deployment's capabilities (supported
     /// summaries, raw-data and query-time retention).
-    pub fn with_deployment(mut self, deployment: &'a DeploymentCapabilities) -> Self {
-        self.deployment = deployment;
+    pub fn with_deployment_capabilities(
+        mut self,
+        deployment_capabilities: &'a DeploymentCapabilities,
+    ) -> Self {
+        self.deployment_capabilities = deployment_capabilities;
         self
     }
 }
