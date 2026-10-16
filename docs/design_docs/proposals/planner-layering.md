@@ -541,6 +541,8 @@ their overlapping windows.
 | Identical-expression rule | The input and computation semantics are identical. | One common computation node serving multiple consumers. |
 | Summary-capability rule | The computations have the same summary input data and the same window, and one summary supports all requested computations and their accuracy requirements. | One summary build node feeding several estimation nodes, e.g. UnivMon → distinct count, entropy, L2 norm. |
 | Window-composition rule | The computations have the same summary input data, and one window summary can answer the requested windows within their accuracy requirements. | One window summary feeding per-query merge (where needed) and estimation nodes, e.g. a sliding-window or tumbling-window KLL, or an Exponential Histogram with a KLL per EH bucket. |
+| Rollup rule | A coarse exact accumulator (`sum`, `min`, `max`) reads the same rows as a finer exact accumulator the workload already computes, grouped by a superset of its keys. | The finer accumulator's finalized values feeding an exact accumulator grouped by the coarse keys, e.g. `sum by (job)` from `sum by (job, instance)`. |
+| Exact top-k reuse rule | Exact top-k computations read the same input and partition with different `k`. | One ranking (`Limit(k_max)` over `Sort`) that each top-k reads its first `k` rows from. |
 
 The rules compare computations by their **summary input data**: what a summary for
 that computation would ingest, namely the data source, the filters, and the key
