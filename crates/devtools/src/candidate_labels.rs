@@ -45,10 +45,10 @@ pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
     labels
 }
 
-/// A Pass 1 choice, e.g. "Q1 exact · Q2 CMS+heap" (exact accumulators in
-/// parentheses), each target listed under the first query that reads it.
-pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usize]) -> String {
-    let query_of_target: Vec<usize> = inventory
+/// The query (index into `inventory.roots`) each target of `inventory` is
+/// listed under: the first that reads it.
+pub fn query_of_each_target<Id>(inventory: &PerComputationCandidates<Id>) -> Vec<usize> {
+    inventory
         .targets
         .iter()
         .map(|target| {
@@ -64,7 +64,25 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
                 })
                 .expect("every target is reached from a root")
         })
-        .collect();
+        .collect()
+}
+
+/// A Pass 1 per-computation candidate, e.g. "exact", "Sum acc" or "Kll".
+pub fn computation_label(candidate: &ComputationCandidate) -> String {
+    match candidate {
+        ComputationCandidate::Exact => "exact".to_string(),
+        ComputationCandidate::ExactAccumulator(kinds) => {
+            let kinds: Vec<String> = kinds.iter().map(|kind| format!("{kind:?}")).collect();
+            format!("{} acc", kinds.join("/"))
+        }
+        ComputationCandidate::Summary(algorithm) => sketch_name(algorithm),
+    }
+}
+
+/// A Pass 1 choice, e.g. "Q1 exact · Q2 CMS+heap" (exact accumulators in
+/// parentheses), each target listed under the first query that reads it.
+pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usize]) -> String {
+    let query_of_target = query_of_each_target(inventory);
     // Each target's chosen candidate, with the target it absorbs when the
     // candidate is its fused computation's.
     let chosen: Vec<_> = inventory
@@ -339,6 +357,7 @@ pub fn physical_label(logical: &str, candidate: &PhysicalCandidate) -> String {
             Materialization::NotMaterialized => continue,
             Materialization::MatAtIngestion(_) => "ingestion time",
             Materialization::MatAtQuery(_) => "query time, shared",
+            Materialization::MatAtQueryKeptAcrossEvaluations(_) => "query time, kept",
         };
         let node = candidate
             .dag

@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use asap_aware_mapping::stage3_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, ResourceUnitCost,
 };
+use asap_aware_mapping::DeploymentCapabilities;
 use asap_types::ir::flat::NodeId;
 use asap_types::post_asap::SketchAlgorithm;
 use asap_types::workload::{DataArrival, PlanningWorkload};
@@ -268,13 +269,20 @@ fn stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
 
 // ── Pattern B ────────────────────────────────────────────────────────────
 
+/// A deployment that keeps query-time results across evaluations, which B3
+/// needs; the default deployment keeps none.
+fn keeping_query_time_results() -> DeploymentCapabilities {
+    DeploymentCapabilities {
+        query_time_results_retained: true,
+        ..DeploymentCapabilities::default()
+    }
+}
+
 /// The 1-min tumbling KLL candidate yields B1 (ingestion time), B2 (not materialized) and B3 (query time, kept).
 #[test]
-#[ignore = "needs B3: panes built at query time and kept across evaluations (G9, #625)"]
 fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options() {
-    let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), tumbling(), 1)
-        .into_keys()
-        .collect();
+    let run = run_promql_for(&pattern_b(), &keeping_query_time_results());
+    let found: BTreeSet<_> = options_of(&run, tumbling(), 1).into_keys().collect();
     assert_eq!(
         found,
         BTreeSet::from([MatAtIngestion, MatAtQuery, NotMaterialized])
@@ -305,9 +313,10 @@ fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_quer
     }
 }
 
-/// Implementer test (until B3, G9): the tumbling KLL candidate yields B1
-/// (maintained at ingestion time) and B2 (rebuilt at every evaluation);
-/// both are priced, and B2's evaluation stays within the 200 ms bound.
+/// Implementer test: for the default deployment, which keeps no query-time
+/// result across evaluations, the tumbling KLL candidate yields B1
+/// (maintained at ingestion time) and B2 (rebuilt at every evaluation), not
+/// B3; both are priced, and B2's evaluation stays within the 200 ms bound.
 #[test]
 fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
     let run = run_promql(&pattern_b());
@@ -324,16 +333,22 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
 }
 
 /// B3 runs nothing at ingestion time; it keeps the tumbling KLLs it builds at query time.
+/// Implementer addition: kept for the readers' 5-min look-back, it is
+/// priced as building one 1-min pane per evaluation, so it reads a fifth of
+/// B2's raw data and keeps a fifth of it on disk.
 #[test]
-#[ignore = "needs B3: panes built at query time and kept across evaluations (G9, #625)"]
 fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
-    let run = run_promql(&pattern_b());
-    let (id, _) = options_of(&run, tumbling(), 1)[&MatAtQuery].clone();
+    let run = run_promql_for(&pattern_b(), &keeping_query_time_results());
+    let options = options_of(&run, tumbling(), 1);
+    let (id, build) = options[&MatAtQuery].clone();
     let p = run.physical(&id);
     assert!(
         p.dag().nodes.iter().all(|n| !runs_at_ingestion(p, n.id)),
         "{id}"
     );
+    assert_eq!(retention_ms(p, build), Some(PATTERN_B_WINDOW_MS));
+    let disk = |id: &str| run.selection.costs[id].usage.disk_bytes;
+    assert_eq!(disk(&id) * 5, disk(&options[&NotMaterialized].0));
 }
 
 /// The sliding-window KLL is kept from ingestion time or from query time; not materializing it is the no-window plan.
@@ -348,9 +363,9 @@ fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_optio
 
 /// B2 rebuilds all five tumbling KLLs at every evaluation, so it costs at least B1 and B3.
 #[test]
-#[ignore = "needs B3: panes built at query time and kept across evaluations (G9, #625)"]
+#[ignore = "the built-in model contradicts it: with query-time retention, B1 keeps 6 panes of 1M per-series KLLs for 13,326.5 cost/s and B3 keeps 4 for 8,884.5, while B2 rebuilds them for 2.183; needs the model-relative rewrite (Q49)"]
 fn stage3_plan_selection_b_rebuilding_every_window_costs_most() {
-    let run = run_promql(&pattern_b());
+    let run = run_promql_for(&pattern_b(), &keeping_query_time_results());
     let options = options_of(&run, tumbling(), 1);
     let b2 = cost(&run, &options[&NotMaterialized].0);
     for m in [MatAtIngestion, MatAtQuery] {
@@ -360,7 +375,7 @@ fn stage3_plan_selection_b_rebuilding_every_window_costs_most() {
 
 /// Repeating over arriving data, the built-in models pick B1 among the tumbling options.
 #[test]
-#[ignore = "the built-in model contradicts it: B1 keeps 6 panes of 1M per-series KLLs (107 GB) for 13,326.5 cost/s, B2 rebuilds them for 2.183; needs B3 (G9) and the model-relative rewrite (Q49, G9)"]
+#[ignore = "the built-in model contradicts it: B1 keeps 6 panes of 1M per-series KLLs (107 GB) for 13,326.5 cost/s, B2 rebuilds them for 2.183; needs the model-relative rewrite (Q49)"]
 fn stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows() {
     let run = run_promql(&pattern_b());
     let options = options_of(&run, tumbling(), 1);

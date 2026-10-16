@@ -26,8 +26,10 @@ pub struct FamilyCapability {
     pub readouts: &'static [(StatisticKind, MergedError)],
 }
 
-/// The kind of a `SummaryEstimate` statistic, without its arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The kind of a `SummaryEstimate` statistic, without its arguments: the
+/// readout vocabulary of this table and of a deployment's supported
+/// summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StatisticKind {
     /// The total of the updates: a bare `PointCount` (no item value).
     Total,

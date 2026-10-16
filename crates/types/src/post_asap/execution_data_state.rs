@@ -51,9 +51,15 @@ pub enum Materialization {
     NotMaterialized,
     /// Runs as data arrives; its output is stored until a query reads it.
     MatAtIngestion(Medium),
-    /// Runs when a query first needs it; its output is stored for later
-    /// executions and other queries of the batch.
+    /// Runs when a query first needs it; its output is reused by the other
+    /// queries of the same evaluation and discarded after it.
     MatAtQuery(Medium),
+    /// Runs at query time and keeps its output across evaluations: a
+    /// tumbling-pane chain whose readers evaluate together every pane
+    /// width builds its newest pane at each evaluation and keeps the older
+    /// ones for the next (#509 Example 4's B3). Offered only when the
+    /// deployment keeps query-time results.
+    MatAtQueryKeptAcrossEvaluations(Medium),
 }
 
 impl Materialization {
@@ -61,7 +67,9 @@ impl Materialization {
     pub fn timing(self) -> ExecutionTiming {
         match self {
             Self::MatAtIngestion(_) => ExecutionTiming::IngestionTime,
-            Self::NotMaterialized | Self::MatAtQuery(_) => ExecutionTiming::QueryTime,
+            Self::NotMaterialized
+            | Self::MatAtQuery(_)
+            | Self::MatAtQueryKeptAcrossEvaluations(_) => ExecutionTiming::QueryTime,
         }
     }
 }

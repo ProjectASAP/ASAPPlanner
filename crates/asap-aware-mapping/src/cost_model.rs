@@ -761,13 +761,6 @@ pub trait CostModel {
         f64::NAN
     }
 
-    /// Physical feasibility evidence for a complete summary candidate.
-    /// `None` defers admission to physical/deployment compilation; `Some(false)`
-    /// excludes the candidate without changing its computation or parameters.
-    fn summary_support_evidence(&self, _summary: &OperatorNode) -> Option<bool> {
-        None
-    }
-
     /// Which mixed exact/summary execution shapes the downstream runtime
     /// advertises (issue #171). Gates candidate *generation* in
     /// [`crate::exact_composition::ExactCompositionStrategy`]: a shape the

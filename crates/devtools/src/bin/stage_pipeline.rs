@@ -20,8 +20,9 @@
 //     then the summary-capability rule's, one per choice of shared summary
 //     builds), in enumeration order. Every candidate is optimized and
 //     priced; the document shows the first `--max-displayed` (default 64)
-//     and the selected one, with `combinations` (how many exist) and
-//     `capped` (whether some are not shown). A candidate that cannot be
+//     and the selected one, with `combinations` (how many exist),
+//     `capped` (whether some are not shown) and `pass1_pruned` (the
+//     candidates Pass 1 pruned per target, with reasons). A candidate that cannot be
 //     composed carries `error` instead of `dag`;
 //   - stage2_physical_asap_optimization: one physical candidate per composed logical
 //     candidate (operator implementation; every sub-DAG NotMaterialized), no
@@ -68,6 +69,23 @@
 // `pareto-front`). Cost models 1 and 2 use the illustrative unit costs.
 // Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
 // cost model 3, and `front` lists the Pareto front under `pareto-front`.
+// `--deployment-capabilities '<json>'` declares what the deployment's
+// executor can run and keep (`DeploymentCapabilities`):
+// `{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}, ...],
+// "raw_data_retained": true, "query_time_results_retained": false}`. Every
+// field is optional: by default every sketch family and readout the planner
+// can build is supported (`supported_summaries` null), raw data is retained,
+// and no query-time result is kept across evaluations. Pass 1 offers no
+// summary the deployment does not support (exact computations are always
+// supported); Stage 1's `pass1_pruned` lists, per target with any, every
+// candidate Pass 1 pruned and why (e.g. `UnsupportedByDeployment`), its fused
+// computation's under `fused_pruned`. Without raw data retained, a candidate
+// that scans raw data at query time is invalid, and stored data (at rest or
+// mixed) is refused as a contradiction; with `query_time_results_retained`,
+// a tumbling-pane chain whose readers evaluate together at its pane width is
+// also offered built at query time and kept across evaluations, beside being
+// shared within one evaluation. The document's top-level
+// `deployment_capabilities` shows the inputs used.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
@@ -78,11 +96,15 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use asap_aware_mapping::per_computation_candidates::{
+    ComputationCandidate, PerComputationCandidates, PruneReason,
+};
 use asap_aware_mapping::stage3_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, Rejection, ResourceUnitCost,
     ResourceUsage, Selection, SelectionError,
 };
-use asap_devtools::candidate_labels::candidate_labels;
+use asap_aware_mapping::DeploymentCapabilities;
+use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
@@ -107,7 +129,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--max-combinations <n>] [--max-displayed <n>] --out <file>";
+[--deployment-capabilities <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) a run enumerates.
@@ -167,6 +189,7 @@ fn document_of(
             "stage1_logical_asap_optimization": {
                 "combinations": 0,
                 "capped": false,
+                "pass1_pruned": [],
                 "candidates": [],
                 "error": format!("Pass 1: {error}"),
             },
@@ -193,6 +216,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut cost_model: Option<String> = None;
     let (mut cluster_memory, mut cluster_disk, mut cluster_cores) = (None, None, None);
     let mut cluster_objective: Option<String> = None;
+    let mut deployment_capabilities = DeploymentCapabilities::default();
     let mut out = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -241,6 +265,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 cluster_cores = Some(value()?.parse::<u32>().map_err(|e| format!("{e}"))?)
             }
             "--cluster-objective" => cluster_objective = Some(value()?),
+            "--deployment-capabilities" => {
+                deployment_capabilities = serde_json::from_str(&value()?)
+                    .map_err(|e| format!("--deployment-capabilities: {e}"))?
+            }
             "--out" => out = Some(value()?),
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -289,7 +317,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         cost_model,
         ..PlanSelectionSettings::default()
     };
-    let document = match (example.as_deref(), queries.is_empty()) {
+    let mut document = match (example.as_deref(), queries.is_empty()) {
         (Some(example), true) => {
             let (workload, catalog) = match example {
                 "planner-layering-1" => (example1(), SqlCatalog::new()),
@@ -318,6 +346,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 &data,
                 Some(max_combinations),
                 &plan_selection,
+                &deployment_capabilities,
             );
             document_of(workload_queries(&workload), &roots, result, max_displayed)?
         }
@@ -385,11 +414,15 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 &data,
                 Some(max_combinations),
                 &plan_selection,
+                &deployment_capabilities,
             );
             document_of(described, &roots, result, max_displayed)?
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),
     };
+    // Read-only: the deployment inputs the run planned with.
+    document["deployment_capabilities"] =
+        serde_json::to_value(&deployment_capabilities).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}").into())
 }
@@ -457,11 +490,45 @@ fn stage_pipeline(queries: Vec<Value>, run: &PlanningStagesRun, max_displayed: u
         "stage1_logical_asap_optimization": {
             "combinations": run.stage1_logical_asap_optimization.len(),
             "capped": candidates.len() < run.stage1_logical_asap_optimization.len(),
+            "pass1_pruned": pass1_pruned_json(&run.stage1_pass1_per_computation),
             "candidates": candidates,
         },
         "stage2_physical_asap_optimization": { "candidates": physical, "pruned": pruned },
         "stage3_plan_selection": plan_selection_json(&run.stage3_plan_selection, |id| shown_physical.contains(id)),
     })
+}
+
+/// The candidates Pass 1 pruned, per target that has any: the target's
+/// index, the query it is listed under, and each pruned candidate of its
+/// own (`pruned`) and of its fused computation (`fused_pruned`) with the
+/// reason, e.g. `UnsupportedByDeployment`.
+fn pass1_pruned_json(inventory: &PerComputationCandidates<usize>) -> Vec<Value> {
+    let pruned_json = |pruned: &[(ComputationCandidate, PruneReason)]| -> Vec<Value> {
+        pruned
+            .iter()
+            .map(|(candidate, reason)| {
+                json!({ "candidate": computation_label(candidate), "reason": format!("{reason:?}") })
+            })
+            .collect()
+    };
+    let query_of_target = query_of_each_target(inventory);
+    inventory
+        .targets
+        .iter()
+        .enumerate()
+        .filter_map(|(index, target)| {
+            let fused_pruned = target.fused.as_ref().map_or(&[][..], |f| &f.pruned[..]);
+            if target.choices.pruned.is_empty() && fused_pruned.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "target": index,
+                "query": format!("Q{}", query_of_target[index] + 1),
+                "pruned": pruned_json(&target.choices.pruned),
+                "fused_pruned": pruned_json(fused_pruned),
+            }))
+        })
+        .collect()
 }
 
 /// Plan selection over every candidate, listing the costs and rejections

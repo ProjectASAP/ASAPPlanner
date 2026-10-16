@@ -1,4 +1,9 @@
 {
+  "deployment_capabilities": {
+    "query_time_results_retained": false,
+    "raw_data_retained": true,
+    "supported_summaries": null
+  },
   "format": "asap-stage-pipeline/v1",
   "stage0_query_language_frontends": {
     "dag": {
@@ -22318,7 +22323,8 @@
       }
     ],
     "capped": false,
-    "combinations": 27
+    "combinations": 27,
+    "pass1_pruned": []
   },
   "stage2_physical_asap_optimization": {
     "candidates": [

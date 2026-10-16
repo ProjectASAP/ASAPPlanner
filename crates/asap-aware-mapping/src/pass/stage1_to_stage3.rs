@@ -45,9 +45,7 @@ use std::rc::Rc;
 use asap_types::ir::flat::flatten;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::workload::{
-    DataWorkload, QueryLanguage, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
-};
+use asap_types::workload::{DataWorkload, QueryLanguage, QueryRecurrence, QueryWorkloadEntry};
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::asap_aware_cse::{
@@ -61,7 +59,9 @@ use crate::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidateError,
     PerComputationCandidates,
 };
-use crate::stage2_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
+use crate::stage2_physical_asap_optimization::{
+    fixed_interval_ms, optimize_physical_asap, PhysicalCandidate,
+};
 use crate::stage3_plan_selection::{select_plan, Selection, SelectionError};
 use crate::PlanningModels;
 
@@ -295,17 +295,6 @@ impl Pass2 {
     }
 }
 
-/// The fixed interval at which a query repeats, in milliseconds.
-fn fixed_interval_ms(recurrence: &QueryRecurrence) -> Option<u64> {
-    match recurrence {
-        QueryRecurrence::Repeated(
-            RepeatedDemand::FixedInterval(interval)
-            | RepeatedDemand::FixedIntervalAt { interval, .. },
-        ) => Some(u64::from(interval.0)).filter(|&ms| ms > 0),
-        _ => None,
-    }
-}
-
 /// The Pass 2 candidates of the composed candidate with roots `roots`, in
 /// enumeration order, each distinct candidate once. `interval_ms[q]` is the
 /// fixed interval of query `q`, if it repeats at one.
@@ -488,8 +477,10 @@ impl Pass2List {
 
 /// [`run_stage1_to_stage3`] after Pass 1: enumerates every Stage 1
 /// candidate of `per_computation` (the Pass 1 inventory of the frontends'
-/// roots, [`stage1_logical_asap_optimization`]), so a caller can read the
-/// inventory, e.g. its
+/// roots, [`stage1_logical_asap_optimization`]) without the summaries the
+/// deployment does not support
+/// ([`PerComputationCandidates::without_unsupported_summaries`]), so a
+/// caller can read the inventory, e.g. its
 /// [`combinations`](PerComputationCandidates::combinations), before
 /// enumerating.
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
@@ -498,6 +489,8 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
+    let per_computation =
+        per_computation.without_unsupported_summaries(models.deployment_capabilities);
     let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let stage1 = stage1_logical_asap_optimization(&per_computation, &recurrence).collect();
     run_stage2_and_stage3(per_computation, stage1, entries, data, models)
@@ -508,6 +501,15 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
 /// enumerated): candidate `n` (from 1) is `L<n>`, implemented as `P<n>`
 /// with nothing materialized and as `P<n>-m<k>` (`k` from 1) for each other
 /// materialization assignment.
+///
+/// It does not prune: `per_computation` must already be pruned for
+/// `models.deployment_capabilities`
+/// ([`PerComputationCandidates::without_unsupported_summaries`]), with
+/// `stage1` enumerated from that pruned inventory, as
+/// [`run_stage1_to_stage3_from_pass1`] does. Pruning here would come too
+/// late: each of `stage1`'s choices indexes the inventory it was enumerated
+/// from, so a candidate with an unsupported summary would already be in
+/// `stage1`.
 pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     stage1: Vec<Stage1Candidate>,
@@ -523,7 +525,8 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         let number = index + 1;
         let id = format!("L{number}");
         if let Ok(roots) = &candidate.roots {
-            match optimize_physical_asap(&id, roots, entries, data) {
+            match optimize_physical_asap(&id, roots, entries, data, models.deployment_capabilities)
+            {
                 Ok(implemented) => {
                     for (k, mut p) in implemented.into_iter().enumerate() {
                         p.id = match k {

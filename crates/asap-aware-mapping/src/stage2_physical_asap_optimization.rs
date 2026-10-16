@@ -7,14 +7,22 @@
 //! Each summary build (a `SummaryAgg` or a `PaneChain`) is one
 //! materialization candidate ([`MaterializationCandidate`]) whose
 //! output materialization may store (#509 §Materialization, Algorithm 3).
-//! Each has up to three options:
+//! Each has up to four options:
 //!
 //! * `NotMaterialized`: rebuilt at query time by every query that reads it;
 //! * `MatAtIngestion(Memory)`: maintained as data arrives and kept for the
 //!   queries, when the build is eligible ([`IngestionPruneReason`]);
-//! * `MatAtQuery(Memory)`: built once per evaluation for every query that
-//!   reads it, offered for a build two or more queries read. State is reused
-//!   only within one evaluation; keeping it across evaluations comes later.
+//! * `MatAtQuery(Memory)`: built once at query time for every query of one
+//!   evaluation that reads it and reused only within that evaluation,
+//!   offered for a build two or more queries read;
+//! * `MatAtQueryKeptAcrossEvaluations(Memory)`: built at query time and
+//!   kept across evaluations (#509 Example 4's B3), offered when the
+//!   deployment keeps query-time results
+//!   ([`DeploymentCapabilities::query_time_results_retained`]) for a
+//!   tumbling-pane chain that builds one new pane per evaluation
+//!   ([`builds_one_pane_per_evaluation`]): each evaluation builds the
+//!   newest pane and reuses the others. Both query-time options are offered
+//!   when both apply, and Stage 3 prices each.
 //!
 //! A build at ingestion time needs every build below it at ingestion time too
 //! (#509 Algorithm 3, line 13); such assignments are not generated. Every
@@ -82,6 +90,8 @@ use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use thiserror::Error;
+
+use crate::deployment_capabilities::DeploymentCapabilities;
 
 /// One CandidatePhysicalASAPDAG (Stage 2 output), derived from exactly one
 /// CandidateLogicalASAPDAG (Stage 1 output). It holds planning data only;
@@ -180,11 +190,17 @@ pub(crate) struct MaterializationCandidate {
     pub(crate) readers: Vec<usize>,
     /// `Ok` when `MatAtIngestion` is an option.
     pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
+    /// Whether `MatAtQueryKeptAcrossEvaluations` is an option: the
+    /// deployment keeps query-time results and it is a tumbling-pane chain
+    /// that builds one new pane per evaluation.
+    pub(crate) may_keep_across_evaluations: bool,
 }
 
 impl MaterializationCandidate {
     /// Its options, `NotMaterialized` first: `MatAtIngestion` when eligible,
-    /// `MatAtQuery` when two or more queries read it.
+    /// `MatAtQuery` when two or more queries read it, and
+    /// `MatAtQueryKeptAcrossEvaluations` when it may be kept across
+    /// evaluations.
     pub(crate) fn options(&self) -> Vec<Materialization> {
         let mut options = vec![Materialization::NotMaterialized];
         if self.at_ingestion.is_ok() {
@@ -193,8 +209,61 @@ impl MaterializationCandidate {
         if self.readers.len() > 1 {
             options.push(Materialization::MatAtQuery(Medium::Memory));
         }
+        if self.may_keep_across_evaluations {
+            options.push(Materialization::MatAtQueryKeptAcrossEvaluations(
+                Medium::Memory,
+            ));
+        }
         options
     }
+}
+
+/// The fixed interval at which a query repeats, in milliseconds.
+pub(crate) fn fixed_interval_ms(recurrence: &QueryRecurrence) -> Option<u64> {
+    match recurrence {
+        QueryRecurrence::Repeated(
+            RepeatedDemand::FixedInterval(interval)
+            | RepeatedDemand::FixedIntervalAt { interval, .. },
+        ) => Some(u64::from(interval.0)).filter(|&ms| ms > 0),
+        _ => None,
+    }
+}
+
+/// Whether a tumbling-pane chain of `pane_width_ms`-wide panes read by
+/// queries repeating as `readers` builds exactly one new pane per
+/// evaluation: there is a reader, every reader repeats at a fixed interval
+/// equal to the pane width, and the readers whose evaluation phase is known
+/// share one phase (modulo the interval). Its other panes are the previous
+/// evaluations' newest, so a deployment that keeps query-time results
+/// reuses them (#509 Example 4's B3).
+///
+/// Co-scheduling assumption: readers with the same interval and no known
+/// phase run at the same instants as each other and as the readers with a
+/// known phase, as [`crate::stage3_plan_selection`] assumes when it counts
+/// one evaluation per interval. Readers at different known phases would
+/// each need their own newest pane, so they do not share one kept chain.
+pub(crate) fn builds_one_pane_per_evaluation<'a>(
+    pane_width_ms: u64,
+    readers: impl IntoIterator<Item = &'a QueryRecurrence>,
+) -> bool {
+    let mut phase_ms = None;
+    let mut any_reader = false;
+    for recurrence in readers {
+        any_reader = true;
+        if fixed_interval_ms(recurrence) != Some(pane_width_ms) {
+            return false;
+        }
+        if let QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            evaluation_phase, ..
+        }) = recurrence
+        {
+            let phase = evaluation_phase.0 % pane_width_ms;
+            if *phase_ms.get_or_insert(phase) != phase {
+                return false;
+            }
+        }
+    }
+    any_reader
 }
 
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
@@ -204,16 +273,18 @@ impl MaterializationCandidate {
 /// its recurrence and predictability decide whether state may be kept from
 /// ingestion time; a missing entry is unknown. `id` is left empty for the
 /// caller to name. Sharing between `roots` is preserved: one memo serves the
-/// whole workload.
+/// whole workload. `deployment` says whether a query-time result may be
+/// kept across evaluations.
 pub fn optimize_physical_asap(
     from_logical: &str,
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
 ) -> Result<Vec<PhysicalCandidate>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
-    let mat_candidates = materialization_candidates(&implemented, entries, data);
+    let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
     let mut candidates = Vec::new();
     for assignment in materialization_assignments(&mat_candidates) {
         let materialized: Vec<_> = mat_candidates
@@ -273,13 +344,12 @@ pub fn physical_candidate_count(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
 ) -> Result<usize, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
-    Ok(
-        materialization_assignments(&materialization_candidates(&implemented, entries, data))
-            .count(),
-    )
+    let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
+    Ok(materialization_assignments(&mat_candidates).count())
 }
 
 /// The operator nodes `root` reads.
@@ -291,11 +361,13 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 }
 
 /// Every summary build of `roots` (implemented), in discovery order, with
-/// its readers and whether it may run at ingestion time.
+/// its readers, whether it may run at ingestion time and whether it may be
+/// kept from query time across evaluations.
 pub(crate) fn materialization_candidates(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
 ) -> Vec<MaterializationCandidate> {
     let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
     let mut readers: HashMap<*const OperatorNode, Vec<usize>> = HashMap::new();
@@ -336,10 +408,23 @@ pub(crate) fn materialization_candidates(
                         .map(|_| ())
                         .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
                 });
+            // A reader without a workload entry has an unknown recurrence.
+            let recurrences: Option<Vec<&QueryRecurrence>> = readers
+                .iter()
+                .map(|&q| entries.get(q).map(|e| &e.recurrence))
+                .collect();
+            let may_keep_across_evaluations = deployment.query_time_results_retained
+                && match (node.asap(), recurrences) {
+                    (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
+                        builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
+                    }
+                    _ => false,
+                };
             MaterializationCandidate {
                 node: Rc::clone(node),
                 readers,
                 at_ingestion,
+                may_keep_across_evaluations,
             }
         })
         .collect()
@@ -659,9 +744,15 @@ mod tests {
 
     /// The all-`NotMaterialized` candidate, with no workload declared.
     fn first_candidate(roots: &[QueryRoot]) -> PhysicalCandidate {
-        optimize_physical_asap("L1", roots, &[], &DataWorkload::default())
-            .unwrap()
-            .remove(0)
+        optimize_physical_asap(
+            "L1",
+            roots,
+            &[],
+            &DataWorkload::default(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap()
+        .remove(0)
     }
 
     fn operator_root(candidate: &PhysicalCandidate, i: usize) -> Rc<OperatorNode> {
@@ -800,8 +891,14 @@ mod tests {
             ),
         ];
         for root in cases {
-            let error = optimize_physical_asap("L1", &[root.into()], &[], &DataWorkload::default())
-                .unwrap_err();
+            let error = optimize_physical_asap(
+                "L1",
+                &[root.into()],
+                &[],
+                &DataWorkload::default(),
+                &DeploymentCapabilities::default(),
+            )
+            .unwrap_err();
             assert!(
                 matches!(error, PhysicalASAPOptimizationError::ExactTopK(_)),
                 "{error}"
@@ -1010,8 +1107,14 @@ mod tests {
     #[test]
     fn a_pane_chain_over_arriving_data_may_be_maintained_at_ingestion_time() {
         let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
-        let candidates =
-            optimize_physical_asap("L1", &[root], &[every_minute()], &arriving()).unwrap();
+        let candidates = optimize_physical_asap(
+            "L1",
+            &[root],
+            &[every_minute()],
+            &arriving(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 2);
         let [b2, b1] = &candidates[..] else {
             unreachable!()
@@ -1069,12 +1172,23 @@ mod tests {
             (once, arriving(), Why::NotRepeated),
         ] {
             let roots = [root.clone()];
-            let candidates =
-                optimize_physical_asap("L1", &roots, std::slice::from_ref(&demand), &data).unwrap();
+            let candidates = optimize_physical_asap(
+                "L1",
+                &roots,
+                std::slice::from_ref(&demand),
+                &data,
+                &DeploymentCapabilities::default(),
+            )
+            .unwrap();
             assert_eq!(candidates.len(), 1, "{why:?}");
             let mut memo = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
-            let mat_candidates = materialization_candidates(&implemented, &[demand], &data);
+            let mat_candidates = materialization_candidates(
+                &implemented,
+                &[demand],
+                &data,
+                &DeploymentCapabilities::default(),
+            );
             assert_eq!(mat_candidates.len(), 1);
             assert_eq!(mat_candidates[0].at_ingestion, Err(why));
         }
@@ -1090,11 +1204,21 @@ mod tests {
             let roots = [in_panes(summary_root(query))];
             let mut memo = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
-            let mat_candidates =
-                materialization_candidates(&implemented, &[every_minute()], &arriving());
+            let mat_candidates = materialization_candidates(
+                &implemented,
+                &[every_minute()],
+                &arriving(),
+                &DeploymentCapabilities::default(),
+            );
             assert_eq!(mat_candidates[0].at_ingestion, Ok(()), "{query}");
-            let candidates =
-                optimize_physical_asap("L1", &roots, &[every_minute()], &arriving()).unwrap();
+            let candidates = optimize_physical_asap(
+                "L1",
+                &roots,
+                &[every_minute()],
+                &arriving(),
+                &DeploymentCapabilities::default(),
+            )
+            .unwrap();
             assert_eq!(candidates.len(), 2, "{query}");
         }
     }
@@ -1120,7 +1244,12 @@ mod tests {
             let roots = [root];
             let mut memo = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
-            let mat_candidates = materialization_candidates(&implemented, &[every_minute()], &data);
+            let mat_candidates = materialization_candidates(
+                &implemented,
+                &[every_minute()],
+                &data,
+                &DeploymentCapabilities::default(),
+            );
             assert_eq!(
                 mat_candidates[0].at_ingestion,
                 Err(Why::CounterNeedsTimeOrder)
@@ -1161,9 +1290,14 @@ mod tests {
             let mut memo = HashMap::new();
             let implemented =
                 map_roots(std::slice::from_ref(root), &mut |n| implement(n, &mut memo)).unwrap();
-            materialization_candidates(&implemented, &[demand], &arriving())
-                .remove(0)
-                .at_ingestion
+            materialization_candidates(
+                &implemented,
+                &[demand],
+                &arriving(),
+                &DeploymentCapabilities::default(),
+            )
+            .remove(0)
+            .at_ingestion
         };
         assert_eq!(mat_candidates(&root, at(MINUTE as u32)), Ok(()));
         assert_eq!(
@@ -1176,6 +1310,7 @@ mod tests {
             std::slice::from_ref(&root),
             &[at(MINUTE as u32)],
             &arriving(),
+            &DeploymentCapabilities::default(),
         )
         .unwrap();
         assert_eq!(materialized(&candidates[1]), [AT_INGESTION]);
@@ -1240,8 +1375,14 @@ mod tests {
             .unwrap(),
         );
         let roots = [QueryRoot::Operator(p99), QueryRoot::Operator(p50)];
-        let candidates =
-            optimize_physical_asap("L1", &roots, &[], &DataWorkload::default()).unwrap();
+        let candidates = optimize_physical_asap(
+            "L1",
+            &roots,
+            &[],
+            &DataWorkload::default(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(
             materialized(&candidates[1]),
@@ -1283,9 +1424,14 @@ mod tests {
             ranged,
         );
         let roots = [QueryRoot::Operator(panes), QueryRoot::Operator(exact)];
-        let candidates =
-            optimize_physical_asap("L1", &roots, &[every_minute(), every_minute()], &arriving())
-                .unwrap();
+        let candidates = optimize_physical_asap(
+            "L1",
+            &roots,
+            &[every_minute(), every_minute()],
+            &arriving(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 2);
         let scans = |c: &PhysicalCandidate| {
             let mut timings: Vec<_> = c
@@ -1303,5 +1449,37 @@ mod tests {
             scans(&candidates[1]),
             [ExecutionTiming::IngestionTime, ExecutionTiming::QueryTime]
         );
+    }
+
+    /// Readers share one kept pane chain only when they evaluate at the
+    /// same instants: two readers every minute at phases 0 and 2 min do,
+    /// at phases 0 and 30 s they do not (each would need its own newest
+    /// pane). A reader with no known phase is assumed to run with the
+    /// others.
+    #[test]
+    fn readers_at_different_phases_do_not_build_one_pane_per_evaluation() {
+        let at = |phase_ms: u64| {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(MINUTE as u32),
+                evaluation_phase: TimestampMs(phase_ms),
+            })
+        };
+        let unknown_phase = every_minute().recurrence;
+        assert!(builds_one_pane_per_evaluation(
+            MINUTE,
+            [&at(0), &at(2 * MINUTE)]
+        ));
+        assert!(!builds_one_pane_per_evaluation(
+            MINUTE,
+            [&at(0), &at(30_000)]
+        ));
+        assert!(builds_one_pane_per_evaluation(
+            MINUTE,
+            [&at(30_000), &unknown_phase]
+        ));
+        assert!(!builds_one_pane_per_evaluation(
+            MINUTE,
+            [&at(0), &unknown_phase, &at(30_000)]
+        ));
     }
 }

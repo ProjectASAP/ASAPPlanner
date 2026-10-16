@@ -525,11 +525,10 @@ impl ReplacementSubDAG {
             Replacement::ExactComposition(composition) => {
                 cost_model.value_operation_support_evidence(&composition.op, composition.placement)
             }
-            // Any summary decision, including one rooted in a relational
-            // operator above its evaluations, asks the deployment for support.
-            Replacement::SubDAG(node) if !self.is_logical_rewrite() => {
-                cost_model.summary_support_evidence(node)
-            }
+            // Summary support is the deployment's capabilities, which the
+            // planner pipeline reads (`DeploymentCapabilities`); this legacy
+            // search defers it to physical compilation.
+            Replacement::SubDAG(_) if !self.is_logical_rewrite() => None,
             Replacement::SubDAG(_) => Some(true),
         }
     }
@@ -9275,35 +9274,6 @@ mod tests {
                 .effective_consumer_count,
             1
         );
-    }
-
-    // A cheap but physically infeasible candidate must not be selected.
-    #[test]
-    fn explicit_summary_infeasibility_prevents_selection() {
-        struct Unsupported;
-        impl CostModel for Unsupported {
-            fn rank_candidates(
-                &self,
-                _: &AggIntent,
-                candidates: &[SketchAlgorithm],
-            ) -> Vec<SketchAlgorithm> {
-                candidates.to_vec()
-            }
-            fn candidate_cost(&self, _: &ReplacementSubDAG, _: &TargetSubDAG<'_>) -> Option<Cost> {
-                Some(Cost(1.0))
-            }
-            fn summary_support_evidence(&self, _: &OperatorNode) -> Option<bool> {
-                Some(false)
-            }
-        }
-        let root = lower_promql("sum_over_time(a[1m])", AccuracyTarget::exact());
-        let space = search_workload(vec![("q", root)]).unwrap();
-        let selected = space.global_selection(&Unsupported);
-        assert!(selected
-            .for_target(&space.roots[0].1)
-            .unwrap()
-            .chosen
-            .is_none());
     }
 
     // Composable temporal/grouped Sum must be executable as one producer.
