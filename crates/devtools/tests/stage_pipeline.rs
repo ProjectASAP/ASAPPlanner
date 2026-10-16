@@ -710,6 +710,82 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
     assert!(cluster["costs"]["P3-m1"]["cost_per_second"].is_null());
 }
 
+/// `--deployment` declares the executor's capabilities, which the
+/// document's `deployment` shows (defaults filled in; without the flag,
+/// every summary supported, raw data retained, no query-time retention).
+/// For Pattern B with KLL only and query-time retention: no DDSketch
+/// candidate is offered, and the KLL panes gain B3, built at query time and
+/// kept (`P3-m2`, 8,884.53 cost/s); the whole-window KLL (`P2`) is still
+/// selected. Without raw data, every query-time scan is invalid and B1
+/// (`P3-m1`) is selected. A deployment with an unknown field is refused.
+#[test]
+fn deployment_flag_sets_the_capabilities_and_shows_them() {
+    let default = generate_example("planner-layering-3b", &[]);
+    assert_eq!(
+        default["deployment"],
+        serde_json::json!({
+            "supported_summaries": null,
+            "raw_data_retained": true,
+            "query_time_retention": false,
+        })
+    );
+    let kll_kept = generate_example(
+        "planner-layering-3b",
+        &[
+            "--deployment",
+            r#"{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}],
+                "query_time_retention": true}"#,
+        ],
+    );
+    assert_eq!(
+        kll_kept["deployment"],
+        serde_json::json!({
+            "supported_summaries": [{ "family": "Kll", "readouts": ["Quantile"] }],
+            "raw_data_retained": true,
+            "query_time_retention": true,
+        })
+    );
+    let physical: Vec<&str> = kll_kept["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(physical, ["P1", "P2", "P3", "P3-m1", "P3-m2"]);
+    let selection = &kll_kept["stage3_plan_selection"];
+    assert_eq!(selection["selected"], "P2");
+    assert_eq!(selection["costs"]["P3-m2"]["cost_per_second"], 8884.53);
+
+    let no_raw = generate_example(
+        "planner-layering-3b",
+        &["--deployment", r#"{"raw_data_retained": false}"#],
+    );
+    let selection = &no_raw["stage3_plan_selection"];
+    assert_eq!(selection["selected"], "P3-m1");
+    let p1 = selection["rejected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "P1")
+        .unwrap();
+    assert_eq!(
+        p1["reason"],
+        "scans 300000 ms of raw latency_ms at query time, but the deployment does not retain raw data"
+    );
+
+    let (status, stderr) = failure(&[
+        "--example",
+        "planner-layering-3b",
+        "--deployment",
+        r#"{"raw_data": false}"#,
+    ]);
+    assert_eq!(status, Some(2));
+    assert!(
+        stderr.contains("--deployment: unknown field `raw_data`"),
+        "{stderr}"
+    );
+}
+
 /// Cluster limits need cost model 3, and cost model 3 needs them.
 #[test]
 fn cluster_flags_and_cost_model_3_go_together() {

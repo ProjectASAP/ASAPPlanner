@@ -68,6 +68,18 @@
 // `pareto-front`). Cost models 1 and 2 use the illustrative unit costs.
 // Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
 // cost model 3, and `front` lists the Pareto front under `pareto-front`.
+// `--deployment '<json>'` declares what the deployment's executor can run
+// and keep (`DeploymentCapabilities`): `{"supported_summaries": [{"family":
+// "Kll", "readouts": ["Quantile"]}, ...], "raw_data_retained": true,
+// "query_time_retention": false}`. Every field is optional: by default every
+// sketch family and readout the planner can build is supported
+// (`supported_summaries` null), raw data is retained, and no query-time
+// result is kept across evaluations. Pass 1 offers no summary the
+// deployment does not support (exact computations are always supported);
+// without raw data, a candidate that scans raw data at query time is
+// invalid; with `query_time_retention`, a tumbling-pane chain whose readers
+// repeat at its pane width may be built at query time and kept across
+// evaluations. The document's top-level `deployment` shows the inputs used.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
@@ -82,6 +94,7 @@ use asap_aware_mapping::stage3_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, Rejection, ResourceUnitCost,
     ResourceUsage, Selection, SelectionError,
 };
+use asap_aware_mapping::DeploymentCapabilities;
 use asap_devtools::candidate_labels::candidate_labels;
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
@@ -107,7 +120,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--max-combinations <n>] [--max-displayed <n>] --out <file>";
+[--deployment <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) a run enumerates.
@@ -193,6 +206,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut cost_model: Option<String> = None;
     let (mut cluster_memory, mut cluster_disk, mut cluster_cores) = (None, None, None);
     let mut cluster_objective: Option<String> = None;
+    let mut deployment = DeploymentCapabilities::default();
     let mut out = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -241,6 +255,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 cluster_cores = Some(value()?.parse::<u32>().map_err(|e| format!("{e}"))?)
             }
             "--cluster-objective" => cluster_objective = Some(value()?),
+            "--deployment" => {
+                deployment =
+                    serde_json::from_str(&value()?).map_err(|e| format!("--deployment: {e}"))?
+            }
             "--out" => out = Some(value()?),
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -289,7 +307,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         cost_model,
         ..PlanSelectionSettings::default()
     };
-    let document = match (example.as_deref(), queries.is_empty()) {
+    let mut document = match (example.as_deref(), queries.is_empty()) {
         (Some(example), true) => {
             let (workload, catalog) = match example {
                 "planner-layering-1" => (example1(), SqlCatalog::new()),
@@ -318,6 +336,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 &data,
                 Some(max_combinations),
                 &plan_selection,
+                &deployment,
             );
             document_of(workload_queries(&workload), &roots, result, max_displayed)?
         }
@@ -385,11 +404,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 &data,
                 Some(max_combinations),
                 &plan_selection,
+                &deployment,
             );
             document_of(described, &roots, result, max_displayed)?
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),
     };
+    // Read-only: the deployment inputs the run planned with.
+    document["deployment"] = serde_json::to_value(&deployment).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}").into())
 }

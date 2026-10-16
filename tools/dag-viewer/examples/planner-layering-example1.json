@@ -1,4 +1,9 @@
 {
+  "deployment": {
+    "query_time_retention": false,
+    "raw_data_retained": true,
+    "supported_summaries": null
+  },
   "format": "asap-stage-pipeline/v1",
   "stage0_query_language_frontends": {
     "dag": {

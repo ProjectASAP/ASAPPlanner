@@ -31,6 +31,7 @@ use crate::accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
 };
 use crate::cost_model::{CostModel, DefaultCostModel};
+use crate::deployment_capabilities::DeploymentCapabilities;
 use crate::per_computation_candidates::PerComputationCandidateError;
 use crate::stage3_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
 
@@ -45,16 +46,19 @@ static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<PlanSelectionSettings> =
     std::sync::LazyLock::new(PlanSelectionSettings::default);
+static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
+    std::sync::LazyLock::new(DeploymentCapabilities::default);
 
 // ── Input ────────────────────────────────────────────────────────────────
 
 /// Planning logic, as opposed to the scoped facts it consumes: a model can have
 /// a built-in default, evidence about a particular deployment cannot.
 ///
-/// Plan selection reads `accuracy`, `evidence` and `plan_selection`. It
-/// measures candidates with its own analytical model and compares them
-/// under `plan_selection`'s cost model, so [`Stage1ToStage3Pass`] does not
-/// read `cost`.
+/// Plan selection reads `accuracy`, `evidence`, `plan_selection` and
+/// `deployment`. It measures candidates with its own analytical model and
+/// compares them under `plan_selection`'s cost model, so
+/// [`Stage1ToStage3Pass`] does not read `cost`. Stage 1 and Stage 2 read
+/// `deployment` too.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
@@ -65,6 +69,11 @@ pub struct PlanningModels<'a> {
     /// cost model 1 with illustrative unit costs), the resource speed and
     /// the non-repeating query horizon.
     pub plan_selection: &'a PlanSelectionSettings,
+    /// What the deployment's executor can run and keep: the summaries it
+    /// supports (Stage 1), whether it retains raw data (Stage 3) and
+    /// whether it keeps query-time results across evaluations (Stages 2
+    /// and 3); default [`DeploymentCapabilities::default`].
+    pub deployment: &'a DeploymentCapabilities,
 }
 
 impl<'a> PlanningModels<'a> {
@@ -78,6 +87,7 @@ impl<'a> PlanningModels<'a> {
             accuracy,
             evidence,
             plan_selection: &DEFAULT_PLAN_SELECTION,
+            deployment: &DEFAULT_DEPLOYMENT,
         }
     }
 
@@ -88,6 +98,7 @@ impl<'a> PlanningModels<'a> {
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
             plan_selection: &DEFAULT_PLAN_SELECTION,
+            deployment: &DEFAULT_DEPLOYMENT,
         }
     }
 
@@ -110,6 +121,13 @@ impl<'a> PlanningModels<'a> {
     /// model, resource speed, non-repeating query horizon).
     pub fn with_plan_selection(mut self, plan_selection: &'a PlanSelectionSettings) -> Self {
         self.plan_selection = plan_selection;
+        self
+    }
+
+    /// These models with the deployment's capabilities (supported
+    /// summaries, raw-data and query-time retention).
+    pub fn with_deployment(mut self, deployment: &'a DeploymentCapabilities) -> Self {
+        self.deployment = deployment;
         self
     }
 }

@@ -10,7 +10,7 @@ use asap_aware_mapping::stage2_physical_asap_optimization::{
     physical_candidate_count, PhysicalCandidate,
 };
 use asap_aware_mapping::stage3_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
-use asap_aware_mapping::PlanningModels;
+use asap_aware_mapping::{DeploymentCapabilities, PlanningModels};
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
@@ -147,6 +147,7 @@ pub fn run_planning_stages(
         &data,
         max_combinations,
         &PlanSelectionSettings::default(),
+        &DeploymentCapabilities::default(),
     )
 }
 
@@ -154,17 +155,21 @@ pub fn run_planning_stages(
 /// languages: query `i` is `roots[i]`, with workload entry `entries[i]`
 /// (its accuracy target, latency bound, recurrence and predictability).
 /// Plan selection compares candidates under `plan_selection`'s cost model.
+/// `deployment` is what the executor can run and keep: Pass 1 offers only
+/// the summaries it supports, and Stages 2 and 3 read its retention.
 pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     max_combinations: Option<usize>,
     plan_selection: &PlanSelectionSettings,
+    deployment: &DeploymentCapabilities,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
     let per_computation =
         generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
-            .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
+            .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?
+            .without_unsupported_summaries(deployment);
     // Count Stage 1 candidates as they are enumerated and stop as soon as
     // the count passes the limit; never truncate.
     let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
@@ -180,7 +185,7 @@ pub fn run_planning_stages_over(
     if let Some(limit) = max_combinations {
         let mut physical = 0usize;
         for roots in stage1.iter().filter_map(|c| c.roots.as_ref().ok()) {
-            physical += physical_candidate_count(roots, entries, data).unwrap_or(0);
+            physical += physical_candidate_count(roots, entries, data, deployment).unwrap_or(0);
             if physical > limit {
                 return Err(PlanningStagesError::TooManyPhysicalCandidates { limit });
             }
@@ -191,7 +196,9 @@ pub fn run_planning_stages_over(
         stage1,
         entries,
         data,
-        PlanningModels::builtin().with_plan_selection(plan_selection),
+        PlanningModels::builtin()
+            .with_plan_selection(plan_selection)
+            .with_deployment(deployment),
     );
     for candidate in &run.stage1_logical_asap_optimization {
         if let Ok(roots) = &candidate.roots {

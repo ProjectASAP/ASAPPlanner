@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
 use asap_aware_mapping::stage3_plan_selection::PlanSelectionSettings;
 use asap_aware_mapping::stage3_plan_selection::Selection;
+use asap_aware_mapping::DeploymentCapabilities;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
@@ -40,6 +41,17 @@ pub fn run_promql(workload: &PlanningWorkload) -> Run {
 /// model other than the default).
 pub fn run_promql_under(workload: &PlanningWorkload, settings: &PlanSelectionSettings) -> Run {
     run_stages_under(workload, lower_promql(workload), settings)
+}
+
+/// Lower and plan a PromQL workload for a deployment with `deployment`'s
+/// capabilities, under the default cost model.
+pub fn run_promql_for(workload: &PlanningWorkload, deployment: &DeploymentCapabilities) -> Run {
+    run_stages_with(
+        workload,
+        lower_promql(workload),
+        &PlanSelectionSettings::default(),
+        deployment,
+    )
 }
 
 /// Whether `form` answers a query window by merging several summaries.
@@ -183,9 +195,25 @@ pub fn run_stages_under(
     roots: Vec<QueryRoot>,
     settings: &PlanSelectionSettings,
 ) -> Run {
+    run_stages_with(
+        workload,
+        roots,
+        settings,
+        &DeploymentCapabilities::default(),
+    )
+}
+
+/// [`run_stages`], selecting under `settings` for a deployment with
+/// `deployment`'s capabilities.
+pub fn run_stages_with(
+    workload: &PlanningWorkload,
+    roots: Vec<QueryRoot>,
+    settings: &PlanSelectionSettings,
+    deployment: &DeploymentCapabilities,
+) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let run = run_planning_stages_over(roots, &entries, &data, None, settings)
+    let run = run_planning_stages_over(roots, &entries, &data, None, settings, deployment)
         .expect("planning stages run");
     let logical_candidates = run
         .stage1_logical_asap_optimization

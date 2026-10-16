@@ -147,6 +147,8 @@
 pub mod accuracy;
 pub mod analytical_cost;
 pub mod cost_model;
+/// The deployment's capabilities: supported summaries and what it retains.
+pub mod deployment_capabilities;
 pub mod empirical_cost;
 pub mod empirical_resources;
 pub mod exact_composition;
@@ -179,6 +181,7 @@ pub use cost_model::{
     CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
     ExactCompositionCostRequest, ValueOperationCapabilities,
 };
+pub use deployment_capabilities::{DeploymentCapabilities, SupportedSummary};
 pub use exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
