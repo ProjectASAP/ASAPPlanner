@@ -432,7 +432,7 @@ pub struct SourceFacts {
     /// How many series (PromQL) or groups of rows (SQL) the source holds
     /// (default: unknown). Plan selection bounds the values a query returns
     /// (`G`) by it, to split a whole-result failure probability, and prices
-    /// scans and selectors with it (1,000 when unknown).
+    /// scans and selectors with it (1,000 when unknown). Must be positive.
     #[serde(default)]
     pub series_count: Option<u64>,
     /// Declared Prometheus type of the metric (`# TYPE` metadata). The
@@ -566,6 +566,9 @@ impl DataWorkload {
     pub fn validate(&self) -> Result<(), WorkloadError> {
         validate_optional_rate(self.arrival.rows_per_second().map(Rate))?;
         for facts in self.sources.values() {
+            if facts.series_count == Some(0) {
+                return Err(WorkloadError::ZeroSeriesCount);
+            }
             if facts.sample_interval == Some(DurationMs(0)) {
                 return Err(WorkloadError::ZeroSampleInterval);
             }
@@ -699,6 +702,11 @@ pub enum WorkloadError {
     /// Bad input: a source's `max_distinct_per_evaluation` of zero.
     #[error("a source's max_distinct_per_evaluation must be greater than zero")]
     ZeroMaxDistinct,
+    /// Bad input: a source declares a `series_count` of zero. A source
+    /// with no series has nothing to plan for, and `absent(m)` over it
+    /// still returns one row.
+    #[error("a source's series_count must be greater than zero")]
+    ZeroSeriesCount,
 }
 
 #[cfg(test)]
@@ -776,6 +784,24 @@ mod tests {
         };
         assert!(with(1).validate().is_ok());
         assert_eq!(with(0).validate(), Err(WorkloadError::ZeroMaxDistinct));
+    }
+
+    /// A declared series count is positive: with zero series, `absent(m)`
+    /// would still return one row the bound does not count.
+    #[test]
+    fn series_count_must_be_positive() {
+        let with = |series_count: u64| DataWorkload {
+            sources: BTreeMap::from([(
+                "m".to_string(),
+                SourceFacts {
+                    series_count: Some(series_count),
+                    ..SourceFacts::default()
+                },
+            )]),
+            ..DataWorkload::default()
+        };
+        assert!(with(1).validate().is_ok());
+        assert_eq!(with(0).validate(), Err(WorkloadError::ZeroSeriesCount));
     }
 
     /// The arrival's rate is finite and non-negative, and each source's
