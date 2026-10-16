@@ -2867,8 +2867,8 @@ mod tests {
     ) {
         use crate::physical_operator_statistics::ScalarInputStatistics;
         use asap_types::workload::{
-            BatchEntry, DataArrival, DataWorkload, PlanningWorkload, Predictability, Query,
-            QueryLanguage, QueryRequirements, QueryWorkload,
+            BatchEntry, DataWorkload, PlanningWorkload, Predictability, Query, QueryLanguage,
+            QueryRequirements, QueryWorkload,
         };
         use std::cell::RefCell;
 
@@ -2887,13 +2887,10 @@ mod tests {
                 }]),
                 repeating_queries: None,
             },
-            data_workload: Some(DataWorkload {
-                arrival: DataArrival::Ingesting {
-                    rows_per_second: 1_000.0,
-                    sample_interval: Some(DurationMs(1_000)),
-                },
-                ..Default::default()
-            }),
+            data_workload: Some(DataWorkload::sampled_every(
+                asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
+                DurationMs(1_000),
+            )),
         };
         let root = asap_frontend_promql::lower_promql_workload(&workload)
             .unwrap()

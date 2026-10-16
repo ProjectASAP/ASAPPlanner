@@ -678,7 +678,6 @@ mod tests {
         let workload = DataWorkload {
             arrival: asap_types::workload::DataArrival::Ingesting {
                 rows_per_second: 100.0,
-                sample_interval: None,
             },
             ..Default::default()
         };
@@ -691,7 +690,6 @@ mod tests {
         let workload = DataWorkload {
             arrival: asap_types::workload::DataArrival::Mixed {
                 rows_per_second: -0.1,
-                sample_interval: None,
             },
             ..Default::default()
         };

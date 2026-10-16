@@ -11,7 +11,7 @@ use asap_aware_mapping::pass::{
     run_stage1_to_stage3, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
 };
 use asap_aware_mapping::realization::{default_size_params, DEFAULT_DELTA};
-use asap_frontend_promql::lower_promql_query_workload;
+use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
@@ -67,9 +67,13 @@ fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1.0,
-                sample_interval: Some(DurationMs(15_000)),
             },
-            ..Default::default()
+            ..DataWorkload::sampled_every(
+                queries
+                    .iter()
+                    .flat_map(|(query, _)| promql_metric_names(query).unwrap_or_default()),
+                DurationMs(15_000),
+            )
         }),
     }
 }

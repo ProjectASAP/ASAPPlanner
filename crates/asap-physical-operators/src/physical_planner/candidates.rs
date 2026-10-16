@@ -359,13 +359,10 @@ mod tests {
                 }]),
                 repeating_queries: None,
             },
-            data_workload: Some(DataWorkload {
-                arrival: DataArrival::Ingesting {
-                    rows_per_second: 1_000.0,
-                    sample_interval: Some(DurationMs(1000)),
-                },
-                ..Default::default()
-            }),
+            data_workload: Some(DataWorkload::sampled_every(
+                ["m".to_string()],
+                DurationMs(1000),
+            )),
         };
         let root = asap_frontend_promql::lower_promql_workload(&workload)
             .unwrap()

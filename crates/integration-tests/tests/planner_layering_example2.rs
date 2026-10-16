@@ -45,9 +45,9 @@ const SQL_Q3: &str = "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FR
     SELECT src_ip, COUNT(*) AS c FROM flows \
     WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)";
 
-/// PromQL stand-in for Q1–Q3 (see the module docs).
 /// The metric the PromQL stand-in reads.
 const STANDIN_METRIC: &str = "flows_src_ip";
+/// PromQL stand-in for Q1–Q3 (see the module docs).
 const PROMQL_Q1: &str = "distinct_over_time(flows_src_ip[1m])";
 const PROMQL_Q2: &str = "entropy_over_time(flows_src_ip[1m])";
 const PROMQL_Q3: &str = "l2_over_time(flows_src_ip[1m])";
@@ -71,20 +71,24 @@ fn panel(query: &str, (epsilon, delta): (f64, f64), scope: AccuracyScope) -> Rep
 }
 
 /// The shared data workload with 10,000,000 distinct source IPs, in the
-/// SQL `flows` table and the PromQL stand-in's `flows_src_ip` metric.
-fn data_workload(sample_interval: bool) -> DataWorkload {
-    let ten_million = || SourceFacts {
-        series: Some(10_000_000),
+/// SQL `flows` table and the PromQL stand-in's `flows_src_ip` metric
+/// (sampled every 15 s; SQL needs no sample interval).
+fn data_workload() -> DataWorkload {
+    let ten_million = SourceFacts {
+        series_count: Some(10_000_000),
         ..SourceFacts::default()
+    };
+    let sampled = SourceFacts {
+        sample_interval: Some(DurationMs(15_000)),
+        ..ten_million.clone()
     };
     DataWorkload {
         arrival: DataArrival::Ingesting {
             rows_per_second: 1_000_000.0 / 15.0,
-            sample_interval: sample_interval.then_some(DurationMs(15_000)),
         },
         sources: [
-            ("flows".to_string(), ten_million()),
-            (STANDIN_METRIC.to_string(), ten_million()),
+            ("flows".to_string(), ten_million),
+            (STANDIN_METRIC.to_string(), sampled),
         ]
         .into(),
     }
@@ -92,7 +96,7 @@ fn data_workload(sample_interval: bool) -> DataWorkload {
 
 /// The SQL queries' targets cover their whole result, as the doc's do. The
 /// PromQL stand-in states them per value: it reads one series, but the
-/// data workload's input cardinality (the 10M source IPs) is what plan
+/// series count of `flows_src_ip` (the 10M source IPs) is what plan
 /// selection takes as the number of values a PromQL vector returns, so a
 /// whole-result target would be checked over 10M values (#669b).
 fn workload(language: QueryLanguage, queries: [&str; 3]) -> PlanningWorkload {
@@ -114,8 +118,7 @@ fn workload(language: QueryLanguage, queries: [&str; 3]) -> PlanningWorkload {
                     .collect(),
             ),
         },
-        // `data_ingestion_interval` is not needed for SQL; PromQL needs it.
-        data_workload: Some(data_workload(!sql)),
+        data_workload: Some(data_workload()),
     }
 }
 

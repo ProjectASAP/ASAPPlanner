@@ -62,7 +62,6 @@ fn run_stage1_to_stage3(
     let data = DataWorkload {
         arrival: DataArrival::Ingesting {
             rows_per_second: 1_000.0,
-            sample_interval: None,
         },
         ..Default::default()
     };

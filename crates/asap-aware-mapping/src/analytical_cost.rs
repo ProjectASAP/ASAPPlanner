@@ -3816,7 +3816,6 @@ mod tests {
                 6,
                 DataArrival::Ingesting {
                     rows_per_second: 1_000.0,
-                    sample_interval: None
                 }
             ),
             Err(AnalyticalCostError::InvalidCacheEvidence(_))
@@ -4018,7 +4017,6 @@ mod tests {
         let mut scope = comparison_scope();
         scope.data_arrival = DataArrival::Ingesting {
             rows_per_second: 1_000.0,
-            sample_interval: None,
         };
         let mut profile = cache_profile(100, 50);
         let CacheProfile::Evidence(inputs) = &mut profile else {

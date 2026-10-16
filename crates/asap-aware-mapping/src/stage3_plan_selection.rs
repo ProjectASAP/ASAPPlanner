@@ -128,7 +128,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator_properties::BinaryOpKind;
+use asap_types::ir::operator_properties::{
+    BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind,
+};
 use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
@@ -145,7 +147,7 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema, Source};
 use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
-    DataWorkload, MetricType, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand, SourceFacts,
+    DataWorkload, MetricType, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use thiserror::Error;
 
@@ -896,30 +898,6 @@ fn describe_usage(usage: &ResourceUsage) -> String {
     )
 }
 
-/// Without a planning time, only evidence that cannot expire is fresh.
-const ANY_TIME: u64 = u64::MAX;
-
-/// `source`'s facts in `data` while their evidence holds at any planning
-/// time (no validity window): the facts accuracy guarantees may bind.
-fn fresh_source_facts<'a>(data: &'a DataWorkload, source: &str) -> Option<&'a SourceFacts> {
-    data.sources
-        .get(source)
-        .filter(|facts| facts.evidence.is_fresh_at(ANY_TIME))
-}
-
-/// The sources (PromQL metric or SQL table names) the scans under `nodes`
-/// read.
-fn sources_read<'a>(nodes: impl IntoIterator<Item = &'a Rc<OperatorNode>>) -> BTreeSet<String> {
-    nodes
-        .into_iter()
-        .flat_map(OperatorNode::reachable)
-        .filter_map(|node| match node.non_asap() {
-            Some(NonASAPOp::Scan { source, .. }) => Some(source_name(source).to_string()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// A scan source's name: its PromQL metric or SQL table.
 fn source_name(source: &Source) -> &str {
     match source {
@@ -928,34 +906,131 @@ fn source_name(source: &Source) -> &str {
     }
 }
 
-/// The series the sources `root` reads hold together, from fresh source
-/// facts: an upper bound on the series (and rows per evaluation) any of
-/// its folds sees. `None` when it reads no source or any source's series
-/// is unknown or not fresh.
+/// An upper bound on the rows one node returns per evaluation, in terms of
+/// the sources it reads: `copies_per_source[s]` times the series of `s`,
+/// plus `constant_rows`. A source with zero copies is read (under a scalar)
+/// but adds no rows.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RowBound {
+    copies_per_source: BTreeMap<String, u64>,
+    constant_rows: u64,
+}
+
+impl RowBound {
+    /// The bound of a node that returns at most as many rows as its largest
+    /// input, source by source: a fold, a join, a filter.
+    fn largest(inputs: &[RowBound]) -> Self {
+        let mut bound = RowBound::default();
+        for input in inputs {
+            for (source, copies) in &input.copies_per_source {
+                let entry = bound.copies_per_source.entry(source.clone()).or_default();
+                *entry = (*entry).max(*copies);
+            }
+            bound.constant_rows = bound.constant_rows.max(input.constant_rows);
+        }
+        bound
+    }
+
+    /// The bound of a union, which returns every row of each input.
+    fn sum(inputs: &[RowBound]) -> Self {
+        let mut bound = RowBound::default();
+        for input in inputs {
+            for (source, copies) in &input.copies_per_source {
+                *bound.copies_per_source.entry(source.clone()).or_default() += copies;
+            }
+            bound.constant_rows += input.constant_rows;
+        }
+        bound
+    }
+}
+
+/// [`RowBound`] of `node`: a scan returns its source's series once; a union
+/// (PromQL `or`, SQL `UNION`, `Concat`) the rows of all its branches; a
+/// constant vector one row and `VALUES` its rows; any other operator at
+/// most as many as its largest input. `memo` holds the shared nodes' bounds.
+fn row_bound(
+    node: &Rc<OperatorNode>,
+    memo: &mut HashMap<*const OperatorNode, RowBound>,
+) -> RowBound {
+    if let Some(bound) = memo.get(&Rc::as_ptr(node)) {
+        return bound.clone();
+    }
+    let inputs: Vec<RowBound> = node
+        .children()
+        .into_iter()
+        .map(|child| row_bound(child, memo))
+        .collect();
+    let bound = match node.non_asap() {
+        Some(NonASAPOp::Scan { source, .. }) => RowBound {
+            copies_per_source: [(source_name(source).to_string(), 1)].into(),
+            constant_rows: 0,
+        },
+        Some(NonASAPOp::Values { rows, .. }) => RowBound {
+            constant_rows: rows.len() as u64,
+            ..RowBound::largest(&inputs)
+        },
+        Some(NonASAPOp::PromqlVectorFromScalar(_)) => {
+            let mut bound = RowBound::largest(&inputs);
+            bound.copies_per_source.values_mut().for_each(|c| *c = 0);
+            bound.constant_rows = 1;
+            bound
+        }
+        Some(
+            NonASAPOp::SetOp {
+                kind: RelationalSetOpKind::Union,
+                ..
+            }
+            | NonASAPOp::Concat { .. },
+        ) => RowBound::sum(&inputs),
+        Some(NonASAPOp::BinaryOp { operator, .. })
+            if operator.kind == BinaryOpKind::Set(PromQLVectorSetOpKind::Or) =>
+        {
+            RowBound::sum(&inputs)
+        }
+        _ => RowBound::largest(&inputs),
+    };
+    memo.insert(Rc::as_ptr(node), bound.clone());
+    bound
+}
+
+/// An upper bound on the rows any operator of `root` sees or returns in one
+/// evaluation ([`row_bound`]), from the series count each source it reads
+/// declares: the input row count of its folds, and `G` for a PromQL
+/// instant vector ([`values_per_result`]). A join or fold of one source
+/// counts it once; an `or` counts each branch. `None` when `root` reads no
+/// source, or a source it reads rows of declares no series count.
 fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
-    let sources = sources_read(root_operators(root));
-    if sources.is_empty() {
+    let mut memo = HashMap::new();
+    let inputs: Vec<RowBound> = root_operators(root)
+        .into_iter()
+        .map(|node| row_bound(node, &mut memo))
+        .collect();
+    let bound = RowBound::largest(&inputs);
+    if bound.copies_per_source.is_empty() {
         return None;
     }
-    sources
-        .iter()
-        .map(|source| fresh_source_facts(data, source)?.series)
-        .sum()
+    let mut rows = bound.constant_rows;
+    for (source, copies) in &bound.copies_per_source {
+        if *copies > 0 {
+            rows += copies * data.sources.get(source)?.series_count?;
+        }
+    }
+    Some(rows)
 }
 
 /// How many values one evaluation of `root` returns at most (`G`): one for
 /// a scalar root and for a root of at most one row ([`at_most_one_row`]),
-/// provable from the query; otherwise, from `data`, at most the series of
-/// the sources it reads ([`series_read`]) for a PromQL instant vector,
-/// whose groups and series never outnumber its input series. `None` when
-/// unbound: any other SQL result, until a bound on the groups of its source
-/// is an input, and a range vector.
-fn values_per_result(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
+/// provable from the query; otherwise `series_read` ([`series_read`]) for
+/// a PromQL instant vector, which bounds the values it can return: each
+/// branch of an `or` adds its own. `None` when unbound: `series_read` is,
+/// any other SQL result (until a bound on the groups of its source is an
+/// input), and a range vector.
+fn values_per_result(root: &QueryRoot, series_read: Option<u64>) -> Option<u64> {
     match root {
         QueryRoot::Scalar(_) => Some(1),
         QueryRoot::Operator(node) if at_most_one_row(node) => Some(1),
         QueryRoot::Operator(node) if node.result_kind == OperatorResultKind::InstantVector => {
-            series_read(root, data).map(|series| series.max(1))
+            series_read.map(|series| series.max(1))
         }
         QueryRoot::Operator(_) => None,
     }
@@ -1089,7 +1164,7 @@ pub fn resize_for_failure_probability(
         };
         let values = match target.accuracy_scope {
             AccuracyScope::PerValue => Some(1),
-            AccuracyScope::WholeResult => values_per_result(root, data),
+            AccuracyScope::WholeResult => values_per_result(root, series_read(root, data)),
         };
         let Some(values) = values else { continue };
         let inputs = approximate_inputs(root);
@@ -1110,7 +1185,7 @@ pub fn resize_for_failure_probability(
                 relative_error,
             } => {
                 let source = distinct_bound_source(state)?;
-                let bound = fresh_source_facts(data, &source)?.max_distinct_per_evaluation?;
+                let bound = data.sources.get(&source)?.max_distinct_per_evaluation?;
                 // The guarantee keeps the relative error Pass 1 sized for.
                 let relative_error = hll::classic_relative_error(*precision, *relative_error);
                 SketchParams::Hll {
@@ -1188,12 +1263,13 @@ fn accuracy_check(
         }
         // A guarantee per value is stated over the whole result's `G`
         // values for a whole-result target.
-        let values = values_per_result(root, data);
+        let series = series_read(root, data);
+        let values = values_per_result(root, series);
         let over_scope = |g: AccuracyGuarantee| match target.accuracy_scope {
             AccuracyScope::WholeResult => g.over_whole_result(values),
             AccuracyScope::PerValue => g,
         };
-        let guarantee = bound_root_guarantee(root, data, models).map(over_scope);
+        let guarantee = bound_root_guarantee(root, series, data, models).map(over_scope);
         let meets = |g: &AccuracyGuarantee| models.accuracy.satisfies(g, target);
         let met = guarantee.clone().filter(meets).or_else(|| {
             models
@@ -1219,8 +1295,9 @@ fn accuracy_check(
             {
                 format!(
                     "q{query}: the output's guarantee holds for each value, and the number \
-                     of values one evaluation returns is not bound (no declared input \
-                     cardinality for a PromQL vector; no bound on a SQL result's groups yet), \
+                     of values one evaluation returns is not bound (no declared series count \
+                     for a source a PromQL vector reads; no bound on a SQL result's groups \
+                     yet), \
                      so it does not meet whole-result target {target:?}, and the deployment \
                      has no evidence that it meets it"
                 )
@@ -1319,8 +1396,7 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 }
 
 /// [`root_guarantee`] with the statistics Stage 1 left symbolic bound:
-/// - the input row count, from the series of the sources `root` reads
-///   ([`series_read`]);
+/// - the input row count, `series` ([`series_read`] of `root`);
 /// - each source's stream norm ([`source_norm_statistic`]), from the data
 ///   workload's per-source `stream_norms`;
 /// - classic HLL's failure probability and the chance a UnivMon's top layer
@@ -1329,18 +1405,16 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 /// - a product's or quotient's bound, from the deployment's enforced
 ///   operand domains ([`operand_domain_bounds`]).
 ///
-/// Data-workload evidence is used only while fresh. Stage 3 has no planning
-/// time and, by design, stays conservative: it uses only evidence that
-/// holds at any planning time (no validity window); evidence with a
-/// validity window is never used. Any other statistic stays unknown, and
-/// an unknown statistic never meets a target.
+/// Every data-workload fact is declared: the caller drops facts that no
+/// longer hold before planning. Any other statistic stays unknown, and an
+/// unknown statistic never meets a target.
 fn bound_root_guarantee(
     root: &QueryRoot,
+    series: Option<u64>,
     data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> Option<AccuracyGuarantee> {
     let guarantee = root_guarantee(root)?;
-    let series = series_read(root, data);
     let domains = operand_domain_bounds(root, series, data, models);
     Some(bind_statistics(&guarantee, &|statistic| {
         workload_statistic(statistic, series, data)
@@ -1383,7 +1457,7 @@ fn workload_statistic(statistic: &str, series: Option<u64>, data: &DataWorkload)
     if let Some((precision, relative_error, source)) =
         hll::parse_classic_failure_statistic(statistic)
     {
-        let bound = fresh_source_facts(data, source)?.max_distinct_per_evaluation?;
+        let bound = data.sources.get(source)?.max_distinct_per_evaluation?;
         return Some(hll::classic_failure_probability(
             precision,
             relative_error,
@@ -1393,13 +1467,13 @@ fn workload_statistic(statistic: &str, series: Option<u64>, data: &DataWorkload)
     if let Some((heap_size, layers, source)) =
         univmon::parse_incomplete_top_layer_statistic(statistic)
     {
-        let bound = fresh_source_facts(data, source)?.max_distinct_per_evaluation?;
+        let bound = data.sources.get(source)?.max_distinct_per_evaluation?;
         return Some(univmon::incomplete_top_layer_probability(
             heap_size, layers, bound,
         ));
     }
     let (norm, source) = parse_source_norm_statistic(statistic)?;
-    let norms = fresh_source_facts(data, source)?.stream_norms?;
+    let norms = data.sources.get(source)?.stream_norms?;
     match norm {
         STREAM_L1_NORM => norms.l1,
         _ => norms.l2,
@@ -1617,9 +1691,8 @@ fn family_name(family: &FieldDataType) -> String {
 }
 
 /// The series pricing assumes a node reading `sources` sees: the sum of
-/// their declared series, [`DEFAULT_SERIES`] for each source without one
-/// and for a node that reads none. Pricing reads a source's series whatever
-/// its evidence's freshness.
+/// their declared series counts, [`DEFAULT_SERIES`] for each source
+/// without one and for a node that reads none.
 fn priced_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> u64 {
     if sources.is_empty() {
         return DEFAULT_SERIES;
@@ -1629,7 +1702,7 @@ fn priced_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> u64 {
         .map(|source| {
             data.sources
                 .get(*source)
-                .and_then(|facts| facts.series)
+                .and_then(|facts| facts.series_count)
                 .unwrap_or(DEFAULT_SERIES)
         })
         .sum::<u64>()
@@ -1838,21 +1911,20 @@ fn price(
     // Each in-memory ingestion-time state's bytes per window (what it keeps
     // for one window, its output or an exact aggregate's values).
     let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
+    // Each node's producers, in edge order.
+    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    for e in &dag.edges {
+        producers_of.entry(e.consumer).or_default().push(e.producer);
+    }
     for node in &dag.nodes {
         let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
-        let inputs: Vec<_> = dag
-            .edges
-            .iter()
-            .filter(|e| e.consumer == node.id)
-            .map(|e| output[&e.producer])
-            .collect();
+        let producers = producers_of.get(&node.id).map_or(&[][..], Vec::as_slice);
+        let inputs: Vec<_> = producers.iter().map(|p| output[p]).collect();
         let sources: BTreeSet<&str> = match &node.payload {
             Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
-            _ => dag
-                .edges
+            _ => producers
                 .iter()
-                .filter(|e| e.consumer == node.id)
-                .flat_map(|e| sources_read_by[&e.producer].iter().copied())
+                .flat_map(|p| sources_read_by[p].iter().copied())
                 .collect(),
         };
         let series = priced_series(&sources, data);
@@ -2092,12 +2164,11 @@ fn price(
             Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
                 // One operation per input state; one state per group out,
                 // each pane of a chain being a state of its group.
-                let producers = dag.edges.iter().filter(|e| e.consumer == node.id);
                 let mut states = 0;
                 let mut group_count = 0;
-                for edge in producers {
-                    let rows = output[&edge.producer].rows;
-                    let panes = match &nodes[&edge.producer].payload {
+                for producer in producers {
+                    let rows = output[producer].rows;
+                    let panes = match &nodes[producer].payload {
                         Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => {
                             u64::from(*pane_count)
                         }
@@ -2639,7 +2710,21 @@ mod tests {
     };
     use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
     use asap_types::types::AccuracyTarget;
-    use asap_types::workload::{DataArrival, Evidence, MetricType};
+    use asap_types::workload::{DataArrival, MetricType, SourceFacts};
+
+    /// `G` of `root` over `data` ([`values_per_result`]).
+    fn values_of(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
+        values_per_result(root, series_read(root, data))
+    }
+
+    /// [`bound_root_guarantee`] of `root` over `data`.
+    fn bound_of(
+        root: &QueryRoot,
+        data: &DataWorkload,
+        models: &PlanningModels<'_>,
+    ) -> Option<AccuracyGuarantee> {
+        bound_root_guarantee(root, series_read(root, data), data, models)
+    }
 
     /// `n` queries repeating every 10 s, as Example 1's panels do.
     fn recurrences(n: usize) -> Vec<QueryRecurrence> {
@@ -2667,13 +2752,12 @@ mod tests {
         DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 10_000.0,
-                sample_interval: None,
             },
             sources: TEST_SOURCES
                 .iter()
                 .map(|source| {
                     let facts = SourceFacts {
-                        series,
+                        series_count: series,
                         ..SourceFacts::default()
                     };
                     (source.to_string(), facts)
@@ -2940,7 +3024,7 @@ mod tests {
         let root = QueryRoot::Operator(Rc::new((*node).clone().with_guarantee(Some(gated))));
         let with = |types: &[(&str, MetricType)]| with_metric_types(data(), types);
         let bound = |data: &DataWorkload| {
-            bound_root_guarantee(&root, data, &PlanningModels::builtin())
+            bound_of(&root, data, &PlanningModels::builtin())
                 .unwrap()
                 .spec
                 .error
@@ -3319,17 +3403,17 @@ mod tests {
     }
 
     /// Without a bound on the values one evaluation returns, a per-value
-    /// guarantee does not meet a whole-result target: a PromQL vector with
-    /// no declared input cardinality, and a SQL relation (until a bound on
+    /// guarantee does not meet a whole-result target: a PromQL vector whose
+    /// source declares no series count, and a SQL relation (until a bound on
     /// its groups is an input). A scalar returns one value.
     #[test]
     fn an_unbound_number_of_values_leaves_a_whole_result_target_unmet() {
         let (candidates, whole) = per_series_kll(AccuracyScope::WholeResult);
-        let no_cardinality = with_series(None);
+        let no_series_count = with_series(None);
         let Err(SelectionError::NoValidCandidate(rejected)) = select_plan(
             &candidates,
             &[entry_with(whole, repeating(10_000))],
-            &no_cardinality,
+            &no_series_count,
             PlanningModels::builtin(),
         ) else {
             panic!("the KLL candidates are invalid")
@@ -3349,12 +3433,9 @@ mod tests {
                 false,
             )]),
         );
+        assert_eq!(values_of(&QueryRoot::Operator(table), &data()), None);
         assert_eq!(
-            values_per_result(&QueryRoot::Operator(table), &data()),
-            None
-        );
-        assert_eq!(
-            values_per_result(
+            values_of(
                 &QueryRoot::Scalar(ScalarExpr::literal_f64(1.0)),
                 &DataWorkload::default()
             ),
@@ -3366,23 +3447,17 @@ mod tests {
     /// query with no data workload: a global aggregate, PromQL or SQL, and
     /// what selects, renames or joins single rows above it. A grouped SQL
     /// aggregate stays unbound, and a grouped PromQL one, or a global top-k
-    /// (k rows), is bound by the input cardinality.
+    /// (k rows), is bound by the series count of the source it reads.
     #[test]
     fn a_root_of_at_most_one_row_returns_one_value() {
         let none = DataWorkload::default();
         let root =
             |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::max_error(0.01)));
-        assert_eq!(values_per_result(&root("sum(rate(x[5m]))"), &none), Some(1));
+        assert_eq!(values_of(&root("sum(rate(x[5m]))"), &none), Some(1));
+        assert_eq!(values_of(&root("topk(5, rate(x[5m]))"), &none), None);
+        assert_eq!(values_of(&root("sum by (job) (rate(x[5m]))"), &none), None);
         assert_eq!(
-            values_per_result(&root("topk(5, rate(x[5m]))"), &none),
-            None
-        );
-        assert_eq!(
-            values_per_result(&root("sum by (job) (rate(x[5m]))"), &none),
-            None
-        );
-        assert_eq!(
-            values_per_result(&root("sum by (job) (rate(x[5m]))"), &data()),
+            values_of(&root("sum by (job) (rate(x[5m]))"), &data()),
             Some(10_000)
         );
         let table = || {
@@ -3402,13 +3477,10 @@ mod tests {
         let global = crate::test_support::agg(vec![], count(), table());
         let grouped = crate::test_support::agg(vec![0], count(), table());
         assert_eq!(
-            values_per_result(&QueryRoot::Operator(global.clone()), &none),
+            values_of(&QueryRoot::Operator(global.clone()), &none),
             Some(1)
         );
-        assert_eq!(
-            values_per_result(&QueryRoot::Operator(grouped), &data()),
-            None
-        );
+        assert_eq!(values_of(&QueryRoot::Operator(grouped), &data()), None);
         let cross = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Join {
             kind: asap_types::ir::operator_properties::JoinKind::Cross,
             pred: asap_types::ir::Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
@@ -3416,16 +3488,13 @@ mod tests {
             right: global,
         }))
         .unwrap();
-        assert_eq!(
-            values_per_result(&QueryRoot::Operator(cross), &none),
-            Some(1)
-        );
+        assert_eq!(values_of(&QueryRoot::Operator(cross), &none), Some(1));
     }
 
     /// `G` and the input row count are bound per query from the sources
     /// it reads: another source's series do not count, a query over two
-    /// sources is bound by their sum, and one unknown or expired source
-    /// leaves it unbound. Pricing reads the same per-source series, with
+    /// sources is bound by their sum, and one source without a series
+    /// count leaves it unbound. Pricing reads the same per-source series, with
     /// the default for an undeclared source.
     #[test]
     fn values_per_result_is_bound_by_the_series_of_the_sources_read() {
@@ -3436,7 +3505,7 @@ mod tests {
                 .iter()
                 .map(|(source, series)| {
                     let facts = SourceFacts {
-                        series: Some(*series),
+                        series_count: Some(*series),
                         ..SourceFacts::default()
                     };
                     (source.to_string(), facts)
@@ -3446,20 +3515,13 @@ mod tests {
         };
         let x = root("sum by (job) (rate(x[5m]))");
         let both = root("sum by (job) (rate(x[5m])) + sum by (job) (rate(m[5m]))");
-        assert_eq!(values_per_result(&x, &series(&[("x", 10)])), Some(10));
-        assert_eq!(values_per_result(&x, &series(&[("m", 10)])), None);
+        assert_eq!(values_of(&x, &series(&[("x", 10)])), Some(10));
+        assert_eq!(values_of(&x, &series(&[("m", 10)])), None);
         let declared = series(&[("x", 10), ("m", 20)]);
-        assert_eq!(values_per_result(&x, &declared), Some(10));
-        assert_eq!(values_per_result(&both, &declared), Some(30));
+        assert_eq!(values_of(&x, &declared), Some(10));
+        assert_eq!(values_of(&both, &declared), Some(30));
         assert_eq!(series_read(&both, &declared), Some(30));
-        assert_eq!(values_per_result(&both, &series(&[("x", 10)])), None);
-        let mut expired = declared.clone();
-        expired.sources.get_mut("m").unwrap().evidence = Evidence {
-            observed_at_ms: Some(0),
-            valid_for_ms: Some(1),
-        };
-        assert_eq!(values_per_result(&x, &expired), Some(10));
-        assert_eq!(values_per_result(&both, &expired), None);
+        assert_eq!(values_of(&both, &series(&[("x", 10)])), None);
         // Pricing sums the series of the sources a node reads; an
         // undeclared source counts the default.
         assert_eq!(priced_series(&["x", "m"].into(), &declared), 30);
@@ -3468,6 +3530,29 @@ mod tests {
             10 + DEFAULT_SERIES
         );
         assert_eq!(priced_series(&BTreeSet::new(), &declared), DEFAULT_SERIES);
+    }
+
+    /// `G` counts the values the root can return: an `or` returns the
+    /// values of both branches (here up to `series(x)` series plus the
+    /// groups of `x`), a constant vector one more, while a join or a fold
+    /// of one source counts it once.
+    #[test]
+    fn values_per_result_adds_the_branches_of_an_or() {
+        let root =
+            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::max_error(0.01)));
+        let data = with_series(Some(10));
+        for (query, values) in [
+            ("rate(x[5m]) or sum without (instance) (rate(x[5m]))", 20),
+            ("rate(x[5m]) or vector(0)", 11),
+            ("rate(x[5m]) or rate(m[5m])", 20),
+            ("(rate(x[5m]) or vector(0)) or vector(1)", 12),
+            ("sum by (job) (rate(x[5m]) or rate(x[5m]))", 20),
+            ("rate(x[5m]) / rate(x[5m])", 10),
+            ("sum without (instance) (rate(x[5m])) * rate(x[5m])", 10),
+            ("rate(x[5m]) + rate(m[5m])", 20),
+        ] {
+            assert_eq!(values_of(&root(query), &data), Some(values), "{query}");
+        }
     }
 
     /// Deployment evidence that every output was measured exact.
@@ -4166,8 +4251,9 @@ mod tests {
     }
 
     /// `max` folds one value per series, so its failure probability is
-    /// scaled by the symbolic input row count. Stage 3 binds it from the data
-    /// workload's input cardinality; without one, the target is unmet.
+    /// scaled by the symbolic input row count. Stage 3 binds it from the
+    /// series count of the source the query reads; without one, the target
+    /// is unmet.
     #[test]
     fn stage3_binds_the_input_row_count_from_the_data_workload() {
         let target = AccuracyTarget::max_error(0.01)
@@ -4301,13 +4387,12 @@ mod tests {
             ),
         );
         let models = PlanningModels::builtin();
-        let both =
-            bound_root_guarantee(&root, &norms(&[("a", 100.0), ("b", 1_000.0)]), &models).unwrap();
+        let both = bound_of(&root, &norms(&[("a", 100.0), ("b", 1_000.0)]), &models).unwrap();
         assert!(
             (both.spec.error.evaluate().unwrap() - 21.0).abs() < 1e-9,
             "{both:?}"
         );
-        let one = bound_root_guarantee(&root, &norms(&[("a", 100.0)]), &models).unwrap();
+        let one = bound_of(&root, &norms(&[("a", 100.0)]), &models).unwrap();
         assert!(one.spec.error.has_unknown());
     }
 
@@ -4337,7 +4422,7 @@ mod tests {
             crate::test_support::cms_summary("count by (job) (m)"),
             column(),
         ));
-        let g = bound_root_guarantee(&raw, &data, &models).unwrap();
+        let g = bound_of(&raw, &data, &models).unwrap();
         assert!(
             (g.spec.error.evaluate().unwrap() - 2.0).abs() < 1e-12,
             "{g:?}"
@@ -4351,7 +4436,7 @@ mod tests {
                 column(),
             )),
         ] {
-            let g = bound_root_guarantee(&unbound, &data, &models).unwrap();
+            let g = bound_of(&unbound, &data, &models).unwrap();
             assert!(g.spec.error.has_unknown(), "{g:?}");
         }
     }
@@ -4374,13 +4459,13 @@ mod tests {
             (&product, 1_000.0 * 0.02 + 1_000.0 * 0.01 + 0.01 * 0.02),
             (&quotient, (1_000.0 * 0.02 + 1_000.0 * 0.01) / (1.0 - 0.02)),
         ] {
-            let g = bound_root_guarantee(root, &data(), &bounded).unwrap();
+            let g = bound_of(root, &data(), &bounded).unwrap();
             assert!(
                 (g.spec.error.evaluate().unwrap() - expected).abs() < 1e-9,
                 "{g:?}"
             );
             assert!((g.spec.failure_probability.evaluate().unwrap() - 0.002).abs() < 1e-12);
-            let unbound = bound_root_guarantee(root, &data(), &PlanningModels::builtin()).unwrap();
+            let unbound = bound_of(root, &data(), &PlanningModels::builtin()).unwrap();
             assert!(unbound.spec.error.has_unknown(), "{unbound:?}");
         }
         let ratio = scalar_root(
@@ -4388,7 +4473,7 @@ mod tests {
             scalar_of("sum(a)", guarantee(AccuracyMetric::Relative, 0.01, 0.0)),
             scalar_of("sum(b)", guarantee(AccuracyMetric::Relative, 0.01, 0.0)),
         );
-        let g = bound_root_guarantee(&ratio, &data(), &PlanningModels::builtin()).unwrap();
+        let g = bound_of(&ratio, &data(), &PlanningModels::builtin()).unwrap();
         assert!(g.spec.error.has_unknown(), "{g:?}");
     }
 
@@ -4421,21 +4506,16 @@ mod tests {
         );
     }
 
-    /// The input row count is bound only from fresh evidence: Stage 3 has
-    /// no planning time, so evidence with a validity window (which could
-    /// have expired) is not used; timeless declared evidence is.
+    /// The input row count is bound only from the series count of the
+    /// sources the query reads: another source's declared series count
+    /// leaves it unbound.
     #[test]
-    fn stage3_binds_only_fresh_input_cardinality() {
+    fn stage3_binds_only_the_series_count_of_the_sources_read() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
-        let mut expiring = data();
-        for facts in expiring.sources.values_mut() {
-            facts.evidence = Evidence {
-                observed_at_ms: Some(1_000),
-                valid_for_ms: Some(1_000),
-            };
-        }
-        let (candidates, selection) = run(query, &target, &expiring, PlanningModels::builtin());
+        let mut other_source = data();
+        other_source.sources.remove("m");
+        let (candidates, selection) = run(query, &target, &other_source, PlanningModels::builtin());
         let ddsketch: Vec<_> = candidates
             .iter()
             .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
@@ -4876,7 +4956,6 @@ mod tests {
         DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: rows_per_s,
-                sample_interval: None,
             },
             ..data()
         }

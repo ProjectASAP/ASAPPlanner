@@ -56,6 +56,7 @@
 //! | `expr[r:res]` | `PromqlSubquery{r, res}` |
 //! | `<selector> offset <d>` / `<selector> @ <ts>`/`start()`/`end()` | `TimeShift{shift}` over the selector's `Scan` — pass-through schema; a ranged selector shifts under its `TimeRange` (issue #40) |
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
@@ -182,20 +183,25 @@ struct Inner {
 const MAX_DEPTH: usize = 256;
 
 impl PromqlLowerer {
-    /// Lower `query`; a bare instant selector reads the latest sample within
-    /// `sample_interval`, and fails with
+    /// Lower `query`; a bare instant selector over metric `m` reads the
+    /// latest sample within `sample_interval_of(m)`, and fails with
     /// [`WorkloadError::MissingSampleInterval`] when it is `None`.
-    pub(crate) fn lower_query_with_sample_interval(
+    pub(crate) fn lower_query_with_sample_intervals(
         query: &str,
         accuracy: &AccuracyTarget,
-        sample_interval: Option<Duration>,
+        sample_interval_of: &dyn Fn(&str) -> Option<Duration>,
     ) -> Result<asap_types::ir::QueryRoot> {
         let _guard = AccuracyGuard::install(accuracy.clone());
-        let _interval = SampleIntervalGuard::install(sample_interval);
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
         check_depth(&ast, MAX_DEPTH)?;
         let mut metrics = Vec::new();
         collect_metric_names(&ast, &mut metrics);
+        let _intervals = SampleIntervalGuard::install(
+            metrics
+                .iter()
+                .filter_map(|metric| Some((metric.clone(), sample_interval_of(metric)?)))
+                .collect(),
+        );
         if metrics.iter().any(|metric| {
             crate::histogram::current_kind_of(metric)
                 == Some(crate::histogram::HistogramKind::Native)
@@ -217,10 +223,20 @@ impl PromqlLowerer {
     }
 }
 
+/// The metric names `query`'s selectors read ([`crate::promql_metric_names`]).
+pub(crate) fn metric_names(query: &str) -> Result<std::collections::BTreeSet<String>> {
+    let ast = parser::parse(query).map_err(LoweringError::Parse)?;
+    check_depth(&ast, MAX_DEPTH)?;
+    let mut metrics = Vec::new();
+    collect_metric_names(&ast, &mut metrics);
+    Ok(metrics.into_iter().collect())
+}
+
 std::thread_local! {
     static ACCURACY: std::cell::RefCell<AccuracyTarget> =
         const { std::cell::RefCell::new(AccuracyTarget::exact()) };
-    static SAMPLE_INTERVAL: std::cell::RefCell<Option<Duration>> = const { std::cell::RefCell::new(None) };
+    static SAMPLE_INTERVALS: std::cell::RefCell<BTreeMap<String, Duration>> =
+        const { std::cell::RefCell::new(BTreeMap::new()) };
 }
 
 /// RAII guard installing `accuracy` as the ambient accuracy target for the
@@ -247,26 +263,27 @@ fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
 
-/// RAII guard installing the workload's sample interval (`None` when it
-/// declares none) for the current thread's lowering.
-struct SampleIntervalGuard(Option<Duration>);
+/// RAII guard installing the sample interval of each metric the query reads
+/// that declares one, for the current thread's lowering.
+struct SampleIntervalGuard(BTreeMap<String, Duration>);
 
 impl SampleIntervalGuard {
-    fn install(sample_interval: Option<Duration>) -> Self {
-        Self(SAMPLE_INTERVAL.with(|current| current.replace(sample_interval)))
+    fn install(sample_intervals: BTreeMap<String, Duration>) -> Self {
+        Self(SAMPLE_INTERVALS.with(|current| current.replace(sample_intervals)))
     }
 }
 
 impl Drop for SampleIntervalGuard {
     fn drop(&mut self) {
-        SAMPLE_INTERVAL.with(|current| *current.borrow_mut() = self.0.take());
+        SAMPLE_INTERVALS.with(|current| *current.borrow_mut() = std::mem::take(&mut self.0));
     }
 }
 
-/// The installed sample interval, which a bare instant selector needs.
-fn current_sample_interval() -> Result<Duration> {
-    SAMPLE_INTERVAL
-        .with(|current| *current.borrow())
+/// `metric`'s installed sample interval, which a bare instant selector over
+/// it needs.
+fn current_sample_interval(metric: &str) -> Result<Duration> {
+    SAMPLE_INTERVALS
+        .with(|current| current.borrow().get(metric).copied())
         .ok_or(LoweringError::InvalidWorkload(
             WorkloadError::MissingSampleInterval,
         ))
@@ -1370,18 +1387,15 @@ fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
 /// name-less selectors like `{le="…"}`.
 fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
     match expr {
+        // A selector without a metric name scans the source named "".
         Expr::VectorSelector(vs) => {
             if let Ok((metric, ..)) = vs_parts(vs) {
-                if !metric.is_empty() {
-                    out.push(metric);
-                }
+                out.push(metric);
             }
         }
         Expr::MatrixSelector(ms) => {
             if let Ok((metric, ..)) = vs_parts(&ms.vs) {
-                if !metric.is_empty() {
-                    out.push(metric);
-                }
+                out.push(metric);
             }
         }
         Expr::Paren(p) => collect_metric_names(&p.expr, out),
@@ -1795,14 +1809,13 @@ fn windowed_aggregate(
     keys: Vec<ColumnRef>,
     intent: AggIntent<ColumnRef>,
 ) -> Result<Unresolved> {
-    let base = filtered_source(inner.metric, inner.matchers, inner.shift);
     let child = match inner.window {
         Some(w) => Unresolved::TimeRange {
             range: w,
             kind: TimeRangeKind::Range,
-            child: Rc::new(base),
+            child: Rc::new(filtered_source(inner.metric, inner.matchers, inner.shift)),
         },
-        None => sample_lookback(base)?,
+        None => instant_source(inner.metric, inner.matchers, inner.shift)?,
     };
     let reduction = reduction_for(&keys, inner.window.is_some() || intent.is_per_series());
     Ok(Unresolved::Aggregate {
@@ -1874,17 +1887,14 @@ fn filtered_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> U
     }
 }
 
-/// An instant selector: the latest sample per series within the workload's
+/// An instant selector: the latest sample per series within its metric's
 /// sample interval, so the lookback is an `Instant` `TimeRange`.
 fn instant_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Result<Unresolved> {
-    sample_lookback(filtered_source(metric, matchers, shift))
-}
-
-fn sample_lookback(child: Unresolved) -> Result<Unresolved> {
+    let interval = current_sample_interval(&metric)?;
     Ok(Unresolved::TimeRange {
-        range: current_sample_interval()?,
+        range: interval,
         kind: TimeRangeKind::Instant,
-        child: Rc::new(child),
+        child: Rc::new(filtered_source(metric, matchers, shift)),
     })
 }
 

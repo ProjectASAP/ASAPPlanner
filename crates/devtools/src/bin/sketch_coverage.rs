@@ -1,4 +1,4 @@
-// cargo run -p asap-devtools --bin sketch_coverage -- --data-ingestion-interval-ms <ms> [--epsilon <f64>]
+// cargo run -p asap-devtools --bin sketch_coverage -- --sample-interval-ms <ms> [--epsilon <f64>]
 //
 // Lowers every query in every corpus we have (mirrors `variant_coverage`'s
 // corpus list exactly, so the two reports are directly comparable) with an
@@ -7,6 +7,8 @@
 // reports which summary candidates Pass 1 offers for it, plus the fraction of
 // lowered queries with at least one.
 //
+// `--sample-interval-ms <ms>` is the sample interval declared for every
+// metric a query reads, which its bare instant selectors look back.
 // `--epsilon <f64>` (default 0.01) sets the `AccuracyTarget` every query in
 // every corpus lowers with. Without an approximate target, Pass 1 offers no
 // summary candidate.
@@ -201,24 +203,24 @@ fn parse_epsilon() -> f64 {
     0.01
 }
 
-fn parse_ingestion_interval() -> u64 {
+fn parse_sample_interval() -> u64 {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--data-ingestion-interval-ms" {
+        if arg == "--sample-interval-ms" {
             return args
                 .next()
-                .expect("--data-ingestion-interval-ms requires a value")
+                .expect("--sample-interval-ms requires a value")
                 .parse()
-                .expect("--data-ingestion-interval-ms must be an unsigned integer");
+                .expect("--sample-interval-ms must be an unsigned integer");
         }
     }
-    panic!("--data-ingestion-interval-ms is required")
+    panic!("--sample-interval-ms is required")
 }
 
 #[tokio::main]
 async fn main() {
     let epsilon = parse_epsilon();
-    let interval_ms = parse_ingestion_interval();
+    let interval_ms = parse_sample_interval();
     let accuracy = AccuracyTarget::max_error(epsilon);
     let mut results = Vec::new();
 

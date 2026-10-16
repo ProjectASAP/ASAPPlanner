@@ -12,6 +12,7 @@ pub mod error;
 pub mod histogram;
 pub mod promql;
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use asap_types::ir::OperatorNode;
@@ -22,12 +23,12 @@ pub use histogram::{HistogramCatalog, HistogramKind};
 
 /// Lower every normalized PromQL workload entry to a plan-ready operator DAG.
 ///
-/// A bare instant selector reads the latest sample within the data
-/// workload's `sample_interval` (declared by an `Ingesting` or `Mixed`
-/// [`DataArrival`](asap_types::workload::DataArrival)); a query with one
-/// fails with `WorkloadError::MissingSampleInterval` when none is declared.
-/// Explicit range selectors keep their query-specified range and need no
-/// interval.
+/// A bare instant selector reads the latest sample within its metric's
+/// `sample_interval`, declared in the data workload's
+/// [`SourceFacts`](asap_types::workload::SourceFacts) whatever the arrival;
+/// a query with one fails with `WorkloadError::MissingSampleInterval` when
+/// that metric declares none. Explicit range selectors keep their
+/// query-specified range and need no interval.
 pub fn lower_promql_workload(
     workload: &PlanningWorkload,
 ) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
@@ -42,6 +43,13 @@ pub fn lower_promql_workload_with_histograms(
 ) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
     let _guard = histogram::CatalogGuard::install(histograms);
     lower_promql_workload_inner(workload)
+}
+
+/// The metrics `query`'s selectors read, by name: the sources whose facts
+/// (such as `sample_interval`) its lowering looks up. A selector with no
+/// metric name reads the source named `""`, as its scan does.
+pub fn promql_metric_names(query: &str) -> Result<BTreeSet<String>, PromqlError> {
+    promql::metric_names(query)
 }
 
 /// Lower scalar and vector query roots without introducing constant operators.
@@ -83,17 +91,19 @@ fn lower_promql_query_workload_inner(
         )));
     }
     workload.validate()?;
-    let sample_interval = workload
-        .sample_interval()
-        .map(|DurationMs(ms)| std::time::Duration::from_millis(ms));
+    let sample_interval_of = |metric: &str| {
+        workload
+            .sample_interval_of(metric)
+            .map(|DurationMs(ms)| std::time::Duration::from_millis(ms))
+    };
     workload
         .query_workload
         .entries()
         .map(|entry| {
-            let root = promql::PromqlLowerer::lower_query_with_sample_interval(
+            let root = promql::PromqlLowerer::lower_query_with_sample_intervals(
                 &entry.query.0,
                 &entry.requirements.accuracy.clone(),
-                sample_interval,
+                &sample_interval_of,
             )?;
             Ok(root)
         })
@@ -104,15 +114,22 @@ fn lower_promql_query_workload_inner(
 mod tests {
     use std::time::Duration;
 
-    use asap_types::ir::{NonASAPOp, TimeRangeKind};
+    use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
+    use asap_types::pre_asap::Source;
     use asap_types::workload::{
         BatchEntry, DataArrival, DataWorkload, PlanningWorkload, Query, QueryRequirements,
-        QueryWorkload, WorkloadError,
+        QueryWorkload, SourceFacts, WorkloadError,
     };
 
     use super::*;
 
+    /// `query` over data whose metrics `data` and `other` are sampled every
+    /// 1 s and 30 s.
     fn workload(query: &str) -> PlanningWorkload {
+        let sampled = |ms: u64| SourceFacts {
+            sample_interval: Some(DurationMs(ms)),
+            ..SourceFacts::default()
+        };
         PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
@@ -126,17 +143,39 @@ mod tests {
                 repeating_queries: None,
             },
             data_workload: Some(DataWorkload {
-                arrival: DataArrival::Ingesting {
-                    rows_per_second: 1_000.0,
-                    sample_interval: Some(DurationMs(1_000)),
-                },
-                ..Default::default()
+                arrival: DataArrival::Unknown,
+                sources: [
+                    ("data".to_string(), sampled(1_000)),
+                    ("other".to_string(), sampled(30_000)),
+                ]
+                .into(),
             }),
         }
     }
 
-    // A bare instant selector reads the latest sample within the declared
-    // sample interval: an `Instant` lookback of that length.
+    /// Each `Instant` lookback under `node`, with the metric it reads.
+    fn instant_lookbacks(node: &Rc<OperatorNode>) -> Vec<(String, Duration)> {
+        OperatorNode::reachable(node)
+            .iter()
+            .filter_map(|node| match node.non_asap()? {
+                NonASAPOp::TimeRange {
+                    range,
+                    kind: TimeRangeKind::Instant,
+                    child,
+                } => match child.non_asap()? {
+                    NonASAPOp::Scan {
+                        source: Source::TimeSeries { metric },
+                        ..
+                    } => Some((metric.clone(), *range)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A bare instant selector reads the latest sample within its metric's
+    // declared sample interval: an `Instant` lookback of that length.
     #[test]
     fn instant_selector_uses_declared_sample_interval() {
         let query = lower_promql_workload(&workload("sum by (job) (data)")).unwrap();
@@ -148,6 +187,22 @@ mod tests {
             if *range == Duration::from_secs(1)
                 && *kind == TimeRangeKind::Instant
                 && matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }))
+        );
+    }
+
+    // Two metrics sampled at different intervals: each selector looks back
+    // its own metric's interval.
+    #[test]
+    fn each_instant_selector_uses_its_own_metrics_sample_interval() {
+        let query = lower_promql_workload(&workload("sum(data) + sum(other)")).unwrap();
+        let mut lookbacks = instant_lookbacks(&query[0]);
+        lookbacks.sort();
+        assert_eq!(
+            lookbacks,
+            [
+                ("data".to_string(), Duration::from_secs(1)),
+                ("other".to_string(), Duration::from_secs(30)),
+            ]
         );
     }
 
@@ -166,31 +221,36 @@ mod tests {
         );
     }
 
-    // Data at rest, an unknown arrival, no data workload, or an ingesting
-    // arrival without `sample_interval` declare no interval: an instant
-    // selector (bare, under an aggregation, or inside a subquery) fails,
-    // with and without histograms, while range-only queries still lower.
+    // A metric without a declared sample interval, whatever the arrival
+    // (and with no data workload): an instant selector over it (bare, under
+    // an aggregation, or inside a subquery) fails, with and without
+    // histograms, even when another metric declares one; range-only
+    // queries still lower.
     #[test]
-    fn instant_selector_needs_a_sample_interval() {
+    fn instant_selector_needs_its_metrics_sample_interval() {
         let arrivals = [
             Some(DataArrival::AtRest),
             Some(DataArrival::Unknown),
             Some(DataArrival::Ingesting {
                 rows_per_second: 1.0,
-                sample_interval: None,
             }),
             None,
         ];
         for arrival in arrivals {
             let with = |query: &str| {
                 let mut input = workload(query);
-                input.data_workload = arrival.map(|arrival| DataWorkload {
-                    arrival,
-                    ..Default::default()
-                });
+                match arrival {
+                    Some(arrival) => input.data_workload.as_mut().unwrap().arrival = arrival,
+                    None => input.data_workload = None,
+                }
                 input
             };
-            for query in ["data", "sum(data)", "max_over_time(data[5m:1m])"] {
+            for query in [
+                "undeclared",
+                "sum(undeclared)",
+                "max_over_time(undeclared[5m:1m])",
+                "sum(data) + sum(undeclared)",
+            ] {
                 assert!(
                     matches!(
                         lower_promql_workload(&with(query)),
@@ -210,7 +270,12 @@ mod tests {
                     ))
                 ));
             }
-            lower_promql_workload(&with("quantile_over_time(0.99, data[5y] offset 1y)")).unwrap();
+            lower_promql_workload(&with("quantile_over_time(0.99, undeclared[5y] offset 1y)"))
+                .unwrap();
+            // The declared metric lowers whatever the arrival.
+            if arrival.is_some() {
+                lower_promql_workload(&with("sum(data)")).unwrap();
+            }
         }
     }
 }

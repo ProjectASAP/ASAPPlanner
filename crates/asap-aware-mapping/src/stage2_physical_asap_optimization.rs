@@ -983,7 +983,6 @@ mod tests {
         DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000.0,
-                sample_interval: None,
             },
             ..Default::default()
         }
@@ -1114,7 +1113,6 @@ mod tests {
         let mixed = DataWorkload {
             arrival: DataArrival::Mixed {
                 rows_per_second: 1_000.0,
-                sample_interval: None,
             },
             ..Default::default()
         };

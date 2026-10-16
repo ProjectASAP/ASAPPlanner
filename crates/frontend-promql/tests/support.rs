@@ -7,8 +7,8 @@ use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::pre_asap::ScalarValue;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload,
+    BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
+    QueryRequirements, QueryWorkload,
 };
 
 pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
@@ -27,13 +27,10 @@ pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1_000.0,
-                sample_interval: Some(DurationMs(1_000)),
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
+            DurationMs(1_000),
+        )),
     }
 }
 
