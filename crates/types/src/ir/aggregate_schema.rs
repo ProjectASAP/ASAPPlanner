@@ -356,4 +356,24 @@ mod tests {
         assert!(out.time_index.is_none());
         assert_eq!(out.unique_keys, vec![vec![0]]);
     }
+
+    // A nested aggregate's renamed sample value is not a kept label:
+    // `sum without (inst) (sum by (inst, job) (m))` over `[inst, job, sum]`.
+    #[test]
+    fn without_aggregate_drops_a_renamed_sample_value() {
+        let inner = Schema::new(vec![
+            col("inst", DataType::Utf8, true),
+            col("job", DataType::Utf8, true),
+            col("sum", DataType::Float64, false),
+        ]);
+        let out = aggregate_output_schema(
+            &inner,
+            &Reduction::Reduce(GroupKeys::without(vec![0])),
+            &[AggIntent::Sum { col: None }],
+            &[],
+        )
+        .expect("valid excluded column");
+        let names: Vec<_> = out.fields.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["job", "sum"]);
+    }
 }

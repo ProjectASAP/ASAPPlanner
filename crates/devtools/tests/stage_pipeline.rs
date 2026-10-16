@@ -152,8 +152,8 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
     let logical = &document["stage1_logical_asap_optimization"];
     assert_eq!(logical["capped"], true);
     assert!(logical["candidates"].as_array().unwrap().len() < 27);
-    // 3 Pass 1 candidates, each with 8 Pass 2 candidates: shared inputs,
-    // tumbling panes, and both.
+    // 3 Pass 1 candidates, each kept as it is and with 8 Pass 2 candidates
+    // (shared inputs, tumbling panes, and both): 3 × 9.
     assert_eq!(logical["combinations"], 27);
     assert_eq!(
         document["stage3_plan_selection"]["selected"],

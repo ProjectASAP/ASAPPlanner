@@ -519,7 +519,7 @@ fn compile_internal(
                 }
             }
             if let Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) = &node.payload {
-                // Exact counts read out as Int64; PromQL declares a Float64 sample.
+                // Exact counts evaluate to Int64; PromQL declares a Float64 sample.
                 let evaluation = bind_operation(node, &schemas)
                     .map_err(|error| invalid(format!("node {id}: {error}")))?;
                 let actual = evaluation.schema();
@@ -678,8 +678,6 @@ fn temporal_evaluation_drops_name(node: &PhysicalASAPDAGNode) -> bool {
         )
 }
 
-/// Bind a Planner node against the schemas supplied by its deployment edges.
-/// This is the same checked path used by complete DAG binding.
 /// The IR accepts a `SummaryMerge` over any state family; the executor runs
 /// one only when the family-capability table gives the family a sound merge.
 pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
@@ -692,6 +690,8 @@ pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
     Ok(())
 }
 
+/// Bind a Planner node against the schemas supplied by its deployment edges.
+/// This is the same checked path used by complete DAG binding.
 pub fn compile_node(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;

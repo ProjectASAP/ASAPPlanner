@@ -54,7 +54,7 @@ function stageScalarText(expr) {
     case 'PromqlScalarFromVector': return `scalar(#${body})`;
     case 'ScalarSubquery': return `(subquery #${body})`;
     case 'Negative': return `-${stageScalarText(body.expr)}`;
-    case 'Arithmetic': return `(${stageScalarText(body.left)} ${Object.keys(body.op)[0] || body.op} ${stageScalarText(body.right)})`;
+    case 'Arithmetic': return `(${stageScalarText(body.left)} ${typeof body.op === 'string' ? body.op : Object.keys(body.op)[0]} ${stageScalarText(body.right)})`;
     default: return `${kind}(…)`;
   }
 }
@@ -129,6 +129,7 @@ function validatePhysicalDag(dag, where, queryCount) {
   dag.edges.forEach((edge, index) => {
     if (!edge || !ids.has(edge.producer) || !ids.has(edge.consumer)) errors.push(`${where}: edge #${index} names a missing producer or consumer`);
   });
+  if (dag.scalar_roots !== undefined && !Array.isArray(dag.scalar_roots)) errors.push(`${where}: scalar_roots must be an array`);
   const scalars = Array.isArray(dag.scalar_roots) ? dag.scalar_roots : [];
   if (dag.roots.length + scalars.length !== queryCount) {
     errors.push(`${where}: ${dag.roots.length} roots and ${scalars.length} scalar roots for ${queryCount} workload queries`);

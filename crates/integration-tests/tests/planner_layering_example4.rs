@@ -148,8 +148,8 @@ fn stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time() {
 #[test]
 fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() {
     // Each query's range window and offset, as its PromQL text states them.
-    let windows: Vec<u64> = PATTERN_A.iter().map(|(_, window, _)| *window).collect();
-    let offsets: Vec<u64> = PATTERN_A.iter().map(|(_, _, before_t)| *before_t).collect();
+    let windows: Vec<u64> = PATTERN_A.iter().map(|p| p.window_ms).collect();
+    let offsets: Vec<u64> = PATTERN_A.iter().map(|p| p.offset_before_t_ms).collect();
     for (workload, windows, offsets) in [
         (once(), windows.clone(), offsets.clone()),
         (monthly(), windows.clone(), offsets.clone()),

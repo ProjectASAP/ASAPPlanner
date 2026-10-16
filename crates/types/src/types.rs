@@ -361,16 +361,70 @@ fn column_metric(node: &OperatorNode, column: usize) -> Option<AccuracyMetric> {
                 column_metric(right, column - width)
             }
         }
-        NonASAPOp::Aggregate { measures, .. } => {
-            // Group keys first, then one column per measure.
-            let keys = node.schema.fields.len().saturating_sub(measures.len());
-            match column.checked_sub(keys).and_then(|m| measures.get(m)) {
-                Some(AggIntent::Quantile { .. } | AggIntent::HistogramQuantile { .. }) => None,
-                Some(intent) => Some(intent_metric(intent).unwrap_or(AccuracyMetric::ABSOLUTE)),
-                None => Some(AccuracyMetric::ABSOLUTE),
-            }
-        }
+        NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            child,
+            ..
+        } => match aggregate_measure_at(node, reduction, measures, child, column) {
+            Some(AggIntent::Quantile { .. } | AggIntent::HistogramQuantile { .. }) => None,
+            Some(intent) => Some(intent_metric(intent).unwrap_or(AccuracyMetric::ABSOLUTE)),
+            None => Some(AccuracyMetric::ABSOLUTE),
+        },
         _ => Some(AccuracyMetric::ABSOLUTE),
+    }
+}
+
+/// The measure the aggregate `node`'s output `column` holds, or `None` for
+/// a group key, a kept label or `count_values`' synthesized label, as
+/// [`aggregate_output_schema`](crate::ir::aggregate_schema::aggregate_output_schema)
+/// lays the columns out. A per-entity reduction replaces its one measure's
+/// input column in place and keeps every other column; a cross-series one
+/// emits its kept labels first, then one column per measure, with a
+/// `count_values` label (unless an earlier column has its name) before its
+/// count.
+fn aggregate_measure_at<'a>(
+    node: &OperatorNode,
+    reduction: &crate::ir::operator_properties::Reduction,
+    measures: &'a [AggIntent],
+    child: &OperatorNode,
+    column: usize,
+) -> Option<&'a AggIntent> {
+    use crate::ir::operator_properties::Reduction;
+    use crate::pre_asap::{resolve_column_ref, ColumnRef};
+    let fields = &node.schema.fields;
+    match reduction {
+        Reduction::PerEntity => {
+            let [measure] = measures else { return None };
+            let value = match measure.input_cols().first() {
+                Some(input) => *input,
+                None => resolve_column_ref(&ColumnRef::SampleValue, &child.schema).ok()?,
+            };
+            (column == value).then_some(measure)
+        }
+        Reduction::Reduce(by) => {
+            let mut next = if by.is_without() {
+                fields.len().checked_sub(measures.len())?
+            } else {
+                by.len()
+            };
+            for measure in measures {
+                if let AggIntent::CountValues { label } = measure {
+                    if !by.is_without()
+                        && !fields[..next.min(fields.len())]
+                            .iter()
+                            .any(|f| f.name == *label)
+                    {
+                        next += 1;
+                    }
+                }
+                if next == column {
+                    return Some(measure);
+                }
+                next += 1;
+            }
+            None
+        }
     }
 }
 
@@ -476,6 +530,42 @@ mod tests {
                 metric
             );
         }
+    }
+
+    /// A per-entity count (`count_over_time`) keeps every label column and
+    /// replaces the sample value in place: the value column carries the
+    /// count's metric, and a label after it is absolute.
+    #[test]
+    fn a_per_entity_count_states_its_value_column_not_its_last_column() {
+        let scan = node(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("job", DataType::Utf8, false),
+                ],
+                0,
+                vec![],
+            ),
+        });
+        let count = node(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Count {
+                accuracy: AccuracyTarget::max_error(0.01),
+            }],
+            output_names: vec![],
+            filters: vec![],
+            having: None,
+            child: scan,
+        });
+        assert_eq!(count.schema.fields[1].name, "value");
+        assert_eq!(
+            column_metric(&count, 1),
+            Some(AccuracyMetric::ABSOLUTE_STREAM_L1)
+        );
+        assert_eq!(column_metric(&count, 2), Some(AccuracyMetric::ABSOLUTE));
     }
 
     /// A root's default metric follows its computation: counts and top-k

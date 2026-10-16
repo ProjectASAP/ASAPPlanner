@@ -928,7 +928,7 @@ fn collect_intents(e: &OperatorNode, out: &mut Vec<AggIntent>) {
     }
 }
 
-/// True if any `AggIntent` anywhere in the dag satisfies `pred`.
+/// True if any `AggIntent` anywhere in the DAG satisfies `pred`.
 fn has_intent<F: Fn(&AggIntent) -> bool>(e: &OperatorNode, pred: F) -> bool {
     all_intents(e).iter().any(pred)
 }

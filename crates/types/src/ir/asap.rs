@@ -33,7 +33,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         #[serde(default)]
         filter: Option<super::scalar::Predicate<C>>,
     },
-    /// Read out a query result from built summary state. Output is a
+    /// Evaluate a query result from built summary state. Output is a
     /// row-shaped schema.
     SummaryEstimate {
         summary_input: C,

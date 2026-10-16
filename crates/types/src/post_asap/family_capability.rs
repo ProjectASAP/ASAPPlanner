@@ -203,10 +203,13 @@ impl FamilyCapability {
                             (FrequencyEntropy, Approximate),
                         ],
                     ),
+                    // HLL's merge keeps each register's maximum, which is
+                    // idempotent: an item both inputs saw counts once, so
+                    // overlapping inputs merge to the state of their union.
                     // `asap_sketchlib`'s KMV hashes every item with one
                     // shared seed (`CANONICAL_HASH_SEED`), and `KMV::merge`
-                    // keeps the k smallest distinct hashes: the state of
-                    // the union. The executor has no KMV kernel yet (#697).
+                    // keeps the k smallest distinct hashes: again the state
+                    // of the union.
                     S::Hll | S::Kmv => (Some(MayOverlap), &[(Distinct, Union)]),
                     // Theta is not offered, and has no merge.
                     S::Theta => (None, &[(Distinct, Approximate)]),

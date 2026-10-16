@@ -621,6 +621,63 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     assert_eq!(targets[0].having.len(), 2);
 }
 
+/// A scalar reference to a grouped aggregate (`Filter(scan, EXISTS G)` as a
+/// second root) is a consumer that reads it without the `HAVING`, so the
+/// first root's key-only `HAVING` stays above the output.
+#[test]
+fn a_scalar_reference_consumer_keeps_a_key_only_having_above() {
+    let node = grouped_count(None);
+    let key = equals(0, ScalarValue::Utf8("a".into()));
+    let filtered = having_filter(node.clone(), key.clone());
+    let exists = having_filter(
+        scan(false),
+        Predicate(ScalarExpr::Exists {
+            subquery: node.clone(),
+            negated: false,
+        }),
+    );
+    let targets = generate_per_computation_candidates(vec![
+        (0, QueryRoot::Operator(filtered.clone())),
+        (1, QueryRoot::Operator(exists)),
+    ])
+    .unwrap()
+    .targets;
+    let target = targets
+        .iter()
+        .find(|target| Rc::ptr_eq(&target.aggregate, &node))
+        .expect("the grouped count's target");
+    assert_eq!(
+        target.having,
+        vec![HavingEntry {
+            filter: Some(filtered),
+            predicate: key,
+            placement: HavingPlacement::AboveOutput,
+        }]
+    );
+}
+
+/// Of two stacked `Filter`s above an aggregate, only the adjacent one is
+/// its `HAVING`; the outer one filters the inner `Filter`'s output.
+#[test]
+fn only_the_adjacent_of_stacked_filters_is_having() {
+    let node = grouped_count(None);
+    let inner_key = equals(0, ScalarValue::Utf8("a".into()));
+    let inner = having_filter(node.clone(), inner_key.clone());
+    let outer = having_filter(inner.clone(), equals(0, ScalarValue::Utf8("b".into())));
+    let targets = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(outer))])
+        .unwrap()
+        .targets;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        targets[0].having,
+        vec![HavingEntry {
+            filter: Some(inner),
+            predicate: inner_key,
+            placement: HavingPlacement::BelowAggregate,
+        }]
+    );
+}
+
 /// A global aggregate's `HAVING` always stays above the output, even a
 /// constant one: the one output row exists with no input rows.
 #[test]

@@ -776,13 +776,20 @@ pub fn select_plan(
 /// order; `None` without candidates.
 fn choose(ranking: Ranking, costs: &[&CandidateCost]) -> Option<(usize, Vec<usize>)> {
     let front: Vec<usize> = match ranking {
-        Ranking::Front => (0..costs.len())
-            .filter(|&i| {
-                !costs
-                    .iter()
-                    .any(|other| dominates(&other.usage, &costs[i].usage))
-            })
-            .collect(),
+        Ranking::Front => {
+            // Each candidate's worst latency once, not once per comparison.
+            let latencies: Vec<f64> = costs.iter().map(|c| worst_latency_ms(&c.usage)).collect();
+            (0..costs.len())
+                .filter(|&i| {
+                    !(0..costs.len()).any(|j| {
+                        dominates_at(
+                            (&costs[j].usage, latencies[j]),
+                            (&costs[i].usage, latencies[i]),
+                        )
+                    })
+                })
+                .collect()
+        }
         _ => Vec::new(),
     };
     // Under the Pareto front, only a front member can be selected.
@@ -843,7 +850,11 @@ fn capacity_violation(usage: &ResourceUsage, limits: &ClusterLimits) -> Option<S
 /// Whether `a` is at least as good as `b` on peak memory, disk and
 /// worst-query latency, and better on one of them.
 fn dominates(a: &ResourceUsage, b: &ResourceUsage) -> bool {
-    let (la, lb) = (worst_latency_ms(a), worst_latency_ms(b));
+    dominates_at((a, worst_latency_ms(a)), (b, worst_latency_ms(b)))
+}
+
+/// [`dominates`] with each usage's worst-query latency already computed.
+fn dominates_at((a, la): (&ResourceUsage, f64), (b, lb): (&ResourceUsage, f64)) -> bool {
     a.peak_memory_bytes <= b.peak_memory_bytes
         && a.disk_bytes <= b.disk_bytes
         && !cheaper(lb, la)
@@ -3712,6 +3723,65 @@ mod tests {
         assert_eq!(kll_params(&select(&per_value).plan), stage1);
     }
 
+    /// With its metric declared a counter, the whole-expression CMS+heap
+    /// candidate (P2) proves its weights non-negative, is valid and is
+    /// priced: its per-node costs cover its DAG and sum to its total.
+    #[test]
+    fn a_declared_counter_prices_the_count_min_heap_candidate() {
+        use asap_types::workload::MetricType;
+        let candidates = candidates();
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
+        let counter = with_metric_types(data(), &[("m", MetricType::Counter)]);
+        let selection = select_plan(
+            &candidates,
+            &[entry_with(target, repeating(10_000))],
+            &counter,
+            PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
+        )
+        .unwrap();
+        let p2 = candidates.iter().find(|c| c.id == "P2").unwrap();
+        let cost = &selection.costs["P2"];
+        let mut ids: Vec<_> = p2.dag.nodes.iter().map(|n| n.id).collect();
+        ids.sort();
+        let mut keys: Vec<_> = cost.per_node.keys().copied().collect();
+        keys.sort();
+        assert_eq!(keys, ids);
+        let sum: f64 = cost
+            .per_node
+            .values()
+            .map(|n| n.cost_per_second.unwrap())
+            .sum();
+        assert_eq!(cost.cost_per_second.unwrap(), sum);
+    }
+
+    /// One summary two queries read is sized for the stricter one: its
+    /// failure probability is the smallest share either query needs (the
+    /// largest `n · G` over its readers).
+    #[test]
+    fn a_shared_summary_takes_the_smallest_failure_probability_share() {
+        let (candidates, lenient) = per_series_kll(AccuracyScope::PerValue);
+        let root = candidates[0].roots[0].clone();
+        let strict = lenient.clone().failure_probability(0.001);
+        let roots = [root.clone(), root];
+        for targets in [[lenient.clone(), strict.clone()], [strict, lenient]] {
+            let resized = resize_for_failure_probability(&roots, &targets, &data()).unwrap();
+            let kll = kll_params(&resized);
+            assert_eq!(kll.len(), 2, "{kll:?}");
+            for params in kll {
+                let SketchParams::Kll {
+                    failure_probability,
+                    ..
+                } = params
+                else {
+                    panic!("{params:?}")
+                };
+                assert_eq!(failure_probability, Some(0.001));
+            }
+        }
+    }
+
     /// Without a bound on the values one evaluation returns, a per-value
     /// guarantee does not meet a whole-result target: a PromQL vector whose
     /// source declares no series count, and a SQL relation (until a bound on
@@ -5363,13 +5433,15 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-        let sites = crate::asap_aware_cse::pane_candidates(&roots, &[Some(u64::from(MINUTE))]);
-        let roots = crate::asap_aware_cse::window_composition_pass2_candidates(&roots, &sites)
-            .unwrap()
-            .pop()
-            .unwrap()
-            .roots
-            .unwrap();
+        let rule_candidates =
+            crate::asap_aware_cse::pane_candidates(&roots, &[Some(u64::from(MINUTE))]);
+        let roots =
+            crate::asap_aware_cse::window_composition_pass2_candidates(&roots, &rule_candidates)
+                .unwrap()
+                .pop()
+                .unwrap()
+                .roots
+                .unwrap();
         let mut candidates = optimize_physical_asap(
             "L1",
             &roots,

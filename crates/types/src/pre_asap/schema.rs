@@ -132,7 +132,7 @@ pub enum FieldDataType {
     /// Exact, mergeable accumulator state (`Sum`/`Count`/`Min`/`Max`/`Rate`/
     /// `Increase`). Value consumers require an explicit finalization boundary.
     ExactAggregate(ExactKind, ExactParams),
-    /// Approximate sketch state (KLL/CMS/HLL/…), read out via a
+    /// Approximate sketch state (KLL/CMS/HLL/…), evaluated by a
     /// `SummaryEstimate`. A [`SketchKind`] already carries the concrete
     /// algorithm, params, and grouping layout committed to, not just its
     /// category — a bound node needs to know it's specifically independent

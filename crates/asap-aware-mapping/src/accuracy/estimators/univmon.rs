@@ -415,7 +415,7 @@ mod tests {
         (0.2, 0.2),
     ];
 
-    /// Each L2 shape meets its target as `RelativeValue`, and one fewer
+    /// Each L2 shape meets its target as a relative error, and one fewer
     /// row or column does not.
     #[test]
     fn l2_shape_is_the_smallest_meeting_its_target() {

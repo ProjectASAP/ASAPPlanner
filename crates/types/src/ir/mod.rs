@@ -25,7 +25,7 @@ pub mod timing;
 pub use crate::post_asap::execution_data_state::{Materialization, Medium};
 pub use timing::{
     apply_materialization_timings, data_state, is_filtered_build, planned_data_state,
-    split_shared_by_phase, validate_at_ingestion, MaterializationAssignment, TimingMemo,
+    split_shared_by_timing, validate_at_ingestion, MaterializationAssignment, TimingMemo,
 };
 pub mod schema_support;
 /// Semantic observation coverage, separate from field layout and physical timing.
