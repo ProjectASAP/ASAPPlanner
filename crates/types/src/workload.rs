@@ -138,8 +138,8 @@ pub struct ObservationWindow {
 ///
 /// # Example
 ///
-/// This estimate predicts ten executions per second, with a possible peak of
-/// twenty, based on one minute of observed data. It is usable for five minutes
+/// This estimate predicts ten executions per second, based on one minute of
+/// observed data. It is usable for five minutes
 /// after `observed_at`.
 ///
 /// ```
@@ -153,8 +153,6 @@ pub struct ObservationWindow {
 ///         end: TimestampMs(60_000),
 ///     },
 ///     expected_rate: Rate(10.0),
-///     peak_rate: Some(Rate(20.0)),
-///     max_concurrency: Some(4),
 ///     confidence: Confidence(0.95),
 ///     observed_at: Some(TimestampMs(60_000)),
 ///     valid_for: Some(DurationMs(5 * 60 * 1_000)),
@@ -165,8 +163,6 @@ pub struct ObservationWindow {
 pub struct DemandEstimate {
     pub observation_window: ObservationWindow,
     pub expected_rate: Rate,
-    pub peak_rate: Option<Rate>,
-    pub max_concurrency: Option<u64>,
     pub confidence: Confidence,
     pub observed_at: Option<TimestampMs>,
     pub valid_for: Option<DurationMs>,
@@ -637,7 +633,6 @@ fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
                 return Err(WorkloadError::InvalidConfidence(estimate.confidence.0));
             }
             validate_rate(estimate.expected_rate)?;
-            validate_optional_rate(estimate.peak_rate)?;
         }
         _ => {}
     }
@@ -876,8 +871,6 @@ mod tests {
                 end: TimestampMs(1_000),
             },
             expected_rate: Rate(1.0),
-            peak_rate: None,
-            max_concurrency: None,
             confidence: Confidence(1.0),
             observed_at: Some(TimestampMs(2_000)),
             valid_for: Some(DurationMs(1_000)),
@@ -1041,8 +1034,6 @@ mod tests {
                     end: TimestampMs(10),
                 },
                 expected_rate: Rate(1.0),
-                peak_rate: None,
-                max_concurrency: None,
                 confidence: Confidence(0.9),
                 observed_at: None,
                 valid_for: None,
