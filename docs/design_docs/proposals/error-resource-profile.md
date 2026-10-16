@@ -1,16 +1,16 @@
 # Error–Resource Profile (ERP)
 
-> Status: implemented ERP v1 with proposed extensions. The
-> [ERP module](../../../crates/asap-aware-mapping/src/erp.rs) consumes discrete
-> empirical profiles; benchmark observations are not worst-case accuracy proofs.
+> Status: ERP v1 with proposed extensions. The planner's ERP module, which
+> consumed discrete empirical profiles, has been removed; no planning stage
+> reads ERP profiles today. Benchmark observations are not worst-case accuracy proofs.
 > See the status, supported selection modes and remaining work below.
 
 ## Status
 
 ERP v1 is a discrete, shape- and distribution-conditioned profile exchanged between
 `sketch-bench` and ASAPPlanner. It is an empirical planning input, not a proof
-of a worst-case sketch guarantee. The implementation lives in
-`asap-aware-mapping::erp`; `approxbench erp` exports the producer artifact.
+of a worst-case sketch guarantee. The planner-side consumer
+(`asap-aware-mapping::erp`) has been removed; `approxbench erp` exports the producer artifact.
 
 ## Motivation
 

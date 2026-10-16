@@ -31,15 +31,16 @@ These three concepts have different roles:
 
 `AccuracyTarget` is the authoritative requirement type:
 
-- `Exact` requires zero error and zero failure probability.
-- `Epsilon` constrains the error magnitude in the relevant metric; it does not specify a failure-probability budget.
-- `EpsilonDelta` constrains both error magnitude and failure probability.
+- `AccuracyTarget::exact()` requires zero error and zero failure probability.
+- `AccuracyTarget::max_error(ε)` constrains the error magnitude in the relevant metric; it does not specify a failure-probability budget.
+- `.failure_probability(δ)` adds a failure-probability bound, so the target constrains both error magnitude and failure probability.
+- `.accuracy_metric(m)` optionally fixes the metric ε is stated in; when it is unset, a guarantee in any metric that meets ε and δ is accepted.
 
 The target at a query root applies to the entire returned result. An aggregate's
 own target guides its local candidate construction. Nested local targets do not
 replace the root requirement: the composed result must satisfy it as well.
 
-A `ResultGuarantee` contains an error metric, an error-bound expression, a
+An `AccuracyGuarantee` contains an error metric, an error-bound expression, a
 failure-probability expression and provenance. The metric is essential:
 
 | Metric | Quantity bounded |
@@ -195,8 +196,8 @@ configuration or candidate is needed.
 and propagation evidence. The evidence must cover the population to which the
 claimed guarantee applies: sources, filters, grouping, evaluation windows and
 all merged panes. Evidence for a narrower population cannot silently certify
-a wider one. The workload-backed provider checks freshness before exposing
-its supported data characteristics.
+a wider one. Data-workload facts are declared: the planner has no clock, so the caller
+drops facts that no longer hold before planning.
 
 Source contracts are assertions that the source or deployment must establish
 and enforce. They are not inferred from observed cardinality or sampled value
@@ -212,14 +213,19 @@ an observation into a guarantee.
 
 ### Example: bounded Classic HLL
 
-A deployment supplies `EstimatorContract::ClassicHll` for the complete aggregate
-expression. It asserts the classic estimator, independent uniform bucket
-hashing and an enforced maximum distinct population per evaluation, including
-all merged panes. Planner combines this contract with the query or allocated
-local target, selects a supported precision, derives the guarantee and uses
-the normal propagation and selection checks.
+A deployment declares `DataWorkload.sources[source].max_distinct_per_evaluation`
+for the source the distinct count reads. It asserts an enforced maximum
+distinct population per evaluation, including all merged panes; the classic
+estimator and independent uniform bucket hashing are the model's
+assumptions. Stage 1 sizes the precision from the query or allocated local
+target and leaves the failure probability symbolic, as
+`classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`. Stage 3
+binds it from the source's declared bound, enlarges the precision when the
+bound needs it, and uses the normal selection checks. A bound outside the
+contract's range gives a failure probability of 1; a missing bound leaves it
+unknown, so the target is not met.
 
-The current model supports maxima from 1 to 4096 and precisions from 4 to 18,
+The current model supports maxima from 1 to 131,072 (2^17) and precisions from 4 to 18,
 and certifies only configurations that remain in the linear-counting branch.
 It bounds collisions across every integer cardinality in the declared domain
 and bounds overestimation deterministically. It is not an RSE-to-normal

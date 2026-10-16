@@ -61,7 +61,7 @@ struct OperatorNode {
     operator: Operator,
     result_kind: OperatorResultKind,
     schema: Schema,
-    guarantee: Option<ResultGuarantee>,
+    guarantee: Option<AccuracyGuarantee>,
     timing: Option<ExecutionTiming>,
 }
 
@@ -345,10 +345,10 @@ enum ExecutionTiming {
 |---|---|---|
 | `operator` | Operation category, parameters and dependencies | `Operator`, `NonASAPOp` and `ASAPOp` in §1 |
 | `result_kind`, `schema` | The output category and fields, including identity/time metadata | Derived from `operator` and its actual inputs, then retained on the resolved node (§2.1) |
-| `guarantee` | An established result-accuracy guarantee, when available | Existing `ResultGuarantee` and composition rules (§2.2); `None` never means exact |
+| `guarantee` | An established result-accuracy guarantee, when available | Existing `AccuracyGuarantee` and composition rules (§2.2); `None` never means exact |
 | `timing` | The assigned ingestion/query execution phase | Physical planning under #509 (§2.3); `None` means not assigned |
 
-`ResultGuarantee` retains its existing definition. `Operator`, `OperatorNode`,
+`AccuracyGuarantee` retains its existing definition. `Operator`, `OperatorNode`,
 `OperatorResultKind` and the common node layout are proposed; `Schema` is unified
 as specified below. This is a resolved-plan interface: name resolution must finish
 before producing these concrete `ColumnId`/`Schema` nodes.
@@ -381,7 +381,7 @@ actual inputs, including producers referenced by scalar expressions. Reading an
 approximate result through `PromqlScalarFromVector` or a SQL scalar subquery does
 not make it exact; unknown accuracy must not be treated as exactness.
 
-The common node reuses `guarantee: Option<ResultGuarantee>` from `SummaryNode`.
+The common node reuses `guarantee: Option<AccuracyGuarantee>` from `SummaryNode`.
 `Some` records an established guarantee; `None` covers an unassessed or unknown
 result, or state whose accuracy is only established at evaluation. Exactness must be
 explicitly established using the existing model. This proposal introduces no new
