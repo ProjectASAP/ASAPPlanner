@@ -200,15 +200,12 @@ fn exact_promql(query: &str) -> Vec<QueryRoot> {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(asap_types::workload::DataWorkload {
-            data_ingestion_interval: asap_types::workload::Evidence {
-                value: Some(asap_types::workload::DurationMs(1000)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(asap_types::workload::DataWorkload::sampled_every(
+            asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
+            asap_types::workload::DurationMs(1000),
+        )),
     };
-    asap_frontend_promql::lower_promql_query_workload(&workload, 0).unwrap()
+    asap_frontend_promql::lower_promql_query_workload(&workload).unwrap()
 }
 
 #[test]

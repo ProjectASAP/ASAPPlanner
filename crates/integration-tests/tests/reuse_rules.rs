@@ -12,7 +12,7 @@ use asap_aware_mapping::pass::Pass2Candidate;
 use asap_aware_mapping::stage3_plan_selection::select_plan;
 use asap_aware_mapping::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
 use asap_devtools::candidate_labels::pass2_label;
-use asap_devtools::planner_layering_examples::shared_data_workload;
+use asap_devtools::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_physical_operators::physical_planner::{compile, promql_rows, InputContract};
 use asap_physical_operators::runtime::Scope;
@@ -63,7 +63,12 @@ fn exact(recurrence: QueryRecurrence) -> QueryWorkloadEntry {
 
 /// The #509 shared data workload: 1,000,000 series sampled every 15 s.
 fn data() -> DataWorkload {
-    shared_data_workload(DataArrival::ContinuouslyIngesting)
+    shared_data_workload(
+        DataArrival::Ingesting {
+            rows_per_second: SHARED_ROWS_PER_SECOND,
+        },
+        "m",
+    )
 }
 
 /// Every minute.

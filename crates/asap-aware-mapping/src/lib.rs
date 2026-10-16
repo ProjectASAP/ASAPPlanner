@@ -172,7 +172,7 @@ pub mod topk_reuse;
 pub use accuracy::reconciliation::AccuracyReconciliationStrategy;
 pub use accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
-    PropagationStats, WorkloadAccuracyEvidence,
+    PropagationStats,
 };
 pub use cost_model::{
     maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,

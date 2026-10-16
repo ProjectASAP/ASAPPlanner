@@ -1,35 +1,23 @@
-use asap_types::workload::{
-    DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, SqlDialect,
-};
+use asap_types::workload::PlanningWorkload;
 
-// Non-PromQL wire workloads should not require a PromQL-only cadence fact.
+// A SQL workload over ingesting data omits the PromQL-only sample interval.
+// Validation never requires it, for PromQL either: the PromQL frontend
+// checks a metric's interval only for a bare instant selector over it.
 #[test]
-fn non_promql_payload_accepts_absent_ingestion_interval() {
+fn ingesting_payload_without_sample_interval_validates() {
     for language in [
-        QueryLanguage::DataFusion,
-        QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+        serde_json::json!("datafusion"),
+        serde_json::json!({"sql": "datafusion_sql"}),
+        serde_json::json!("promql"),
     ] {
-        let workload = PlanningWorkload {
-            query_workload: QueryWorkload {
-                language,
-                query_batch: None,
-                repeating_queries: None,
-            },
-            data_workload: Some(DataWorkload::default()),
-        };
+        let payload = serde_json::json!({
+            "query_workload": {"language": language, "query_batch": null,
+                "repeating_queries": null},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 10.0}},
+                "sources": {"m": {"series_count": 10}}}
+        });
+        let workload = serde_json::from_value::<PlanningWorkload>(payload).unwrap();
         workload.validate().unwrap();
-        let mut payload = serde_json::to_value(&workload).unwrap();
-        payload["data_workload"]
-            .as_object_mut()
-            .unwrap()
-            .remove("data_ingestion_interval");
-        let decoded = serde_json::from_value::<PlanningWorkload>(payload.clone()).unwrap();
-        decoded.validate().unwrap();
-        payload["query_workload"]["language"] = serde_json::json!("promql");
-        let promql = serde_json::from_value::<PlanningWorkload>(payload).unwrap();
-        assert_eq!(
-            promql.validate(),
-            Err(asap_types::workload::WorkloadError::MissingDataIngestionInterval)
-        );
+        assert_eq!(workload.sample_interval_of("m"), None);
     }
 }

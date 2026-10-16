@@ -363,7 +363,7 @@ fn ingestion_eligibility(
     use IngestionPruneReason as Why;
     if !matches!(
         data.arrival,
-        DataArrival::ContinuouslyIngesting | DataArrival::Mixed
+        DataArrival::Ingesting { .. } | DataArrival::Mixed { .. }
     ) {
         return Err(Why::NotIngesting);
     }
@@ -396,7 +396,7 @@ fn ingestion_eligibility(
         // Assumption (module doc): continuously ingesting PromQL data
         // arrives in time order per series, as Prometheus assumes.
         let ordered =
-            data.arrival == DataArrival::ContinuouslyIngesting && reads_only_time_series(node);
+            matches!(data.arrival, DataArrival::Ingesting { .. }) && reads_only_time_series(node);
         if !ordered {
             return Err(Why::CounterNeedsTimeOrder);
         }
@@ -981,7 +981,9 @@ mod tests {
 
     fn arriving() -> DataWorkload {
         DataWorkload {
-            arrival: DataArrival::ContinuouslyIngesting,
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+            },
             ..Default::default()
         }
     }
@@ -1109,7 +1111,9 @@ mod tests {
         };
         let table = QueryRoot::Operator(to_table(node));
         let mixed = DataWorkload {
-            arrival: DataArrival::Mixed,
+            arrival: DataArrival::Mixed {
+                rows_per_second: 1_000.0,
+            },
             ..Default::default()
         };
         for (root, data) in [(table, arriving()), (root.clone(), mixed)] {

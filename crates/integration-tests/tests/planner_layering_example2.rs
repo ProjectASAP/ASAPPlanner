@@ -27,8 +27,8 @@ use asap_types::pre_asap::DataType;
 use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
-    QueryRequirements, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-    SqlDialect,
+    QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+    SourceFacts, SqlDialect,
 };
 use planner_layering_common::*;
 
@@ -45,6 +45,8 @@ const SQL_Q3: &str = "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FR
     SELECT src_ip, COUNT(*) AS c FROM flows \
     WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)";
 
+/// The metric the PromQL stand-in reads.
+const STANDIN_METRIC: &str = "flows_src_ip";
 /// PromQL stand-in for Q1–Q3 (see the module docs).
 const PROMQL_Q1: &str = "distinct_over_time(flows_src_ip[1m])";
 const PROMQL_Q2: &str = "entropy_over_time(flows_src_ip[1m])";
@@ -68,26 +70,33 @@ fn panel(query: &str, (epsilon, delta): (f64, f64), scope: AccuracyScope) -> Rep
     }
 }
 
-/// The shared data workload with 10,000,000 distinct source IPs.
-fn data_workload(ingestion_interval: bool) -> DataWorkload {
+/// The shared data workload with 10,000,000 distinct source IPs, in the
+/// SQL `flows` table and the PromQL stand-in's `flows_src_ip` metric
+/// (sampled every 15 s; SQL needs no sample interval).
+fn data_workload() -> DataWorkload {
+    let ten_million = SourceFacts {
+        series_count: Some(10_000_000),
+        ..SourceFacts::default()
+    };
+    let sampled = SourceFacts {
+        sample_interval: Some(DurationMs(15_000)),
+        ..ten_million.clone()
+    };
     DataWorkload {
-        arrival: DataArrival::ContinuouslyIngesting,
-        data_ingestion_interval: if ingestion_interval {
-            declared(DurationMs(15_000))
-        } else {
-            Default::default()
+        arrival: DataArrival::Ingesting {
+            rows_per_second: 1_000_000.0 / 15.0,
         },
-        ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
-        input_cardinality: declared(10_000_000),
-        stream_norms: Default::default(),
-        max_distinct_per_evaluation: Default::default(),
-        metric_types: Default::default(),
+        sources: [
+            ("flows".to_string(), ten_million),
+            (STANDIN_METRIC.to_string(), sampled),
+        ]
+        .into(),
     }
 }
 
 /// The SQL queries' targets cover their whole result, as the doc's do. The
 /// PromQL stand-in states them per value: it reads one series, but the
-/// data workload's input cardinality (the 10M source IPs) is what plan
+/// series count of `flows_src_ip` (the 10M source IPs) is what plan
 /// selection takes as the number of values a PromQL vector returns, so a
 /// whole-result target would be checked over 10M values (#669b).
 fn workload(language: QueryLanguage, queries: [&str; 3]) -> PlanningWorkload {
@@ -109,8 +118,7 @@ fn workload(language: QueryLanguage, queries: [&str; 3]) -> PlanningWorkload {
                     .collect(),
             ),
         },
-        // `data_ingestion_interval` is not needed for SQL; PromQL needs it.
-        data_workload: Some(data_workload(!sql)),
+        data_workload: Some(data_workload()),
     }
 }
 
@@ -171,8 +179,10 @@ fn standin_with_distinct_bound(bound: Option<u64>) -> PlanningWorkload {
             .data_workload
             .as_mut()
             .expect("data workload")
-            .max_distinct_per_evaluation =
-            declared(BTreeMap::from([("flows_src_ip".into(), bound)]));
+            .sources
+            .get_mut(STANDIN_METRIC)
+            .expect("the stand-in's source")
+            .max_distinct_per_evaluation = Some(bound);
     }
     workload
 }

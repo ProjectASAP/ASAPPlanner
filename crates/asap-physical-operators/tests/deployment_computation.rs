@@ -34,15 +34,12 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::Op
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(60_000)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
+            DurationMs(60_000),
+        )),
     };
-    asap_frontend_promql::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
         .remove(0)
 }

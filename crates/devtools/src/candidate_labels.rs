@@ -444,7 +444,7 @@ mod tests {
     /// once per build with both readers each time.
     #[test]
     fn identical_pane_chains_in_two_queries_are_listed_once() {
-        use crate::planner_layering_examples::shared_data_workload;
+        use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
         use asap_types::types::AccuracyTarget;
         use asap_types::workload::{
             DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
@@ -469,7 +469,12 @@ mod tests {
                     panel("max_over_time(a[1m])"),
                 ]),
             },
-            data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
+            data_workload: Some(shared_data_workload(
+                DataArrival::Ingesting {
+                    rows_per_second: SHARED_ROWS_PER_SECOND,
+                },
+                "a",
+            )),
         };
         let run =
             run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
@@ -500,7 +505,7 @@ mod tests {
     /// avg's exact states as "Sum/Count acc".
     #[test]
     fn fused_computations_and_avg_states_have_their_own_labels() {
-        use crate::planner_layering_examples::shared_data_workload;
+        use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
         use asap_types::types::AccuracyTarget;
         use asap_types::workload::{
             DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
@@ -521,7 +526,12 @@ mod tests {
                         predictability: Predictability::Predictable { known_at: None },
                     }]),
                 },
-                data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
+                data_workload: Some(shared_data_workload(
+                    DataArrival::Ingesting {
+                        rows_per_second: SHARED_ROWS_PER_SECOND,
+                    },
+                    "m",
+                )),
             };
             let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None)
                 .unwrap();

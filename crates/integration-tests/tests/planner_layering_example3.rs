@@ -15,12 +15,15 @@ use std::collections::BTreeSet;
 use asap_types::ir::flat::NodeId;
 use asap_types::post_asap::{SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::workload::DataArrival;
+
 use planner_layering_common::*;
 
 fn run_a() -> Run {
     run_promql(&pattern_a(
         PatternARecurrence::OnceAdHoc,
-        DataArrival::Mixed,
+        DataArrival::Mixed {
+            rows_per_second: SHARED_ROWS_PER_SECOND,
+        },
     ))
 }
 
@@ -56,7 +59,12 @@ fn windowed_builds(c: &Logical) -> Vec<(NodeId, SketchAlgorithm, WindowForm, BTr
 /// Pattern A is one ad hoc batch of five queries run once at T; Pattern B one repeating query.
 #[test]
 fn workload_encodes_example3() {
-    let a = pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed);
+    let a = pattern_a(
+        PatternARecurrence::OnceAdHoc,
+        DataArrival::Mixed {
+            rows_per_second: SHARED_ROWS_PER_SECOND,
+        },
+    );
     a.validate().expect("valid Pattern A");
     let queries: Vec<_> = a.query_workload.entries().map(|e| e.query.0).collect();
     assert_eq!(queries, PATTERN_A.map(|(q, ..)| q));
@@ -72,7 +80,9 @@ fn workload_encodes_example3() {
 fn stage0_query_language_frontends_a_lowers_each_query_to_its_interval() {
     let roots = lower_promql(&pattern_a(
         PatternARecurrence::OnceAdHoc,
-        DataArrival::Mixed,
+        DataArrival::Mixed {
+            rows_per_second: SHARED_ROWS_PER_SECOND,
+        },
     ));
     let ops: Vec<_> = roots.iter().map(frontend_operations).collect();
     let plain = vec![op("aggregate:quantile"), op("scan"), op("time_range")];

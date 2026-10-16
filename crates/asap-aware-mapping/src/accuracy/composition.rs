@@ -4,11 +4,11 @@
 //! `Unknown` leaf named by one of the constants below, which Stage 3 binds.
 use super::*;
 
-/// Rows an exact aggregation folds (per group): bounded by the data
-/// workload's input cardinality.
+/// Rows an exact aggregation folds (per group): bounded by the series
+/// count of the sources the query reads.
 pub(crate) const INPUT_ROW_COUNT: &str = "input_row_count";
 /// Rows one group of a SQL fold over an approximate relation folds: not
-/// bounded by the data workload's input cardinality, so plan selection
+/// bounded by the series count of the sources it reads, so plan selection
 /// leaves it unbound.
 pub(crate) const GROUP_ROW_COUNT: &str = "group_row_count";
 /// Whether every input value is non-negative.

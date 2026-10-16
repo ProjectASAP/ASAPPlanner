@@ -31,7 +31,7 @@ class PlanArgsTests(unittest.TestCase):
         )
         self.assertEqual(
             args[1:],
-            ["--promql", "sum(rate(m[1m]))", "--name", "q1", "--epsilon", "0.01", "--interval-ms", "15000", "--out", "out.json"],
+            ["--promql", "sum(rate(m[1m]))", "--name", "q1", "--epsilon", "0.01", "--sample-interval-ms", "15000", "--out", "out.json"],
         )
 
     def test_metric_names_the_targets_error_metric(self):

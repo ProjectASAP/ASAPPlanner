@@ -423,7 +423,7 @@ explicit concern. `kind` records which samples a PromQL selector reads:
 
 - `TimeRangeKind::Instant` — an instant selector: `range` is the lookback horizon and the
   latest eligible sample per series is selected (the planner injects the declared
-  `data_ingestion_interval` around a bare selector).
+  `sample_interval` of the selector's metric around a bare selector).
 - `TimeRangeKind::Range` — a range selector (`m[5m]`): every sample in the window.
 
 ```promql

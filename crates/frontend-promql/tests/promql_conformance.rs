@@ -186,6 +186,28 @@ fn name_regex_matcher_is_rejected__GAP() {
 }
 
 #[test]
+fn selector_without_metric_name_is_rejected__GAP() {
+    // A selector with no metric name (`{job="a"}`) selects across every
+    // metric, which the single-metric `Source::TimeSeries { metric }` can't
+    // represent; it is rejected, as in the MetricsQL frontend, rather than
+    // scanning a source named "".
+    for query in [
+        r#"{job="a"}"#,
+        r#"rate({job="a"}[5m])"#,
+        r#"sum by (job) ({job="a"})"#,
+        r#"histogram_quantile(0.9, sum by (le) (rate({le!=""}[5m])))"#,
+    ] {
+        let error = rejected(query);
+        assert!(
+            error
+                .to_string()
+                .contains("selector without one exact metric name"),
+            "{query}: {error}"
+        );
+    }
+}
+
+#[test]
 fn range_vector_selector_is_time_range() {
     // SEMANTICS: `[5m]` turns an instant vector into a range vector,
     // represented in the canonical DAG as a dedicated `TimeRange` node.
@@ -203,8 +225,8 @@ fn range_vector_selector_is_time_range() {
 
 #[test]
 fn selector_time_ranges_carry_their_kind() {
-    // SEMANTICS: an instant selector reads the latest sample within the
-    // ingestion interval (`Instant`); `m[5m]` is a range selection (`Range`).
+    // SEMANTICS: an instant selector reads the latest sample within its
+    // metric's sample interval (`Instant`); `m[5m]` is a range selection (`Range`).
     // Same length is not the same shape: `m` and `m[1s]` stay distinct.
     assert!(matches!(
         ok("node_cpu_seconds_total").expect_non_asap(),

@@ -138,7 +138,7 @@ fn recognize(
         }
         return Some((population, evaluation, Rc::clone(source)));
     }
-    // A bare PromQL selector carries the declared ingestion interval as a
+    // A bare PromQL selector carries its metric's sample interval as a
     // temporal input scope. Membership must expire at that horizon; retain
     // the wrapper as the maintained input so validation can check agreement.
     let (series_source, lookback_ms) = match source.non_asap() {

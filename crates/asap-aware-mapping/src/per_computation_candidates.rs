@@ -1577,8 +1577,8 @@ fn source_distinct_guarantee(
 fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<PropagationStats> {
     let sign_statistic = estimates_samples_of(input).map(|metric| samples_sign_statistic(&metric));
     let stats = match reduction {
-        // The input cardinality bounds a PromQL fold's rows (series), not
-        // the rows of a SQL group.
+        // The series count of the sources read bounds a PromQL fold's rows
+        // (series), not the rows of a SQL group.
         Reduction::Reduce(_) if reads_table(input) => Some(PropagationStats {
             row_count_statistic: Some(GROUP_ROW_COUNT),
             ..PropagationStats::default()

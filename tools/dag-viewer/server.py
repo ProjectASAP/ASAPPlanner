@@ -139,7 +139,7 @@ def plan_args(payload: object, out: str) -> list[str]:
     interval = payload.get("interval_ms", 15_000)
     if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
         raise ValueError("interval_ms must be a positive integer")
-    args.extend(["--interval-ms", str(interval), "--out", out])
+    args.extend(["--sample-interval-ms", str(interval), "--out", out])
     return args
 
 

@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
-use asap_devtools::planner_layering_examples::{example1, pattern_a, PatternARecurrence};
+use asap_devtools::planner_layering_examples::{
+    example1, pattern_a, PatternARecurrence, SHARED_ROWS_PER_SECOND,
+};
 use asap_devtools::planning_stages::{
     lower_promql_roots, run_planning_stages, PlanningStagesError,
 };
@@ -11,6 +13,7 @@ use asap_types::ir::flat::FlatDag;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
 use asap_types::ir::QueryRoot;
 use asap_types::workload::DataArrival;
+
 use serde_json::Value;
 
 const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.json";
@@ -203,7 +206,12 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
 /// displayed with its cost.
 #[test]
 fn example3a_selects_the_cheapest_of_all_candidates() {
-    let workload = pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed);
+    let workload = pattern_a(
+        PatternARecurrence::OnceAdHoc,
+        DataArrival::Mixed {
+            rows_per_second: SHARED_ROWS_PER_SECOND,
+        },
+    );
     let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
     assert_eq!(run.stage1_logical_asap_optimization.len(), 972);
     let expected = run.stage3_plan_selection.unwrap().selected;
@@ -427,6 +435,28 @@ fn planning_stages_without_a_limit_plan_every_candidate() {
         limited,
         Err(PlanningStagesError::TooManyCandidates { limit: 26 })
     ));
+}
+
+/// `--sample-interval-ms` is the sample interval of every metric the
+/// queries read, as in the other lowering tools: `sum(up)`'s bare selector
+/// looks back 30 s. The former `--interval-ms` is unknown.
+#[test]
+fn sample_interval_ms_sets_the_instant_selector_lookback() {
+    let document = document_of(&["--promql", "sum(up)", "--sample-interval-ms", "30000"]);
+    let ranges: Vec<&Value> = document["stage0_query_language_frontends"]["dag"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["operator"]["NonASAP"]["TimeRange"]["range"].as_object())
+        .map(|range| &range["secs"])
+        .collect();
+    assert_eq!(ranges, [&Value::from(30)]);
+    let (status, stderr) = failure(&["--promql", "sum(up)", "--interval-ms", "30000"]);
+    assert_eq!(status, Some(2));
+    assert!(
+        stderr.contains("unknown argument --interval-ms"),
+        "{stderr}"
+    );
 }
 
 #[test]

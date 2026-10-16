@@ -15,8 +15,8 @@ Post-ASAP alternatives for the workload.
 | Input | Fields | Required |
 |---|---|---:|
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
-| `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion and cardinality | No implicit default. Set `None` when unavailable for non-PromQL workloads; PromQL requires `Some(DataWorkload)` with a nonzero ingestion interval. |
-| Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; `now_ms` and, when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering; `now_ms` is required for PromQL lowering |
+| `PlanningWorkload.data_workload` | How the data arrives, and facts about each source | No implicit default. Set `None` when unavailable; a PromQL query with a bare instant selector needs a nonzero `sample_interval` on the metric it reads. |
+| Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering |
 | Planning models | Candidate cost/ranking and accuracy composition/checking | Used by the relevant APIs; built-in `DefaultCostModel` and `DefaultAccuracyModel` are available |
 | External evidence and capabilities | Domain facts, measured costs, workload statistics, and runtime support | Supply when available and when the chosen optimization depends on them; absence is not proof |
 
@@ -64,8 +64,7 @@ inputs and the two possible uses of the same candidate space:
 ```mermaid
 flowchart TD
     Q["query_workload: PromQL; repeating query count_over_time(up[5m]); every 60 s; exact; real-time; predictable"]
-    D["data_workload: continuous arrival; declared ingestion interval 15 s"]
-    T["Frontend argument: now_ms"]
+    D["data_workload: ingesting; up sampled every 15 s"]
     F["PromQL lowering"]
     R["One canonical OperatorNode root"]
     S["Candidate search"]
@@ -76,7 +75,6 @@ flowchart TD
     B["Backend: bind physical operators, deploy, and execute"]
     Q --> F
     D --> F
-    T --> F
     F --> R --> S --> P
     P --> I
     P --> G --> L --> B
@@ -126,7 +124,7 @@ struct PlanningWorkload {
 | Field | Required | Purpose |
 |---|---:|---|
 | `query_workload` | Yes | Contains the source language and every one-time or repeating query. |
-| `data_workload` | Optional generally; required for PromQL | There is no automatic default: explicitly set `None` when unavailable for non-PromQL workloads. PromQL requires `Some(DataWorkload)` with a nonzero `data_ingestion_interval`. |
+| `data_workload` | Optional | There is no automatic default: explicitly set `None` when unavailable. A PromQL or MetricsQL query with a bare instant selector needs a nonzero `sample_interval` on the metric it reads. |
 
 #### `query_workload: QueryWorkload`
 
@@ -206,39 +204,41 @@ entry for later recurrence and materialization planning.
 
 #### `data_workload: Option<DataWorkload>`
 
-`DataWorkload` describes the data being queried. Each empirical field uses
-`Evidence<T>` so a value is accompanied by its source and freshness.
+`DataWorkload` describes the data being queried: how it arrives, and what
+is known about each source.
 
 ```rust
 struct DataWorkload {
     arrival: DataArrival,
-    data_ingestion_interval: Evidence<DurationMs>,
-    ingestion_rate: Evidence<Rate>,
-    input_cardinality: Evidence<u64>,
+    sources: BTreeMap<String, SourceFacts>, // key: PromQL metric or SQL table
+}
+enum DataArrival {
+    AtRest,
+    Ingesting { rows_per_second: f64 },
+    Mixed { rows_per_second: f64 },
+    Unknown,
+}
+struct SourceFacts {
+    series_count: Option<u64>,
+    metric_type: Option<MetricType>,
+    sample_interval: Option<DurationMs>,
+    stream_norms: Option<StreamNorms>,
+    max_distinct_per_evaluation: Option<u64>,
 }
 ```
 
 | Field | Required | Purpose and behavior when unavailable |
 |---|---:|---|
-| `arrival` | Present; may be `Unknown` | Distinguishes data at rest, continuously ingesting data, and mixed data. Continuous-maintenance decisions are limited when unknown. |
-| `data_ingestion_interval` | Required and nonzero for PromQL; otherwise optional | Sampling cadence for each PromQL source. Bare instant selectors use it as their explicit selection horizon. |
-| `ingestion_rate` | Optional evidence | Updates per second used to price continuous maintenance. It must be finite and non-negative; at-rest data cannot declare a positive rate. |
-| `input_cardinality` | Optional evidence | Input row/sample count used by applicable sizing, accuracy, or cost rules. |
+| `arrival` | Present; may be `Unknown` | Distinguishes data at rest, ingesting data, and mixed data. Ingestion-time builds are possible only for ingesting or mixed data. |
+| `rows_per_second` | With `Ingesting`/`Mixed` | Rows arriving per second over all sources, used to price scans and continuous maintenance. It must be finite and non-negative. |
+| `series_count` | Optional | Series in the source. Plan selection bounds a query's number of values `G`, and its input row count, by the series counts of the sources it reads (each branch of an `or` counted); unknown, they stay unbound. |
+| `metric_type` | Optional | Declared Prometheus type; a counter proves samples non-negative. Never inferred from a name. |
+| `sample_interval` | PromQL and MetricsQL; nonzero | How often each series of the metric is sampled. Bare instant selectors over it use it as their selection horizon; without it, such a query fails to lower. |
+| `stream_norms`, `max_distinct_per_evaluation` | Optional | Bounds that Count-Min/Count Sketch and HLL/UnivMon guarantees are bound with. |
 
-##### `Evidence<T>` fields
-
-Every empirical field in `DataWorkload` uses `Evidence<T>`, which has four
-fields:
-
-| Field | Meaning |
-|---|---|
-| `value: Option<T>` | The fact itself; `None` means unavailable. |
-| `source: EvidenceSource` | `Declared`, `Observed`, `Derived`, or `Unknown`. |
-| `observed_at_ms: Option<u64>` | Observation timestamp used for freshness checks. |
-| `valid_for_ms: Option<u64>` | Validity duration. A duration without an observation timestamp is unusable. |
-
-Unavailable or stale data evidence stays unknown. Planner does not reinterpret
-it as zero ingestion, zero cardinality, or a favorable distribution.
+Every fact is declared: the planner has no clock, so a caller drops facts
+that no longer hold before planning. Unavailable data facts stay unknown. Planner does not reinterpret
+them as zero ingestion, zero cardinality, or a favorable distribution.
 
 ### Frontend-specific dependencies
 
@@ -247,7 +247,7 @@ inside it:
 
 | Frontend | Additional lowering inputs |
 |---|---|
-| PromQL | `now_ms`, plus an optional `HistogramCatalog` when histogram semantics must be resolved |
+| PromQL | An optional `HistogramCatalog` when histogram semantics must be resolved |
 | SQL | `SqlCatalog`; single-query APIs also receive the accuracy target and optionally an explicit SQL dialect |
 | MetricsQL | No catalog; the single-query API receives the query text and accuracy target directly |
 

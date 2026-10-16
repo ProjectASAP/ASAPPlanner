@@ -1,4 +1,4 @@
-// cargo run -p asap-lower --bin variant_coverage -- --data-ingestion-interval-ms 1000
+// cargo run -p asap-lower --bin variant_coverage -- --sample-interval-ms 1000
 //
 // Lowers every query in every corpus we have (PromQL + SQL), walks the
 // resulting `OperatorNode` DAGs, and reports which IR variants show up — per
@@ -6,7 +6,7 @@
 // `ASAPOp`, by `Operator::kind_name`) and the scalar-expression vocabulary
 // (`ScalarExpr`) separately. Used to find the minimal IR node set.
 
-use asap_devtools::lower_promql_with_data_ingestion_interval;
+use asap_devtools::lower_promql_with_sample_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::ir::{OperatorNode, ScalarExpr};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
@@ -248,23 +248,23 @@ fn report(r: &CorpusResult) {
     println!();
 }
 
-fn parse_ingestion_interval() -> u64 {
+fn parse_sample_interval() -> u64 {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--data-ingestion-interval-ms" {
+        if arg == "--sample-interval-ms" {
             return args
                 .next()
-                .expect("--data-ingestion-interval-ms requires a value")
+                .expect("--sample-interval-ms requires a value")
                 .parse()
-                .expect("--data-ingestion-interval-ms must be an unsigned integer");
+                .expect("--sample-interval-ms must be an unsigned integer");
         }
     }
-    panic!("--data-ingestion-interval-ms is required")
+    panic!("--sample-interval-ms is required")
 }
 
 #[tokio::main]
 async fn main() {
-    let interval_ms = parse_ingestion_interval();
+    let interval_ms = parse_sample_interval();
     let mut results = Vec::new();
 
     // ── PromQL corpora ──
@@ -297,8 +297,7 @@ async fn main() {
         let mut lowered = 0;
         let mut failed = 0;
         for q in promql_lines(corpus) {
-            match lower_promql_with_data_ingestion_interval(q, AccuracyTarget::exact(), interval_ms)
-            {
+            match lower_promql_with_sample_interval(q, AccuracyTarget::exact(), interval_ms) {
                 Ok(qe) => {
                     walk(&qe, &mut variants);
                     lowered += 1;

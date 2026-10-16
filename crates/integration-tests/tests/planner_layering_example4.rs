@@ -25,11 +25,21 @@ use planner_layering_common::*;
 
 /// Pattern A as given: one ad hoc batch at T over mixed data.
 fn once() -> PlanningWorkload {
-    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed)
+    pattern_a(
+        PatternARecurrence::OnceAdHoc,
+        DataArrival::Mixed {
+            rows_per_second: SHARED_ROWS_PER_SECOND,
+        },
+    )
 }
 
 fn monthly() -> PlanningWorkload {
-    pattern_a(PatternARecurrence::MonthlyPredictable, DataArrival::Mixed)
+    pattern_a(
+        PatternARecurrence::MonthlyPredictable,
+        DataArrival::Mixed {
+            rows_per_second: SHARED_ROWS_PER_SECOND,
+        },
+    )
 }
 
 fn at_rest() -> PlanningWorkload {

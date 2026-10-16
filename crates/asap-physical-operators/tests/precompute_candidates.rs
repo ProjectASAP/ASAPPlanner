@@ -41,15 +41,12 @@ fn exact_promql_root(query: &str) -> std::rc::Rc<planner_types::ir::OperatorNode
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(1000)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
+            DurationMs(1000),
+        )),
     };
-    let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
+    let root = asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
         .remove(0);
     asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root).unwrap()
@@ -641,15 +638,12 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(60_000)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            ["m".to_string()],
+            DurationMs(60_000),
+        )),
     };
-    let original = asap_frontend_promql::lower_promql_workload(&workload, 0)
+    let original = asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
         .remove(0);
     let root =

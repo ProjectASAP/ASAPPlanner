@@ -56,10 +56,14 @@ fn canonical(labels: &Series) -> Series {
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
     use asap_aware_mapping::stage3_plan_selection::with_confirmed_weights;
     use asap_types::ir::QueryRoot;
-    use asap_types::workload::{DataWorkload, MetricType};
+    use asap_types::workload::{DataWorkload, MetricType, SourceFacts};
     let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
+    let counter = SourceFacts {
+        metric_type: Some(MetricType::Counter),
+        ..SourceFacts::default()
+    };
     let data = DataWorkload {
-        metric_types: [("m".to_string(), MetricType::Counter)].into(),
+        sources: [("m".to_string(), counter)].into(),
         ..Default::default()
     };
     logical_candidates(root, accuracy)

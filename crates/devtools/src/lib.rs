@@ -26,15 +26,17 @@ pub use asap_frontend_promql::{
 };
 pub use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlError, SqlLowerer};
 
-/// Lower one developer-supplied PromQL query with an explicit source cadence.
-/// Tools intentionally require the cadence rather than choosing a default.
-pub fn lower_promql_with_data_ingestion_interval(
+/// Lower one developer-supplied PromQL query whose metrics are each sampled
+/// every `interval_ms`, declared on each metric's source facts. Tools
+/// intentionally require the sample interval rather than choosing a
+/// default.
+pub fn lower_promql_with_sample_interval(
     query: &str,
     accuracy: asap_types::types::AccuracyTarget,
     interval_ms: u64,
 ) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, PromqlError> {
     use asap_types::workload::{
-        BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+        BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
         QueryRequirements, QueryWorkload,
     };
 
@@ -53,20 +55,11 @@ pub fn lower_promql_with_data_ingestion_interval(
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(interval_ms)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            asap_frontend_promql::promql_metric_names(query)?,
+            DurationMs(interval_ms),
+        )),
     };
-    lower_promql_workload(&workload, 0)?
-        .into_iter()
-        .next()
-        .ok_or({
-            PromqlError::InvalidWorkload(
-                asap_types::workload::WorkloadError::MissingPromqlDataWorkload,
-            )
-        })
+    // One workload entry lowers to one root.
+    Ok(lower_promql_workload(&workload)?.remove(0))
 }

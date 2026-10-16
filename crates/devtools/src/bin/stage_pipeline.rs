@@ -68,14 +68,15 @@
 // `pareto-front`). Cost models 1 and 2 use the illustrative unit costs.
 // Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
 // cost model 3, and `front` lists the Pareto front under `pareto-front`.
-// `--interval-ms` is the source cadence (default 15000). `--table '<json>'`
-// (repeatable) declares a table the SQL queries read: `{"name": ...,
+// `--sample-interval-ms` is the sample interval declared for every metric the
+// PromQL queries read (default 15000); the data declares no other facts.
+// `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
 // int64|bigint", "nullable": true}], "time_index": 0}` (`nullable` defaults
 // to true; without `time_index` the table has no time column; a
 // `time_index` that is not a column index is an error).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use asap_aware_mapping::stage3_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, Rejection, ResourceUnitCost,
@@ -83,13 +84,14 @@ use asap_aware_mapping::stage3_plan_selection::{
 };
 use asap_devtools::candidate_labels::candidate_labels;
 use asap_devtools::planner_layering_examples::{
-    declared, example1, example2, pattern_a, pattern_b, PatternARecurrence,
+    example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_planning_stages_over, PlanningStagesError,
     PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
+use asap_frontend_promql::promql_metric_names;
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
@@ -102,7 +104,7 @@ use serde_json::{json, Value};
 
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
-[--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--interval-ms <u64>])) \
+[--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--max-combinations <n>] [--max-displayed <n>] --out <file>";
@@ -184,7 +186,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // (language, text, name) in workload order.
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
-    let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
+    let (mut epsilon, mut delta, mut sample_interval_ms) = (None, None, 15_000u64);
     let mut metric: Option<AccuracyMetric> = None;
     let mut max_displayed = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
@@ -221,7 +223,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                         .map_err(|_| format!("unknown metric {name}"))?,
                 )
             }
-            "--interval-ms" => interval_ms = value()?.parse().map_err(|e| format!("{e}"))?,
+            "--sample-interval-ms" => {
+                sample_interval_ms = value()?.parse().map_err(|e| format!("{e}"))?
+            }
             "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
             "--max-combinations" => {
                 max_combinations = value()?.parse().map_err(|e| format!("{e}"))?
@@ -291,7 +295,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 "planner-layering-1" => (example1(), SqlCatalog::new()),
                 "planner-layering-2" => example2(),
                 "planner-layering-3a" => (
-                    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed),
+                    pattern_a(
+                        PatternARecurrence::OnceAdHoc,
+                        DataArrival::Mixed {
+                            rows_per_second: SHARED_ROWS_PER_SECOND,
+                        },
+                    ),
                     SqlCatalog::new(),
                 ),
                 "planner-layering-3b" => (pattern_b(), SqlCatalog::new()),
@@ -329,6 +338,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             let catalog = sql_catalog(&tables)?;
             let mut names = HashSet::new();
             let (mut described, mut roots, mut entries) = (Vec::new(), Vec::new(), Vec::new());
+            // Every metric the PromQL queries read, each sampled every
+            // `--sample-interval-ms`.
+            let mut metrics = BTreeSet::new();
             for (index, (language, text, name)) in queries.into_iter().enumerate() {
                 let (name, defaulted) = match name {
                     Some(name) => (name, false),
@@ -346,20 +358,27 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     .into());
                 }
                 // Each query lowers in its own language; planning sees one workload.
-                let one = query_batch(language.clone(), &[text], accuracy.clone(), interval_ms);
+                let one = query_batch(
+                    language.clone(),
+                    &[text],
+                    accuracy.clone(),
+                    sample_interval_ms,
+                );
                 roots.extend(match language {
                     QueryLanguage::PromQL => lower_promql_roots(&one)?,
                     _ => lower_sql_roots(&one, &catalog)?,
                 });
                 entries.extend(one.query_workload.entries());
+                metrics.extend(
+                    one.data_workload
+                        .iter()
+                        .flat_map(|d| d.sources.keys().cloned()),
+                );
                 let mut query = workload_queries(&one).remove(0);
                 query["id"] = json!(name);
                 described.push(query);
             }
-            let data = DataWorkload {
-                data_ingestion_interval: declared(DurationMs(interval_ms)),
-                ..Default::default()
-            };
+            let data = DataWorkload::sampled_every(metrics, DurationMs(sample_interval_ms));
             let result = run_planning_stages_over(
                 roots.clone(),
                 &entries,
@@ -656,8 +675,17 @@ fn query_batch(
     language: QueryLanguage,
     queries: &[String],
     accuracy: AccuracyTarget,
-    interval_ms: u64,
+    sample_interval_ms: u64,
 ) -> PlanningWorkload {
+    // Each metric a PromQL query reads is sampled every `sample_interval_ms`; a
+    // query that does not parse names none and fails when lowered.
+    let metrics: BTreeSet<String> = match language {
+        QueryLanguage::PromQL => queries
+            .iter()
+            .flat_map(|query| promql_metric_names(query).unwrap_or_default())
+            .collect(),
+        _ => BTreeSet::new(),
+    };
     PlanningWorkload {
         query_workload: QueryWorkload {
             language,
@@ -678,10 +706,10 @@ fn query_batch(
             ),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload {
-            data_ingestion_interval: declared(DurationMs(interval_ms)),
-            ..Default::default()
-        }),
+        data_workload: Some(DataWorkload::sampled_every(
+            metrics,
+            DurationMs(sample_interval_ms),
+        )),
     }
 }
 
