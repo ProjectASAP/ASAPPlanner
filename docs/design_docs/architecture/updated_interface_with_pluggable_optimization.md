@@ -61,7 +61,7 @@ Details of these types are provided below.
 | Field | Meaning |
 |---|---|
 | `workload` | `&PlanningWorkload` |
-| `frontend_specific` | `Sql { catalog }` / `Promql { now_ms, histograms }` / `Metricsql`; fixed by `query_workload.language` |
+| `frontend_specific` | `Sql { catalog }` / `Promql { histograms }` / `Metricsql`; fixed by `query_workload.language` |
 | `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults. `Stage1ToStage3Pass` reads the accuracy model and the evidence provider, not the cost model |
 | `pass` | `None` uses `Stage1ToStage3Pass` |
 
