@@ -3,7 +3,7 @@
 The Stage Viewer shows, in a browser, what ASAPPlanner does with one workload
 at each of its planning stages, and why it selects the plan it selects. Use it
 to check a plan by hand, to compare the alternatives the planner considered,
-and to see how the deployment's capabilities and the query requirements
+and to see how the deployment's cost model and the query requirements
 change the choice.
 
 The stages are those of
@@ -13,19 +13,11 @@ The stages are those of
 | --- | --- |
 | 0. Frontends | The logical DAG the queries lower into, one root per query |
 | 1. Logical ASAP-aware optimization | The logical ASAP candidates: each choice of exact or approximate computation per query (Pass 1), with shared inputs, shared summaries and tumbling panes (Pass 2) |
-| 2. Physical ASAP-aware optimization | The physical candidates of each logical candidate, which differ in what runs at ingestion time and what runs at query time |
-| 3. Plan selection | Each physical candidate checked for accuracy, latency and deployment capabilities, priced per second, and the cheapest selected |
+| 2. Physical ASAP-aware optimization | The physical candidates of each logical candidate, which differ in what is materialized: state maintained at ingestion time, a node built once per evaluation at query time and read by several queries, or nothing |
+| 3. Plan selection | Each physical candidate checked for accuracy and latency, compared under the deployment's cost model (by default priced per second), and one selected |
 
 The viewer reads one JSON document per workload, written by the
 `stage_pipeline` command. It does not run the plans.
-
-> **Based on [PR #574](https://github.com/ProjectASAP/ASAPPlanner/pull/574)**
-> (branch `stack/509-viewer-stages`), which redesigns the viewer, together with
-> the PRs it is stacked on: #613 (`stage_pipeline` examples 2 and 4b, and
-> pricing every plan), #610 (deployment inputs in the document) and #609
-> (deployment capabilities). Until they are merged, check out
-> `stack/509-viewer-stages` to use the viewer as described here; `main` still
-> has the earlier Pre/Post-ASAP viewer.
 
 ## Start the viewer
 
@@ -69,14 +61,20 @@ plan wins.
 | Tab | Workload | What to look for |
 | --- | --- | --- |
 | 1 · dashboard panels | Two PromQL panels over 1M counter series every 10 s: an exact per-job rate, and the approximate top-10 series per job | The exact query stays exact; the CMS+heap and CountSketch+heap top-k plans are rejected with their reasons, so the all-exact plan wins; the plans that share the two queries' scan and range selector tie with it, and the independent plan is kept on enumeration order. Pass 2 also builds Q1's rate and Q2's option in six 10-s tumbling panes, each alone or both (27 logical plans); rebuilt at every refresh, the panes cost more than the whole window. Stage 2 adds 30 plans that maintain Q1's rate panes, Q2's panes or both at ingestion time (57 physical plans); continuously ingesting PromQL data is taken to arrive in time order, so the rate panes may be maintained. Keeping seven panes of 1M per-series states costs more than rebuilding them (12.94 against 8.54 per second for either query's exact panes), so P1, all exact, is still selected at 7.94 |
-| 2 · SQL flow statistics | Distinct sources, entropy and L2 of per-source counts over the last minute of flows | All 82 plans compose and are priced; none is pruned. The SQL frontend recognizes Q2 as entropy and Q3 (its counts cast to DOUBLE) as L2, each with an exact or UnivMon option and an exact population count for the empty-input NULL. 16 plans come from Pass 1. Pass 2 adds the plans that share identical nodes and, by the summary-capability rule, the plans in which one UnivMon serves two of the queries or all three, sized with each parameter's largest value among them. 70 plans are invalid: HLL or UnivMon for Q1 (50) because its bound has "failure probability None" (both need the source's distinct bound, which this example does not declare), and UnivMon for Q2 (20) because entropy has no certified bound. 12 are valid: Q1 exact or KMV, Q2 exact, and Q3 exact or UnivMon, each alone or sharing identical nodes. Q3's UnivMon keeps its L2 guarantee through the exact population count joined beside it and the `CASE` that decides the empty-input NULL on that count. Theta is not offered: `asap_sketchlib` has no Theta sketch. P1 (all exact) is selected at 6.08 per second; KMV on Q1 costs the same to three decimals, UnivMon on Q3 costs 8.08, and the shared plans cost 7.44 or more, because a shared node that is not materialized is charged once per query that reads it |
-| 3a · historical p99 batch | Five p99 reports over 1–5 years, run once | All 972 plans are priced: 243 Pass 1 plans, each with 3 shared-input plans. Each query builds its own sketch at query time. P485 is selected: KLL for all five queries. DDSketch in place of KLL ties, and the tie goes to enumeration order. The all-exact plan costs about 16% more |
+| 3a · historical p99 batch | Five p99 reports over 1–5 years, run once | All 972 plans are priced or rejected: 243 Pass 1 plans, each with 3 shared-input plans. Each query builds its own sketch at query time. P485 is selected: KLL for all five queries. 844 plans are invalid: every plan with DDSketch, because each query's target is a rank error and DDSketch bounds a relative error. The all-exact plan costs about 16% more |
 | 3b · live p99 panel | p99 over the last 5 min every minute, 1M series | P2, KLL, is selected at 2.100 per second; exact over the window's raw samples costs 2.400. Pass 2 adds KLL and DDSketch in five 1-min tumbling panes (5 plans in all): rebuilt at every evaluation, the KLL panes cost 2.183, the whole build plus merging the panes. DDSketch misses the rank target. Memory a query holds only while it runs is not charged. Stage 2 adds the KLL and DDSketch panes maintained at ingestion time (7 plans in all): maintained, the KLL panes keep six panes of 1M per-series KLLs, about 107 GB, for 13,326.5 per second, so P2 still wins. Every priced plan meets the 200 ms latency bound: the whole-window KLL takes 126 ms per evaluation, the panes rebuilt at query time 131 ms and the maintained panes 7 ms |
-| 4a · monthly p99 reports | Example 3a repeated monthly | The same plan, with its cost amortized over a month |
-| 4b · panes that pay off | p99 over the last hour every 10 min, 1k series sampled every second, raw data not kept by the deployment | Maintaining six 10-min KLL panes at ingestion time wins |
 
 To link to one example, add its name after `#`, for example
-`http://127.0.0.1:8000/#example4b`.
+`http://127.0.0.1:8000/#example3b`.
+
+The other examples of the design document have no tab. Write their
+documents with `stage_pipeline` (see [From the command line](#from-the-command-line))
+and open them with **Open stage document…**:
+
+| Example | Command options | What to look for |
+| --- | --- | --- |
+| 2 · SQL flow statistics | `--example planner-layering-2` | Distinct sources, entropy and L2 of per-source counts over the last minute of flows. All 82 logical plans compose; none is pruned. The SQL frontend recognizes Q2 as entropy and Q3 (its counts cast to DOUBLE) as L2, each with an exact or UnivMon option and an exact population count for the empty-input NULL. 16 plans come from Pass 1. Pass 2 adds the plans that share identical nodes and, by the summary-capability rule, the plans in which one UnivMon serves two of the queries or all three, sized with each parameter's largest value among them. Stage 2 adds 102 plans in which a node that two queries read is built once per evaluation at query time and read by both (`query time, shared: …` in the label), 184 physical plans in all. 164 plans are invalid: HLL or UnivMon for Q1 (120) because its bound has "failure probability None" (both need the source's distinct bound, which this example does not declare), and UnivMon for Q2 (44) because entropy has no certified bound. 20 are valid: Q1 exact or KMV, Q2 exact, and Q3 exact or UnivMon, each alone, sharing identical nodes, or with the shared node built once at query time. Q3's UnivMon keeps its L2 guarantee through the exact population count joined beside it and the `CASE` that decides the empty-input NULL on that count. Theta is not offered: `asap_sketchlib` has no Theta sketch. P1 (all exact) is selected at 6.08 per second; KMV on Q1 costs the same to three decimals, and UnivMon on Q3 costs 8.08. The shared plans cost 7.44 or more when the shared node is not materialized, because it is then charged once per query that reads it, and 7.04 when it is built once at query time |
+| 4 · one workload, three cost models | `--example planner-layering-3b` with `--cost-model` | Example 3b's live p99 panel under each cost model. Cost model 1 (`usage-over-time`, the default) selects P2, the whole-window KLL, at 2.100 per second. Cost model 2 (`provisioned-capacity`) selects P1, exact, at 1024.0 per second against 3221.0 for P2, because it prices peak memory, and the KLL states hold about 17.8 GB at their full capacity. Cost model 3 (`cluster-capacity --cluster-memory-bytes 256000000000 --cluster-disk-bytes 1000000000000`) selects by `--cluster-objective`: `lowest-latency` selects P3-m1, the KLL panes maintained at ingestion time (7 ms per evaluation); `least-memory` selects P1; `pareto-front` lists P1, P2 and P3-m1 and selects P3-m1. With 64 GB of memory (`--cluster-memory-bytes 64000000000`), the plans with KLL panes are over the limit and invalid, `lowest-latency` selects P2, and the front is P1 and P2. Under cost model 3 the plans have no price |
 
 The workload statistics in the examples (series counts, ingestion rates) are
 illustrative. Read the costs as a ranking, not as a prediction of real
@@ -97,29 +95,19 @@ planner must meet:
 - **latency**: the maximum time an evaluation may take at query time;
 - **every N s**: how often a repeating query runs.
 
-The line under the queries counts the candidates at each stage, for example
-`1 logical DAG → 88 logical ASAP → 112 physical → 1 selected (40 invalid, 71
-valid but costlier)`.
-
-### Deployment inputs
-
-What the deployment told the planner, which Stage 3 uses to accept or reject
-plans:
-
-| Row | Meaning |
-| --- | --- |
-| Exact aggregates | Exact computations the executor can run (Sum, Count, Min, Max, Increase, Rate) |
-| Sketches → estimates | Each sketch the executor can build, with the estimates it can be read for, for example `Kll → Quantile`. A plan that needs anything else is invalid. |
-| Ingestion-time maintenance | Whether the deployment can keep state up to date as data arrives |
-| Keep query-time results across evaluations | Whether results built at query time can be kept for the next evaluation |
-| Memory budget | The most state the deployment can keep, or none |
-| Raw data | Whether the deployment keeps raw samples anyway. If it does not, plans that read raw data at query time pay to keep the samples they read. |
-| Cost model | The cost model, its unit, and its calibration constants, such as the cost of one CPU operation and of keeping one byte for one second |
-| Accuracy model | The model that decides whether a sketch meets a query's accuracy target |
+The line under the queries counts the candidates at each stage, for example,
+in Example 1, `Candidates per stage: 1 logical DAG → 27 logical ASAP → 57
+physical → 1 selected (38 invalid, 18 valid but costlier)`.
 
 ### Stage 3 · plans by cost
 
-Every physical plan, cheapest first, with its total cost per second.
+The selected plan first, then the other valid plans cheapest first, each
+with its cost per second; then the invalid plans with their reasons, the
+plans Stage 2 pruned, and the Stage 1 candidates that did not compose.
+Under cost model 3 the plans have no price: the list shows the selected
+plan and marks the other valid ones `valid · costlier` without a reason;
+the document's `stage3_plan_selection.rejected` holds the reasons (for
+example `slower: latency 144.0 ms, …`).
 A node that is not materialized is recomputed for each query that reads it,
 so a node shared by two queries is charged twice; a materialized node, at
 ingestion or at query time, is charged once, and the nodes below it once for
@@ -131,33 +119,37 @@ it (plus once for each query that also reads them directly).
 A selected or costlier plan also says, per query, which metric its accuracy
 was accepted in, e.g. `q1: metric not set; accepted rank (Kll)`.
 - **✗ invalid**: fails a check, with the reason. Examples: an accuracy target
-  the sketch cannot guarantee, an evaluation over the latency bound, or a
-  summary the deployment cannot build.
+  the sketch cannot guarantee, an evaluation over the latency bound, or,
+  under cost model 3, a plan over the cluster's memory or disk.
 
-Each label names the choice per query, for example `Q1 exact · Q2 CMS+heap ·
-shared input`, and, for physical plans, what runs at ingestion time, for
-example `ingestion time: Kll ×6 panes`.
+Each label names the choice per query, for example `Q1 exact (Sum acc, Rate
+acc) · Q2 CMS+heap`, what Pass 2 shares or splits into panes, for example
+`shared Scan (Q1, Q2)` or `Kll for Q1 in 5 × 1m panes`, and, for physical
+plans, what is materialized: `ingestion time: Kll ×5 panes` for state
+maintained as data arrives, `query time, shared: Count acc` for a node built
+once per evaluation and read by several queries.
 
 Click a plan to show it in the three lanes. For workloads with many plans,
-the document may carry only the cheapest ones. The list then says so, for
-example `showing 64 of 486 plans, cheapest first; Stage 3 priced 486 and
-selected among all of them`. The selection is made over all plans either
-way.
+the document may carry only the first ones in enumeration order, plus the
+selected one. The list's header then says so, for example `972 candidates
+(document shows 65)` in Example 3a. The selection is made over all plans
+either way.
 
 ### The three lanes
 
 | Lane | Shows |
 | --- | --- |
-| Stage 0 · Logical DAG | The queries as lowered by the frontends |
-| Stage 1 · Logical ASAP DAG | The logical candidate of the plan you picked. The **candidate** menu shows any other. |
-| Stage 2 · Physical ASAP DAG | The plan you picked, with each node's timing (ingestion time or query time) and Stage 3 cost. The **candidate** menu shows any other. |
+| Stage 0 · Query-language frontends | The queries as lowered by the frontends |
+| Stage 1 · Logical ASAP candidate | The logical candidate of the plan you picked. The **candidate** menu shows any other. |
+| Stage 2 · Physical ASAP candidate | The plan you picked, with each node's timing (ingestion time or query time) and Stage 3 cost. The **candidate** menu shows any other. |
 
 Data flows from the bottom up. Node colors:
 
 - blue: data sources;
 - grey: relational operators (filter, project, aggregate, sort, …);
 - purple: summary operators (build a sketch or exact accumulator, merge,
-  estimate, finalize).
+  estimate, finalize);
+- dashed: a standalone scalar query, such as `time()` or `1 + 2`.
 
 A thick border marks a query's result. A sketch build shows its configuration
 and how many instances it keeps, for example `summary: CmsWithHeap · depth 7
@@ -184,19 +176,21 @@ Click an edge to see the schema and data state it carries.
 
 ### In the page
 
-Click **Query editor**, enter PromQL queries one per line, and click
-**Plan**:
+Click **Query editor**, declare the tables the SQL queries read, enter SQL
+or PromQL queries, and click **Plan**:
 
 | Field | Meaning |
 | --- | --- |
-| ε | Relative error allowed for every query. Leave it empty for exact queries. |
-| δ | Failure probability allowed. Needs ε. |
-| sample interval (ms) | How often each series is sampled (default 15000) |
+| Input tables | One table per row: a name, one column per line (`name TYPE [NOT NULL]`) and an optional time column. Only SQL queries read them; PromQL schemas are inferred from the metrics a query reads. |
+| Queries | One query per row: a name, the language (SQL or PromQL), the tables a SQL query reads, and its text. Unchecked rows are left out of the workload. |
+| ε | Error allowed for every query (default 0.01). |
+| metric | The error metric ε is stated in: Absolute, Relative or Rank. `default` leaves it to the planner, which accepts a plan in any metric that meets ε; a quantile query must name one. |
 
-The editor plans the queries as one batch that runs once. It declares only
-the sample interval, so the planner uses default statistics for everything
-else. SQL is not available in the editor yet; use the command below with a
-built-in example, or a document written elsewhere.
+The editor plans the checked queries as one batch that runs once, with no
+failure probability δ. It declares a 15 s sample interval for every metric
+the PromQL queries read and no other data facts, so the planner uses
+default statistics for everything else. For δ, another sample interval or
+another cost model, use the command below.
 
 ### From the command line
 
@@ -210,11 +204,18 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 
 | Option | Meaning |
 | --- | --- |
-| `--promql <query>` | A query; repeat for several |
+| `--promql <query>`, `--sql <query>` | A query; repeat and mix for several, in workload order |
+| `--name <name>` | Names the query before it (default `q1`, `q2`, …) |
+| `--table '<json>'` | A table the SQL queries read, for example `{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}, {"name": "service", "type": "utf8"}], "time_index": 0}`; repeat for several |
 | `--epsilon`, `--delta` | Accuracy for every query; without them the queries are exact |
-| `--sample-interval-ms <ms>` | Sample interval of every metric the queries read (default 15000) |
-| `--example <name>` | A built-in example instead of `--promql`: `planner-layering-1`, `-2`, `-3a`, `-3b`, `-4a` or `-4b` |
+| `--metric <metric>` | The error metric of that accuracy: `absolute`, `absolute_stream_l1`, `absolute_stream_l2`, `relative` or `rank`. Without it, a plan is accepted in whatever metric meets ε (and δ). |
+| `--sample-interval-ms <ms>` | Sample interval of every metric the PromQL queries read (default 15000) |
+| `--example <name>` | A built-in example instead of queries: `planner-layering-1`, `-2`, `-3a` or `-3b` |
+| `--cost-model <model>` | How plan selection compares valid plans: `usage-over-time` (cost model 1, the default: CPU, scanned bytes and memory over time, priced per second), `provisioned-capacity` (cost model 2: peak memory, peak CPU cores and disk, priced) or `cluster-capacity` (cost model 3: no prices) |
+| `--cluster-memory-bytes <n>`, `--cluster-disk-bytes <n>`, `--cluster-cpu-cores <n>` | Cost model 3 only: the cluster's limits; a plan over one is invalid. The CPU limit is optional. |
+| `--cluster-objective <objective>` | Cost model 3 only: `lowest-latency`, `least-memory` or `pareto-front` (the plans no other plan beats on latency, memory and disk; the lowest-latency one is selected) |
 | `--max-displayed <n>` | How many plans the document shows (default 64), in enumeration order, plus the selected plan. The planner still optimizes and prices every plan, so the selection does not depend on it. |
+| `--max-combinations <n>` | The most candidates a run plans (default 10000), counted at Stage 1 and again at Stage 2; a larger workload is refused with exit status 3 and no document |
 | `--out <file>` | Where to write the document |
 
 Open the document with **Open stage document…**, by dropping the file on the

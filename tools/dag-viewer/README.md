@@ -7,8 +7,9 @@ A browser view of what the planner does with one workload, read from an
   one root per query;
 - **Stage 1**, the logical ASAP candidates: Pass 1's per-computation
   choices, each followed by its Pass 2 identical-expression candidates;
-- **Stage 2**, the physical candidate of each composed Stage 1 candidate,
-  or the reason Stage 2 pruned it;
+- **Stage 2**, the physical candidates of each composed Stage 1 candidate,
+  one per materialization assignment (`P<n>`, then `P<n>-m<k>`), or the
+  reason Stage 2 pruned it;
 - **Stage 3**, which checks every physical candidate, prices the valid ones
   per second and selects the cheapest.
 
@@ -75,12 +76,17 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
     "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }]
   },
   "stage3_plan_selection": {
-    "costs": { "P1": { "total": 7.9, "unit": "cost_per_second", "source": "...",
-                       "per_node": { "<node id>": { "cost": 2.3, "multiplier": 1, "detail": "..." } } } },
+    "costs": { "P1": { "cost_per_second": 7.9, "unit": "cost_per_second", "source": "...",
+                       "usage": { "cpu_ops_per_second": 4100210.0, "scanned_bytes_per_second": 38400000.0,
+                                  "average_memory_bytes": 0.0, "peak_memory_bytes": 16481088,
+                                  "disk_bytes": 192000000, "peak_cpu_cores": 2,
+                                  "latency_per_query": [{ "compaction_ms": 0.0, "query_ms": 33.2 }] },
+                       "per_node": { "<node id>": { "cost_per_second": 2.3, "multiplier": 1, "detail": "..." } } } },
     "accepted": { "P1": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
                            "summary": "metric not set; accepted rank (Kll)" }] },
     "selected": "P1",
-    "rejected": [{ "id": "P2", "valid": true, "reason": "..." }]
+    "rejected": [{ "id": "P2", "valid": true, "reason": "..." }],
+    "front": []
   }
 }
 ```
@@ -99,6 +105,12 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
 - `stage3_plan_selection.accepted` has, per shown valid candidate and query,
   the metric the target set (null when not set) and the metric Stage 3
   accepted (null for an exact output).
+- `costs` has, per shown valid candidate, its resource `usage` and its
+  `cost_per_second` under the run's cost model (`--cost-model`). A
+  candidate's `cost_per_second` is null under cost model 3, which has no
+  prices; a node's is null under cost models 2 and 3, which price or limit
+  the whole candidate's peaks. `front` lists the Pareto front under cost
+  model 3's `pareto-front` objective, and is empty otherwise.
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
 
