@@ -6,8 +6,7 @@ Audience: developers moving computation from ASAPQuery-backend into
 ## Contract
 
 Logical selection decides what to compute. A `MaterializationAssignment` sets
-node timing (all query time until Stage 2 materialization, #509, decides
-otherwise). `physical_planner::compile` turns a timed `PhysicalASAPDAG` into physical
+node timing (Stage 2 materialization chooses it per physical candidate). `physical_planner::compile` turns a timed `PhysicalASAPDAG` into physical
 operator DAGs. The backend owns ingestion, panes, storage, stored-state
 evaluation, external exact engines, pricing/selection, and execution scheduling.
 

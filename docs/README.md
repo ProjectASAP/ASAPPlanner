@@ -19,7 +19,8 @@ Start with [ASAPPlanner input, output, and workflows](design_docs/architecture/i
 for the integration boundary, nested inputs, and choice of planning workflow.
 
 Use [Public library functions and examples](develop_docs/library-api.md) for
-frontend lowering, workload search, ranking, selection and DAG assembly.
+frontend lowering, planning a workload through the stages to a selected plan,
+and the legacy workload search, ranking, selection and DAG assembly.
 
 ## Extend the planner
 

@@ -1,5 +1,13 @@
 # Consuming offline sketch measurements
 
+> **Status: no planner consumer.** The planner-side reader of this artifact
+> (`empirical_cost`, `EmpiricalCostModel`) has been removed. Plan selection
+> reads measured CPU time per sketch operation from
+> `PlanSelectionSettings::measured_operation_costs`, which
+> `convert_rqe_atomic_costs` (in `asap-devtools`) builds from sketch-bench's
+> `rqe_atomic_costs.json`. This document is kept as the record of the
+> artifact contract.
+
 This document is for developers integrating sketch-bench with the planner. The
 Rust schema is `asap_aware_mapping::empirical_cost::EvidenceArtifact`; its JSON
 schema version is `1`. Required artifact-level `benchmark_version` and
@@ -101,6 +109,10 @@ errors into formal accuracy guarantees or runtime feedback, and never shrinks
 parameters solely because one dataset had low observed error.
 
 ## Query-matched offline recommendations
+
+> **Removed.** The `empirical_comparison` module that implemented this section
+> has been deleted, and nothing in the planner reads `OfflineComparisonEvidence`
+> now. The section is kept as the record of its contract.
 
 `empirical_comparison::recommend_offline` consumes the companion
 [`OfflineComparisonEvidence` JSON format](offline-comparison-evidence.schema.json).

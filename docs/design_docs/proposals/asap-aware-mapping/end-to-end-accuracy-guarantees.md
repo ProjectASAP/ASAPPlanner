@@ -115,7 +115,7 @@ candidate can be proved legal.
 ### End-to-end example
 
 Consider two compatible approximate operations and a final requirement
-`EpsilonDelta { epsilon: 0.10, delta: 0.02 }`.
+`AccuracyTarget::max_error(0.10).failure_probability(0.02)`.
 
 1. The allocator proposes local requirements of `(0.05, 0.01)` for each
    approximate operation.
@@ -169,8 +169,8 @@ defines a standing planner contract rather than a time-bounded project.
 The design must:
 
 1. Represent each summary's final-result correctness requirement with an
-   `AccuracyTarget`. The existing `Exact`, `Epsilon`, and `EpsilonDelta`
-   variants remain valid where their semantics match, but they are not a
+   `AccuracyTarget`. The existing `exact()`, `max_error(ε)`, and
+   `max_error(ε).failure_probability(δ)` forms remain valid where their semantics match, but they are not a
    closed set: add or refine target variants when a new summary requires a
    correctness contract that those variants cannot express faithfully.
 2. Preserve the meaning of each error metric instead of treating every bound
@@ -200,10 +200,10 @@ AccuracyTarget
     describes what the query requires
 
 committed summary parameters + optional evidence
-    determine each operation's local ResultGuarantee
+    determine each operation's local AccuracyGuarantee
 
 CompositionOperator + AccuracyModel
-    combine local and child guarantees into the final ResultGuarantee
+    combine local and child guarantees into the final AccuracyGuarantee
 
 AccuracyModel::satisfies
     accepts or rejects the candidate before CostModel ranking
@@ -216,7 +216,7 @@ Four components have distinct responsibilities:
 | `AccuracyTarget` | State the required correctness of the final query result | Describe evidence or choose parameters |
 | `AccuracyBudgetAllocator` | Propose local requirements for approximate layers | Prove that the combined result is legal |
 | `AccuracyModel` | Derive, compose, and check guarantees | Rank candidates by cost |
-| `ResultGuarantee` | Record the bound, failure probability, metric, and evidence for one candidate result | Express what the query requested |
+| `AccuracyGuarantee` | Record the bound, failure probability, metric, and evidence for one candidate result | Express what the query requested |
 
 Candidate generation first enumerates an implementation, commits its concrete
 parameters, and derives a local guarantee from those same parameters. If the
@@ -230,10 +230,10 @@ parameter-configuration modes, planner/runtime boundary, and explanation data.
 
 ### Guarantee IR
 
-Finalized post-ASAP values may carry a `ResultGuarantee`:
+Finalized post-ASAP values may carry an `AccuracyGuarantee`:
 
 ```rust
-struct ResultGuarantee {
+struct AccuracyGuarantee {
     metric: AccuracyMetric,
     bound: BoundExpr,
     failure_probability: ProbabilityExpr,
@@ -382,9 +382,9 @@ combined implementations without creating a second legality pipeline.
 
 ### Accuracy targets and allocation
 
-`AccuracyTarget::Exact` accepts only a zero bound and zero failure probability.
-`AccuracyTarget::Epsilon` checks the evaluated magnitude. An
-`AccuracyTarget::EpsilonDelta` requires both an evaluated magnitude no greater
+`AccuracyTarget::exact()` accepts only a zero bound and zero failure probability.
+`AccuracyTarget::max_error(ε)` checks the evaluated magnitude. A
+`max_error(ε).failure_probability(δ)` target requires both an evaluated magnitude no greater
 than epsilon and an evaluated failure probability no greater than delta.
 
 These variants are the currently supported target vocabulary, not a permanent
@@ -399,7 +399,7 @@ epsilon-style numeric error contract. Any new or revised target must define:
 
 The planner must fail closed until the corresponding guarantee model,
 propagation rules, and final satisfaction check exist. It must not force a new
-summary into `Exact`, `Epsilon`, or `EpsilonDelta` merely to reuse the existing
+summary into `exact()`, `max_error(ε)`, or `max_error(ε).failure_probability(δ)` merely to reuse the existing
 API.
 
 The initial allocator uses conservative finite choices, including equal splits
@@ -450,7 +450,7 @@ uses the same candidate space and legality checks as optimization.
 
 Three concepts are necessary:
 
-- `ResultGuarantee` is the authoritative description of final-result error;
+- `AccuracyGuarantee` is the authoritative description of final-result error;
   reusing `AccuracyTarget` would conflate a request with evidence that the
   request was met.
 - `AccuracyModel` separates correctness rules from `CostModel`; embedding
