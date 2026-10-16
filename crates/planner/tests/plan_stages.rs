@@ -56,7 +56,7 @@ fn enumerates_every_combination_and_selects_one() {
         .stage1_pass1_per_computation
         .targets
         .iter()
-        .map(|target| target.choices.candidates.len())
+        .map(|target| target.choice_count())
         .collect();
     assert_eq!(sizes.len(), 2);
     assert_eq!(run.combinations, sizes[0] * sizes[1]);

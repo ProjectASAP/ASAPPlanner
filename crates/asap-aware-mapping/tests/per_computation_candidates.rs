@@ -9,8 +9,7 @@ use asap_types::{
         ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, ScalarExpr,
     },
     post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
-        SummaryUpdate,
+        ExactKind, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     },
     pre_asap::{
         AggIntent, ColumnRef, CompareOpKind, DataType, Field, FieldDataType, ScalarValue, Schema,
@@ -172,7 +171,7 @@ fn scalar_root_producers_are_discovered_once() {
         root.validate_structure().unwrap();
     }
     assert_eq!(candidates.targets.len(), 1);
-    assert!(Rc::ptr_eq(&candidates.targets[0].target, &producer));
+    assert!(Rc::ptr_eq(&candidates.targets[0].aggregate, &producer));
     assert!(producer.timing.is_none());
     assert!(producer.guarantee.is_none());
     producer.validate_structure().unwrap();
@@ -225,20 +224,16 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
     assert_eq!(
         found,
         vec![
-            vec![ComputationCandidate::ExactAccumulator {
-                kind: ExactKind::Sum,
-                params: ExactParams::Sum
-            }],
-            vec![ComputationCandidate::ExactAccumulator {
-                kind: ExactKind::Rate,
-                params: ExactParams::Rate
-            }],
+            vec![ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])],
+            vec![ComputationCandidate::ExactAccumulator(vec![
+                ExactKind::Rate
+            ])],
         ]
     );
     assert!(candidates
         .targets
         .iter()
-        .all(|target| target.target.timing.is_none()));
+        .all(|target| target.aggregate.timing.is_none()));
 }
 
 /// Physical annotations, ASAP operators and invalid probability requirements
@@ -411,10 +406,7 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
     );
     assert_eq!(
         candidates[0].choices.candidates,
-        vec![ComputationCandidate::ExactAccumulator {
-            kind: ExactKind::Sum,
-            params: ExactParams::Sum
-        }]
+        vec![ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])]
     );
     assert_eq!(
         algorithms(&candidates[1].choices.candidates),
@@ -510,7 +502,7 @@ fn key_only_having_is_pushed_below_and_keeps_candidates() {
         .unwrap()
         .targets;
     assert_eq!(targets.len(), 1);
-    assert!(Rc::ptr_eq(&targets[0].target, &node));
+    assert!(Rc::ptr_eq(&targets[0].aggregate, &node));
     assert_eq!(
         targets[0].having,
         vec![HavingEntry {
@@ -575,7 +567,10 @@ fn avg_rewrites_to_sum_and_count_states() {
     .targets;
     assert_eq!(
         targets[0].choices.candidates,
-        vec![ComputationCandidate::AvgAsSumCount]
+        vec![ComputationCandidate::ExactAccumulator(vec![
+            ExactKind::Sum,
+            ExactKind::Count
+        ])]
     );
     assert_eq!(
         targets[1].choices.candidates,
@@ -584,7 +579,7 @@ fn avg_rewrites_to_sum_and_count_states() {
     assert_eq!(
         targets[1].choices.pruned,
         vec![(
-            ComputationCandidate::AvgAsSumCount,
+            ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count]),
             PruneReason::NullableAvgInput
         )]
     );
@@ -692,10 +687,7 @@ fn example_1_exact_q2_prunes_topk_heaps() {
         ]
     );
     assert!(found.iter().any(|choices| choices.candidates
-        == [ComputationCandidate::ExactAccumulator {
-            kind: ExactKind::Sum,
-            params: ExactParams::Sum
-        }]
+        == [ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])]
         && choices.pruned.is_empty()));
     assert_eq!(found.len(), 2, "{found:#?}");
 }
@@ -707,7 +699,7 @@ fn having_of(
 ) -> Vec<HavingEntry> {
     let target = targets
         .iter()
-        .find(|target| match target.target.non_asap() {
+        .find(|target| match target.aggregate.non_asap() {
             Some(NonASAPOp::Aggregate { measures, .. }) => is(&measures[target.measure]),
             _ => false,
         })
@@ -740,7 +732,7 @@ fn scalar_reference_filter_is_not_having() {
         .unwrap()
         .targets;
     assert_eq!(targets.len(), 1);
-    assert!(Rc::ptr_eq(&targets[0].target, &agg));
+    assert!(Rc::ptr_eq(&targets[0].aggregate, &agg));
     assert!(targets[0].having.is_empty(), "{:?}", targets[0].having);
 
     let agg = aggregate_over(scan(false), count(), vec![], None);

@@ -2048,7 +2048,7 @@ mod tests {
     fn exact_accumulators_that_merge_get_panes() {
         use crate::per_computation_candidates::ComputationCandidate;
         let accumulator =
-            |c: &ComputationCandidate| matches!(c, ComputationCandidate::ExactAccumulator { .. });
+            |c: &ComputationCandidate| matches!(c, ComputationCandidate::ExactAccumulator(_));
         for query in [
             "rate(m[5m])",
             "increase(m[5m])",
@@ -2153,9 +2153,7 @@ mod tests {
     fn exact(queries: &[&str]) -> Vec<QueryRoot> {
         use crate::per_computation_candidates::ComputationCandidate as C;
         let queries: Vec<(&str, f64)> = queries.iter().map(|q| (*q, 0.01)).collect();
-        chose_where(&queries, |c| {
-            matches!(c, C::Exact | C::ExactAccumulator { .. })
-        })
+        chose_where(&queries, |c| matches!(c, C::Exact | C::ExactAccumulator(_)))
     }
 
     fn operator(root: &QueryRoot) -> &Rc<OperatorNode> {
@@ -2415,17 +2413,16 @@ mod tests {
             .collect(),
         )
         .unwrap();
-        let heap = |c: &C| {
-            matches!(
-                c,
-                C::WholeExpression(SketchAlgorithm::CountSketchWithHeap)
-                    | C::Summary(SketchAlgorithm::CountSketchWithHeap)
-            )
-        };
+        // The CountSketch heap, the top-k's fused whole-expression one.
+        let heap = |c: &C| matches!(c, C::Summary(SketchAlgorithm::CountSketchWithHeap));
         let choice: Vec<usize> = inventory
             .targets
             .iter()
-            .map(|t| t.choices.candidates.iter().position(heap).unwrap_or(0))
+            .map(|t| {
+                (0..t.choice_count())
+                    .position(|i| t.computation_for(i).is_some_and(|(c, _)| heap(c)))
+                    .unwrap_or(0)
+            })
             .collect();
         let heaps: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)
             .unwrap()

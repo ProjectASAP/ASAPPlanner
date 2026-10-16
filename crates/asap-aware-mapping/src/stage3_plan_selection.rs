@@ -2633,7 +2633,7 @@ mod tests {
         let topk = inventory
             .targets
             .iter()
-            .position(|t| t.choices.candidates.len() > 2)
+            .position(|t| t.choice_count() > 2)
             .unwrap();
         [0, 1, 2]
             .into_iter()
@@ -3073,7 +3073,7 @@ mod tests {
             choices = choices
                 .into_iter()
                 .flat_map(|choice: Vec<usize>| {
-                    (0..target.choices.candidates.len()).map(move |index| {
+                    (0..target.choice_count()).map(move |index| {
                         let mut choice = choice.clone();
                         choice.push(index);
                         choice

@@ -65,8 +65,9 @@ use crate::stage2_physical_asap_optimization::{optimize_physical_asap, PhysicalC
 use crate::stage3_plan_selection::{select_plan, Selection, SelectionError};
 use crate::PlanningModels;
 
-/// One whole-workload CandidateLogicalASAPDAG: `choice[t]` indexes
-/// `targets[t].choices.candidates` of the Pass 1 inventory. `roots` are the
+/// One whole-workload CandidateLogicalASAPDAG: `choice[t]` picks target
+/// `t`'s candidate, or its fused computation's
+/// (`targets[t].computation_for(choice[t])`), of the Pass 1 inventory. `roots` are the
 /// composed query roots in input order, or why the choice did not compose.
 #[derive(Debug)]
 pub struct LogicalCandidate {
@@ -185,8 +186,9 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
 /// One Stage 1 candidate in enumeration order, before Stage 2 numbers it.
 #[derive(Debug)]
 pub struct Stage1Candidate {
-    /// The Pass 1 choice (`targets[t].choices.candidates[choice[t]]`); a
-    /// Pass 2 candidate has its Pass 1 candidate's.
+    /// The Pass 1 choice (`targets[t].computation_for(choice[t])`: target
+    /// `t`'s candidate, or its fused computation's); a Pass 2 candidate has
+    /// its Pass 1 candidate's.
     pub choice: Vec<usize>,
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
     /// For a Pass 2 candidate: what it changed of its Pass 1 candidate.
@@ -576,12 +578,13 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
     }
 }
 
-/// Mixed-radix increment of `choice`: the last target varies fastest.
+/// Mixed-radix increment of `choice`, each digit over its target's
+/// candidates and then its fused computation's: the last target varies fastest.
 /// `false` when a carry out of the first target ends the enumeration.
 fn next_choice<Id>(inventory: &PerComputationCandidates<Id>, choice: &mut [usize]) -> bool {
     for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
         *digit += 1;
-        if *digit < target.choices.candidates.len() {
+        if *digit < target.choice_count() {
             return true;
         }
         *digit = 0;
