@@ -1198,3 +1198,56 @@ fn per_series_avg_with_series_identity_composes_from_sum_and_count() {
     let [composed] = <[_; 1]>::try_from(composed(vec![root.clone()], &[0])).unwrap();
     assert_eq!(columns(&composed), columns(&root));
 }
+
+/// Exact per-series `rate` keeps every label and retypes the value column to the Rate state.
+#[test]
+fn per_series_rate_keeps_labels_and_retypes_its_state() {
+    use asap_types::post_asap::ExactParams;
+    let [QueryRoot::Operator(root)] = &exact_promql("rate(m{job=\"api\"}[5m])")[..] else {
+        panic!("one operator root");
+    };
+    let [out] = <[_; 1]>::try_from(composed(vec![root.clone()], &[0])).unwrap();
+    let rate = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let ASAPOp::SummaryAgg {
+        family, reduction, ..
+    } = summary_agg(&out)
+    else {
+        unreachable!()
+    };
+    assert_eq!(*family, rate);
+    assert_eq!(*reduction, Reduction::PerEntity);
+    let state = OperatorNode::reachable(&out)
+        .into_iter()
+        .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
+        .unwrap();
+    // The state replaces the sample value in place, named `state`; the
+    // finalized output has the rate's own columns.
+    let label = Field::plain("job", DataType::Utf8, true);
+    assert_eq!(
+        columns(&state),
+        [
+            (
+                "ts".into(),
+                FieldDataType::Plain(DataType::Timestamp),
+                false
+            ),
+            ("state".into(), rate, false),
+            (label.name, label.dtype, label.nullable),
+        ]
+    );
+    assert_eq!(state.schema.time_index, Some(0));
+    assert_eq!(out.schema, root.schema);
+}
+
+/// Exact grouped `avg` composes from sum and count with the aggregate's whole schema.
+#[test]
+fn grouped_avg_composition_preserves_the_whole_schema() {
+    let [QueryRoot::Operator(root)] = &exact_promql("avg by (job) (m)")[..] else {
+        panic!("one operator root");
+    };
+    let [out] = <[_; 1]>::try_from(composed(vec![root.clone()], &[0])).unwrap();
+    assert!(OperatorNode::reachable(&out)
+        .iter()
+        .any(|node| matches!(node.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))));
+    assert_eq!(out.schema, root.schema);
+}
