@@ -34,8 +34,8 @@ pub mod summary_window;
 
 pub use crate::pre_asap::schema::{Field, FieldDataType, Schema};
 pub use execution_data_state::{
-    lift_plain, DataPrimitive, ExactOperationSchemaError, ExecutionDataState,
-    ExecutionDataStateError, ExecutionTiming, Materialization, Medium,
+    DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming, Materialization,
+    Medium,
 };
 pub use family_capability::{FamilyCapability, MergeInputRule, MergedError, StatisticKind};
 pub use guarantee::{
