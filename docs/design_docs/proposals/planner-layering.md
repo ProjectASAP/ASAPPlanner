@@ -162,7 +162,7 @@ flowchart TB
   subgraph INPUTS["Inputs"]
     direction LR
     QW["Query workload<br/>(PromQL / SQL / MetricsQL,<br/>query recurrence,<br/>accuracy requirements,<br/>latency requirements)"]:::input
-    DW["+ Data workload<br/>(streaming vs. data at rest,<br/>per-source series counts,<br/>sample intervals)"]:::input
+    DW["+ Data workload<br/>(streaming vs. data at rest,<br/>data distribution,<br/>cardinality)"]:::input
     DI["+ Deployment inputs<br/>(cost model,<br/>accuracy model,<br/>deployment capabilities)"]:::input
   end
 
@@ -920,12 +920,12 @@ To see examples in DAG Viewer, following the instructions [here](TODO: write an 
 
 Each example's workload is shown as tables. Field names in code font are the
 fields of
-[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs).
-The lookback and as_of columns are not fields: the query text states them (its range and
-offset). Each query reads the event-time window [as_of − lookback, as_of].
-as_of is the window's end; lookback is its length. An
-as_of of "evaluation time" means no offset: the window ends whenever the
-query runs, so it moves forward with each evaluation. A fixed as_of, such as
+[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs),
+except `lookback` and `as_of`, which the query text states (its range and
+offset). Each query reads the event-time window [`as_of` − `lookback`, `as_of`].
+`as_of` is the window's end; `lookback` is its length. An
+`as_of` of "evaluation time" means no offset: the window ends whenever the
+query runs, so it moves forward with each evaluation. A fixed `as_of`, such as
 T − 1 y, pins the window to a historical interval. An approximate accuracy target
 (`AccuracyTarget::max_error(ε).failure_probability(δ)`) means the answer's error
 is at most ε with probability at least 1 − δ.
@@ -959,7 +959,7 @@ With 1,000,000 series each sampled every 15 s, the ingestion rate is
 **Query workload.** Two PromQL dashboard panels over the last minute. The
 first needs an exact total; the second tolerates error.
 
-| Query | Repeats | lookback | as_of | Accuracy requirement | Latency requirement |
+| Query | Repeats | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
 |---|---|---|---|---|---|
 | Q1: `sum by (job) (rate(http_requests_total[1m]))` | every 10 s | 1 m | evaluation time | exact | none |
 | Q2: `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | every 10 s | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
@@ -1220,7 +1220,7 @@ The SQL frontend recognizes Q2 as `Entropy` and Q3 as `L2` when Q3 casts its
 counts to DOUBLE (`CAST(c AS DOUBLE) * CAST(c AS DOUBLE)`): the Int64 `c * c`
 above can overflow, so only the Float64 product is recognized.
 
-| Query | Computation | Repeats | lookback | as_of | Accuracy requirement |
+| Query | Computation | Repeats | `lookback` | `as_of` | Accuracy requirement |
 |---|---|---|---|---|---|
 | Q1 | `Distinct(src_ip)` | every 10 s | 1 m | evaluation time | ε = 0.02, δ = 0.01 |
 | Q2 | `Entropy(src_ip)` | every 10 s | 1 m | evaluation time | ε = 0.05, δ = 0.01 |
@@ -1338,7 +1338,7 @@ all executed together at time T.
 | `predictability` | `ad_hoc` |
 | Accuracy requirement | ε = 0.005, δ = 0.01 |
 
-| Query | lookback | as_of |
+| Query | `lookback` | `as_of` |
 |---|---|---|
 | `quantile_over_time(0.99, latency_ms[5y])` | 5 y | T |
 | `quantile_over_time(0.99, latency_ms[1y])` | 1 y | T |
@@ -1401,7 +1401,7 @@ flowchart LR
 **Pattern B: one repeating query with overlapping windows.** A real-time p99 panel
 over the last 5 min, refreshed every minute.
 
-| Query | Repeats | lookback | as_of | Accuracy requirement | Latency requirement |
+| Query | Repeats | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
 |---|---|---|---|---|---|
 | `quantile_over_time(0.99, latency_ms[5m])` | every 1 min | 5 m | evaluation time | ε = 0.01, δ = 0.01 | ≤ 200 ms |
 

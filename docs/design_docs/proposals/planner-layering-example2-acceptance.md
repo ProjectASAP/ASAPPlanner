@@ -14,7 +14,7 @@ needs a missing feature is `#[ignore]`d with the PR that delivers it.
 
 ## Workload
 
-Three SQL dashboard panels over `flows`, every 10 s, lookback 1 m, as_of
+Three SQL dashboard panels over `flows`, every 10 s, `lookback` 1 m, `as_of`
 evaluation time, no latency requirement.
 
 | Query | Computation | SQL (abridged) | Accuracy |

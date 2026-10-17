@@ -31,7 +31,7 @@ Shared data workload: `arrival` = `Ingesting { rows_per_second }`, about
 66,667 samples/s; `sources["http_requests_total"]` has `series_count` =
 1,000,000, `sample_interval` = 15 s and `metric_type` = counter.
 
-| Query | Repeats | lookback | as_of | Accuracy | Latency |
+| Query | Repeats | `lookback` | `as_of` | Accuracy | Latency |
 |---|---|---|---|---|---|
 | Q1 `sum by (job) (rate(http_requests_total[1m]))` | 10 s | 1 m | evaluation time | exact | none |
 | Q2 `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | 10 s | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |

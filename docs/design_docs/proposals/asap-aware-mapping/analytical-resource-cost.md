@@ -19,8 +19,8 @@ plans. These are separate concerns:
   evidence to estimate CPU work, peak memory, and source/disk I/O.
 
 The physical-resource estimator itself is independent of the arrival mode.
-One planner adapter currently lowers work into it: `PhysicalPlanCostModel`
-compares complete at-rest plans. Continuously-ingesting, `Mixed` and `Unknown`
+One planner adapter lowered work into it before it was removed:
+`PhysicalPlanCostModel` compared complete at-rest plans. Continuously-ingesting, `Mixed` and `Unknown`
 comparisons are unavailable; costing summary maintenance over arriving data
 belongs to Stage 2 materialization (#509). Evidence from one arrival mode must
 not be reused for another.
@@ -797,8 +797,8 @@ windows, nested aggregates, Top-K, and shared sub-DAGs therefore use the same
 estimation path. The generic query lowerer recursively maps the supported raw
 query operators into that representation.
 
-`PhysicalPlanCostModel` is the final-selection adapter. For every
-candidate it obtains one canonical `ComparisonScope`, recursively lowers the
+`PhysicalPlanCostModel` was the final-selection adapter (now removed). For every
+candidate it obtained one canonical `ComparisonScope`, recursively lowers the
 actual raw target, and then lowers a logical rewrite or requests the fully
 bound physical DAG for a `SummaryExpr` candidate. The deployment implements
 `PlannerPhysicalPlanProvider`: query-node evidence is consumed atomically by
@@ -911,7 +911,7 @@ The intended end-to-end selection pipeline is:
 6. applies calibration and ranks candidates by ascending cost.
 
 The query lowerer and physical estimator cover the supported raw-query shapes
-listed above. `PhysicalPlanCostModel` executes this pipeline for every
+listed above. `PhysicalPlanCostModel`, now removed, executed this pipeline for every
 candidate supplied to `CandidateLogicalASAPDAGs::global_selection`. Logical rewrites are
 lowered recursively. Summary candidates participate only after the deployment
 has bound their complete `SummaryExpr` DAG; there is no optimistic generic

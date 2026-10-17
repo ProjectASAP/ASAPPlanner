@@ -80,7 +80,7 @@ it.
 |---|---|---|
 | Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time` | passes: B1 and the monthly variant's maintained panes |
 | With data at rest, no node runs at ingestion time | `stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes |
-| A materialized output covers its consumers: retention ≥ max over its readers of lookback + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min |
+| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min |
 
 ### Pattern A
 
@@ -109,8 +109,12 @@ it.
 
 ### Selection direction, relative to the cost model
 
-* A3 > A1 and B2 ≥ B1, B3 hold under any model that charges each build: A3
-  and B2 do strictly more of the same work.
+* A3 > A1 holds under any model that charges each build: A3 does strictly
+  more of the same work. B2 also rebuilds more per evaluation than B1 and B3,
+  but it keeps nothing between evaluations, so B2 ≥ B1, B3 holds only under a
+  model that charges rebuilds more than kept state. Cost model 1 does not:
+  B2 costs 2.183 per second, B3 8,884.5 and B1 13,326.5 (see the table
+  above).
 * A1 ≤ A2 as given, and B1 ≤ B3, depend on the cost model (cost model 1, 2
   or 3). The doc's reasons are
   that A2 maintains years of history for one batch, and that B3 adds the
@@ -140,7 +144,7 @@ it.
    repeating entry whose window ends at each run, known at T.
 4. **Retention unit.** "Kept 5 min" is read as the event-time span the stored
    state covers. For A1, which lives only for the batch, that is 5 y of
-   history. The test requires retention ≥ each reader's lookback + offset.
+   history. The test requires retention ≥ each reader's `lookback` + offset.
 5. **Backfill.** A2 backfills old data once. Whether that one-time cost is
    charged to the plan, and how it is amortized, is not stated; not tested.
 6. **Pruning A2 at rest.** "A2 is not generated" is read as physical

@@ -26,13 +26,18 @@ artifact, while preserving the checks required by its intended consumer.
 Inside this workspace, depend on the frontend you need, `asap-aware-mapping`,
 and `asap-types`, or on `asap-planner`, which wraps every frontend and the
 planning stages. External users can use Git dependencies pinned to a compatible
-revision; use the same revision across these crates. For the example below:
+revision; use the same revision across these crates, and pick a revision at
+least as new as the APIs you call (this guide describes `main` at `775e21ee`).
+For the examples below:
 
 ```toml
 [dependencies]
-asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
-asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
-asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
+asap-planner = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "775e21ee38879631fe9752c105d50bea890d3d4a" }
+asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "775e21ee38879631fe9752c105d50bea890d3d4a" }
+asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "775e21ee38879631fe9752c105d50bea890d3d4a" }
+asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "775e21ee38879631fe9752c105d50bea890d3d4a" }
+# For the async e2e_plan example:
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 ```
 
 ## Lower a query into Pre-ASAP IR

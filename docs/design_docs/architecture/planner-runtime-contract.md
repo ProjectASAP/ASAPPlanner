@@ -69,7 +69,8 @@ activation, and rollback are not an end-to-end Planner protocol.
    scan selection, input/output edges, operation counts, update and bootstrap
    fanout, retained state, CPU, memory, I/O, and accuracy facts.
 4. ASAPPlanner keeps constructible candidates with missing evidence visible
-   in `CandidateLogicalASAPDAGs` but does not certify unknown accuracy.
+   among its Stage 1 candidates, and Stage 3 rejects them with the reason; it
+   does not certify unknown accuracy.
    Materialization compares supported alternatives over the same workload
    horizon. Missing or incomparable costs do not establish
    that maintaining a summary beats raw recomputation; structural scores and
@@ -126,7 +127,7 @@ in one cost formula.
   execution.
 - A selected realization framework is a contract, not executor code.
 - Physical capabilities and evidence constrain deployment choices, not every
-  logical candidate's presence in `CandidateLogicalASAPDAGs`. Known unsupported capabilities
+  logical candidate's presence among the Stage 1 candidates. Known unsupported capabilities
   and unknown algorithms cannot become deployable alternatives.
 - Complete physical alternatives need identity and comparable evidence for
   cost-based deployment decisions. Stale evidence cannot certify or cost a

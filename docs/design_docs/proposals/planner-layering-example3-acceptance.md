@@ -25,7 +25,7 @@ Shared data workload, except Pattern A's `arrival` is `Mixed`.
 **Pattern A.** One `query_batch`, `invocations: 1` at T, `ad_hoc`, ε = 0.005,
 δ = 0.01. Tests use T = 2026-01-01T00:00:00Z and a 365-day year.
 
-| Query | lookback | as_of |
+| Query | `lookback` | `as_of` |
 |---|---|---|
 | q1 `quantile_over_time(0.99, latency_ms[5y])` | 5 y | T |
 | q2 `quantile_over_time(0.99, latency_ms[1y])` | 1 y | T |
@@ -34,7 +34,7 @@ Shared data workload, except Pattern A's `arrival` is `Mixed`.
 | q5 `quantile_over_time(0.99, latency_ms[3y] offset 2y)` | 3 y | T − 2 y |
 
 **Pattern B.** `quantile_over_time(0.99, latency_ms[5m])`, every 1 min,
-lookback 5 m, as_of evaluation time, ε = 0.01, δ = 0.01, ≤ 200 ms.
+`lookback` 5 m, `as_of` evaluation time, ε = 0.01, δ = 0.01, ≤ 200 ms.
 
 ## Expected candidates per stage
 
@@ -106,8 +106,8 @@ and the `SummaryEstimate`.
    them.
 5. **EH accuracy.** A boundary inside an EH bucket is approximate. Whether the
    accuracy model charges that against ε = 0.005 is not stated; not tested.
-6. **as_of and `offset`.** The table gives as_of = T − 1 y and the query
-   text has `offset 1y`. We read as_of as the window's end (the result of
+6. **`as_of` and `offset`.** The table gives `as_of` = T − 1 y and the query
+   text has `offset 1y`. We read `as_of` as the window's end (the result of
    the offset at T), not as a second shift. The frontend lowers the offset
    from the text.
 7. **Plan selection statistics.** A scan reads the window above it, through
