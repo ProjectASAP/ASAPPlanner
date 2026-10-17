@@ -1,26 +1,32 @@
 # Planner pipeline
 
-ASAPPlanner accepts a planning workload and produces `CandidateLogicalASAPDAGs`, a compact
-representation of candidate Post-ASAP DAGs. Ranking and selection are operations
-over that output, not mandatory stages of candidate search.
+ASAPPlanner accepts a planning workload and the deployment's inputs, and
+produces one selected physical plan for the whole workload. The
+[planning stages design](../proposals/planner-layering.md) defines each
+stage.
 
-    SQL / PromQL / MetricsQL queries
-            | parse and canonicalize
+    SQL / PromQL / MetricsQL queries + data workload
+            | Stage 0: query-language frontends
             v
-    Pre-ASAP IR: exact, language-independent query intent
-            | enumerate legal summary-aware alternatives
+    Logical DAG (Pre-ASAP IR): exact, language-independent query intent
+            | Stage 1: logical ASAP-aware optimization
+            |   Pass 1: exact or a summary per computation
+            |   Pass 2: share, split into panes, or reuse across computations
             v
-    CandidateLogicalASAPDAGs: candidate Post-ASAP DAGs
-            |
-            +--> inspect candidates, optionally using cost_sorted
-            +--> select and assemble logical DAGs
+    Logical ASAP candidates (Post-ASAP IR, untimed)
+            | Stage 2: physical ASAP-aware optimization
+            |   materialization: not materialized, at ingestion time,
+            |   or at query time (shared, or kept across evaluations)
+            v
+    Physical ASAP candidates (timed)
+            | Stage 3: plan selection
+            |   accuracy, latency and deployment checks; cost model 1, 2 or 3
+            v
+    Selected PhysicalASAPDAG, with every candidate's cost or rejection reason
 
-Stage 2 materialization (#509) will decide per sub-DAG whether to materialize
-and whether at ingestion or query time; until then every summary runs at query
-time. All physical binding, deployment, and execution remain downstream
-responsibilities.
+Every stage keeps all its candidates; only Stage 3 compares them. The
+deployment supplies its cost model, accuracy model and capabilities, and runs
+the selected plan; physical deployment and execution stay downstream.
 
 The [input, output, and workflows](../architecture/input-output-workflow.md)
 document defines the public boundary and helper call order.
-
-The [Pre-ASAP IR](pre-asap-ir.md) captures what a query means without any summary implementation. The [Post-ASAP IR](post-asap-ir.md) represents the same intent using possible ASAP primitives. See the [architecture overview](../architecture/README.md) for the full component flow and boundary details.

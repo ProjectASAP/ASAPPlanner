@@ -1,5 +1,11 @@
 # Common sub-DAG sharing: rule-based vs. cost-based framework (issue #237)
 
+> **Status: historical.** This document describes the legacy replacement
+> search (strategies, `CandidateLogicalASAPDAGs` as a Rust type, cost-model
+> ranking and `global_selection`), which has been removed. The planner now
+> plans through the stages of the [planning stages design](../proposals/planner-layering.md). The
+> document is kept as a record of the design.
+
 > Status: accepted decision for the implementation described here.
 
 ## Context

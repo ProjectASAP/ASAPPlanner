@@ -50,8 +50,8 @@ column and grouping determine whether consumers refer to the same population.
 
 ## Rule: share one population across compatible readouts
 
-**Realization:** `MaintainedPopulationStrategy`, an opt-in `ReplacementStrategy`
-in [maintained_population.rs](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
+**Realization:** `MaintainedPopulationStrategy::candidate` builds the sub-DAG;
+Pass 1 does not offer it yet. Code: [maintained_population.rs](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
 
 **Target sub-DAGs:**
 

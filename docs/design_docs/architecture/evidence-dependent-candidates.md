@@ -1,5 +1,11 @@
 # Evidence-dependent candidates
 
+> **Status: historical.** This document describes the legacy replacement
+> search (strategies, `CandidateLogicalASAPDAGs` as a Rust type, cost-model
+> ranking and `global_selection`), which has been removed. The planner now
+> plans through the stages of the [planning stages design](../proposals/planner-layering.md). The
+> document is kept as a record of the design.
+
 Audience: ASAPPlanner library integrators, especially ASAPQuery-backend.
 
 `CandidateLogicalASAPDAGs` is a space of constructible logical alternatives, not a list of

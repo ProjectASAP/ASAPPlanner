@@ -1,5 +1,12 @@
 # One entry point, and a pluggable optimization pass
 
+> **Status:** the end-to-end function (`asap_planner::e2e_plan`) and the
+> pluggable pass (`OptimizationPass`, with `Stage1ToStage3Pass` as the default)
+> are implemented. Passages that name the legacy search (`MajorPass`,
+> `search_workload`, `global_selection`) describe code that has been removed;
+> the default pass runs the stages of the
+> [planning stages design](../proposals/planner-layering.md).
+
 ## 1. What is new
 
 1. An **end-to-end function API** to lib users, giving them a one-function-call abstraction from a prepared input to the selected Post-ASAP DAG. 

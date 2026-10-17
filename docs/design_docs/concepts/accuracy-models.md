@@ -131,14 +131,12 @@ another implementation with the same algorithm name. In particular, a named
 empirical calibration is different from an arbitrary benchmark's maximum
 observed error; both its confidence and applicability must remain explicit.
 
-The current interfaces still expose general parameter proposal through
-`CostModel::size_params`. Default sizing is dispatched to the estimator modules through the existing
-public candidate-construction entry point. Accuracy validation is independent of those proposals. The new
-source-contract path centralizes HLL sizing and guarantee derivation in
-Planner's accuracy module, overriding the generic proposal when the applicable
-contract is supplied. It does not yet move every algorithm's sizing interface
-out of CostModel. The design boundary is that parameter proposals never grant
-accuracy authority to the cost model.
+Default sizing is `realization::default_size_params`, which dispatches to the
+estimator modules; a summary shared by several readers is sized with each
+parameter's largest value among them. Accuracy validation is independent of
+sizing: Stage 3 checks the guarantee derived from the committed parameters.
+The design boundary is that sizing never grants accuracy authority to the
+cost model.
 
 ## Composing guarantees through a DAG
 

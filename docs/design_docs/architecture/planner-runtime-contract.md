@@ -2,11 +2,11 @@
 
 ## Purpose
 
-ASAPPlanner produces `CandidateLogicalASAPDAGs`, a compact logical candidate space. Integrators
-may select candidates downstream or ask Planner's helpers to select and assemble
-DAGs. Stage 2 materialization (#509) will decide per sub-DAG whether to
-materialize and whether at ingestion or query time; until then every summary
-runs at query time. Physical deployment and execution remain downstream. The
+ASAPPlanner produces one selected physical plan for a workload: Stage 1
+enumerates the logical candidates, Stage 2 decides per summary build whether
+and when it is materialized, and Stage 3 checks every physical candidate and
+selects one under the deployment's cost model. Physical deployment and
+execution remain downstream. The
 [input/output/workflow design](input-output-workflow.md) defines this boundary.
 
 ## Three decision layers

@@ -62,7 +62,7 @@ Reserved (migrated but unimplemented; schema derivation rejects them with
 
 The earlier draft listed `SummaryCreate` and `SummaryInsert`. These are not
 separate variants. `SummaryAgg` describes the state-producing
-computation and its update input. Stage 2 materialization (#509) will decide
+computation and its update input. Stage 2 (physical ASAP-aware optimization) decides
 whether and when that state is maintained. Physical binding and runtime
 execution implement the actual build and update operations. Not every summary family supports incremental maintenance.
 

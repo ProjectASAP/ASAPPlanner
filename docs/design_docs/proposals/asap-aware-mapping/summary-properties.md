@@ -110,7 +110,7 @@ candidate generation
     -> guarantee propagation            (AccuracyModel::propagate)
     -> AccuracyTarget satisfaction      (AccuracyModel::satisfies)
     -> legal candidates only            (illegal ones -> TargetSubDAGCandidates::rejected)
-    -> cost ranking / global selection  (CostModel)
+    -> plan selection                   (Stage 3 cost model)
 ```
 
 Every finalized post-ASAP value carries a machine-readable
@@ -144,5 +144,4 @@ registered same-metric additive, relative, and Lipschitz rules and exact
 sum/max/min over approximate inputs. It uses union-bound probabilities
 without assuming independence, preserves unknown statistics as unknown,
 and rejects unsupported composition instead of treating the child as exact.
-An `AccuracyBudgetAllocator` can propose resized layers; the `CostModel`
-ranks only candidates that satisfy the accuracy requirement.
+Plan selection prices only candidates that satisfy the accuracy requirement.

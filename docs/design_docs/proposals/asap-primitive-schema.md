@@ -93,7 +93,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; exact accumulators come from `exact_realization` there (`Count`) and from `function_rules.rs` (the others); the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-post_asapsketchrs-post_asapmaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `per_computation_candidates.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-post_asapsketchrs-post_asapmaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint panes combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.

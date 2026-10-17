@@ -5,10 +5,11 @@
 This document is for library integrators such as ASAPQuery-backend, not users
 submitting queries through a backend.
 
-ASAPPlanner is a **logical planning library**. Its input is a planning workload
-plus the models, evidence, and deployment capabilities needed by the requested
-planning workflow. Its canonical output is a `CandidateLogicalASAPDAGs` containing the legal
-Post-ASAP alternatives for the workload.
+ASAPPlanner is a **planning library**. Its input is a planning workload plus
+the deployment's inputs: its accuracy model, plan selection settings (the
+cost model) and capabilities. Its output is one selected physical plan for
+the workload, with every alternative it considered and why each was not
+selected.
 
 ### Input fields at a glance
 
@@ -17,40 +18,31 @@ Post-ASAP alternatives for the workload.
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | How the data arrives, and facts about each source | No implicit default. Set `None` when unavailable; a PromQL query with a bare instant selector needs a nonzero `sample_interval` on the metric it reads. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering |
-| Planning models | Candidate cost/ranking and accuracy composition/checking | Used by the relevant APIs; built-in `DefaultCostModel` and `DefaultAccuracyModel` are available |
-| External evidence and capabilities | Domain facts, measured costs, workload statistics, and runtime support | Supply when available and when the chosen optimization depends on them; absence is not proof |
+| `PlanningModels` | Accuracy model and evidence, `PlanSelectionSettings` (cost model 1, 2 or 3, resource speed, measured operation costs), `DeploymentCapabilities` | `PlanningModels::builtin()` uses `DefaultAccuracyModel`, no evidence, cost model 1 with illustrative unit costs, and a deployment that supports everything |
 
-Frontend lowering and candidate search are stages within this workflow, not
-additional end-to-end inputs. See [Inputs](#inputs) for the nested workload
-fields and [frontend dependencies](#frontend-specific-dependencies).
+Frontend lowering (Stage 0) and Stages 1–3 run inside the workflow; they are
+not additional inputs. See [Inputs](#inputs) for the nested workload fields
+and [frontend dependencies](#frontend-specific-dependencies).
 
 ### Output at a glance
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `CandidateLogicalASAPDAGs<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The ASAPPlanner output |
+| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected`, `plan`, `costs`, `accepted`, `rejected`, `front`), set by the default pass `Stage1ToStage3Pass`; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `execution_timed_dag()` exports it as one `PhysicalASAPDAG` |
+| `Stage1ToStage3Run<Id>` (from `run_stage1_to_stage3`) | Every stage's candidates: Pass 1's per-computation candidates, the logical candidates, the physical candidates, Stage 2's pruned candidates, and the selection | For callers that inspect or display the alternatives |
 
-[Ranking](#ranked-view) and [selection and
-DAG assembly](#selection-and-dag-assembly) APIs operate on this `CandidateLogicalASAPDAGs`.
-These are alternative uses of the candidate space, not mandatory sequential
-stages. Its candidates do not choose ingestion-time versus query-time
-placement: a `MaterializationAssignment` sets each node's execution timing.
-Stage 2 materialization (#509) will decide per sub-DAG whether to materialize
-and whether at ingestion or query time; until then every summary runs at query
-time.
-
-The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
-produce a deployed executable plan; downstream systems bind physical operators,
-choose placement and storage, deploy state, and execute queries.
+The selected plan is a planning artifact. ASAPPlanner does **not** deploy
+it; downstream systems compile it, choose placement and storage, deploy state
+and execute queries.
 
 ```text
-PlanningWorkload + frontend dependencies + planning models/evidence
+PlanningWorkload + frontend dependencies + PlanningModels
                         |
                         v
-                   ASAPPlanner
+     ASAPPlanner: Stage 0 → Stage 1 → Stage 2 → Stage 3
                         |
                         v
-        CandidateLogicalASAPDAGs: candidate Post-ASAP DAGs
+        PlanOutput: selected plan, costs and rejection reasons
 ```
 
 ---
@@ -58,51 +50,34 @@ PlanningWorkload + frontend dependencies + planning models/evidence
 ## Running example: a recurring PromQL query
 
 Suppose a dashboard evaluates `count_over_time(up[5m])` once a minute, and
-`up` receives a sample every 15 seconds. This diagram traces the concrete
-inputs and the two possible uses of the same candidate space:
+`up` receives a sample every 15 seconds:
 
 ```mermaid
 flowchart TD
-    Q["query_workload: PromQL; repeating query count_over_time(up[5m]); every 60 s; exact; real-time; predictable"]
+    Q["query_workload: PromQL; repeating query count_over_time(up[5m]); every 60 s; exact; predictable"]
     D["data_workload: ingesting; up sampled every 15 s"]
-    F["PromQL lowering"]
-    R["One canonical OperatorNode root"]
-    S["Candidate search"]
-    P["CandidateLogicalASAPDAGs: logical choices for this root"]
-    I["cost_sorted: inspect choices"]
-    G["global_selection + assemble_selected_dag(root)"]
-    L["One selected Post-ASAP DAG; the exact pre-ASAP sub-DAG if no optimization is selected"]
-    B["Backend: bind physical operators, deploy, and execute"]
+    M["PlanningModels: accuracy model, cost model, deployment capabilities"]
+    F["Stage 0: PromQL lowering → one OperatorNode root"]
+    S1["Stage 1: exact accumulator or plain exact; panes"]
+    S2["Stage 2: each summary build at query time or maintained at ingestion time"]
+    S3["Stage 3: check and price every physical candidate; select one"]
+    B["Backend: compile, deploy and execute the selected plan"]
     Q --> F
     D --> F
-    F --> R --> S --> P
-    P --> I
-    P --> G --> L --> B
+    F --> S1 --> S2 --> S3 --> B
+    M --> S1
+    M --> S2
+    M --> S3
 ```
 
-“Predictable” says the query is known in advance; it is independent of its
-one-minute recurrence. The `CandidateLogicalASAPDAGs` may contain an exact count-summary
-realization, but it is not a deployed query. The caller can inspect candidates
-or obtain a logical DAG; deciding whether maintaining a summary is cheaper than
-recomputing raw results belongs to Stage 2 materialization (#509).
+"Predictable" says the query is known in advance; it is independent of its
+one-minute recurrence. Whether maintaining the count as data arrives is
+cheaper than recomputing it at every evaluation is Stage 3's comparison of
+Stage 2's candidates under the deployment's cost model.
 
 For contrast, a one-time SQL query needs a catalog but need not supply data
-arrival evidence merely to inspect logical alternatives:
-
-```mermaid
-flowchart LR
-    Q["query_batch: SELECT COUNT(*) FROM metrics; invocations 1; AdHoc"]
-    C["SqlCatalog: resolves metrics and its columns"]
-    F["SQL lowering"]
-    R["One OperatorNode root"]
-    P["Candidate search → CandidateLogicalASAPDAGs"]
-    Q --> F
-    C --> F
-    F --> R --> P
-```
-
-In this SQL example, `data_workload` can be `None` if the chosen lowering and
-search rules do not consume it.
+arrival facts: `data_workload` can be `None`, and the data is then treated as
+of unknown arrival with no source facts.
 
 ---
 
@@ -264,11 +239,11 @@ latter cannot be fabricated by one.
 
 | Input | Where it enters / default | Why it matters |
 |---|---|---|
-| Accuracy model | Target-aware search takes an `AccuracyModel`; `DefaultAccuracyModel` is available. Default strategies also use it for candidate construction. | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
-| Cost model | Candidate strategies and `cost_sorted`/`global_selection` use a `CostModel`; `DefaultCostModel` is available. | Ranks or selects candidates. The built-in model is not a measured deployment cost for every physical implementation. |
-| Accuracy/domain evidence | `AccuracyEvidenceProvider`; default strategies use `NoAccuracyEvidence` when no provider is supplied. | Input ranges, nonempty populations, Top-K intervals, and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
-| Measured cost evidence | Supplied through a deployment-specific cost model or physical-evidence provider when cost-based physical comparison is needed. | CPU, memory, and I/O estimates must be comparable before claiming a summary beats raw recomputation. |
-| Runtime capabilities | Checked by deployment-specific providers. | Prevents choosing a maintenance/window operation the intended executor cannot implement. |
+| Accuracy model | `PlanningModels` (`AccuracyModel`; `DefaultAccuracyModel` by default) | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
+| Accuracy/domain evidence | `PlanningModels` (`AccuracyEvidenceProvider`; `NoAccuracyEvidence` by default) | Input ranges, nonempty populations and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
+| Cost model | `PlanSelectionSettings.cost_model` (cost model 1 by default) | Turns each valid candidate's resource usage into a choice. The illustrative unit costs are not a measured deployment cost. |
+| Measured cost evidence | `PlanSelectionSettings.measured_operation_costs` | Measured CPU time per sketch update, merge and estimate replaces the formulas for the sketch nodes it matches. |
+| Runtime capabilities | `DeploymentCapabilities` (`supported_summaries`, `raw_data_retained`, `query_time_results_retained`) | Prevents choosing a summary, raw-data scan or kept state the intended executor cannot provide. |
 
 For example, the query `quantile_over_time(0.9, data[5m]) /
 quantile_over_time(0.5, data[5m])` does not tell Planner whether the windows
@@ -279,144 +254,53 @@ backend observation must cover the relevant data, not just an earlier window.
 
 Evidence is input; a derived guarantee or rejection reason is output. Missing
 facts do not establish either validity or invalidity: Planner cannot claim a
-guarantee that depends on them. Candidate retention and selection depend on
-the applicable strategy, accuracy target, and helper; missing evidence is not
-a blanket reason to discard unrelated candidates. For the direct DDSketch
-ratio above, search retains a candidate without a proven root guarantee when
-domain evidence is missing; automatic `global_selection` does not choose it.
-See the [candidate-search reference](../../develop_docs/library-api.md#generate-and-rank-candidates)
-for this backend-selection path.
+guarantee that depends on them, so Stage 3 rejects, with its reason, a
+candidate whose output has no guarantee for an approximate target.
 
 ---
 
 ## Output
 
-### `CandidateLogicalASAPDAGs<Id>`
+### `PlanOutput`
 
-`CandidateLogicalASAPDAGs` is Planner's canonical output. It contains:
+`PlanOutput` holds the selected plan and Stage 3's record of the selection:
 
-* canonical workload roots;
-* one `TargetSubDAGCandidates` entry for each discovered target sub-DAG;
-* legal replacement candidates;
-* rejected candidates and reasons; and
-* information needed to select compatible candidates across targets.
+* `plans`: one plan root per query, in `QueryWorkload::entries()` order;
+* `selection.selected`: the id of the selected physical candidate, and
+  `selection.plan` its roots;
+* `selection.costs`: each valid candidate's resource usage and, under cost
+  models 1 and 2, its cost per second;
+* `selection.accepted`: per valid candidate and query, the accuracy metric
+  Stage 3 accepted;
+* `selection.rejected`: every other candidate with its reason, whether it
+  failed a check or lost under the cost model;
+* `selection.front`: the Pareto front under cost model 3's Pareto objective.
 
-A `CandidateLogicalASAPDAGs` represents a **space of logical DAG choices**, not a single plan.
-It is exposed to integrators because the backend may choose among candidates
-using implementation support, measured costs, and available resources that
-candidate search does not have. A summary that is cheap on one backend may be
-expensive or unsupported on another. Returning only one plan during search
-would discard those choices too early.
-
-Callers with suitable models can instead use the [selection workflows](#workflows)
-below. A future higher-level API could hide `CandidateLogicalASAPDAGs` behind those decisions;
-the current interface lets an integrator own them. DAG assembly connects choices
-after selection and does not replace this candidate interface.
-
-Here, a **root** is the top-level `Rc<OperatorNode>` for a workload query. A
-**target** is any discovered sub-DAG that may be replaced, including roots.
-For `count(up) + 1`, the addition is a root and `count(up)` can be an inner
-target. `TargetSubDAGCandidates` holds the alternatives for one such target.
-
-It represents that space compactly instead of eagerly copying every complete
-DAG. `CandidateLogicalASAPDAGs` stores the workload's canonical roots once, creates one
-`TargetSubDAGCandidates` entry for each distinct target sub-DAG, and stores
-that target's replacement alternatives once inside the entry. Candidate
-children refer back to canonical
-targets, so common subexpressions and shared alternatives are not duplicated
-across roots.
-
-For example, if one target has three alternatives and its child has two,
-eager enumeration could create six complete DAGs. `CandidateLogicalASAPDAGs` stores the three
-parent alternatives, the two child alternatives, and their relationship.
-Whole-plan selection chooses compatible alternatives across those targets;
-`assemble_selected_dag(root)` then recursively substitutes the selected alternatives to
-construct a complete Post-ASAP DAG. Sharing each target's candidate set avoids the
-Cartesian-product expansion of complete DAGs and preserves shared nodes.
+Planner selects because it now has the inputs a backend used to own: the
+deployment declares its cost model, measurements and capabilities, and every
+alternative stays visible in `selection` and in `Stage1ToStage3Run`.
 
 ## Workflows
 
-All paths start by lowering the workload and searching for candidates:
-
 ```text
-PlanningWorkload + frontend dependencies + planning models/evidence
-    -> frontend lowering: one OperatorNode root per normalized query entry
-    -> search_workload_with_targets
-    -> CandidateLogicalASAPDAGs
+PlanningWorkload + frontend dependencies + PlanningModels
+    -> Stage 0: frontend lowering, one root per normalized query entry
+    -> Stage 1: Pass 1 per-computation candidates, Pass 2 sharing, panes, reuse
+    -> Stage 2: one physical candidate per materialization assignment
+    -> Stage 3: check, measure and select
+    -> PlanOutput
 ```
-
-The integration associates each lowered root with a caller-owned `Id` and its
-accuracy target for search; `Id` correlates results, not query semantics.
-See the [public library reference](../../develop_docs/library-api.md) for arguments.
-
-Then choose the operation matching the caller's responsibility:
 
 | Purpose | Operation | Result |
 |---|---|---|
-| Inspect candidates or let the backend choose | [Ranked view](#ranked-view), if ranking is useful | Per-target candidate lists and costs |
-| Ask Planner to choose logical computations | [Selection and DAG assembly](#selection-and-dag-assembly) | One selected Post-ASAP DAG root per query |
+| Plan a workload end to end | `asap_planner::e2e_plan` | `PlanOutput` |
+| Plan already-lowered roots and inspect every stage | `asap_aware_mapping::run_stage1_to_stage3` | `Stage1ToStage3Run`, whose `stage3_plan_selection` is the `Selection` |
+| Inspect a workload's stages as a document | `stage_pipeline` (devtools) | The stage document the [Stage Viewer](../../user_guide_docs/stage-viewer.md) shows |
 
-### Ranked view
-
-`CandidateLogicalASAPDAGs::cost_sorted` returns one `RankedTargetSubDAGCandidates` for each
-`TargetSubDAGCandidates` entry. Conceptually, it is the same target's
-alternatives in cost-model preference order where the model defines one
-(otherwise discovery order), with one displayed cost per alternative. It is
-a **view of one decision point**, not a complete DAG or a selected plan.
-
-The return type is `Vec<RankedTargetSubDAGCandidates<'_>>`; each element has this shape:
-
-```rust
-struct RankedTargetSubDAGCandidates<'a> {
-    target: &'a Rc<OperatorNode>,
-    consumer_count: usize,
-    candidates: Vec<&'a ReplacementSubDAG>,
-    costs: Vec<f64>, // costs[i] describes candidates[i]
-}
-```
-
-`consumer_count` counts references to this target in the workload. `costs`
-may contain `NaN` when the model has no numeric estimate; the ordering is not
-itself a deployment-cost certificate. This view is useful for debugging,
-explanation, or downstream optimization. Candidate presence does not imply
-physical deployability.
-
-### Selection and DAG assembly
-
-The input is `CandidateLogicalASAPDAGs` and a cost model. Call
-`CandidateLogicalASAPDAGs::global_selection(&cost_model)` once for the workload, then
-`GlobalSelection::assemble_selected_dag(root)` for each wanted query root.
-These are two public APIs, not one combined call: N roots require one selection
-and N assembly calls. Each successful assembly returns one DAG root; the caller
-collects them for the workload, with shared nodes where applicable.
-
-Selection chooses compatible alternatives across the workload. For example,
-if two queries can share a summary, their choices must agree on the shared
-computation. `assemble_selected_dag(root)` then connects the chosen alternatives
-into each query's DAG in memory, preserving shared nodes. Candidate search has
-already built candidate sub-DAGs; assembly connects the selected choices into
-the result for one query root.
-
-| Input → decisions → output (click a step for details) |
-|:---:|
-| **Input:** [CandidateLogicalASAPDAGs](asap-aware-plan-search.md) + cost model |
-| ↓ |
-| **Select:** [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) chooses compatible alternatives |
-| ↓ |
-| **Assemble:** [assemble_selected_dag(root)](../../develop_docs/library-api.md#api-definition-and-example) connects those choices for each query root |
-| ↓ |
-| **Output:** one selected logical [Post-ASAP DAG](../concepts/post-asap-ir.md) per query root |
-
-Each output DAG specifies the chosen operators, parameters, and accuracy
-guarantees. Its root is an `Rc<OperatorNode>` (the same IR as the input,
-with some nodes now ASAP operators) and carries no execution timing yet; the
-[API reference](../../develop_docs/library-api.md#api-definition-and-example)
-describes the function signatures and return handling.
-
-This path selects how to compute the query, not whether summary state is
-materialized.
-
----
+The integration associates each lowered root with a caller-owned `Id` and its
+workload entry (accuracy target, latency bound, recurrence); `Id` correlates
+results, not query semantics. See the
+[public library reference](../../develop_docs/library-api.md) for arguments.
 
 ## Replanning (future support)
 
@@ -435,5 +319,5 @@ responsibilities.
 * [Pre-ASAP IR](../concepts/pre-asap-ir.md)
 * [Post-ASAP IR](../concepts/post-asap-ir.md)
 * [Planner/runtime responsibilities](planner-runtime-contract.md)
-* [Plan search internals](asap-aware-plan-search.md)
+* [Planning stages design](../proposals/planner-layering.md)
 * [Public library reference](../../develop_docs/library-api.md)
