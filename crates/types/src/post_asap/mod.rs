@@ -15,8 +15,8 @@
 //!
 //! [`sketch::GroupingStrategy`] is a second, orthogonal axis: how many
 //! physical instances of a summary exist across a grouped aggregate's `by`
-//! subpopulations (per-subpopulation vs. one shared Hydra instance — see
-//! `asap_aware_mapping::grouping`). It rides on `ASAPOp::SummaryAgg` and on
+//! subpopulations (per-subpopulation vs. one shared Hydra instance; the
+//! planner does not offer Hydra yet, #703). It rides on `ASAPOp::SummaryAgg` and on
 //! sketch-valued edge types.
 //!
 //! The rest: what each family can do ([`family_capability`]), accuracy
@@ -34,8 +34,8 @@ pub mod summary_window;
 
 pub use crate::pre_asap::schema::{Field, FieldDataType, Schema};
 pub use execution_data_state::{
-    lift_plain, DataPrimitive, ExactOperationSchemaError, ExecutionDataState,
-    ExecutionDataStateError, ExecutionTiming, Materialization, Medium,
+    DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming, Materialization,
+    Medium,
 };
 pub use family_capability::{FamilyCapability, MergeInputRule, MergedError, StatisticKind};
 pub use guarantee::{

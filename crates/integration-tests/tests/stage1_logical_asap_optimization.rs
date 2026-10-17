@@ -652,6 +652,39 @@ async fn sql_avg_counts_its_own_input() {
     assert_eq!(execute(&root, &rows), want);
 }
 
+/// SQL `avg` as `sum` and `count` keeps an explicit output alias.
+#[tokio::test]
+async fn sql_avg_keeps_its_explicit_output_name() {
+    let (_, root) =
+        avg_as_sum_and_count(&avg_table(), "SELECT avg(value) AS avg_latency FROM t").await;
+    assert_eq!(root.schema.fields.last().unwrap().name, "avg_latency");
+}
+
+/// SQL `avg` of a non-null Int64 column as `sum` and `count` keeps the exact plan's Float64 columns.
+#[tokio::test]
+async fn sql_avg_of_an_int64_column_keeps_the_exact_columns() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain("k", DataType::Utf8, true),
+            Field::plain("n", DataType::Int64, false),
+        ]),
+    );
+    let query = "SELECT k, avg(n) FROM t GROUP BY k";
+    let (exact, root) = avg_as_sum_and_count(&catalog, query).await;
+    assert_eq!(
+        root.schema.fields.last().unwrap().plain_dtype(),
+        Some(&DataType::Float64)
+    );
+    let row = |k: &str, n: i64| vec![("k", Value::Utf8(k.into())), ("n", Value::Int64(n))];
+    let rows = vec![row("a", 1), row("a", 2), row("b", 4)];
+    let want = vec![
+        vec!["\"a\"".to_string(), "1.5".to_string()],
+        vec!["\"b\"".to_string(), "4".to_string()],
+    ];
+    assert_eq!(execute(&exact, &rows), want);
+}
+
 /// `count(*)` counts a non-null column, never a nullable one; executed, it
 /// counts the rows whose nullable column is NULL too.
 #[tokio::test]

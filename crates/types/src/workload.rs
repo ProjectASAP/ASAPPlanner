@@ -774,9 +774,34 @@ mod tests {
             with(-1.0, None).validate(),
             Err(WorkloadError::InvalidRate(-1.0))
         );
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(
+                    with(bad, None).validate(),
+                    Err(WorkloadError::InvalidRate(_))
+                ),
+                "{bad}"
+            );
+        }
         assert_eq!(
             with(1.0, Some(0)).validate(),
             Err(WorkloadError::ZeroSampleInterval)
+        );
+    }
+
+    /// A repeating query with a zero fixed interval is rejected.
+    #[test]
+    fn zero_repetition_interval_is_rejected() {
+        let mut workload = base_workload();
+        workload.repeating_queries = Some(vec![RepeatingEntry {
+            query: Query("dashboard".into()),
+            demand: RepeatedDemand::FixedInterval(RepetitionInterval(0)),
+            requirements: QueryRequirements::default(),
+            predictability: Predictability::Predictable { known_at: None },
+        }]);
+        assert_eq!(
+            workload.validate(),
+            Err(WorkloadError::ZeroRepetitionInterval)
         );
     }
 

@@ -348,4 +348,40 @@ mod tests {
             );
         }
     }
+
+    /// KLL `k` inverts the rank-error fit: ε = 0.01 → 269, ε = 0.05 → 52.
+    #[test]
+    fn accuracy_target_drives_kll_k() {
+        use crate::realization::default_size_params;
+        use asap_types::pre_asap::agg_intent::default_quantile;
+        let q = default_quantile(0.99);
+        assert_eq!(
+            default_size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01),
+            SketchParams::Kll {
+                k: 269,
+                failure_probability: None
+            }
+        );
+        assert_eq!(
+            default_size_params(SketchAlgorithm::Kll, &q, 0.05, 0.01),
+            SketchParams::Kll {
+                k: 52,
+                failure_probability: None
+            }
+        );
+    }
+
+    /// A zero ε saturates KLL `k` to the tightest buildable value.
+    #[test]
+    fn degenerate_epsilon_saturates_to_tightest_kll_params() {
+        use crate::realization::default_size_params;
+        use asap_types::pre_asap::agg_intent::default_quantile;
+        assert_eq!(
+            default_size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.0, 0.01),
+            SketchParams::Kll {
+                k: 26_602,
+                failure_probability: None
+            }
+        );
+    }
 }

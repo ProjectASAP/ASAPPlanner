@@ -2,8 +2,7 @@
 //!
 //! An [`OptimizationPass`] is the whole optimization stage behind one
 //! signature: pre-ASAP IR in, post-ASAP DAG out. The trait deliberately names
-//! none of this crate's two-phase vocabulary — no `CandidateLogicalASAPDAGs`, no
-//! `TargetSubDAGCandidates`, no `ReplacementStrategy` — so an algorithm with no
+//! none of the stages' candidate types, so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is
 //! one implementation, [`Stage1ToStage3Pass`]: the planning stages in order
@@ -30,7 +29,6 @@ use asap_types::workload::WorkloadError;
 use crate::accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
 };
-use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::deployment_capabilities::DeploymentCapabilities;
 use crate::per_computation_candidates::PerComputationCandidateError;
 use crate::stage3_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
@@ -41,7 +39,6 @@ pub use stage1_to_stage3::{
     Stage1Candidate, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
-static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<PlanSelectionSettings> =
@@ -55,15 +52,18 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 /// a built-in default, evidence about a particular deployment cannot.
 ///
 /// Plan selection reads `accuracy`, `evidence`, `plan_selection` and
-/// `deployment_capabilities`. It measures candidates with its own
-/// analytical model and compares them under `plan_selection`'s cost model,
-/// so [`Stage1ToStage3Pass`] does not read `cost`. Stage 1 and Stage 2 read
-/// `deployment_capabilities` too.
+/// `deployment_capabilities`: it checks each candidate's guarantee with
+/// `accuracy` and `evidence`, measures it with its own analytical model and
+/// compares the candidates under `plan_selection`'s cost model. Stage 1 and
+/// Stage 2 read `deployment_capabilities` too.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
-    pub cost: &'a dyn CostModel,
+    /// Decides whether a candidate's accuracy guarantee meets its query's
+    /// target; built-in [`DefaultAccuracyModel`] by default.
     pub accuracy: &'a dyn AccuracyModel,
+    /// Deployment facts the guarantees need (operand domains, observed
+    /// guarantees); [`NoAccuracyEvidence`] by default.
     pub evidence: &'a dyn AccuracyEvidenceProvider,
     /// The deployment's plan selection settings: the cost model (default
     /// cost model 1 with illustrative unit costs), the resource speed and
@@ -77,13 +77,13 @@ pub struct PlanningModels<'a> {
 }
 
 impl<'a> PlanningModels<'a> {
+    /// These accuracy and evidence models with the default plan selection
+    /// settings.
     pub fn new(
-        cost: &'a dyn CostModel,
         accuracy: &'a dyn AccuracyModel,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
         Self {
-            cost,
             accuracy,
             evidence,
             plan_selection: &DEFAULT_PLAN_SELECTION,
@@ -94,17 +94,11 @@ impl<'a> PlanningModels<'a> {
     /// The built-in models.
     pub fn builtin() -> PlanningModels<'static> {
         PlanningModels {
-            cost: &DEFAULT_COST_MODEL,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
             plan_selection: &DEFAULT_PLAN_SELECTION,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
         }
-    }
-
-    pub fn with_cost(mut self, cost: &'a dyn CostModel) -> Self {
-        self.cost = cost;
-        self
     }
 
     pub fn with_accuracy(mut self, accuracy: &'a dyn AccuracyModel) -> Self {

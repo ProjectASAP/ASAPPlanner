@@ -140,11 +140,6 @@ pub(crate) fn without_agg(
     )
 }
 
-/// A per-entity (per-series) single-measure aggregate.
-pub(crate) fn agg_per_entity(intent: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    aggregate(Reduction::PerEntity, vec![intent], vec![], None, child)
-}
-
 pub(crate) fn filter(pred: ScalarExpr, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
     OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
         pred: Predicate(pred),
@@ -190,22 +185,6 @@ pub(crate) fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         &mut TimingMemo::new(),
     )
     .expect("at-ingestion materialization timings apply")
-}
-
-/// Time `root` under the default materialization assignment (which runs every
-/// data-state / population-contract check) and export it as a physical ASAP DAG.
-pub(crate) fn time_and_export(
-    root: &Rc<OperatorNode>,
-) -> Result<
-    asap_types::ir::physical_export::PhysicalASAPDAG,
-    asap_types::post_asap::execution_data_state::ExecutionDataStateError,
-> {
-    let timed = apply_materialization_timings(
-        root,
-        &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
-    )?;
-    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
 }
 
 /// The Count-Min summary of a Stage 1 candidate of `query`.

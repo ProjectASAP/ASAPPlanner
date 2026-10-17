@@ -12,11 +12,11 @@ const OPTIMIZATION_MODULES: &[&str] = &[
 
 /// The modules that price plans.
 const COST_MODULES: &[&str] = &[
-    "cost_model",
-    "recurrence",
     "analytical_cost",
+    "physical_handoff_cost",
     "physical_operator_statistics",
     "stage3_plan_selection",
+    "storage_io",
 ];
 
 /// The source lines outside `#[cfg(test)]` items and comments, numbered.
@@ -100,6 +100,9 @@ fn cost_imports(source: &str, forbidden: &[&str]) -> Vec<(usize, String)> {
 fn logical_and_physical_asap_optimization_import_no_cost_model() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let lib = std::fs::read_to_string(src.join("lib.rs")).unwrap();
+    for module in COST_MODULES {
+        assert!(src.join(format!("{module}.rs")).exists(), "{module}");
+    }
     let forbidden: Vec<&str> = COST_MODULES
         .iter()
         .copied()
@@ -128,20 +131,20 @@ fn logical_and_physical_asap_optimization_import_no_cost_model() {
 #[test]
 fn the_check_finds_cost_imports_outside_tests() {
     let source = "\
-// use crate::cost_model::CostModel;
+// use crate::stage3_plan_selection::CostModel;
 use crate::{
     accuracy::AccuracyModel,
-    DefaultCostModel,
+    ResourceUnitCost,
 };
 fn f() -> f64 {
     crate::analytical_cost::price()
 }
 #[cfg(test)]
 mod tests {
-    use crate::cost_model::CostModel;
+    use crate::stage3_plan_selection::CostModel;
 }
 ";
-    let lines: Vec<_> = cost_imports(source, &["DefaultCostModel"])
+    let lines: Vec<_> = cost_imports(source, &["ResourceUnitCost"])
         .into_iter()
         .map(|(number, _)| number)
         .collect();

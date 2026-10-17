@@ -1,62 +1,41 @@
-//! Function facts shared by value-operation propagation and accumulator realization.
-//! Runtime support remains a deployment decision in `CostModel`.
-use asap_types::post_asap::{CompositionOperator, ExactKind, ExactParams};
+//! The accuracy composition rule of each exact function applied to an
+//! approximate input, shared by Pass 1's guarantee composition and the
+//! accuracy algebra.
+use asap_types::post_asap::CompositionOperator;
 use asap_types::pre_asap::AggIntent;
 
-pub(crate) struct FunctionRules {
-    pub accuracy: CompositionOperator,
-    pub accumulator: Option<(ExactKind, ExactParams)>,
-}
-
-/// Unregistered functions have no approximate-input propagation rule.
-pub(crate) fn function_rules(intent: &AggIntent) -> Option<FunctionRules> {
-    let (accuracy, accumulator) = match intent {
-        AggIntent::Sum { .. } => (
-            CompositionOperator::ExactSum,
-            Some((ExactKind::Sum, ExactParams::Sum)),
-        ),
-        AggIntent::Min { .. } => (
-            CompositionOperator::ExactExtremum,
-            Some((ExactKind::Min, ExactParams::Min)),
-        ),
-        AggIntent::Max { .. } => (
-            CompositionOperator::ExactExtremum,
-            Some((ExactKind::Max, ExactParams::Max)),
-        ),
-        AggIntent::Avg { .. } => (CompositionOperator::ExactAverage, None),
-        AggIntent::Rate => (
-            CompositionOperator::CounterRate,
-            Some((ExactKind::Rate, ExactParams::Rate)),
-        ),
-        AggIntent::IRate => (
-            CompositionOperator::InstantCounterRate,
-            Some((ExactKind::IRate, ExactParams::IRate)),
-        ),
-        AggIntent::Increase => (
-            CompositionOperator::CounterIncrease,
-            Some((ExactKind::Increase, ExactParams::Increase)),
-        ),
+/// The composition operator that propagates an approximate input's guarantee
+/// through `intent`; `None` for a function with no registered rule over
+/// approximate input, whose callers must fail closed.
+pub(crate) fn approximate_input_composition(intent: &AggIntent) -> Option<CompositionOperator> {
+    Some(match intent {
+        AggIntent::Sum { .. } => CompositionOperator::ExactSum,
+        AggIntent::Min { .. } | AggIntent::Max { .. } => CompositionOperator::ExactExtremum,
+        AggIntent::Avg { .. } => CompositionOperator::ExactAverage,
+        AggIntent::Rate => CompositionOperator::CounterRate,
+        AggIntent::IRate => CompositionOperator::InstantCounterRate,
+        AggIntent::Increase => CompositionOperator::CounterIncrease,
         _ => return None,
-    };
-    Some(FunctionRules {
-        accuracy,
-        accumulator,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The maintained extrema state must encode the direction independently of query text.
+
     #[test]
-    fn minimum_and_maximum_have_distinct_accumulator_contracts() {
-        assert_ne!(
-            function_rules(&AggIntent::Min { col: None })
-                .unwrap()
-                .accumulator,
-            function_rules(&AggIntent::Max { col: None })
-                .unwrap()
-                .accumulator
+    fn counter_functions_have_distinct_definition_rules() {
+        assert_eq!(
+            approximate_input_composition(&AggIntent::Rate),
+            Some(CompositionOperator::CounterRate)
+        );
+        assert_eq!(
+            approximate_input_composition(&AggIntent::IRate),
+            Some(CompositionOperator::InstantCounterRate)
+        );
+        assert_eq!(
+            approximate_input_composition(&AggIntent::Increase),
+            Some(CompositionOperator::CounterIncrease)
         );
     }
 }

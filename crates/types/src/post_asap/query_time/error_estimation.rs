@@ -63,9 +63,7 @@
 //! issue #239.
 //!
 //! Integration point (2) — tighter *plan-time* sizing under an expected-case
-//! (non-adversarial) assumption — is wired for real, since it touches code
-//! that already exists: see
-//! `crates/asap-aware-mapping/src/implementation.rs::posterior_aware_size_params`.
+//! (non-adversarial) assumption — is not implemented in the planner stages.
 
 // ── Posterior (query-time) estimators ───────────────────────────────────────
 
@@ -477,7 +475,7 @@ mod tests {
     #[test]
     fn classic_cms_sizing_matches_implementation_rs_formula() {
         // Same worked example as
-        // `asap-aware-mapping::replacement::tests::epsilon_delta_sizes_cms_depth`
+        // `asap-aware-mapping::accuracy::estimators::cms` sizing
         // (eps=0.001, delta=0.001 ⇒ width=2719, depth=7), pinned here too so
         // the two independent (layering-forced) reimplementations can't
         // silently drift apart undetected.

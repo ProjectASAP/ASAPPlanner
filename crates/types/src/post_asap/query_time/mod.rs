@@ -19,18 +19,9 @@
 //! this crate's. Nothing in `asap-types` or `asap-aware-mapping` calls
 //! into this module today; it is a library waiting for a runtime that
 //! doesn't exist yet in this workspace (see [`error_estimation`]'s own
-//! docs for exactly what's blocked and why).
-//!
-//! Contrast with `asap-aware-mapping::replacement::posterior_aware_size_params`
-//! (issue #239, PR #248): that function is real, wired *planning*-time
-//! code — it lives in the planning crate, not here, and does not call
-//! into this module. It borrows the same underlying intuition (a
-//! non-adversarial workload can use a smaller sketch than the worst case)
-//! but as an explicit, caller-supplied planning-time assumption, not a
-//! query-time measurement — the two are independent by construction. See
-//! issue #250 for the still-unimplemented idea of actually connecting
-//! them: recording this module's query-time observations over time and
-//! feeding them into a future replan.
+//! docs for exactly what's blocked and why). See issue #250 for the
+//! still-unimplemented idea of recording this module's query-time
+//! observations over time and feeding them into a future replan.
 
 pub mod error_estimation;
 
