@@ -17,7 +17,7 @@ use asap_integration_tests::planning::logical_candidates;
 use asap_integration_tests::post_asap::{at_ingestion, at_ingestion_post_asap_dag, post_asap_dag};
 use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::post_asap::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Schema,
     SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
@@ -159,6 +159,34 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
             );
         };
         assert!(matches!(child.asap(), Some(ASAPOp::SummaryAgg { .. })));
+    }
+}
+
+/// A vector-scalar division keeps its operand order in every Stage 1
+/// logical candidate: `rate(a[1m]) / 2` divides the rate by 2, and
+/// `2 / rate(a[1m])` divides 2 by the rate.
+#[test]
+fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
+    for (query, scalar_left) in [("rate(a[1m]) / 2", false), ("2 / rate(a[1m])", true)] {
+        let pre = lower_promql(query, AccuracyTarget::exact()).expect("lowering failed");
+        let candidates = logical_candidates(pre, AccuracyTarget::exact());
+        assert!(!candidates.is_empty(), "{query}");
+        for root in candidates {
+            let Some(NonASAPOp::Project { cols, .. }) = root.non_asap() else {
+                panic!("expected Project for {query}, got {:?}", root.operator)
+            };
+            let ScalarExpr::Arithmetic { left, right, .. } = &cols[1].expr else {
+                panic!("expected arithmetic for {query}, got {:?}", cols[1].expr)
+            };
+            let (scalar, sample) = if scalar_left {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            assert_eq!(**scalar, ScalarExpr::literal_f64(2.0), "{query}");
+            assert_eq!(**sample, ScalarExpr::Column(1), "{query}");
+            assert!(root.schema.has_promql_series_identity(), "{query}");
+        }
     }
 }
 
