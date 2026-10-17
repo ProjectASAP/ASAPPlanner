@@ -1,5 +1,11 @@
 # Candidate Plan Search
 
+> **Status: historical.** This document describes the legacy replacement
+> search (strategies, `CandidateLogicalASAPDAGs` as a Rust type, cost-model
+> ranking and `global_selection`), which has been removed. The planner now
+> plans through the stages of the [planning stages design](../proposals/planner-layering.md). The
+> document is kept as a record of the design.
+
 ASAP-aware mapping should consider all alternatives holistically rather than optimize prematurely.
 
 Suppose a plan contains several independent-looking decision points:
@@ -91,6 +97,6 @@ order.
 
 The [code architecture](../../develop_docs/asap-aware-mapping-architecture.md)
 describes current discovery and registry behavior; the
-[library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
+[library guide](../../develop_docs/library-api.md)
 shows selection and its evidence boundaries. Broader optimization dimensions are
 tracked in the [proposal](../proposals/asap-aware-mapping/optimizations.md).

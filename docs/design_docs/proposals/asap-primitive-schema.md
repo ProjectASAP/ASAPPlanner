@@ -93,7 +93,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; exact accumulators come from `exact_realization` there (`Count`) and from `function_rules.rs` (the others); the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-post_asapsketchrs-post_asapmaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `per_computation_candidates.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-post_asapsketchrs-post_asapmaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint panes combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
@@ -870,7 +870,7 @@ OperatorNode                                         §6.1
 │     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
 │           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
 │                 └── category, algorithm, params    §6.4
-├── guarantee: ResultGuarantee                       §6.5  (accuracy of an evaluation)
+├── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 └── coverage() → SummaryCoverage                     §6.6
       └── definition: OperatorNode   (again a node, so the same structure)
 ```
@@ -904,7 +904,7 @@ pub struct OperatorNode {
     pub schema: Schema,
     /// The accuracy statement of the output, once known. `None` does not
     /// mean exact.
-    pub guarantee: Option<ResultGuarantee>,
+    pub guarantee: Option<AccuracyGuarantee>,
     /// When the node runs: `IngestionTime` or `QueryTime`. `None` until
     /// planning assigns it.
     pub timing: Option<ExecutionTiming>,
@@ -1325,7 +1325,7 @@ pub struct CurrentSeriesInput {
 }
 ```
 
-A finalized value's accuracy statement is `ResultGuarantee` (`post_asap/guarantee.rs`): `metric` (which error is measured, e.g. rank error), `bound` (the error bound), `failure_probability` (the chance the bound does not hold) and `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
+A finalized value's accuracy statement is `AccuracyGuarantee` (`post_asap/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
 ### 6.6 Summary coverage (`crates/types/src/ir/summary_coverage.rs`)
 

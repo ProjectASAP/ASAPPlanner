@@ -1,5 +1,11 @@
 # Evidence-dependent candidates
 
+> **Status: historical.** This document describes the legacy replacement
+> search (strategies, `CandidateLogicalASAPDAGs` as a Rust type, cost-model
+> ranking and `global_selection`), which has been removed. The planner now
+> plans through the stages of the [planning stages design](../proposals/planner-layering.md). The
+> document is kept as a record of the design.
+
 Audience: ASAPPlanner library integrators, especially ASAPQuery-backend.
 
 `CandidateLogicalASAPDAGs` is a space of constructible logical alternatives, not a list of
@@ -10,7 +16,7 @@ not turn an unknown guarantee into a satisfied accuracy requirement.
 ## Candidate state
 
 Here, **certified for a target** means Planner has a fully known
-`ResultGuarantee` for the candidate and `AccuracyModel::satisfies(guarantee,
+`AccuracyGuarantee` for the candidate and `AccuracyModel::satisfies(guarantee,
 target)` returns `true`. **Uncertified** means Planner cannot make that claim:
 the guarantee is absent, contains unknown terms, or is known not to meet the
 target. An uncertified summary may still be a well-formed logical candidate;
@@ -19,13 +25,13 @@ The exact path (the pre-ASAP sub-DAG kept by `retain_exact`) has an exact guaran
 
 | State | Planner representation | Consequence / next step |
 |---|---|---|
-| Known guarantee | `ResultGuarantee` with evaluable bound and failure probability | Planner checks whether the guarantee satisfies the query's accuracy target. If this candidate is selected, the backend checks whether its implementation can realize the selected summary; it does not re-decide the accuracy target. |
+| Known guarantee | `AccuracyGuarantee` with evaluable bound and failure probability | Planner checks whether the guarantee satisfies the query's accuracy target. If this candidate is selected, the backend checks whether its implementation can realize the selected summary; it does not re-decide the accuracy target. |
 | Missing accuracy/domain evidence | Symbolic `BoundExpr::Unknown` or `ProbabilityExpr::Unknown`, or `guarantee: None` on a constructible summary | Inspect `ReplacementSubDAG::has_missing_accuracy_evidence()`, obtain applicable evidence or apply explicit policy; do not claim certification. |
 | Missing cost | `CostModel::candidate_cost()` returns `None` for a `ReplacementSubDAG` (including a non-finite or negative legacy estimate) | Keep that logical summary/rewrite candidate in `CandidateLogicalASAPDAGs` for inspection; provide a comparable cost before selecting it by cost. This does not make it a deployable physical plan. |
 | Unknown runtime support | `ReplacementSubDAG::runtime_support_evidence(model)` returns `None` | Candidate remains visible; bind a concrete implementation and confirm support before deployment. |
 | Known invalid evidence or impossible semantics | No candidate; where supported, a `RejectedCandidate` records the error | Do not deploy. |
 
-`ResultGuarantee::has_unknown()` detects symbolic gaps. The candidate-level
+`AccuracyGuarantee::has_unknown()` detects symbolic gaps. The candidate-level
 helper also covers summaries with no guarantee model, including DDSketch-ratio
 `None`. A root `AccuracyTarget` rejects a fully known guarantee that misses
 the target, but does not prune a candidate solely because a required statistic

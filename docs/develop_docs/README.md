@@ -10,11 +10,14 @@ formats, evidence, and verification workflows.
 - [Pre-ASAP IR reference](pre-asap-ir.md)
 - [Post-ASAP IR](../design_docs/concepts/post-asap-ir.md)
 - [Accuracy implementation companion](end-to-end-accuracy-guarantees.md)
-- [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md)
 - [Offline sketch evidence](offline-sketch-evidence.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)
 - [Physical handoff cost references](physical-handoff-costs.md), [storage operations](storage-operation-costs.md)
-- [Replacement explanations](replacement-explanations.md)
 - [Physical compile coverage for deployment computation](physical-compile-coverage.md)
 
-- [Planner vocabulary migration (#427)](planner-vocabulary-migration.md)
+Historical records of removed APIs:
+
+- [Planner vocabulary migration](planner-vocabulary-migration.md)
+- [Target candidate API migration](target-candidate-api-migration.md)
+- [Replacement explanations](replacement-explanations.md)
+- [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md)

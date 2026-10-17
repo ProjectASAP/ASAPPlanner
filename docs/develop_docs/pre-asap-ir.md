@@ -32,8 +32,9 @@ pub struct OperatorNode {
     pub operator: Operator,                   // NonASAP(NonASAPOp) | ASAP(ASAPOp)
     pub result_kind: OperatorResultKind,      // Relation | InstantVector | RangeVector | State | Scalar
     pub schema: Schema,                       // output schema, derived at construction
-    pub guarantee: Option<ResultGuarantee>,   // None until accuracy assessment establishes one
+    pub guarantee: Option<AccuracyGuarantee>, // None until accuracy assessment establishes one
     pub timing: Option<ExecutionTiming>,      // None until a materialization assignment is applied
+    pub materialization: Materialization,     // NotMaterialized until Stage 2 assigns one
 }
 ```
 
@@ -49,6 +50,9 @@ pub struct OperatorNode {
 - `timing` is `None` in every front-end DAG and every candidate. It is written by
   `ir::timing::apply_materialization_timings` (see the Post-ASAP IR document); export rejects an
   untimed node.
+- `materialization` is `NotMaterialized` in every front-end DAG. Stage 2 writes it, with
+  `timing`, through `ir::timing::apply_materialization_timings` from its materialization
+  assignment.
 
 `OperatorNode::children()` returns the operator's inputs in field order followed by the
 operator nodes its scalar expressions read (see "Scalar expressions"). Every DAG traversal —
@@ -295,7 +299,7 @@ first, reporting single-column cardinality as tuple cardinality.
 Realization is the single-column one with a wider item: a tuple becomes a
 `SummaryInputExpr::Tuple`, which the distinct-count sketches (HLL, KMV)
 hash as one value. UnivMon is withheld from a tuple — it estimates frequency
-moments over a single value stream. At `AccuracyTarget::Exact` the node stays a
+moments over a single value stream. At `AccuracyTarget::exact()` the node stays a
 logical pass-through at any arity. Each SQL argument must be a bare column,
 qualifier preserved so a tuple over a join resolves to the correct side; an
 expression argument is rejected rather than reduced over a probe column.

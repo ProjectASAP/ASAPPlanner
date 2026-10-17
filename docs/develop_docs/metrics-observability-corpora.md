@@ -42,30 +42,25 @@ o11y-bench, and awesome-prometheus-alerts. They are not duplicated here.
   formats and writes deterministic fixtures; it does not parse or judge
   PromQL.
 - `metrics_observability.rs` is the executable corpus test. It runs the
-  PromQL parser/lowerer and the sketch-only post-ASAP replacement pass, and
-  prints the current measurements.
+  PromQL parser/lowerer and Stage 1 (logical ASAP-aware optimization) on each
+  query, and prints the current measurements.
 - `summarize_misses.py` is an optional report formatter. It consumes the
   test's opt-in `POST_ASAP_MISS` lines and groups misses by coarse root shape.
 
 The test prints totals, parse errors, lowering errors, pre-ASAP successes,
 post-ASAP candidates, unchanged queries, and post-ASAP errors. `Pre-ASAP` means
 that parsing and lowering produced an `OperatorNode` DAG. `Post-ASAP candidate`
-means the isolated `ASAPStrategies` produced a candidate that contains
-an ASAP operator (`contains_asap()`). `Unchanged` is a successful pre-ASAP query
-for which that strategy returned only the kept pre-ASAP sub-DAG (`retain_exact`).
+means that some Stage 1 candidate of the query, run alone through
+`run_stage1_to_stage3` with the built-in models, contains an ASAP operator
+(`contains_asap()`). `Unchanged` is a successful pre-ASAP query whose Stage 1
+candidates are all exact.
 
-## Strategies
+## What is measured
 
-The corpus measurement deliberately uses only
-`ASAPStrategies::default_cost_model().replacements(...)` on each
-query root. It does not measure workload-wide search or the other default
-strategies.
-
-The default workload search currently registers `ASAPStrategies`,
-`HydraGroupingStrategy`, `SharedSubDAGStrategy`, and
-`AvgToSumOverCountStrategy`. Workload context can additionally contribute
-`RollupStrategy` and `AccuracyReconciliationStrategy`. This baseline is
-therefore a sketch-only comparison point.
+Each query is planned alone, with an approximate target (ε = 0.01) on
+lowering and no data facts, so the measurement shows which queries Pass 1
+and Pass 2 can give a summary candidate. It does not measure sharing across
+queries or which plan Stage 3 selects.
 
 ## Alerts
 

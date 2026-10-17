@@ -2,7 +2,9 @@
 
 > Status: implemented model with explicit support limits. The
 > [analytical estimator](../../../../crates/asap-aware-mapping/src/analytical_cost.rs)
-> and physical-plan adapter implement supported evidenced comparisons.
+> is what Stage 3 measures resource usage with. The physical-plan adapter and
+> the legacy `CostModel` described below have been removed; Stage 3's cost
+> models 1–3 replace them.
 > Unsupported operators, arrival modes and missing evidence remain unavailable;
 > proposed extensions are not implied by the implemented formulas.
 
@@ -17,8 +19,8 @@ plans. These are separate concerns:
   evidence to estimate CPU work, peak memory, and source/disk I/O.
 
 The physical-resource estimator itself is independent of the arrival mode.
-One planner adapter currently lowers work into it: `PhysicalPlanCostModel`
-compares complete at-rest plans. Continuously-ingesting, `Mixed` and `Unknown`
+One planner adapter lowered work into it before it was removed:
+`PhysicalPlanCostModel` compared complete at-rest plans. Continuously-ingesting, `Mixed` and `Unknown`
 comparisons are unavailable; costing summary maintenance over arriving data
 belongs to Stage 2 materialization (#509). Evidence from one arrival mode must
 not be reused for another.
@@ -208,28 +210,28 @@ parameters, memory, and calibration determine the winner.
 ## Canonical workload and evidence sources
 
 The cost model does not define a second workload schema. It consumes the
-normalized workload, lowered query IR, and freshness-aware statistics:
+normalized workload, lowered query IR, and declared statistics:
 
 | Cost concept | Canonical source |
 |---|---|
-| Source row cardinality | Fresh `DataWorkload.input_cardinality: Evidence<u64>`. |
-| Arrival and update rate | `DataWorkload.arrival` and `ingestion_rate`. |
+| Source row cardinality | `DataWorkload.sources[source].series_count`. |
+| Arrival and update rate | `DataWorkload.arrival` and its `rows_per_second`. |
 | Query demand | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. |
 | Event-time range | The query text (its range and offset). |
 | Accuracy and latency requirements | `QueryWorkloadEntry.requirements`. |
 | Operator shape, grouping keys, and constants such as Top-K limit and offset | Lowered query and selected physical plan. |
 
 `DataWorkload` does define whether input is streaming: its `arrival` field is
-`AtRest`, `ContinuouslyIngesting`, `Mixed`, or `Unknown`, and a continuous
-arrival rate comes from fresh `ingestion_rate` evidence. These facts describe
+`AtRest`, `Ingesting`, `Mixed`, or `Unknown`, and the arriving variants
+carry the arrival rate as `rows_per_second`. These facts describe
 how source data arrives. They do not choose materialization or a window framework:
 `Incremental` describes how a selected summary state is updated, while
 tumbling, sliding, and exponential histogram describe how that state is
 organized over time.
 
-Evidence is read through `Evidence<T>::value_at(planning_time)`. Stale,
-future, or improperly time-bounded evidence remains unknown. Costing follows
-the same freshness rule as accuracy checking.
+Every data-workload fact is declared. The planner has no clock, so the
+caller drops facts that no longer hold before planning; an undeclared fact
+remains unknown. Costing follows the same rule as accuracy checking.
 
 The current workload schema does not yet contain every physical statistic.
 The missing facts have explicit ownership:
@@ -308,7 +310,7 @@ It is not an independent workload axis. A repeated rate without a horizon
 cannot produce a finite total cost.
 
 An at-rest estimate must not be reused for `unknown`, `mixed`, or
-`continuously_ingesting` data. Callers fail closed instead of pretending that
+`ingesting` data. Callers fail closed instead of pretending that
 incremental updates are a one-time snapshot build.
 
 The at-rest summary alternative scans the selected source snapshot once and
@@ -795,8 +797,8 @@ windows, nested aggregates, Top-K, and shared sub-DAGs therefore use the same
 estimation path. The generic query lowerer recursively maps the supported raw
 query operators into that representation.
 
-`PhysicalPlanCostModel` is the final-selection adapter. For every
-candidate it obtains one canonical `ComparisonScope`, recursively lowers the
+`PhysicalPlanCostModel` was the final-selection adapter (now removed). For every
+candidate it obtained one canonical `ComparisonScope`, recursively lowers the
 actual raw target, and then lowers a logical rewrite or requests the fully
 bound physical DAG for a `SummaryExpr` candidate. The deployment implements
 `PlannerPhysicalPlanProvider`: query-node evidence is consumed atomically by
@@ -839,8 +841,8 @@ Cost evidence cannot replace accuracy evidence. Examples include:
 
 - approximate Top-K requires a lower bound for the kth selected item, an
   upper bound for excluded items, and their union-bounded failure probability;
-- distribution-sensitive sizing or error propagation consumes fresh
-  `DataWorkload.distribution` evidence;
+- distribution-sensitive sizing or error propagation needs distribution
+  evidence, which `DataWorkload` does not carry;
 - a shared sketch layout requires a proven composition bound.
 
 Window candidates therefore contain both physical-resource evidence and a
@@ -866,7 +868,7 @@ EH Universal/GSum, arbitrary sub-window:
 Here `suffix_rows` is the cardinality from the query's left endpoint through
 the maintained window's right endpoint, and `query_rows` is the requested
 sub-window cardinality. Both must be positive and `suffix_rows >= query_rows`.
-The failure probability is carried separately in `ResultGuarantee`. The EH+KLL
+The failure probability is carried separately in `AccuracyGuarantee`. The EH+KLL
 rule is accepted only for a KLL summary; the current Universal/GSum rule is
 accepted only for exact `Count` or `Sum` accumulator states. An EH assignment
 with an exact marker, a mismatched family, invalid parameters, or an unregistered
@@ -909,7 +911,7 @@ The intended end-to-end selection pipeline is:
 6. applies calibration and ranks candidates by ascending cost.
 
 The query lowerer and physical estimator cover the supported raw-query shapes
-listed above. `PhysicalPlanCostModel` executes this pipeline for every
+listed above. `PhysicalPlanCostModel`, now removed, executed this pipeline for every
 candidate supplied to `CandidateLogicalASAPDAGs::global_selection`. Logical rewrites are
 lowered recursively. Summary candidates participate only after the deployment
 has bound their complete `SummaryExpr` DAG; there is no optimistic generic

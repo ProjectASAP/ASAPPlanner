@@ -1,8 +1,8 @@
 # Storage operation estimates
 
-The physical-plan ranking adapter accepts an optional `StorageIoProfile` in
-its immutable `PhysicalEvidenceSnapshot`. `dag_export --planner-cost-json`
-accepts the same profile in the document's top-level `storage_io` field.
+The `StorageIoProfile` estimator is kept in `storage_io`, but its consumer,
+the legacy physical-plan ranking adapter and its `PhysicalEvidenceSnapshot`,
+has been removed. No planning stage or devtool reads the profile yet.
 Omitting the profile preserves the existing CPU/memory/scan-byte objective;
 operation counts are unestimated, not inferred to be zero.
 
@@ -84,5 +84,4 @@ Verification:
 ```sh
 cargo test -p asap-aware-mapping --test storage_io
 cargo test -p asap-aware-mapping --lib storage_io
-cargo test -p asap-devtools --bin dag_export storage_requests_export_and_change_plan_selection
 ```

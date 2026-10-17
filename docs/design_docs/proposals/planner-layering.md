@@ -149,7 +149,7 @@ ASAPPlanner relies on the assumptions below.
 
 ### ASAPPlanner System Overview: Planning Stages
 
-ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
+ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L384) and the deployment's
 inputs (TODO: define this data structure, issue [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how it is computed, and which plan is best. The deployment only supplies data and query inputs and
 executes the plan: it provides its empirical cost model, empirical accuracy
 model and capabilities, but never optimize queries.
@@ -541,6 +541,8 @@ their overlapping windows.
 | Identical-expression rule | The input and computation semantics are identical. | One common computation node serving multiple consumers. |
 | Summary-capability rule | The computations have the same summary input data and the same window, and one summary supports all requested computations and their accuracy requirements. | One summary build node feeding several estimation nodes, e.g. UnivMon → distinct count, entropy, L2 norm. |
 | Window-composition rule | The computations have the same summary input data, and one window summary can answer the requested windows within their accuracy requirements. | One window summary feeding per-query merge (where needed) and estimation nodes, e.g. a sliding-window or tumbling-window KLL, or an Exponential Histogram with a KLL per EH bucket. |
+| Rollup rule | A coarse exact accumulator (`sum`, `min`, `max`) reads the same rows as a finer exact accumulator the workload already computes, grouped by a superset of its keys. | The finer accumulator's finalized values feeding an exact accumulator grouped by the coarse keys, e.g. `sum by (job)` from `sum by (job, instance)`. |
+| Exact top-k reuse rule | Exact top-k computations read the same input and partition with different `k`. | One ranking (`Limit(k_max)` over `Sort`) that each top-k reads its first `k` rows from. |
 
 The rules compare computations by their **summary input data**: what a summary for
 that computation would ingest, namely the data source, the filters, and the key
@@ -775,6 +777,16 @@ the `DataWorkload`. Typical outcomes:
 
 A shared summary is materialized once for all its consumers. See Example 4.
 
+The planner implements a subset of these options today. Stage 2 enumerates
+materialization only for summary builds (`SummaryAgg` and `PaneChain`); each
+gets `NotMaterialized`, `MatAtIngestion(Memory)` when it is eligible to run
+at ingestion time, and `MatAtQuery(Memory)` when two or more queries read
+it. A `MatAtQuery` state is reused within one evaluation only. When the
+deployment's capabilities declare `query_time_results_retained`, a
+tumbling-pane chain that builds exactly one new pane per evaluation also gets
+`MatAtQueryKeptAcrossEvaluations(Memory)`: the panes built at query time are
+kept for the next evaluations. Nothing is placed on disk yet.
+
 #### Physical operator implementation
 
 Physical operator implementation converts every node to physical operators, for
@@ -885,6 +897,18 @@ which is what lets one shared summary beat several cheaper independent ones:
 the cost of a shared summary is estimated once, with the demand of all its
 consumers.
 
+Selection first measures each valid candidate's resource usage, with no
+prices (`ResourceUsage`: CPU operations and scanned bytes per second, average
+and peak memory, disk, peak CPU cores and each query's latency). The
+deployment's cost model (`CostModel`, in `PlanSelectionSettings`) then turns
+usage into a choice:
+
+| Cost model | Deployment | How the plan is chosen |
+|---|---|---|
+| Cost model 1, `UsageOverTime(ResourceUnitCost)` (default) | Pay-as-you-go | Unit cost × usage per second; the cheapest wins |
+| Cost model 2, `ProvisionedCapacity(ResourceUnitCost)` | Pays for provisioned capacity | Unit cost × peak memory, peak CPU cores and disk; the cheapest wins |
+| Cost model 3, `ClusterCapacity(ClusterLimits)` | Its own cluster | No prices: a candidate over the cluster's memory, disk or (optionally) cores is invalid; the objective `LowestLatency`, `LeastMemory` or `ParetoFront` chooses among the rest |
+
 ### 4. Execution
 
 Execution runs outside ASAPPlanner. The deployment runs the selected plan as
@@ -902,7 +926,8 @@ offset). Each query reads the event-time window [`as_of` − `lookback`, `as_of`
 `as_of` is the window's end; `lookback` is its length. An
 `as_of` of "evaluation time" means no offset: the window ends whenever the
 query runs, so it moves forward with each evaluation. A fixed `as_of`, such as
-T − 1 y, pins the window to a historical interval. Approximate accuracy targets are `EpsilonDelta`: the answer's error
+T − 1 y, pins the window to a historical interval. An approximate accuracy target
+(`AccuracyTarget::max_error(ε).failure_probability(δ)`) means the answer's error
 is at most ε with probability at least 1 − δ.
 
 | Example | Shows |
@@ -922,10 +947,9 @@ Unless an example says otherwise, every example uses this data workload:
 
 | `DataWorkload` field | Meaning | Value |
 |---|---|---|
-| `arrival` | Whether the data is at rest, still arriving, or both | `continuously_ingesting` |
-| `data_ingestion_interval` | How often each series delivers one sample (the scrape interval in Prometheus). PromQL uses it as the look-back horizon of instant selectors. | 15 s |
-| `ingestion_rate` | Samples arriving per second across all series | about 66,667 samples/s |
-| `input_cardinality` | Number of distinct series (or keys) | 1,000,000 series |
+| `arrival` | Whether the data is at rest, still arriving (`Ingesting`), or both (`Mixed`); an arriving variant carries `rows_per_second`, the samples arriving per second across all sources | `Ingesting`, about 66,667 samples/s |
+| `sources[metric].sample_interval` | How often each series of the metric delivers one sample (the scrape interval in Prometheus). PromQL uses it as the look-back horizon of instant selectors. | 15 s |
+| `sources[metric].series_count` | Number of distinct series (or keys) of the metric | 1,000,000 series |
 
 With 1,000,000 series each sampled every 15 s, the ingestion rate is
 1,000,000 / 15 ≈ 66,667 samples/s.
@@ -973,7 +997,7 @@ flowchart TB
   exact Sum accumulator state. The per-`job` top-*k* has three options, so Q2
   has three options. The exact one keeps a per-series sum and sorts
   within each `job`, which is costly at one million Zipf-distributed series.
-  The `EpsilonDelta` target also admits a **Count-Min Sketch with a top-*k*
+  The approximate (ε, δ) target also admits a **Count-Min Sketch with a top-*k*
   heap per `job`**, and **Hydra over the whole `job` column**, where one sketch
   covers every (`job`, series) key and a top-*k* heap is still kept per `job`.
 
@@ -1192,8 +1216,9 @@ FROM (
 );
 ```
 
-The SQL frontend does not yet recognize the Q2 and Q3 forms as `Entropy` and
-`L2`. TODO: add this recognition to the per-language frontends.
+The SQL frontend recognizes Q2 as `Entropy` and Q3 as `L2` when Q3 casts its
+counts to DOUBLE (`CAST(c AS DOUBLE) * CAST(c AS DOUBLE)`): the Int64 `c * c`
+above can overflow, so only the Float64 product is recognized.
 
 | Query | Computation | Repeats | `lookback` | `as_of` | Accuracy requirement |
 |---|---|---|---|---|---|
@@ -1205,8 +1230,8 @@ The data workload differs from the shared one in two fields:
 
 | `DataWorkload` field | Value |
 |---|---|
-| `input_cardinality` | 10,000,000 distinct source IPs |
-| `data_ingestion_interval` | not needed for SQL |
+| `sources["flows"].series_count` | 10,000,000 distinct source IPs (groups of rows) |
+| `sources["flows"].sample_interval` | not needed for SQL |
 
 **Pass 1.** Rewrite rules recognize the three computations, and each gets its
 per-computation candidates from the Pass 1 table: exact, a specialized summary, or
@@ -1321,7 +1346,7 @@ all executed together at time T.
 | `quantile_over_time(0.99, latency_ms[1y] offset 2y)` | 1 y | T − 2 y |
 | `quantile_over_time(0.99, latency_ms[3y] offset 2y)` | 3 y | T − 2 y |
 
-The data workload is the shared one, except `arrival` is `mixed`: five years
+The data workload is the shared one, except `arrival` is `Mixed`: five years
 of data at rest, plus data still arriving.
 
 * **Pass 1.** Each `quantile_over_time` gets an exact candidate and a KLL over

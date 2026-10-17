@@ -17,7 +17,7 @@ whose expectation needs a feature that is not in the stack yet is
 |---|---|---|
 | Query-language frontends | 1 workload `LogicalDAG` | same |
 | Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 (3), each with 2 identical-expression candidates and 6 window-composition candidates (Q1's rate and Q2's option in six 10-s tumbling panes, alone or both, each also with a shared scan) = **27**. Sliding windows are not implemented. |
-| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, every sub-DAG `NotMaterialized` = **27** (the doc's Raw plans, with panes rebuilt at every refresh). Materialization enumeration is #604. |
+| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, plus materialization: each logical candidate with every sub-DAG `NotMaterialized` (27: the doc's Raw plans, with panes rebuilt at every refresh), and each pane chain also `MatAtIngestion(Memory)` (30 more) = **57** |
 | Plan selection | 1 plan | 1 plan |
 
 Every MVP candidate is one of the doc's candidates: in logical ASAP-aware
@@ -27,8 +27,9 @@ query; in physical ASAP-aware optimization, the one where both queries are
 
 ## Workload
 
-Shared data workload: `continuously_ingesting`, 15 s ingestion interval,
-1,000,000 series, about 66,667 samples/s, `zipf`, volume unknown.
+Shared data workload: `arrival` = `Ingesting { rows_per_second }`, about
+66,667 samples/s; `sources["http_requests_total"]` has `series_count` =
+1,000,000, `sample_interval` = 15 s and `metric_type` = counter.
 
 | Query | Repeats | `lookback` | `as_of` | Accuracy | Latency |
 |---|---|---|---|---|---|
@@ -75,11 +76,14 @@ Invariants:
 * Every candidate covers both queries.
 * Q1 never reaches a summary node.
 * Every target's exact option is its exact accumulator (`SummaryAgg` with an
-  exact family → `FinalizeExactAccumulator`): three per candidate.
+  exact family → `FinalizeExactAccumulator`): three per candidate with exact
+  Q2, two with a heap Q2 (Q1's rate and sum). Q2's heaps are whole-expression
+  heaps, Q2 top-*k*'s fused computation: they absorb its `sum_over_time`,
+  which is then not computed.
 * Q2's sketch families are exactly {`CmsWithHeap`, `CountSketchWithHeap`},
   each per subpopulation (job). Exact Q2 has no sketch.
 * Only the scan and range nodes may be shared between the queries. No summary
-  is shared. (Today nothing is shared.)
+  is shared.
 * Nothing is pruned: the heap sketches are admitted by ε = 0.01, δ = 0.001,
   and Q1's exact target admits only the exact option.
 
@@ -87,10 +91,8 @@ Ignored until their feature lands:
 
 * Hydra (`HydraCms` over all (job, series) keys, a heap per job) as a third
   Q2 summary (#605).
-* A shared-input variant of every Q2 option next to the independent one
-  (Pass 2 identical-expression rule, #588).
 
-## Physical ASAP-aware optimization: 27 candidates
+## Physical ASAP-aware optimization: 57 candidates
 
 The three whole-window candidates without a shared input:
 
@@ -105,56 +107,64 @@ accumulator, each finalized.
 
 Invariants:
 
-* Exactly one physical candidate per logical candidate, and none pruned.
-  `from_logical` is a bijection onto the logical ids, so no candidate is
-  dropped before plan selection.
+* Every logical candidate keeps its all-`NotMaterialized` physical candidate,
+  and none is pruned, so no candidate is dropped before plan selection. A
+  logical candidate with `n` pane chains has 2ⁿ physical candidates: each
+  chain `NotMaterialized` or `MatAtIngestion(Memory)` (ids `P<n>-m<k>`).
+  Only pane chains are placed at ingestion time; Q1's rate panes may be,
+  because continuously ingesting PromQL data is taken to arrive in time
+  order per series.
 * Each physical candidate keeps its logical Q2 option and input sharing.
 * Exact top-*k* is implemented as a sort followed by a limit: each job's
   series sorted by the ranked value, descending, then a `Project` that
   restores the logical root columns `[job, topk_10]`.
 * A summary Q2 is a sketch build node feeding an estimation node. There is no
   merge node, because there are no window summaries.
-* Every node is `NotMaterialized` and runs at query time.
+* In the whole-window candidates, every node is `NotMaterialized` and runs
+  at query time.
 
 Runtime capability check (not part of the doc): every candidate compiles in
-the physical planner. Ignored on two runtime gaps: CMS + heap needs a
-non-negative weight contract (#593), and the CountSketch + heap estimate's
-output is not the keyed-evaluation shape the physical planner builds (#579).
+the physical planner. Ignored on two runtime gaps: a candidate's CMS + heap
+weights are an open requirement that only the selected plan's confirmation
+answers, and the heaps' top-*k* estimate output is not the keyed-evaluation
+shape the physical planner builds (#579).
 
 ## Plan selection: 1 plan
 
 | Id | Outcome | Reason |
 |---|---|---|
-| P1 | selected | the only valid candidate |
-| P2 | invalid | Count-Min needs non-negative update weights, and `sum_over_time` weights are not proven non-negative |
-| P3 | invalid | a top-*k* output has no guarantee (a heap's bound is per item frequency, not top-*k* membership), and the deployment has no evidence that it meets the target |
+| P1 | selected | all exact, at 7.94 per second (cost model 1) |
+| P2, P3 | valid · costlier | the shared-scan and shared-scan-and-range candidates of P1; they tie with it up to rounding and lose on enumeration order |
+| P10 | invalid | Count-Min + heap: a top-*k* output has no guarantee (a heap's bound is per item frequency, not top-*k* membership), and the deployment has no evidence that it meets the target |
+| P19 | invalid | CountSketch + heap: the same reason |
+
+The 38 heap candidates (whole window or panes, rebuilt or maintained) are
+invalid for that reason; the other 18 exact candidates are valid but
+costlier. Count-Min's weights are the raw samples of `http_requests_total`,
+which the workload declares a counter, so they are proven non-negative;
+without that declaration Count-Min is also rejected on its weights. Exact
+panes rebuilt at every refresh cost 8.54, and maintaining a query's exact
+panes at ingestion time costs 12.94.
 
 Invariants:
 
 * One selected id. Every other candidate is listed once as rejected, with a
   reason, and marked invalid or valid but costlier.
 * Only valid candidates are priced. Each valid candidate's cost has one entry
-  per DAG node, and `total` is their sum. A materialized node is charged
+  per DAG node, and `cost_per_second` is their sum. A materialized node is charged
   once. A `NotMaterialized` node is charged once per consumer that reads it
   (its multiplier), where a consumer is a query or a materialized node and
-  a read stops at materialized nodes. Every node is `NotMaterialized` today;
+  a read stops at materialized nodes.
   `stage3_plan_selection_charging_helper_*` check the helper on a hand-built candidate with a
   materialized node.
 * The selected plan is no more expensive than any valid candidate.
 * The selected plan compiles in the physical planner.
+* For each Q2 option, the shared-input candidate costs no more than its
+  separate counterpart.
 
-Ignored until Pass 2 (#588): for each Q2 option, the shared-input candidate
-costs no more than its separate counterpart.
-
-When #588's shared-input candidates land, each Q2 option has two
-candidates. The tests already count only candidates whose queries share no
-node (Pass 1's 3 logical and 3 physical), pick a Q2 option's candidate by
-(option, no shared input), and check only that every invalid candidate is a
-heap one, not that exactly two are invalid, so they need no change.
-
-The doc's typical winners need window forms or materialization, and its
-"Raw with a shared input" needs Pass 2. Latency bounds are not checked, so
-whether an exact Q2 misses 100 ms is not tested.
+The doc's typical winners need summaries that plan selection can accept for
+Q2, or materialization that pays off; neither happens here. The latency
+check runs: P1's Q2 takes about 46 ms per evaluation, within its 100 ms.
 
 ## Where the doc and the planner differ
 
@@ -163,17 +173,19 @@ whether an exact Q2 misses 100 ms is not tested.
    comes in #605. The tests follow the planner.
 2. **Count-Min + heap is invalid.** The doc expects the accuracy model to
    judge it. Plan selection admits Count-Min only over weights proven
-   non-negative, which `sum_over_time` over an arbitrary metric is not
-   (counter declarations: #593).
+   non-negative; the workload declares `http_requests_total` a counter
+   (`sources[metric].metric_type`), which proves them. It still rejects the
+   candidate, because a top-*k* output has no guarantee (item 3).
 3. **No summary is selectable.** The doc expects a summary for Q2 to win in
    most deployments. A composed top-*k* estimate has no guarantee, so without
    deployment evidence every heap candidate is invalid and the exact plan is
    selected.
 4. **Physical ASAP-aware optimization is materialization in the doc's
    example.** Example 1 lists only window-form and materialization options.
-   The MVP reads "physical operator implementation" from the physical
-   ASAP-aware optimization section ("TopK as a sort followed by a limit"),
-   which gives one physical candidate per logical candidate.
+   The planner also reads "physical operator implementation" from the
+   physical ASAP-aware optimization section ("TopK as a sort followed by a
+   limit"), and enumerates materialization only for summary builds: each
+   pane chain is `NotMaterialized` or `MatAtIngestion(Memory)`.
 5. **Where exact top-*k* becomes sort + limit.** The Pass 1 diagram draws
    exact Q2 as "sort + limit 10 per job", but the frontend emits
    `Aggregate{[TopK]}` and the physical ASAP-aware optimization section calls
@@ -184,9 +196,14 @@ whether an exact Q2 misses 100 ms is not tested.
 7. **"Shared summary charged once"** does not apply literally: the doc says
    no summary is shared in Example 1. Plan selection charges a
    `NotMaterialized` node once per consuming query and a materialized one
-   once; the tests check that rule. A shared input therefore saves nothing
-   until it is materialized (#604).
+   once; the tests check that rule. Stage 2 materializes only summary
+   builds, so a shared input saves nothing here.
 8. **Latency.** The doc says an exact top 10 rebuilt at every refresh "may
-   miss" 100 ms. Plan selection does not check latency yet.
-9. **Accuracy of Count-Min heap merges** matters only with tumbling windows,
-   which are out of MVP scope.
+   miss" 100 ms. With the illustrative calibration it takes about 46 ms, so
+   the exact plan meets the bound.
+9. **Accuracy of Count-Min heap merges.** The heap panes are invalid like
+   their whole-window builds, so the approximate merge is never judged.
+10. **Input sharing in Pass 2.** The doc gives each Pass 1 candidate "2 input
+    choices (separate or shared)". Following Algorithm 2 line 31 (one
+    candidate per non-empty subset of the sharing options), the planner
+    gives 3: separate, shared scan, and shared scan and range selector.

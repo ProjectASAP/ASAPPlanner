@@ -1,5 +1,10 @@
 # Planner vocabulary migration (#427)
 
+> **Status: historical.** Most names in this table belonged to the legacy
+> replacement search, which has been removed. The planner now plans through
+> the stages described in [the architecture](asap-aware-mapping-architecture.md).
+> The table is kept as a record of the rename.
+
 This is a Rust source API rename. Update imports and call sites using the table
 below. Planning, ranking, schema resolution, cost arithmetic, and window coverage
 rules are unchanged. Old Rust names are removed rather than retained as a second

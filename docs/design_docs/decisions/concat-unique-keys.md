@@ -1,6 +1,7 @@
 # `Concat` and `unique_keys`: the discriminator override (issue #228)
 
-> Status: accepted decision for the implementation described here.
+> Status: accepted decision for the implementation described here. The
+> legacy `replacement.rs` and `explanation.rs` it mentions have been removed.
 
 > Historical: `crates/types/src/pre_asap/query_expr.rs` was removed in #543;
 > `Concat` is now `NonASAPOp::Concat` (`crates/types/src/ir/non_asap.rs`).

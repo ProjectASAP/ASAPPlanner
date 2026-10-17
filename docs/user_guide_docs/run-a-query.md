@@ -1,12 +1,11 @@
 # ASAPPlanner CLI user guide
 
-Use the `asap-devtools` commands to inspect query IR, export DAGs, and inspect
-corpus coverage. These commands do not deploy or execute a physical plan.
+Use the `asap-devtools` commands to plan a workload through the planning
+stages, inspect the logical DAG a query lowers into, and inspect corpus
+coverage. These commands do not deploy or execute a physical plan.
 
 To develop an application using the Rust library, start with
 [Library API: definitions, options, and examples](../develop_docs/library-api.md).
-That guide explains how to choose strategies and models, rank candidates, and
-assemble selected DAGs.
 
 ## Choose a command
 
@@ -15,19 +14,38 @@ tool on first use.
 
 | Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
 | --- | --- | --- |
-| `show_pre_asap_ir --sample-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
-| `show_post_asap_ir --sample-interval-ms 1000 queries.txt` | Same query file format | Prints all sketch-strategy Post-ASAP candidates using a fixed approximate target, in cost-model order |
-| `dag_export --sample-interval-ms 1000 --promql "<query>"` | One PromQL expression | Exports a query DAG for inspection |
-| `dag_export --sql "<query>"` | One SQL expression using the tool's catalog | Exports a query DAG for inspection |
+| `stage_pipeline --promql "<query>" --out plan.json` | One or more `--promql` / `--sql` queries, or `--example <name>` | Plans the workload through Stages 0–3 and writes the stage document the [Stage Viewer](stage-viewer.md) shows |
+| `convert_rqe_atomic_costs <rqe_atomic_costs.json> <out.json>` | sketch-bench's per-operation cost table | Writes the measured table `stage_pipeline --measured-operation-costs` reads; skipped rows are listed on stderr |
+| `show_logical_dag --sample-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints each query's logical DAG (Pre-ASAP IR) |
 | `analyze_corpora --corpora --sample-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
 | `variant_coverage --sample-interval-ms 1000` | Repository corpora | Reports Pre-ASAP IR variant coverage |
-| `sketch_coverage --sample-interval-ms 1000 --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports sketch/reuse opportunities among successfully lowered queries |
+| `sketch_coverage --sample-interval-ms 1000 --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports which summary candidates Pass 1 offers for each successfully lowered query |
 
-## Inspect a query from the command line
+## Plan a workload
 
-Run these commands from the repository root. They are inspection tools; their
-demonstration defaults are not the configuration of your downstream deployment.
+`stage_pipeline` runs the query-language frontends (Stage 0), logical
+ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
+(Stage 2) and plan selection (Stage 3), and writes one JSON document:
+
+```sh
+cargo run -p asap-devtools --bin stage_pipeline -- \
+    --promql "topk by (job) (10, sum_over_time(http_requests_total[1m]))" \
+    --epsilon 0.01 --delta 0.001 --out plan.json
+```
+
+The document's `stage3_plan_selection.selected` names the selected plan, and
+`stage3_plan_selection.costs` holds each shown plan's `cost_per_second`.
+For this query, `selected` is `P1`, the exact plan. The Count-Min top-k
+plan (`P2`) is rejected because the command declares no metric type, so the
+samples are not proven non-negative, and the CountSketch top-k plan (`P3`)
+because its output has no guarantee; `stage3_plan_selection.rejected` gives
+each reason.
+Open the document in the [Stage Viewer](stage-viewer.md) to see every
+stage, or run a built-in example of the design document, such as
+`--example planner-layering-1`. The Stage Viewer guide lists every option.
+
+## Inspect a query's logical DAG
 
 ### Create a query file
 
@@ -40,25 +58,29 @@ promql> quantile(0.99, rate(http_requests_total[5m]))
 sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 ```
 
-Blank lines and lines beginning with `#` are ignored. The two file/stdin tools
-accept `sql>` and `promql>`; MetricsQL is available through the library frontend.
+Blank lines and lines beginning with `#` are ignored. `show_logical_dag`
+accepts `sql>` and `promql>`; MetricsQL is available through the library frontend.
 SQL examples use the fixed catalog
 `metrics(ts: Timestamp, service: Utf8, region: Utf8, latency: Float64, bytes: Int64)`.
-For your own schema, provide a `SqlCatalog` through the library API.
+For your own schema, provide a `SqlCatalog` through the library API, or
+declare tables with `stage_pipeline --table`.
 
-### Show the Pre-ASAP IR
+### Show the logical DAG
 
 Run:
 
 ```sh
-cargo run -p asap-devtools --bin show_pre_asap_ir -- --sample-interval-ms 1000 queries.txt
+cargo run -p asap-devtools --bin show_logical_dag -- --sample-interval-ms 1000 queries.txt
 ```
 
 You can also provide the queries through stdin:
 
 ```sh
-cargo run -p asap-devtools --bin show_pre_asap_ir -- --sample-interval-ms 1000 < queries.txt
+cargo run -p asap-devtools --bin show_logical_dag -- --sample-interval-ms 1000 < queries.txt
 ```
+
+Each input line is followed by its debug IR or an `ERR:` message. The tool
+never picks a sketch: it shows what a query means, with exact operators only.
 
 To dump and compare every PromQL corpus, run:
 
@@ -78,61 +100,7 @@ The corresponding SQL corpus analysis is:
 cargo run -p asap-devtools --bin analyze_corpora -- --sql-corpora --out-dir artifacts/sql_pre_asap
 ```
 
-### Inspect Post-ASAP IR candidates
-
-Run:
-
-```sh
-cargo run -p asap-devtools --bin show_post_asap_ir -- --sample-interval-ms 1000 queries.txt
-```
-
-Or through stdin:
-
-```sh
-cargo run -p asap-devtools --bin show_post_asap_ir -- --sample-interval-ms 1000 < queries.txt
-```
-
-`show_post_asap_ir` uses an approximation target of ε = 0.01 and prints every
-available binding from the sketch strategy for each query, numbered in cost-model
-order. If no candidate is available, it prints the pre-ASAP fallback as candidate
-1. It does not show the complete ranked workload candidate set or choose a
-deployment. Its SQL examples use a fixed demonstration catalog, not
-your database schema. Use the
-[library workflow](../develop_docs/library-api.md) to retain workload alternatives
-and provide your own models.
-
-The default strategy generates DDSketch quantile-ratio candidates even when no
-input-domain evidence is available. Such candidates have `guarantee: None`:
-they do not claim a certified end-to-end accuracy bound. They also remain
-visible in a target-aware `CandidateLogicalASAPDAGs` so the downstream backend can decide
-whether to select them using its own evidence. Planner's automatic
-`global_selection` skips them; their presence alone does not show that they
-meet the requested target.
-
-Each input line is followed by its debug IR or an `ERR:` message. Pre-ASAP and
-Post-ASAP output use the same node format: Post-ASAP output adds summary nodes
-(state, readouts) and keeps the original exact operators wherever no summary
-replaces them. An
-approximate target permits approximation; it does not guarantee a legal or
-certified sketch. The tool prints plans, not query results.
-
 ## More inspection commands
-
-### Export a query DAG
-
-Export pre-ASAP IR for SQL or PromQL queries for use with the interactive DAG viewer:
-
-```sh
-cargo run -p asap-devtools --bin dag_export -- --sql "<SQL query>"
-```
-
-or:
-
-```sh
-cargo run -p asap-devtools --bin dag_export -- --sample-interval-ms 1000 --promql "<PromQL query>"
-```
-
-See [`tools/dag-viewer/RUNNING.md`](../../tools/dag-viewer/RUNNING.md) for instructions on running the DAG viewer.
 
 ### Check IR variant coverage
 
@@ -142,15 +110,15 @@ Parse the query corpora in the repository and report which pre-ASAP IR variants 
 cargo run -p asap-devtools --bin variant_coverage -- --sample-interval-ms 1000
 ```
 
-### Check sketch-replacement coverage
+### Check summary coverage
 
-Parse the same query corpora, lower them with an approximate `AccuracyTarget`, and report what fraction of each corpus's successfully-lowered queries got a genuine sketch alternative (`SketchApproximation`, e.g. KLL vs. DDSketch) and/or a cross-query common-subexpression-reuse candidate (`CommonSubexpressionReuse`):
+Parse the same query corpora, lower them with an approximate `AccuracyTarget`, run Pass 1 of logical ASAP-aware optimization over each query, and report which summary candidates Pass 1 offers, plus the fraction of each corpus's successfully lowered queries with at least one:
 
 ```sh
 cargo run -p asap-devtools --bin sketch_coverage -- --sample-interval-ms 1000 --epsilon 0.01
 ```
 
-`--epsilon` is optional (defaults to `0.01`). See the binary's own doc comment for exactly how "coverage" is defined and attributed back to each query.
+`--epsilon` is optional (defaults to `0.01`). Without an approximate target, Pass 1 offers no summary candidate. See the binary's own doc comment for exactly how coverage is counted.
 
 ## Additional examples
 
@@ -175,6 +143,7 @@ cargo run -p asap-devtools --example canonical_examples
 - [Post-ASAP IR reference](../design_docs/concepts/post-asap-ir.md)
 
 PromQL commands require `--sample-interval-ms`, the nonzero sample interval in
-milliseconds declared for every metric a query reads. The examples use one
-second; supply the interval for your data. The mixed-input `show_pre_asap_ir` and
-`show_post_asap_ir` tools require this option even for SQL-only input files.
+milliseconds declared for every metric a query reads (`stage_pipeline`
+defaults it to 15000). The examples use one second; supply the interval for
+your data. `show_logical_dag` requires this option even for SQL-only input
+files.

@@ -28,10 +28,12 @@ implementation library. Deployment systems such as ASAPQuery and asap-fusion
 own deployment compilation and operation. Materialization is a planning contract
 associated with the logical DAG, not a separate computation IR.
 
-> **Status:** Stage 2 materialization (#509) will decide per sub-DAG whether to
-> materialize and whether at ingestion or query time. It is not implemented yet;
-> until then the planner times every summary at query time. Sections 2 and 3
-> describe the intended contract.
+> **Status:** Stage 2 (physical ASAP-aware optimization) decides, per summary
+> build, whether it is not materialized, materialized at ingestion time, or
+> materialized at query time (shared within one evaluation, or kept across
+> evaluations), and Stage 3 selects among the results. Sections 2 and 3
+> describe the intended contract, which is wider than what Stage 2 offers
+> today.
 
 The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG, the
 language-independent query semantics before summary selection. Both are

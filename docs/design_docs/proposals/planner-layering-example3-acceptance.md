@@ -20,7 +20,7 @@ that needs a missing feature is `#[ignore]`d with the PR that delivers it.
 
 ## Workload
 
-Shared data workload, except Pattern A's `arrival` is `mixed`.
+Shared data workload, except Pattern A's `arrival` is `Mixed`.
 
 **Pattern A.** One `query_batch`, `invocations: 1` at T, `ad_hoc`, ε = 0.005,
 δ = 0.01. Tests use T = 2026-01-01T00:00:00Z and a 365-day year.
@@ -43,8 +43,8 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 | Query-language frontends | A: five scan → range → quantile chains. B: one. | Same; q3–q5 also have a `time_shift`. |
 | Logical ASAP-aware optimization, Pass 1 | A: exact or KLL over its own interval per query, 2⁵ = 32. B: exact, KLL. | A: exact, KLL (k = 547), DDSketch per query, 3⁵ = **243**. B: exact, KLL (k = 269), DDSketch, **3**. |
 | Logical ASAP-aware optimization, Pass 2 | A: window composition adds one EH of KLLs over [T − 5 y, T], one merge + p99 estimate per query, plus a candidate for every grouping of two or more queries onto shared window summaries ("hundreds"). B: each Pass 1 option × {none, sliding L = 5 min s = 1 min (5 active windows), 1-min tumbling (merge 5)} = 6. Independent kept. | Identical-expression rule: each Pass 1 candidate also gets its shared-input candidates (A: 3 per Pass 1 candidate; B: none). Window-composition rule, tumbling panes only: B's KLL and DDSketch each also come as 1-min tumbling panes (a `PaneChain` of 5, merged before the p99 estimate), **5** in all; A is run once, so it gets none. No sliding windows or EHs. |
-| Physical ASAP-aware optimization | See Example 4. | One physical candidate per logical candidate, every sub-DAG `NotMaterialized`. |
-| Plan selection | Not stated for Example 3. | Every candidate is valid. A: KLL for all five queries (P485); DDSketch in place of KLL ties, and the tie goes to enumeration order. B: KLL (P2, 2.100 per second); the 1-min KLL panes, rebuilt at every evaluation since nothing is materialized, cost 2.183 (the same rows and updates plus merging 5 panes per series); exact costs 2.400; DDSketch, whole or in panes, misses the rank target. |
+| Physical ASAP-aware optimization | See Example 4. | Each logical candidate with every sub-DAG `NotMaterialized` (A: 972; B: 5), plus, for B, each pane chain maintained `MatAtIngestion(Memory)` (B: 7 in all). |
+| Plan selection | Not stated for Example 3. | A: 128 valid, 844 invalid: every candidate with a DDSketch misses the rank target (its bound is relative). KLL for all five queries (P485) is selected at 39,828.80 per second (cost model 1); all exact costs 46,252.80, about 16% more. B: KLL (P2, 2.100 per second); the 1-min KLL panes rebuilt at every evaluation cost 2.183 (the same rows and updates plus merging 5 panes per series); maintained at ingestion time they keep six panes of 1,000,000 per-series KLLs for 13,326.53; exact costs 2.400; DDSketch, whole or in panes, misses the rank target. Every valid B plan meets 200 ms: 126 ms for the whole-window KLL, 131 ms for the rebuilt panes, 7 ms for the maintained panes, 144 ms exact. |
 
 ## Invariants and tests
 
@@ -57,13 +57,13 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 | One summary-free frontend DAG; the queries share no node | `stage0_query_language_frontends_a_one_summary_free_dag_without_sharing` | passes |
 | Each query has an exact and a KLL option | `stage1_logical_asap_optimization_a_pass1_offers_exact_and_kll_per_query` | passes |
 | Five independent KLLs, each read by one query, all the same size | `stage1_logical_asap_optimization_a_keeps_five_independent_klls` | passes |
-| The identical-expression rule shares only raw input (scan, range, shift) and keeps the unshared variant | `stage1_logical_asap_optimization_a_identical_expression_rule_shares_only_raw_input` | ignored: #588 |
+| The identical-expression rule shares only raw input (scan, range, shift) and keeps the unshared candidate | `stage1_logical_asap_optimization_a_identical_expression_rule_shares_only_raw_input` | passes |
 | One EH of KLLs over ≥ 5 y is read by all five queries; each has its own merge feeding a p99 estimate | `stage1_logical_asap_optimization_a_window_composition_adds_one_eh_for_all_five` | ignored: #628, #634 |
 | The EH candidate coexists with the five independent KLLs | `stage1_logical_asap_optimization_a_keeps_independent_and_shared_window_summaries` | ignored: #628, #634 |
 | Every pair of queries shares a window summary in some candidate | `stage1_logical_asap_optimization_a_window_composition_groups_every_pair` | ignored: #628, #634 |
 | One selected id, the rest explained; the selected plan is the cheapest valid one | `stage3_plan_selection_a_selects_cheapest_valid` | passes |
-| Each node of a valid candidate is charged once per consuming query while `NotMaterialized` (all today), once when materialized | `stage3_plan_selection_a_charges_each_node_per_consuming_query` | passes |
-| For the same per-computation choices, sharing the scan costs no more than separate scans | `stage3_plan_selection_a_shared_scan_is_not_costlier` | ignored: #588, #632 (see ambiguity 7) |
+| Each node of a valid candidate is charged once per consuming query while `NotMaterialized`, once when materialized | `stage3_plan_selection_a_charges_each_node_per_consuming_query` | passes |
+| For the same per-computation choices, sharing the scan costs no more than separate scans | `stage3_plan_selection_a_shared_scan_is_not_costlier` | ignored: #632 (see ambiguity 7) |
 
 ### Pattern B
 
@@ -89,8 +89,9 @@ and the `SummaryEstimate`.
 ## Ambiguities and conflicts with the planner
 
 1. **Pass 1 families.** The doc offers exact and KLL; the planner also offers
-   DDSketch. Tests check presence of exact and KLL, and require window forms
-   for every summary option.
+   DDSketch, which plan selection rejects against the rank targets. Tests
+   check presence of exact and KLL, and require window forms for every
+   summary option.
 2. **Exact in window forms.** Pattern B counts 2 × 3 = 6, so the exact option
    also gets sliding and tumbling forms. Tumbling needs a mergeable exact
    state for quantiles (the retained values), which the planner has no
@@ -114,10 +115,10 @@ and the `SummaryEstimate`.
    scan keeps one year of rows. A shared scan that is not materialized is
    still charged once per query at the longest window it serves, so sharing
    it costs more than separate scans, and the invariant test waits on #632.
-8. **Identical-expression sharing.** Not mentioned by the doc. Once
-   implemented (#588), the planner can share the `latency_ms` scan and the
-   2-y time shift read by q4 and q5 (the shift sits below the range).
+8. **Identical-expression sharing.** Not mentioned by the doc. The planner
+   shares the `latency_ms` scan and the 2-y time shift read by q4 and q5
+   (the shift sits below the range).
 9. **Additional sliding forms.** L shorter than W (merged) is allowed by the
    Pass 2 rules but not listed for Pattern B. Tests allow extra forms.
-10. **Latency.** Pattern B's ≤ 200 ms is not checked by any test; plan
-    selection does not check latency yet.
+10. **Latency.** Plan selection checks Pattern B's ≤ 200 ms; every valid
+    candidate meets it (see the table above).

@@ -2,11 +2,11 @@
 
 ## Purpose
 
-ASAPPlanner produces `CandidateLogicalASAPDAGs`, a compact logical candidate space. Integrators
-may select candidates downstream or ask Planner's helpers to select and assemble
-DAGs. Stage 2 materialization (#509) will decide per sub-DAG whether to
-materialize and whether at ingestion or query time; until then every summary
-runs at query time. Physical deployment and execution remain downstream. The
+ASAPPlanner produces one selected physical plan for a workload: Stage 1
+enumerates the logical candidates, Stage 2 decides per summary build whether
+and when it is materialized, and Stage 3 checks every physical candidate and
+selects one under the deployment's cost model. Physical deployment and
+execution remain downstream. The
 [input/output/workflow design](input-output-workflow.md) defines this boundary.
 
 ## Three decision layers
@@ -69,7 +69,8 @@ activation, and rollback are not an end-to-end Planner protocol.
    scan selection, input/output edges, operation counts, update and bootstrap
    fanout, retained state, CPU, memory, I/O, and accuracy facts.
 4. ASAPPlanner keeps constructible candidates with missing evidence visible
-   in `CandidateLogicalASAPDAGs` but does not certify unknown accuracy.
+   among its Stage 1 candidates, and Stage 3 rejects them with the reason; it
+   does not certify unknown accuracy.
    Materialization compares supported alternatives over the same workload
    horizon. Missing or incomparable costs do not establish
    that maintaining a summary beats raw recomputation; structural scores and
@@ -126,7 +127,7 @@ in one cost formula.
   execution.
 - A selected realization framework is a contract, not executor code.
 - Physical capabilities and evidence constrain deployment choices, not every
-  logical candidate's presence in `CandidateLogicalASAPDAGs`. Known unsupported capabilities
+  logical candidate's presence among the Stage 1 candidates. Known unsupported capabilities
   and unknown algorithms cannot become deployable alternatives.
 - Complete physical alternatives need identity and comparable evidence for
   cost-based deployment decisions. Stale evidence cannot certify or cost a
