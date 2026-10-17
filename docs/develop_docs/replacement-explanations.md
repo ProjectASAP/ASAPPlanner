@@ -1,5 +1,12 @@
 # Explaining a Replacement
 
+> **Status: historical.** `explanation.rs` and `explain_replacements` were
+> removed with the legacy replacement search. What the planner considered,
+> and why each candidate was pruned or rejected, is now in the stages'
+> output: Pass 1's pruned candidates with their `PruneReason`, Stage 2's
+> pruned candidates, and Stage 3's `Rejection` reasons, all written by
+> `stage_pipeline` (see the [Stage Viewer guide](../user_guide_docs/stage-viewer.md)).
+
 ASAP-aware mapping should make its discovered opportunities visible to users and other components.
 
 For each relevant region of the plan, the planner should be able to explain:

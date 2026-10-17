@@ -23,7 +23,7 @@ aggregate intent and AccuracyTarget
     -> propagate guarantees through the registered composition rule
     -> check the final guarantee against AccuracyTarget
     -> keep legal candidate or record AccuracyError
-    -> rank retained candidates with CostModel (ranking does not prove accuracy)
+    -> Stage 3 prices the valid candidates under the cost model (cost does not prove accuracy)
 ```
 
 For a single summary, the child is exact and propagation leaves the local
@@ -77,9 +77,9 @@ trait AccuracyModel {
 approximate inputs of one composition (ε / n for an additive metric,
 (1 + ε)^(1/n) − 1 for a relative one, δ / n). Every candidate must then be resized, propagated, and
 checked before being treated as satisfying the target. This is distinct from
-candidate visibility: direct DDSketch ratios lacking domain evidence remain in
-`CandidateLogicalASAPDAGs` with `guarantee: None` and can appear in `cost_sorted`, but automatic
-`global_selection` skips them. Presence and cost are not accuracy certification.
+candidate visibility: a Stage 1 candidate whose output has no guarantee is
+still enumerated and appears in the stage document, but Stage 3 rejects it
+for any approximate target. Presence and cost are not accuracy certification.
 See the [workflow design](../design_docs/architecture/input-output-workflow.md#planning-evidence-inputs)
 for this boundary.
 

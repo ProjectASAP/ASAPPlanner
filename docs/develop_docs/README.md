@@ -14,7 +14,10 @@ formats, evidence, and verification workflows.
 - [Offline sketch evidence](offline-sketch-evidence.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)
 - [Physical handoff cost references](physical-handoff-costs.md), [storage operations](storage-operation-costs.md)
-- [Replacement explanations](replacement-explanations.md)
 - [Physical compile coverage for deployment computation](physical-compile-coverage.md)
 
-- [Planner vocabulary migration (#427)](planner-vocabulary-migration.md)
+Historical records of removed APIs:
+
+- [Planner vocabulary migration](planner-vocabulary-migration.md)
+- [Target candidate API migration](target-candidate-api-migration.md)
+- [Replacement explanations](replacement-explanations.md)

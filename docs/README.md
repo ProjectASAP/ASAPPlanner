@@ -20,13 +20,14 @@ for the integration boundary, nested inputs, and choice of planning workflow.
 
 Use [Public library functions and examples](develop_docs/library-api.md) for
 frontend lowering, planning a workload through the stages to a selected plan,
-and the legacy workload search, ranking, selection and DAG assembly.
+and exporting it.
 
 ## Extend the planner
 
-1. Read the [ASAP-aware mapping architecture](develop_docs/asap-aware-mapping-architecture.md).
-2. Consult [mapping contracts](develop_docs/asap-aware-mapping-contracts.md).
-3. Follow [Extend ASAP-aware mapping](develop_docs/extend-asap-aware-mapping.md).
+1. Read the [planning stages design](design_docs/proposals/planner-layering.md).
+2. Read the [ASAP-aware mapping architecture](develop_docs/asap-aware-mapping-architecture.md), which maps each stage to its code.
+3. Consult [mapping contracts](develop_docs/asap-aware-mapping-contracts.md).
+4. Follow [Extend ASAP-aware mapping](develop_docs/extend-asap-aware-mapping.md).
 
 ## Understand a design
 

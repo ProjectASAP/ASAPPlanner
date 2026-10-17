@@ -1,5 +1,12 @@
 # Target candidate and DAG assembly API migration (#456)
 
+> **Status: historical.** The candidate and DAG-assembly API this migration
+> renamed (the legacy search's target candidates, `CandidateLogicalASAPDAGs`,
+> `GlobalSelection`) has been removed. Stage 1 now produces
+> `LogicalCandidate`s, Stage 2 `PhysicalCandidate`s, and Stage 3's
+> `select_plan` the `Selection`; see [the architecture](asap-aware-mapping-architecture.md).
+> The table is kept as a record of the rename.
+
 This source-only rename follows the input/output/workflow design in #445.
 Candidate generation, ordering, accuracy checks, selection, and runtime behavior
 are unchanged. #453 separately defines the integration API surface.

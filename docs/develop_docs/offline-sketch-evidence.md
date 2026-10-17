@@ -84,12 +84,12 @@ include generator configuration and seed, or trace checksum and sampling rules.
 Validity intervals are supplied by the producer or deployment policy; they are
 an explicit applicability assumption, not a measured property.
 
-`EmpiricalCostModel` implements the planner's existing `CostModel` boundary.
+`EmpiricalCostModel` implemented the planner's former `CostModel` boundary.
 It derives the planner's default parameter configurations for the requested
 accuracy, and orders algorithms by mean measured update CPU only when all
 candidates have applicable measurements. Otherwise it preserves discovery order.
 It returns every candidate and keeps default sizing. Its final candidate scores
-retain `DefaultCostModel`'s dimensionless structural meaning; do not label those
+retained `DefaultCostModel`'s dimensionless structural meaning; do not label those
 scores as CPU or measured savings.
 
 Deployment cost models can own the provider and call `lookup` with their own

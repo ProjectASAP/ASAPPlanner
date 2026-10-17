@@ -1,392 +1,116 @@
 # ASAP-Aware Mapping contracts
 
-This reference defines the current public concepts and interface contracts used
-by ASAP-aware mapping. Read the [architecture](asap-aware-mapping-architecture.md)
-first; use the [extension guide](extend-asap-aware-mapping.md) when changing one.
-
-## Interfaces and definitions
-
-## 1. Glossary
-
-### `TargetSubDAG`
-
-A pre-ASAP `OperatorNode` that a strategy may replace.
-
-```rust
-pub struct TargetSubDAG<'a> {
-    pub root: &'a Rc<OperatorNode>,
-    pub consumer_count: usize,
-}
-```
-
-`root` is the actual `Rc<OperatorNode>` from the workload.
-
-`consumer_count` counts structural references, not runtime executions. It is the number of places in the workload DAG that point to this exact `Rc<OperatorNode>` node.
-
-For example, consider two top-level queries:
-
-- `sum by (service) (rate(m[5m]))`
-- `avg by (service) (rate(m[5m]))`
-
-After `share_common_sub_dags` merges their identical `rate(m[5m])` sub-DAGs, both query trees point to the same `Rc`. That node's `consumer_count` is `2`, regardless of how often either query executes.
-
-Use:
-
-```rust
-let target = TargetSubDAG::new(&root);
-```
-
-when you are inspecting a node in isolation.
-
-Use:
-
-```rust
-let target = TargetSubDAG::with_consumer_count(&root, count);
-```
-
-when the caller already knows the real number of consumers.
-
-`TargetSubDAG::new` assumes one consumer.
-
----
-
-### `Replacement`
-
-The actual object that substitutes the target.
-
-There are currently two forms:
-
-```rust
-pub enum Replacement {
-    SubDAG(Rc<OperatorNode>),
-    ExactComposition(ExactComposition),
-}
-```
-
-Use `Replacement::SubDAG` for a replacement sub-DAG. It is one of:
-
-- a constructed post-ASAP summary plan: the sub-DAG contains an `ASAPOp`
-  (`SummaryAgg`, `SummaryEstimate`, ...);
-- a logical rewrite: only `NonASAPOp` nodes and no guarantee yet.
-
-`is_logical_rewrite(&node)` tells the two apart. A kept pre-ASAP sub-DAG
-(`retain_exact`) has no ASAP operator but carries an exact guarantee, so it
-counts as a bound decision, not a rewrite.
-
-Use `Replacement::ExactComposition` when an exact operation refers to a child
-target whose realization must remain undecided. Selection coordinates the
-parent/child pair; DAG assembly constructs and validates the composed DAG.
-See [exact_composition.rs](../../crates/asap-aware-mapping/src/exact_composition.rs).
-
-Examples:
-
-```text
-Quantile(...)
-    -> SummaryEstimate(SummaryAgg(KLL))
-```
-
-is a summary `Subtree`; KLL (Karnin–Lang–Liberty) is a quantile-sketch algorithm.
-
-```text
-compute independently
-    vs.
-reuse an already shared logical sub-DAG
-```
-
-is represented as two logical-rewrite `Subtree`s.
-
----
-
-### `ReplacementSubDAG`
-
-One candidate replacement plus an explanation.
-
-```rust
-pub struct ReplacementSubDAG {
-    pub replacement: Replacement,
-    pub strategy: &'static str,
-    pub provenance: ReplacementProvenance,
-    pub rationale: String,
-}
-```
-
-The `rationale` is for debugging, reporting, and explaining planner choices. It is human-readable text, not a machine-readable protocol.
-
-Every candidate should carry a useful rationale. Search records the strategy
-name, and selection uses typed provenance instead of inferring candidate roles
-from the rationale or pointer identity.
-
----
-
-### `ReplacementStrategy`
-
-The main extension point for adding a new optimization or replacement source.
-
-```rust
-// Required methods; the trait also provides default name and propose methods.
-pub trait ReplacementStrategy {
-    fn matches(&self, target: &TargetSubDAG<'_>) -> bool;
-
-    fn replacements(
-        &self,
-        target: &TargetSubDAG<'_>,
-    ) -> Vec<ReplacementSubDAG>;
-}
-```
-
-The two required methods have intentionally different responsibilities.
-`name` supplies the diagnostic strategy name. `propose` returns accepted
-candidates and structured accuracy rejections; its default wraps `replacements`.
-Search calls `propose`, so rejected candidates remain available for explanation.
-
-`matches` answers:
-
-> Does this strategy have anything to offer for this target?
-
-`replacements` answers:
-
-> What are all semantically valid alternatives for this target?
-
-`replacements` must be **exhaustive and not cost-filtered**. When its output has
-a preferred order, that ordering must come from the supplied `CostModel`; the
-strategy must still return every supported legal candidate. Required accuracy,
-schema and capability checks can reject an otherwise applicable algorithm;
-exhaustiveness is not a promise of all theoretically possible plans.
-
----
-
-### `Realization`
-
-One valid realization of an `AggIntent`, the pre-ASAP description of what an
-aggregation must compute without committing to a physical summary algorithm.
-A realization may be an approximate sketch, an exact mergeable
-accumulator, or a pass-through that keeps the original operation instead of
-building a summary. `realizations_for_intent` enumerates these concrete
-realizations; `ASAPStrategies::replacements()` constructs each one as
-a `ReplacementSubDAG`. It returns all
-candidates in preferred order without selecting a winner. At workload scale,
-`search_workload`/`search_workload_with` preserve all supported legal alternatives
-across every `TargetSubDAG`. Optional planner APIs coordinate compatible semantic selections; physical
-commitment and placement remain downstream deployment decisions.
-
-This guide uses the Cascades/Volcano terminology:
-
-- An **implementation rule** maps a logical operation to a candidate physical
-  realization. For example, a quantile `AggIntent` may have KLL and DDSketch
-  `Realization` values.
-- A **transformation rule** maps a logical operation to another logical
-  operation. In this crate, that kind of candidate is a logical-rewrite
-  `Replacement::SubDAG`.
-- A **replacement candidate** packages either kind of result as a
-  `ReplacementSubDAG` for search. `CandidateLogicalASAPDAGs` stores and ranks these candidates.
-- **Physical commitment and placement** happen downstream. An `Realization`
-  therefore does not mean that the planner has committed the workload to that
-  choice.
-
-The concrete flow is:
-
-```text
-AggIntent
-  -> realizations_for_intent(): enumerate Realization values
-  -> ASAPStrategies: construct ReplacementSubDAG candidates
-  -> CandidateLogicalASAPDAGs: store and rank candidates
-  -> downstream deployment: select and place a final choice
-```
-
-`ReplacementStrategy` enumerates supported legal candidates. The caller can
-consume ranked candidate sets or use coordinated selection and DAG assembly;
-see [code architecture §3](asap-aware-mapping-architecture.md#3-how-the-current-pieces-fit-together).
-
----
-
-### `CostModel`
-
-`CostModel` covers every deployment-specific numeric or configuration decision—not only which candidate is cheapest. For example, sketch sizing trades memory and update cost for accuracy, so it belongs here too.
-
-The crate cannot hardcode real deployment costs: `asap-aware-mapping` uses `asap-types` and pinned `asap_sketchlib` mapping
-bounds, but does not execute workloads or own deployment measurements. Most hooks therefore provide the crate's built-in static behavior as a default. Override only the decisions your deployment needs to change.
-
-| Hook | Use it to | Default? |
-|---|---|---|
-| `rank_candidates` | Order valid sketch algorithms | No |
-| `size_params` | Convert an accuracy target into sketch parameters | Yes |
-| `realize_extension` | Map a custom intent to a realization | Yes |
-| `evaluation_extension` | Query a custom extension summary | Panics until paired with a custom realization |
-| `cse_recompute_cost` | Estimate independent recomputation | Yes |
-| `cse_shared_maintenance_cost` | Estimate shared maintenance | Yes |
-| `cse_share_decision` | Choose sharing or recomputation | Yes |
-| `estimate_cost` | Attach a comparable numeric cost to a replacement | Returns `NaN` (IEEE “not a number”); `DefaultCostModel` provides real values |
-
-- **`rank_candidates`** — order the sketch candidates for one `AggIntent`, best first. This is the only required hook.
-
-  ```rust
-  fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchAlgorithm]) -> Vec<SketchAlgorithm>;
-  ```
-
-- **`size_params`** — choose parameters, such as sketch capacity, for an already-selected `SketchAlgorithm` and accuracy target `(eps, delta)`, where `eps` is the tolerated error and `delta` is the tolerated probability of exceeding that error. It is separate from ranking so a deployment can customize sizing without changing algorithm preference. The trait provides a default implementation.
-
-  ```rust
-  fn size_params(&self, kind: SketchAlgorithm, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
-  ```
-
-- **`realize_extension`** — map a deployment-defined `AggIntent::Extension` to a post-ASAP `Realization`. The default is `Realization::PassThrough`.
-
-  Use `AggIntent::Extension { ext_kind, payload }` for intent shapes that only your deployment needs. Core treats both fields as opaque. For example, a deployment can tag an approximate-frequency intent with `ext_kind: "frequency"` and recognize it in `realize_extension`:
-
-  ```rust
-  fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Realization {
-      if ext_kind == "frequency" {
-          Realization::Sketch(SketchKind::new(
-              SketchAlgorithm::CountSketch,
-              SketchParams::CountSketch { width: 1024, depth: 5 },
-          ))
-      } else {
-          Realization::PassThrough  // fall back to the default for anything else
-      }
-  }
-  ```
-
-  Return `Realization::PassThrough` for unrecognized extension kinds. Do not panic.
-
-  ```rust
-  fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Realization;
-  ```
-
-- **`evaluation_extension`** — define how queries read an extension summary that `realize_extension` mapped to a `Sketch`. The two hooks are a pair: realization defines what is maintained; evaluation defines how it is queried. Override both for the same `ext_kind`. The default evaluation panics to prevent a silent wrong answer.
-
-  ```rust
-  fn evaluation_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchStatistic;
-  ```
-
-- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's sub-DAG independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
-
-  ```rust
-  fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost;
-  ```
-
-- **`cse_shared_maintenance_cost`** — estimate the cost of maintaining one shared summary continuously for the life of the workload. Default: `default_cse_shared_maintenance_cost`, a per-family weight table.
-
-  ```rust
-  fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost;
-  ```
-
-  Both hooks return `Cost`, currently a unitless `f64` newtype. The wrapper allows the type to grow later—for example, to separate CPU, memory, and network costs—without changing every hook signature.
-
-- **`cse_share_decision`** — choose between one shared summary and independent recomputation at each consumer. By default, it shares when maintenance cost is no greater than total recomputation cost. Override the two cost inputs first; override this decision hook only when you need a different policy.
-
-  ```rust
-  fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision;
-  ```
-
-- **`estimate_cost`** — attach a comparable numeric cost to an already-constructed replacement. `CandidateLogicalASAPDAGs::cost_sorted` calls it for every candidate and keeps the returned values aligned with the ranked candidates. The trait default returns `f64::NAN` deliberately; override it when a custom model's callers need displayable or otherwise consumable numeric costs. `DefaultCostModel` provides real values derived from its CSE cost hooks.
-
-  ```rust
-  fn estimate_cost(
-      &self,
-      candidate: &ReplacementSubDAG,
-      target: &TargetSubDAG<'_>,
-  ) -> f64;
-  ```
-
-A custom cost model does not necessarily need to override every hook. The current tests include a model that overrides only `rank_candidates`, relying on defaults for the rest. Such a minimal model inherits `estimate_cost`'s `NaN` placeholder; it must also override `estimate_cost` if consumers require numeric costs.
-
----
-
-### `CandidateLogicalASAPDAGs` / `TargetSubDAGCandidates` / `RankedTargetSubDAGCandidates` — the whole-workload view
-
-`ReplacementStrategy` answers "what are the candidates for this one target?" `CandidateLogicalASAPDAGs` answers the same question for every target in a whole workload at once, without enumerating `2^N` fully-copied plans for `N` independently-choosable sites.
-
-```rust
-// replacement.rs
-
-// One TargetSubDAGCandidates per distinct TargetSubDAG in the whole workload —
-// never a flat list of fully assembled plans.
-pub struct TargetSubDAGCandidates {
-    pub target: Rc<OperatorNode>,
-    pub consumer_count: usize,
-    pub candidates: Vec<ReplacementSubDAG>,  // accepted alternatives, unranked
-    pub rejected: Vec<RejectedCandidate>,    // failed accuracy checks
-}
-
-pub struct RankedTargetSubDAGCandidates<'a> {
-    pub target: &'a Rc<OperatorNode>,
-    pub consumer_count: usize,
-    pub candidates: Vec<&'a ReplacementSubDAG>,  // same candidates, ranked
-    pub costs: Vec<f64>,                         // costs[i] <-> candidates[i]
-}
-```
-
-`search_workload(roots)` runs the shared-sub-DAG pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubDAGStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
-
-`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubDAGStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `ASAPStrategies` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
-may already have removed proposals before this boundary. In particular,
-`search_workload_with_targets` checks explicit per-root targets, while retaining
-direct DDSketch ratios with missing domain evidence and no root guarantee for
-backend inspection. Automatic selection skips those unproven ratios. Use
-`global_selection` for coordinated sharing/composition choices and
-`GlobalSelection::assemble_selected_dag` for the resulting semantic DAG; neither deploys it.
-
----
-
-### Family, category, algorithm, and parameters
-
-A summary's identity has four levels: family (`FieldDataType` variant), sketch
-category (`SketchCategory`), algorithm (`SketchAlgorithm`), and the validated
-committed choice (`SketchKind`). The levels and their validation are specified in
-[Schema and physical data for ASAP primitives](../design_docs/proposals/asap-primitive-schema.md#3-proposed-schema-design).
-
-Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `ASAPStrategies::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `FieldDataType::Sketch(SketchKind, GroupingStrategy)`.
-
----
-
-### `Matcher`
-
-`Matcher` is a smaller, separate extension point:
-
-```rust
-pub trait Matcher {
-    fn is_satisfied_by(&self, required: &Realization, available: &Realization) -> bool;
-}
-```
-
-`Matcher` does not decide how to build a summary. It asks whether an existing summary can satisfy a required realization without building anything new. This is similar to a database reusing a materialized view or index.
-
-For example, a deployment may have a DDSketch for `latency` while a request
-was planned with KLL. A shared quantile query category is insufficient to prove
-substitutability: rank-error and relative-value guarantees differ. The deployment
-must check the required guarantee, parameters, grouping, coverage and storage
-compatibility before reusing state. `Matcher::is_satisfied_by(required, available)` lets the deployment make that decision: `required` is what the query needs, and `available` is what the inventory already contains.
-
-The crate provides no default `Matcher` implementation because the answer depends on deployment-specific inventory and storage rules. If you need one, implement the complete trait for your deployment.
-
----
-
-## 2. Replacement explanations (`explanation.rs`)
-
-`explanation::explain_replacements`/`explain_replacements_with` answer a different question than everything above: not "what could this target become" (`ReplacementStrategy::replacements`) but "why does the replacement already discovered for this target exist, and where." It is a **reporting view over `CandidateLogicalASAPDAGs`**, not a second search or a second rule engine — this crate's *explanation of a replacement*, not an applicability classifier deciding admissibility from scratch.
-
-### The rule
-
-> A `TargetSubDAG` is worth explaining exactly when its `CandidateLogicalASAPDAGs` candidate list contains something beyond the trivial, no-op realization.
-
-Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubDAGCandidates`:
-
-- `ExplanationKind::SketchApproximation` — the set contains a summary `Replacement::SubDAG` that realizes `FieldDataType::Sketch(..)`, not just an exact/pass-through candidate.
-- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubDAGStrategy`'s "build once and share" candidate (the `Replacement::SubDAG` whose `Rc` is the set's `target`).
-
-- `ExplanationKind::ExactComposition` — the candidate set contains an exact operation
-  composed with a child target whose realization remains a coordinated choice.
-
-Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
-
-`ReplacementExplanation` carries both `node_hash` and `target`. A downstream consumer first compares `node_hash` with an exported `DAGNode::hash` to narrow the search, then compares the exact `target` node with the exported node's in-process `DAGNode::source_node`. This preserves the hash's role as a fast filter while making the final association collision-safe; `location` remains human-readable presentation text rather than a machine identifier.
-
-### Why there is no `ExplanationRule` trait
-
-Explanations are derived from candidates already present in `CandidateLogicalASAPDAGs`. A new candidate kind therefore requires an `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with`; a second explanation-specific trait would duplicate registration and could drift from the actual search space. Custom callers supply strategies through `explain_replacements_with`, using the same extension point exposed by `search_workload_with`.
-
-### How it derives `location` text
-
-`CandidateLogicalASAPDAGs`/`TargetSubDAGCandidates` track `Rc<OperatorNode>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
-
----
+Audience: developers changing the planner. This reference states the rules
+the stage code relies on: what each stage's input and output may contain,
+and which component owns each decision. Read the
+[architecture](asap-aware-mapping-architecture.md) first; use the
+[extension guide](extend-asap-aware-mapping.md) when changing one. Field-level
+details are in the rustdoc (`cargo doc -p asap-aware-mapping -p asap-types
+--no-deps`).
+
+## 1. IR at each stage
+
+| After | The DAG holds | Timing |
+| --- | --- | --- |
+| Stage 0 (frontends) | `NonASAPOp` nodes only; aggregates carry `AggIntent` measures with each query's `AccuracyTarget` as written | none |
+| Stage 1 (`compose_logical_candidate`, Pass 2 rules) | `ASAPOp` nodes where a candidate chose an exact accumulator or a summary (`SummaryAgg`, `PaneChain`, `SummaryMerge`, `SummaryEstimate`, `FinalizeExactAccumulator`); everything else stays `NonASAPOp` | none: Stage 1 never decides when anything runs |
+| Stage 2 (`optimize_physical_asap`) | the same operators, with a `Materialization` on each summary build | every node timed from the candidate's `MaterializationAssignment` |
+
+- Structurally equal sub-DAGs are interned before Stage 1
+  (`asap_types::ir::cse`), so Stage 1 compares nodes by structure and Pass 2
+  matches readers structurally, never by pointer.
+- Timing is applied with `apply_materialization_timings`, which validates
+  every data-state edge. A violation is an `ExecutionDataStateError`:
+  for example `QueryTimeValueUnderIngestionSummary` (a query-time value
+  beneath an ingestion-time build), `ConflictingTiming` (one shared node
+  needs two timings; `split_shared_by_timing` copies it for one side first)
+  or `IllegalChildDataState`. These are internal errors in a candidate the
+  stages built, not bad user input.
+- A summary build's `SummaryCoverage` (which rows and time range its state
+  represents) is derived, never declared; a merge's inputs must be disjoint
+  as its family's `MergeInputRule` requires, or coverage fails
+  (`InputsOverlap`).
+
+## 2. Stage 1 candidates
+
+- **Targets.** `ComputationTarget` is one measure of one `Aggregate`. Its
+  `choices` list the exact option first (`ExactAccumulator` when the intent
+  has a mergeable exact state, else `Exact`), then each `Summary(family)` from
+  `realization::summary_candidates`. Candidates are unranked: Pass 1 never
+  compares cost.
+- **Pruning.** A candidate that cannot meet the target is moved to the
+  target's pruned list with a `PruneReason` (`RequiresExact`,
+  `NullableAvgInput`, `UnsupportedByDeployment`); it is never silently
+  dropped. Pass 1 prunes only what it can prove; accuracy that depends on
+  data facts is left to Stage 3.
+- **Fused computations.** `FusedComputation { absorbs, candidates, pruned }`
+  replaces the target directly beneath (the whole-expression top-k, the
+  nested sum). A whole-workload choice keeps one digit per target; a fused
+  pick with a non-first digit on the absorbed target is skipped, so each
+  plan is enumerated once.
+- **Pass 2.** Each rule adds candidates; none removes a Pass 1 candidate, adds
+  a summary family, or adds a readout. So a deployment that does not support a
+  family never sees it again after Pass 1. A Pass 2 candidate records what it
+  changed in `Pass2Candidate` (shared builds, panes, rollups, top-k reuses,
+  identical-node sharing) and keeps its Pass 1 candidate's `choice`.
+- **Sizing.** A summary shared by several readers is sized with each
+  parameter's largest value among them. A summary is sized for ε in Stage 1;
+  a δ that depends on data facts (a distinct-count bound, series counts) is
+  left symbolic in its guarantee for Stage 3 to bind.
+
+## 3. Accuracy
+
+- `AccuracyModel` is the extension point: `local_guarantee` (a family's
+  guarantee over exact input), `propagate` (composition through an operator)
+  and `satisfies` (a guarantee against a target). It fails closed: no rule, or
+  a missing input guarantee, means no guarantee, and the candidate is
+  rejected rather than assumed accurate.
+- A target with no `accuracy_metric` accepts a guarantee in any metric that
+  meets its ε, δ and scope; Stage 3 reports the metric it accepted
+  (`AcceptedAccuracy`).
+- An approximate input split across several inputs gets its share through
+  `accuracy::budget::per_input_target`.
+- Facts come only from the declared `DataWorkload`; an undeclared fact is
+  unknown, never zero.
+
+## 4. Stage 2
+
+- Only summary builds (`SummaryAgg`, `PaneChain`) get materialization
+  options: `NotMaterialized` always; `MatAtIngestion(Memory)` when the build
+  is eligible to run as data arrives; `MatAtQuery(Memory)` when two or more
+  queries read it (reused within one evaluation);
+  `MatAtQueryKeptAcrossEvaluations(Memory)` for a tumbling-pane chain that
+  builds one new pane per evaluation, when the deployment declares
+  `query_time_results_retained`.
+- One `PhysicalCandidate` per assignment, the all-`NotMaterialized` one first
+  (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
+  time over one that is not is not generated. A logical candidate Stage 2
+  cannot implement becomes a `PrunedCandidate` with its reason.
+
+## 5. Stage 3
+
+- `select_plan` validates its inputs first: `SelectionError::InvalidSettings`,
+  `EntryCount` and `InvalidDeploymentCapabilities` are bad input and fail the
+  whole selection.
+- Each candidate is then either invalid or valid, recorded as a `Rejection`
+  with its reason (`valid: false` failed a check: accuracy, latency, raw data
+  not retained, or a cluster limit under cost model 3; `valid: true` lost
+  under the cost model). A candidate that cannot be resized for its failure
+  probability is rejected alone.
+- Usage (`ResourceUsage`) is measured without prices; the `CostModel` in
+  `PlanSelectionSettings` turns it into a choice. Ties keep enumeration order
+  under every cost model.
+- `Selection.plan` is the selected candidate's roots with the weight
+  requirements Stage 3 confirmed from the data facts.
+
+## 6. Ownership
+
+| Decision | Owner |
+| --- | --- |
+| What a query means | the frontend (Stage 0) |
+| Which computations exist and how each may be computed | Pass 1 |
+| What is shared, split into panes or reused | Pass 2 |
+| When each build runs and whether it is kept | Stage 2 |
+| Which plan is valid and which is chosen | Stage 3 |
+| What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `PlanSelectionSettings`, `AccuracyModel`) |
+| Running the plan | the executor (`asap-physical-operators`), outside the planner |
