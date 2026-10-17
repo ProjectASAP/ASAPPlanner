@@ -16,7 +16,8 @@ mod planner_layering_common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use asap_aware_mapping::stage3_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, ResourceUnitCost,
+    ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, RejectionCause,
+    ResourceUnitCost,
 };
 use asap_aware_mapping::DeploymentCapabilities;
 use asap_types::ir::flat::NodeId;
@@ -499,7 +500,7 @@ fn stage3_plan_selection_b_pareto_front_over_memory_disk_and_latency() {
         .find(|r| r.id == ids.b2)
         .unwrap();
     assert!(
-        b2.valid
+        b2.cause == RejectionCause::Dominated
             && b2
                 .reason
                 .starts_with(&format!("dominated by {}", ids.whole_window_kll)),

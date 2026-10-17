@@ -24,9 +24,11 @@
 //! ## Cost model: cost per second of wall time
 //!
 //! A candidate's cost is what running it costs per second ([`COST_UNIT`]),
-//! so queries with different recurrences add up. Each node's price for one
+//! so queries with different recurrences add up. A node here is one
+//! operator node of the candidate's physical plan DAG (`PhysicalASAPDAG`),
+//! not a machine. Each node's price for one
 //! computation is multiplied by how often it is computed per second
-//! ([`NodeCost::per_second`]):
+//! ([`NodeCost::cost_per_second`]):
 //!
 //! * A `NotMaterialized` node is recomputed for each consumer that reads it
 //!   and is not stored: it is charged once per consumer
@@ -450,7 +452,10 @@ impl PlanSelectionSettings {
     }
 }
 
-/// One node's price per second of wall time, with how it was measured.
+/// One node's price per second of wall time, with how it was measured. A
+/// node is one operator node of the candidate's physical plan DAG
+/// (`PhysicalASAPDAG`), keyed by its [`PhysicalASAPNodeId`] in
+/// [`CandidateCost::per_node`]; not a machine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeCost {
     /// Its price per second under cost model 1; `None` under cost models 2
@@ -469,7 +474,8 @@ pub struct NodeCost {
 }
 
 /// One candidate's usage and price over the whole workload: `usage` is
-/// the whole candidate's, `per_node` one price per DAG node.
+/// the whole candidate's, `per_node` one price per operator node of its
+/// physical plan DAG.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateCost {
     pub usage: ResourceUsage,
@@ -481,6 +487,8 @@ pub struct CandidateCost {
     /// [`COST_SOURCE`] (all formulas), [`MEASURED_COST_SOURCE`] (all
     /// measured) or [`MIXED_COST_SOURCE`].
     pub source: &'static str,
+    /// Each operator node of the candidate's physical plan DAG, by its id
+    /// in that DAG, with its price.
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
 }
 
@@ -536,16 +544,68 @@ pub(crate) fn accuracy_targets(entries: &[QueryWorkloadEntry]) -> Vec<AccuracyTa
         .collect()
 }
 
-/// A candidate that was not selected. `valid == false`: it failed a check
-/// (accuracy, latency bound or, under cost model 3, the cluster's limits);
-/// `true`: it lost under the cost model (costlier, slower, more memory, off
-/// or not chosen from the Pareto front), or tied and lost on enumeration
-/// order.
+/// A candidate that was not selected: its id, why it lost
+/// ([`RejectionCause`]) and a one-line reason with the numbers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rejection {
     pub id: String,
-    pub valid: bool,
+    pub cause: RejectionCause,
     pub reason: String,
+}
+
+/// Why Stage 3 did not select a candidate. The first five mean the
+/// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
+/// rest mean it was valid and lost under the cost model. JSON: the
+/// snake_case variant name, e.g. `"costlier"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectionCause {
+    /// Its summaries, resized for the queries' failure probabilities, do
+    /// not rebuild into a plan.
+    FailureProbabilityResizeFailed,
+    /// A query's accuracy target is not met: its output's guarantee misses
+    /// it (or does not hold, as for a Count-Min sketch whose update weights
+    /// are not proven non-negative) and no deployment evidence meets it.
+    AccuracyTargetMissed,
+    /// It scans raw data at query time in a deployment that does not
+    /// retain raw data.
+    RawDataNotRetained,
+    /// A query's latency is over its `max_latency_ms` bound.
+    LatencyBoundExceeded,
+    /// Under cost model 3, its usage is over one of the cluster's limits.
+    OverClusterCapacity,
+    /// Under cost models 1 and 2, its price is higher than the selected
+    /// candidate's.
+    Costlier,
+    /// Under cost model 3's `lowest-latency`, it is slower than the
+    /// selected candidate.
+    Slower,
+    /// Under cost model 3's `least-memory`, it uses more memory than the
+    /// selected candidate.
+    MoreMemory,
+    /// Under cost model 3's `pareto-front`, it is on the Pareto front but
+    /// not its lowest-latency member, which is selected.
+    NotLowestLatencyOnParetoFront,
+    /// Under cost model 3's `pareto-front`, another candidate dominates it.
+    Dominated,
+    /// It ties with the selected candidate and comes later in enumeration
+    /// order.
+    TiedLostOnEnumerationOrder,
+}
+
+impl RejectionCause {
+    /// Whether the candidate failed a check (accuracy, raw data, latency
+    /// bound or cluster capacity) rather than losing under the cost model.
+    pub fn failed_a_check(self) -> bool {
+        matches!(
+            self,
+            Self::FailureProbabilityResizeFailed
+                | Self::AccuracyTargetMissed
+                | Self::RawDataNotRetained
+                | Self::LatencyBoundExceeded
+                | Self::OverClusterCapacity
+        )
+    }
 }
 
 /// The accuracy Stage 3 accepted for one query of a valid candidate: the
@@ -680,7 +740,7 @@ pub fn select_plan(
             Err(reason) => {
                 rejected.push(Rejection {
                     id: candidate.id.clone(),
-                    valid: false,
+                    cause: RejectionCause::FailureProbabilityResizeFailed,
                     reason,
                 });
                 continue;
@@ -691,7 +751,7 @@ pub fn select_plan(
             Err(reason) => {
                 rejected.push(Rejection {
                     id: candidate.id.clone(),
-                    valid: false,
+                    cause: RejectionCause::AccuracyTargetMissed,
                     reason,
                 });
                 continue;
@@ -704,7 +764,7 @@ pub fn select_plan(
             if let Some(reason) = raw_data_violation(&candidate.dag, &nodes, &kept_chains) {
                 rejected.push(Rejection {
                     id: candidate.id.clone(),
-                    valid: false,
+                    cause: RejectionCause::RawDataNotRetained,
                     reason,
                 });
                 continue;
@@ -723,14 +783,17 @@ pub fn select_plan(
             node,
             error,
         })?;
-        let violation = latency_violation(&cost, entries).or_else(|| match &settings.cost_model {
-            CostModel::ClusterCapacity(limits) => capacity_violation(&cost.usage, limits),
-            _ => None,
-        });
-        if let Some(reason) = violation {
+        let violation = latency_violation(&cost, entries)
+            .map(|reason| (RejectionCause::LatencyBoundExceeded, reason))
+            .or_else(|| match &settings.cost_model {
+                CostModel::ClusterCapacity(limits) => capacity_violation(&cost.usage, limits)
+                    .map(|reason| (RejectionCause::OverClusterCapacity, reason)),
+                _ => None,
+            });
+        if let Some((cause, reason)) = violation {
             rejected.push(Rejection {
                 id: candidate.id.clone(),
-                valid: false,
+                cause,
                 reason,
             });
             continue;
@@ -753,10 +816,11 @@ pub fn select_plan(
     for (index, _) in &valid {
         let id = id(*index);
         if id != selected {
+            let (cause, reason) = ranking.lost_reason(id, &selected, &costs, &front);
             rejected.push(Rejection {
                 id: id.to_string(),
-                valid: true,
-                reason: ranking.lost_reason(id, &selected, &costs, &front),
+                cause,
+                reason,
             });
         }
     }
@@ -913,14 +977,15 @@ impl Ranking {
         order == Ordering::Less
     }
 
-    /// Why valid candidate `id` was not `selected`.
+    /// Why valid candidate `id` was not `selected`, and the reason with
+    /// its numbers.
     fn lost_reason(
         self,
         id: &str,
         selected: &str,
         costs: &BTreeMap<String, CandidateCost>,
         front: &[String],
-    ) -> String {
+    ) -> (RejectionCause, String) {
         let (cost, best) = (&costs[id], &costs[selected]);
         if !self.better(best, cost) {
             let tied = match self {
@@ -930,40 +995,58 @@ impl Ranking {
                 ),
                 _ => describe_usage(&cost.usage),
             };
-            return format!(
-                "tied with the selected candidate {selected} at {tied}; lost on enumeration order"
+            return (
+                RejectionCause::TiedLostOnEnumerationOrder,
+                format!(
+                    "tied with the selected candidate {selected} at {tied}; lost on enumeration order"
+                ),
             );
         }
         match self {
-            Ranking::Price => format!(
-                "costlier: {:.3} vs {:.3} {COST_UNIT}",
-                cost.cost_per_second.unwrap_or_default(),
-                best.cost_per_second.unwrap_or_default()
+            Ranking::Price => (
+                RejectionCause::Costlier,
+                format!(
+                    "costlier: {:.3} vs {:.3} {COST_UNIT}",
+                    cost.cost_per_second.unwrap_or_default(),
+                    best.cost_per_second.unwrap_or_default()
+                ),
             ),
-            Ranking::Latency => format!(
-                "slower: {} vs {}",
-                describe_usage(&cost.usage),
-                describe_usage(&best.usage)
+            Ranking::Latency => (
+                RejectionCause::Slower,
+                format!(
+                    "slower: {} vs {}",
+                    describe_usage(&cost.usage),
+                    describe_usage(&best.usage)
+                ),
             ),
-            Ranking::Memory => format!(
-                "more memory: {} vs {}",
-                describe_usage(&cost.usage),
-                describe_usage(&best.usage)
+            Ranking::Memory => (
+                RejectionCause::MoreMemory,
+                format!(
+                    "more memory: {} vs {}",
+                    describe_usage(&cost.usage),
+                    describe_usage(&best.usage)
+                ),
             ),
-            Ranking::Front if front.iter().any(|f| f == id) => format!(
-                "on the Pareto front, not its lowest-latency member: {} vs {}",
-                describe_usage(&cost.usage),
-                describe_usage(&best.usage)
+            Ranking::Front if front.iter().any(|f| f == id) => (
+                RejectionCause::NotLowestLatencyOnParetoFront,
+                format!(
+                    "on the Pareto front, not its lowest-latency member: {} vs {}",
+                    describe_usage(&cost.usage),
+                    describe_usage(&best.usage)
+                ),
             ),
             Ranking::Front => {
                 let by = front
                     .iter()
                     .find(|f| dominates(&costs[f.as_str()].usage, &cost.usage))
                     .map_or(selected, String::as_str);
-                format!(
-                    "dominated by {by}: {} vs {}",
-                    describe_usage(&cost.usage),
-                    describe_usage(&costs[by].usage)
+                (
+                    RejectionCause::Dominated,
+                    format!(
+                        "dominated by {by}: {} vs {}",
+                        describe_usage(&cost.usage),
+                        describe_usage(&costs[by].usage)
+                    ),
                 )
             }
         }
@@ -3174,7 +3257,7 @@ mod tests {
         assert!(!summaries.contains(&selection.selected.as_str()));
         for id in &summaries {
             let rejection = selection.rejected.iter().find(|r| r.id == *id).unwrap();
-            assert!(!rejection.valid);
+            assert_eq!(rejection.cause, RejectionCause::AccuracyTargetMissed);
             assert!(
                 rejection.reason.contains("misses target"),
                 "{}",
@@ -3216,7 +3299,7 @@ mod tests {
         )
         .unwrap();
         let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
-        assert!(!p2.valid);
+        assert_eq!(p2.cause, RejectionCause::AccuracyTargetMissed);
         assert!(p2.reason.contains("non-negative"), "{}", p2.reason);
     }
 
@@ -3249,7 +3332,7 @@ mod tests {
             )
             .unwrap();
             let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
-            assert!(!p2.valid);
+            assert_eq!(p2.cause, RejectionCause::AccuracyTargetMissed);
             assert_eq!(
                 !p2.reason.contains("non-negative"),
                 admitted,
@@ -3478,7 +3561,11 @@ mod tests {
             assert_eq!(cost.cost_per_second.unwrap(), sum);
             assert!(cost.cost_per_second.unwrap() > 0.0);
         }
-        let costlier: Vec<_> = selection.rejected.iter().filter(|r| r.valid).collect();
+        let costlier: Vec<_> = selection
+            .rejected
+            .iter()
+            .filter(|r| r.cause == RejectionCause::Costlier)
+            .collect();
         assert_eq!(costlier.len(), 1);
         assert_ne!(costlier[0].id, selection.selected);
     }
@@ -3644,7 +3731,10 @@ mod tests {
             .iter()
             .find(|r| r.id == candidates[broken].id)
             .unwrap();
-        assert!(!rejection.valid);
+        assert_eq!(
+            rejection.cause,
+            RejectionCause::FailureProbabilityResizeFailed
+        );
         assert!(
             rejection
                 .reason
@@ -3998,7 +4088,11 @@ mod tests {
         };
         let relative = select(AccuracyMetric::Relative);
         assert_eq!(relative.selected, "P1");
-        let mut invalid: Vec<_> = relative.rejected.iter().filter(|r| !r.valid).collect();
+        let mut invalid: Vec<_> = relative
+            .rejected
+            .iter()
+            .filter(|r| r.cause.failed_a_check())
+            .collect();
         invalid.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(
             invalid.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
@@ -4012,7 +4106,11 @@ mod tests {
             );
         }
         let l1 = select(AccuracyMetric::ABSOLUTE_STREAM_L1);
-        assert!(l1.rejected.iter().all(|r| r.valid), "{:?}", l1.rejected);
+        assert!(
+            l1.rejected.iter().all(|r| !r.cause.failed_a_check()),
+            "{:?}",
+            l1.rejected
+        );
     }
 
     /// A difference of two quantile estimates has no output guarantee, though
@@ -4045,7 +4143,7 @@ mod tests {
         .unwrap();
         for id in &summaries {
             let rejection = builtin.rejected.iter().find(|r| r.id == *id).unwrap();
-            assert!(!rejection.valid);
+            assert_eq!(rejection.cause, RejectionCause::AccuracyTargetMissed);
             assert!(
                 rejection.reason.contains("no guarantee"),
                 "{}",
@@ -5568,29 +5666,32 @@ mod tests {
             .unwrap()
         };
         let retained = select(&keeping_query_time_results());
-        assert!(retained.rejected.iter().all(|r| r.valid), "{retained:?}");
+        assert!(
+            retained.rejected.iter().all(|r| !r.cause.failed_a_check()),
+            "{retained:?}"
+        );
         let dropped = select(&DeploymentCapabilities {
             raw_data_retained: false,
             ..keeping_query_time_results()
         });
         assert_eq!(dropped.selected, candidates[1].id);
-        let reasons: BTreeMap<&str, (bool, &str)> = dropped
+        let reasons: BTreeMap<&str, (RejectionCause, &str)> = dropped
             .rejected
             .iter()
-            .map(|r| (r.id.as_str(), (r.valid, r.reason.as_str())))
+            .map(|r| (r.id.as_str(), (r.cause, r.reason.as_str())))
             .collect();
         let unretained = "at query time, but the deployment does not retain raw data";
         assert_eq!(
             reasons[candidates[0].id.as_str()],
             (
-                false,
+                RejectionCause::RawDataNotRetained,
                 format!("scans 300000 ms of raw m {unretained}").as_str()
             )
         );
         assert_eq!(
             reasons[candidates[2].id.as_str()],
             (
-                false,
+                RejectionCause::RawDataNotRetained,
                 format!("scans 60000 ms of raw m {unretained}").as_str()
             )
         );
@@ -5777,7 +5878,7 @@ mod tests {
         assert_eq!(selection.selected, candidates[1].id);
         let rejected = &selection.rejected[0];
         assert_eq!(rejected.id, candidates[0].id);
-        assert!(!rejected.valid);
+        assert_eq!(rejected.cause, RejectionCause::LatencyBoundExceeded);
         assert!(
             rejected.reason.starts_with(&format!(
                 "q1: latency {:.1} ms per evaluation (compaction 0.0 ms + query",
@@ -6009,7 +6110,7 @@ mod tests {
             .iter()
             .find(|r| r.id == candidates[1].id)
             .unwrap();
-        assert!(!b1.valid);
+        assert_eq!(b1.cause, RejectionCause::OverClusterCapacity);
         assert_eq!(b1.reason, "2 CPU cores at peak is over the cluster's 1");
     }
 
@@ -6093,7 +6194,7 @@ mod tests {
             .iter()
             .find(|r| r.id == candidates[0].id)
             .unwrap();
-        assert!(!b2.valid);
+        assert_eq!(b2.cause, RejectionCause::OverClusterCapacity);
         assert_eq!(
             b2.reason,
             format!("disk {raw} bytes is over the cluster's {} bytes", raw - 1)
@@ -6184,7 +6285,7 @@ mod tests {
             assert_eq!(selection.selected, candidates[0].id, "{objective:?}");
             let twin = &selection.rejected[0];
             assert_eq!(twin.id, candidates[1].id);
-            assert!(twin.valid);
+            assert_eq!(twin.cause, RejectionCause::TiedLostOnEnumerationOrder);
             assert!(
                 twin.reason.starts_with(&format!(
                     "tied with the selected candidate {}",

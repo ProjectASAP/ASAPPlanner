@@ -53,7 +53,7 @@ decided by a `MaterializationAssignment`, as the layer contract below states.
    every node's `ExecutionTiming` and `Materialization`: a `MatAtIngestion`
    state and all of its inputs run at ingestion time; readouts, other
    consumers, and the other states run at query time. The default assignment
-   is `NotMaterialized` everywhere, which `PlanOutput::execution_timed_dag`
+   is `NotMaterialized` everywhere, which `PlanOutput::physical_asap_dag`
    applies.
 3. **Physical compile** (Planner) reads timing: ingestion-time nodes form the
    precompute DAG and the rest form the query DAG, joined by typed outputs. It
@@ -402,7 +402,7 @@ node does not depend on the frontier, so each query DAG is lowered once and
 different materialization assignments are different cuts of that lowering.
 `compile(dag, inputs, roots)` yields the complete `CompiledPhysicalDAG`.
 `frontier_from_timing(&timed_dag)` reads an assignment's timed DAG (from
-`execution_timed_dag`) and returns its frontier: ingestion-time nodes read by
+`physical_asap_dag`) and returns its frontier: ingestion-time nodes read by
 query-time nodes, or an ingestion-time root; a query-time node feeding an
 ingestion-time node is rejected. `cut_candidate(&compiled, &frontier)` then
 partitions the lowered operators: the frontier's ancestors form the precompute

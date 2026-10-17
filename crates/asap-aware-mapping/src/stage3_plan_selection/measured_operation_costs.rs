@@ -5,9 +5,10 @@
 //! with given parameters costs (e.g. sketch-bench's `rqe_atomic_costs.json`,
 //! converted by `asap-devtools`' `convert_rqe_atomic_costs`) and puts the
 //! table in [`PlanSelectionSettings::measured_operation_costs`]. Stage 3
-//! prices a sketch node's CPU from the entry for its sketch parameters and
-//! operation when there is one, and from its formulas otherwise, and
-//! reports which per node ([`NodeCost::price_source`]). The planner reads
+//! prices a sketch node (an operator node of the physical plan DAG) from
+//! the entry for its sketch parameters and operation when there is one, and
+//! from its formulas otherwise, and reports which per node
+//! ([`NodeCost::price_source`]). The planner reads
 //! only this table, never a benchmark file.
 //!
 //! A measured time enters [`ResourceUsage`] as CPU operations: `t` ns is
@@ -51,7 +52,11 @@ pub struct MeasuredOperationCost {
     pub cpu_ns_per_operation: f64,
 }
 
-/// Which prices one node's CPU operations came from.
+/// Which prices one node's CPU operations came from. A node is one operator
+/// node of the candidate's physical plan DAG (`PhysicalASAPDAG`), keyed by
+/// its `PhysicalASAPNodeId` in [`CandidateCost::per_node`]; not a machine.
+///
+/// [`CandidateCost::per_node`]: super::CandidateCost::per_node
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePriceSource {

@@ -59,7 +59,7 @@ pub enum QueryLanguage {
 /// Independent accuracy and response-latency constraints attached to one
 /// query in the workload.
 ///
-/// JSON: `{"accuracy": {"error": 0.01, "accuracy_metric": "rank"}, "max_latency_ms":
+/// JSON: `{"accuracy": {"max_error": 0.01, "accuracy_metric": "rank"}, "max_latency_ms":
 /// 200.0}`. An omitted `accuracy` is [`AccuracyTarget::exact`] and an
 /// omitted `max_latency_ms` imposes no bound.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -672,18 +672,18 @@ mod tests {
         let empty = serde_json::to_value(parse("{}").unwrap()).unwrap();
         assert_eq!(
             empty,
-            serde_json::json!({"accuracy": {"error": 0.0, "failure_probability": 0.0,
+            serde_json::json!({"accuracy": {"max_error": 0.0, "failure_probability": 0.0,
                 "accuracy_scope": "whole_result"}, "max_latency_ms": null})
         );
         let bounded = serde_json::to_value(
-            parse(r#"{"accuracy": {"error": 0.01}, "max_latency_ms": 200.0}"#).unwrap(),
+            parse(r#"{"accuracy": {"max_error": 0.01}, "max_latency_ms": 200.0}"#).unwrap(),
         )
         .unwrap();
-        assert_eq!(bounded["accuracy"]["error"], 0.01);
+        assert_eq!(bounded["accuracy"]["max_error"], 0.01);
         assert_eq!(bounded["max_latency_ms"], 200.0);
         for old in [
             r#"{"accuracy": "implicit_exact", "response_latency": "unspecified"}"#,
-            r#"{"accuracy": {"explicit": {"error": 0.01}}}"#,
+            r#"{"accuracy": {"explicit": {"max_error": 0.01}}}"#,
             r#"{"response_latency": {"explicit_max_ms": 100.0}}"#,
             r#"{"max_latency_ms": 100.0, "unknown": 1}"#,
         ] {
@@ -993,7 +993,7 @@ mod tests {
         }))
         .is_err());
         assert!(serde_json::from_value::<AccuracyTarget>(serde_json::json!({
-            "error": 0.1, "failure_probability": 0.01, "typo": true
+            "max_error": 0.1, "failure_probability": 0.01, "typo": true
         }))
         .is_err());
     }

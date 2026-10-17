@@ -110,7 +110,7 @@ impl AccuracyModel for DefaultAccuracyModel {
             .accuracy_metric
             .is_none_or(|metric| metric_meets(guarantee.spec.accuracy_metric, metric))
             && scope_meets(guarantee, target)
-            && within(guarantee.spec.error.evaluate(), target.error)
+            && within(guarantee.spec.error.evaluate(), target.max_error)
             && target
                 .failure_probability
                 .is_none_or(|delta| within(guarantee.spec.failure_probability.evaluate(), delta))

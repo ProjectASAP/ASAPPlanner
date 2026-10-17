@@ -115,8 +115,8 @@
           schemas: Array.from(schemaRows.querySelectorAll('.schemaRow'))
             .filter((row) => row.querySelector('.schemaInclude').checked)
             .map(parseSchemaRow),
-          epsilon: Number($('plannerEpsilon').value),
-          metric: $('plannerMetric').value,
+          max_error: Number($('plannerMaxError').value),
+          accuracy_metric: $('plannerAccuracyMetric').value,
         }),
       });
       const result = await response.json();

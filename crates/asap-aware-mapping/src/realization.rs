@@ -63,13 +63,13 @@ pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
 
 /// The [`AccuracyTarget`] an approximate-capable intent's summary is sized
 /// and checked against, or `None` for every other intent (no sketch
-/// candidate applies). It is the query's target restated in the intent's own metric
+/// candidate applies): the query's target restated in the intent's own metric
 /// (#690 §4): an L1-scaled absolute error for counts and top-k frequencies,
 /// a relative error for distinct counts and L2 frequency moments, an
 /// absolute error for entropy, and for a quantile the query's metric or a
 /// rank error when none is set. The query's own metric, set or not, is
 /// checked at its root in Stage 3.
-pub fn accuracy_target(intent: &AggIntent) -> Option<AccuracyTarget> {
+pub fn sizing_target(intent: &AggIntent) -> Option<AccuracyTarget> {
     let (target, metric) = match intent {
         AggIntent::Quantile { accuracy, .. } => (
             accuracy,
@@ -107,7 +107,7 @@ pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
         return (f64::MIN_POSITIVE, DEFAULT_DELTA);
     }
     (
-        accuracy.error,
+        accuracy.max_error,
         accuracy.failure_probability.unwrap_or(DEFAULT_DELTA),
     )
 }

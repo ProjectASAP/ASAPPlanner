@@ -142,7 +142,7 @@ impl Run {
         self.selection
             .rejected
             .iter()
-            .filter(|r| !r.valid)
+            .filter(|r| r.cause.failed_a_check())
             .map(|r| (r.id.as_str(), r.reason.as_str()))
             .collect()
     }

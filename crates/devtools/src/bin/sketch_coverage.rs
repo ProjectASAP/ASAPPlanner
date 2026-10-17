@@ -1,4 +1,4 @@
-// cargo run -p asap-devtools --bin sketch_coverage -- --sample-interval-ms <ms> [--epsilon <f64>]
+// cargo run -p asap-devtools --bin sketch_coverage -- --sample-interval-ms <ms> [--max-error <f64>]
 //
 // Lowers every query in every corpus we have (mirrors `variant_coverage`'s
 // corpus list exactly, so the two reports are directly comparable) with an
@@ -9,7 +9,7 @@
 //
 // `--sample-interval-ms <ms>` is the sample interval declared for every
 // metric a query reads, which its bare instant selectors look back.
-// `--epsilon <f64>` (default 0.01) sets the `AccuracyTarget` every query in
+// `--max-error <f64>` (ε, default 0.01) sets the `AccuracyTarget` every query in
 // every corpus lowers with. Without an approximate target, Pass 1 offers no
 // summary candidate.
 
@@ -190,14 +190,14 @@ fn report(r: &CorpusCoverage) {
     println!();
 }
 
-fn parse_epsilon() -> f64 {
+fn parse_max_error() -> f64 {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--epsilon" {
-            let raw = args.next().expect("--epsilon requires a value");
+        if arg == "--max-error" {
+            let raw = args.next().expect("--max-error requires a value");
             return raw
                 .parse()
-                .unwrap_or_else(|_| panic!("--epsilon must be a float, got {raw:?}"));
+                .unwrap_or_else(|_| panic!("--max-error must be a float, got {raw:?}"));
         }
     }
     0.01
@@ -219,9 +219,9 @@ fn parse_sample_interval() -> u64 {
 
 #[tokio::main]
 async fn main() {
-    let epsilon = parse_epsilon();
+    let max_error = parse_max_error();
     let interval_ms = parse_sample_interval();
-    let accuracy = AccuracyTarget::max_error(epsilon);
+    let accuracy = AccuracyTarget::max_error(max_error);
     let mut results = Vec::new();
 
     // ── PromQL corpora — same set as `variant_coverage` ──
@@ -305,7 +305,7 @@ async fn main() {
     let total_rejected: usize = results.iter().map(|r| r.rejected).sum();
     let total_covered: usize = results.iter().map(covered).sum();
 
-    println!("=== global (epsilon = {epsilon}) ===");
+    println!("=== global (max_error = {max_error}) ===");
     println!(
         "total lowered: {total_lowered}, total failed: {total_failed}, rejected by Pass 1: {total_rejected}"
     );

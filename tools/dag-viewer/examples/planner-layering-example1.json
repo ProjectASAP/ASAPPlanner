@@ -550,8 +550,8 @@
                   {
                     "accuracy": {
                       "accuracy_scope": "whole_result",
-                      "error": 0.01,
-                      "failure_probability": 0.001
+                      "failure_probability": 0.001,
+                      "max_error": 0.01
                     },
                     "k": 10,
                     "kind": "top_k"
@@ -1472,8 +1472,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -2271,8 +2271,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -2991,8 +2991,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -3898,8 +3898,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -4682,8 +4682,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -5589,8 +5589,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -6373,8 +6373,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -7265,8 +7265,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -8034,8 +8034,8 @@
                       {
                         "accuracy": {
                           "accuracy_scope": "whole_result",
-                          "error": 0.01,
-                          "failure_probability": 0.001
+                          "failure_probability": 0.001,
+                          "max_error": 0.01
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -105738,284 +105738,284 @@
     "front": [],
     "rejected": [
       {
+        "cause": "accuracy_target_missed",
         "id": "P10",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P11",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P12",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P13",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P13-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P14",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P14-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P15",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P15-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P16",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P16-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P17",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P17-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P17-m2",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P17-m3",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P18",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P18-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P18-m2",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P18-m3",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P19",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P20",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P21",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P22",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P22-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P23",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P23-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P24",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P24-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P25",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P25-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P26",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P26-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P26-m2",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P26-m3",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P27",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P27-m1",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P27-m2",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "accuracy_target_missed",
         "id": "P27-m3",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }",
-        "valid": false
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
       },
       {
+        "cause": "tied_lost_on_enumeration_order",
         "id": "P2",
-        "reason": "tied with the selected candidate P1 at 7.940 cost_per_second; lost on enumeration order",
-        "valid": true
+        "reason": "tied with the selected candidate P1 at 7.940 cost_per_second; lost on enumeration order"
       },
       {
+        "cause": "tied_lost_on_enumeration_order",
         "id": "P3",
-        "reason": "tied with the selected candidate P1 at 7.940 cost_per_second; lost on enumeration order",
-        "valid": true
+        "reason": "tied with the selected candidate P1 at 7.940 cost_per_second; lost on enumeration order"
       },
       {
+        "cause": "costlier",
         "id": "P4",
-        "reason": "costlier: 8.540 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 8.540 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P4-m1",
-        "reason": "costlier: 12.940 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 12.940 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P5",
-        "reason": "costlier: 8.540 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 8.540 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P5-m1",
-        "reason": "costlier: 12.940 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 12.940 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P6",
-        "reason": "costlier: 8.540 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 8.540 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P6-m1",
-        "reason": "costlier: 12.940 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 12.940 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P7",
-        "reason": "costlier: 8.540 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 8.540 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P7-m1",
-        "reason": "costlier: 12.940 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 12.940 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P8",
-        "reason": "costlier: 9.140 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 9.140 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P8-m1",
-        "reason": "costlier: 13.540 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 13.540 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P8-m2",
-        "reason": "costlier: 13.540 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 13.540 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P8-m3",
-        "reason": "costlier: 17.940 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 17.940 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P9",
-        "reason": "costlier: 9.140 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 9.140 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P9-m1",
-        "reason": "costlier: 13.540 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 13.540 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P9-m2",
-        "reason": "costlier: 13.540 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 13.540 vs 7.940 cost_per_second"
       },
       {
+        "cause": "costlier",
         "id": "P9-m3",
-        "reason": "costlier: 17.940 vs 7.940 cost_per_second",
-        "valid": true
+        "reason": "costlier: 17.940 vs 7.940 cost_per_second"
       }
     ],
     "selected": "P1"
@@ -106028,8 +106028,8 @@
         "requirements": {
           "accuracy": {
             "accuracy_scope": "whole_result",
-            "error": 0.0,
-            "failure_probability": 0.0
+            "failure_probability": 0.0,
+            "max_error": 0.0
           },
           "repeat_interval_ms": 10000
         },
@@ -106041,8 +106041,8 @@
         "requirements": {
           "accuracy": {
             "accuracy_scope": "whole_result",
-            "error": 0.01,
-            "failure_probability": 0.001
+            "failure_probability": 0.001,
+            "max_error": 0.01
           },
           "default_metric": "absolute_stream_l1",
           "max_latency_ms": 100.0,

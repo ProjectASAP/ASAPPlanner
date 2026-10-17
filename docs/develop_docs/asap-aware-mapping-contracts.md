@@ -93,9 +93,12 @@ details are in the rustdoc (`cargo doc -p asap-aware-mapping -p asap-types
   `EntryCount` and `InvalidDeploymentCapabilities` are bad input and fail the
   whole selection.
 - Each candidate is then either invalid or valid, recorded as a `Rejection`
-  with its reason (`valid: false` failed a check: accuracy, latency, raw data
-  not retained, or a cluster limit under cost model 3; `valid: true` lost
-  under the cost model). A candidate that cannot be resized for its failure
+  with its `cause` (`RejectionCause`) and reason: a failed check
+  (`FailureProbabilityResizeFailed`, `AccuracyTargetMissed`,
+  `RawDataNotRetained`, `LatencyBoundExceeded`, or `OverClusterCapacity`
+  under cost model 3) or a loss under the cost model (`Costlier`, `Slower`,
+  `MoreMemory`, `NotLowestLatencyOnParetoFront`, `Dominated`,
+  `TiedLostOnEnumerationOrder`). A candidate that cannot be resized for its failure
   probability is rejected alone.
 - Usage (`ResourceUsage`) is measured without prices; the `CostModel` in
   `PlanSelectionSettings` turns it into a choice. Ties keep enumeration order

@@ -121,9 +121,7 @@ use crate::accuracy::estimators::{hll, univmon};
 use crate::accuracy::{per_input_target, AccuracyModel, DefaultAccuracyModel, PropagationStats};
 use crate::deployment_capabilities::DeploymentCapabilities;
 use crate::function_rules::approximate_input_composition;
-use crate::realization::{
-    accuracy_budget, accuracy_target, default_size_params, summary_candidates,
-};
+use crate::realization::{accuracy_budget, default_size_params, sizing_target, summary_candidates};
 
 /// How one Pass 1 target is computed: exact or a summary.
 ///
@@ -456,7 +454,7 @@ pub fn computation_candidates_for_intent(
         candidates: vec![exact],
         pruned: vec![],
     };
-    if let Some(target) = accuracy_target(intent) {
+    if let Some(target) = sizing_target(intent) {
         if !target.is_exact() {
             let (epsilon, delta) = accuracy_budget(&target);
             let unit = |value: f64| value > 0.0 && value < 1.0;
@@ -3028,7 +3026,7 @@ impl Sizing {
 /// requirement ([`per_input_target`]), split in the metric of the summary's own
 /// bound: a relative error splits multiplicatively.
 fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> SketchKind {
-    let target = accuracy_target(intent).unwrap_or_else(AccuracyTarget::exact);
+    let target = sizing_target(intent).unwrap_or_else(AccuracyTarget::exact);
     let size = |target: &AccuracyTarget| {
         let (epsilon, delta) = accuracy_budget(target);
         SketchKind::new(

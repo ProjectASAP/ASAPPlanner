@@ -788,7 +788,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
         assert_eq!(alphas.len(), 2);
         assert_eq!(alphas[0], alphas[1]);
         let alpha = alphas[0];
-        let bound = target.error;
+        let bound = target.max_error;
         for values in [
             vec![sign; 30],
             (1..=100).map(|i| sign * i as f64).collect(),

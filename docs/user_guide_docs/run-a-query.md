@@ -20,7 +20,7 @@ tool on first use.
 | `analyze_corpora --corpora --sample-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
 | `variant_coverage --sample-interval-ms 1000` | Repository corpora | Reports Pre-ASAP IR variant coverage |
-| `sketch_coverage --sample-interval-ms 1000 --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports which summary candidates Pass 1 offers for each successfully lowered query |
+| `sketch_coverage --sample-interval-ms 1000 --max-error 0.01` | Repository corpora; `--max-error` defaults to `0.01` | Reports which summary candidates Pass 1 offers for each successfully lowered query |
 
 ## Plan a workload
 
@@ -31,7 +31,7 @@ ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
 ```sh
 cargo run -p asap-devtools --bin stage_pipeline -- \
     --promql "topk by (job) (10, sum_over_time(http_requests_total[1m]))" \
-    --epsilon 0.01 --delta 0.001 --out plan.json
+    --max-error 0.01 --failure-probability 0.001 --out plan.json
 ```
 
 The document's `stage3_plan_selection.selected` names the selected plan, and
@@ -40,7 +40,7 @@ For this query, `selected` is `P1`, the exact plan. The Count-Min top-k
 plan (`P2`) is rejected because the command declares no metric type, so the
 samples are not proven non-negative, and the CountSketch top-k plan (`P3`)
 because its output has no guarantee; `stage3_plan_selection.rejected` gives
-each reason.
+each `cause` (here `accuracy_target_missed`) and reason.
 Open the document in the [Stage Viewer](stage-viewer.md) to see every
 stage, or run a built-in example of the design document, such as
 `--example planner-layering-1`. The Stage Viewer guide lists every option.
@@ -115,10 +115,10 @@ cargo run -p asap-devtools --bin variant_coverage -- --sample-interval-ms 1000
 Parse the same query corpora, lower them with an approximate `AccuracyTarget`, run Pass 1 of logical ASAP-aware optimization over each query, and report which summary candidates Pass 1 offers, plus the fraction of each corpus's successfully lowered queries with at least one:
 
 ```sh
-cargo run -p asap-devtools --bin sketch_coverage -- --sample-interval-ms 1000 --epsilon 0.01
+cargo run -p asap-devtools --bin sketch_coverage -- --sample-interval-ms 1000 --max-error 0.01
 ```
 
-`--epsilon` is optional (defaults to `0.01`). Without an approximate target, Pass 1 offers no summary candidate. See the binary's own doc comment for exactly how coverage is counted.
+`--max-error` is optional (defaults to `0.01`). Without an approximate target, Pass 1 offers no summary candidate. See the binary's own doc comment for exactly how coverage is counted.
 
 ## Additional examples
 

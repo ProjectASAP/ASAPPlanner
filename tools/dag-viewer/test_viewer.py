@@ -108,9 +108,10 @@ class ValidationTests(unittest.TestCase):
             "edge endpoint": lambda d: physical(d)[0]["dag"]["edges"][0].update(producer=42),
             "pruned from_logical": lambda d: d["stage2_physical_asap_optimization"]["pruned"].append({"from_logical": "L99", "display_name": "x", "reason": "r"}),
             "selected": lambda d: selection(d).update(selected="P99"),
-            "rejected also selected": lambda d: selection(d)["rejected"].append({"id": selection(d)["selected"], "valid": True, "reason": "x"}),
+            "rejected also selected": lambda d: selection(d)["rejected"].append({"id": selection(d)["selected"], "cause": "costlier", "reason": "x"}),
             "unaccounted candidate": lambda d: selection(d)["rejected"].pop(),
-            "valid flag": lambda d: selection(d)["rejected"][0].pop("valid"),
+            "rejection cause": lambda d: selection(d)["rejected"][0].pop("cause"),
+            "unknown rejection cause": lambda d: selection(d)["rejected"][0].update(cause="invalid"),
             "per_node": lambda d: selection(d)["costs"]["P1"]["per_node"].update({"99": {"cost_per_second": 1, "multiplier": 1}}),
             "cost per second": lambda d: selection(d)["costs"]["P1"].pop("cost_per_second"),
             "cost for unknown candidate": lambda d: selection(d)["costs"].update({"P99": {"cost_per_second": 1, "unit": "u", "per_node": {}}}),
@@ -160,7 +161,8 @@ class CandidateRowTests(unittest.TestCase):
         costlier = [row for row in rows if row["status"] == "costlier"]
         self.assertEqual([r["total"] for r in costlier], sorted(r["total"] for r in costlier))
         self.assertEqual([r["rank"] for r in costlier], list(range(2, len(costlier) + 2)))
-        rejected = {r["id"]: r["reason"] for r in selection["rejected"] if not r["valid"]}
+        failed_a_check = {"failure_probability_resize_failed", "accuracy_target_missed", "raw_data_not_retained", "latency_bound_exceeded", "over_cluster_capacity"}
+        rejected = {r["id"]: r["reason"] for r in selection["rejected"] if r["cause"] in failed_a_check}
         self.assertTrue(rejected)
         for row in rows:
             if row["status"] == "rejected":
@@ -203,10 +205,10 @@ class CandidateRowTests(unittest.TestCase):
 
     def test_accuracy_text_reads_the_target_json(self):
         text = lambda target: self.js.call("accuracyText", target)
-        self.assertEqual(text({"error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}), "exact")
-        self.assertEqual(text({"error": 0.01, "accuracy_scope": "whole_result"}), "ε=0.01 (metric not set)")
-        self.assertEqual(text({"accuracy_metric": "rank", "error": 0.01, "failure_probability": 0.001, "accuracy_scope": "whole_result"}), "ε=0.01, δ=0.001 (rank)")
-        self.assertEqual(self.js.call("accuracyText", {"error": 0.01}, "relative"), "ε=0.01 (metric not set; default relative)")
+        self.assertEqual(text({"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}), "exact")
+        self.assertEqual(text({"max_error": 0.01, "accuracy_scope": "whole_result"}), "ε=0.01 (metric not set)")
+        self.assertEqual(text({"accuracy_metric": "rank", "max_error": 0.01, "failure_probability": 0.001, "accuracy_scope": "whole_result"}), "ε=0.01, δ=0.001 (rank)")
+        self.assertEqual(self.js.call("accuracyText", {"max_error": 0.01}, "relative"), "ε=0.01 (metric not set; default relative)")
         self.assertEqual(text(None), "")
 
     def test_header_counts_candidates_and_shows_a_selection_error(self):
@@ -401,10 +403,10 @@ class PageTests(unittest.TestCase):
         """The metric dropdown offers the default (empty) and the three
         metrics, and the editor sends its value to /api/plan."""
         page = (HERE / "index.html").read_text()
-        select = re.search(r'<select id="plannerMetric"[^>]*>(.*?)</select>', page, re.S)
+        select = re.search(r'<select id="plannerAccuracyMetric"[^>]*>(.*?)</select>', page, re.S)
         self.assertIsNotNone(select)
         self.assertEqual(re.findall(r'<option value="([^"]*)"', select.group(1)), ["", "absolute", "relative", "rank"])
-        self.assertIn("metric: $('plannerMetric').value", (HERE / "editor.js").read_text())
+        self.assertIn("accuracy_metric: $('plannerAccuracyMetric').value", (HERE / "editor.js").read_text())
 
     def test_examples_are_stage_pipeline_examples_written_into_out(self):
         examples = json.loads((HERE / "examples.json").read_text())

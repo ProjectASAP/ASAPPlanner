@@ -119,12 +119,14 @@ pub enum AccuracyScope {
 /// ([`crate::post_asap::AccuracyGuarantee`]):
 /// `Pr[err_metric(estimate, truth) > error] ≤ failure_probability` over the
 /// values `accuracy_scope` names. An [`AccuracyTarget`] has the same fields, with
-/// concrete numbers and an optional metric.
+/// concrete numbers, an optional metric and `max_error` for `error`: a target
+/// states the largest error a query accepts, a guarantee the error bound
+/// (an expression over the plan's parameters) its plan achieves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccuracySpec<E, P> {
     pub accuracy_metric: AccuracyMetric,
-    /// ε, in `accuracy_metric`'s units.
+    /// ε: the error bound, in `accuracy_metric`'s units.
     pub error: E,
     /// δ.
     pub failure_probability: P,
@@ -132,7 +134,7 @@ pub struct AccuracySpec<E, P> {
 }
 
 /// An accuracy requirement, as a workload, a caller or a frontend states
-/// it: `Pr[err_metric(estimate, truth) > error] ≤ failure_probability` over
+/// it: `Pr[err_metric(estimate, truth) > max_error] ≤ failure_probability` over
 /// the values `accuracy_scope` names.
 ///
 /// `accuracy_metric: None` means the user did not set one: plan selection
@@ -140,24 +142,24 @@ pub struct AccuracySpec<E, P> {
 /// target's, and reports the metric it accepted. A set metric accepts only
 /// guarantees in that metric (or convertible to it with evidence).
 /// `failure_probability: None` imposes no δ requirement (sizing then uses
-/// the planner's default δ). Exact is `error = 0`,
+/// the planner's default δ). Exact is `max_error = 0`,
 /// `failure_probability = Some(0)`, whatever the metric.
 ///
 /// Built with [`Self::exact`] or [`Self::max_error`] plus the optional
 /// builders [`Self::failure_probability`], [`Self::accuracy_metric`] and
 /// [`Self::accuracy_scope`].
 ///
-/// JSON: `{"accuracy_metric": "rank", "error": 0.01, "failure_probability":
-/// 0.001, "accuracy_scope": "whole_result"}`; every field but `error` may be
+/// JSON: `{"accuracy_metric": "rank", "max_error": 0.01, "failure_probability":
+/// 0.001, "accuracy_scope": "whole_result"}`; every field but `max_error` may be
 /// omitted (`accuracy_scope` defaults to `whole_result`). Exact is
-/// `{"error": 0.0, "failure_probability": 0.0}`.
+/// `{"max_error": 0.0, "failure_probability": 0.0}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccuracyTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accuracy_metric: Option<AccuracyMetric>,
-    /// ε, in the metric's units.
-    pub error: f64,
+    /// ε: the largest error the query accepts, in the metric's units.
+    pub max_error: f64,
     /// δ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_probability: Option<f64>,
@@ -174,18 +176,18 @@ impl AccuracyTarget {
     pub const fn exact() -> Self {
         Self {
             accuracy_metric: None,
-            error: 0.0,
+            max_error: 0.0,
             failure_probability: Some(0.0),
             accuracy_scope: AccuracyScope::WholeResult,
         }
     }
 
-    /// Error at most `error` over the whole result, with no δ requirement
-    /// and no metric set.
-    pub const fn max_error(error: f64) -> Self {
+    /// Error at most `max_error` over the whole result, with no δ
+    /// requirement and no metric set.
+    pub const fn max_error(max_error: f64) -> Self {
         Self {
             accuracy_metric: None,
-            error,
+            max_error,
             failure_probability: None,
             accuracy_scope: AccuracyScope::WholeResult,
         }
@@ -217,7 +219,7 @@ impl AccuracyTarget {
 
     /// Whether this target permits no approximation.
     pub fn is_exact(&self) -> bool {
-        self.error == 0.0 && self.failure_probability == Some(0.0)
+        self.max_error == 0.0 && self.failure_probability == Some(0.0)
     }
 }
 
@@ -471,7 +473,7 @@ mod tests {
     }
 
     /// A target reads and writes as a plain struct: every field but
-    /// `error` may be omitted (no metric, no δ, the whole result), an unset
+    /// `max_error` may be omitted (no metric, no δ, the whole result), an unset
     /// metric or δ writes nothing, and the old named forms (`"Exact"`,
     /// `{"Epsilon": ε}`, `{"EpsilonDelta": …}`) and unknown fields are
     /// rejected.
@@ -480,35 +482,37 @@ mod tests {
         use serde_json::json;
         let read = |value: serde_json::Value| serde_json::from_value::<AccuracyTarget>(value);
         assert_eq!(
-            read(json!({"error": 0.01})).unwrap(),
+            read(json!({"max_error": 0.01})).unwrap(),
             AccuracyTarget::max_error(0.01)
         );
         assert_eq!(
-            read(json!({"error": 0.0, "failure_probability": 0.0})).unwrap(),
+            read(json!({"max_error": 0.0, "failure_probability": 0.0})).unwrap(),
             AccuracyTarget::exact()
         );
         let rank = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::Rank);
         assert_eq!(
-            read(json!({"accuracy_metric": "rank", "error": 0.01, "failure_probability": 0.001}))
-                .unwrap(),
+            read(
+                json!({"accuracy_metric": "rank", "max_error": 0.01, "failure_probability": 0.001})
+            )
+            .unwrap(),
             rank
         );
         assert_eq!(
             serde_json::to_value(&rank).unwrap(),
-            json!({"accuracy_metric": "rank", "error": 0.01, "failure_probability": 0.001,
+            json!({"accuracy_metric": "rank", "max_error": 0.01, "failure_probability": 0.001,
                    "accuracy_scope": "whole_result"})
         );
         assert_eq!(
             serde_json::to_value(AccuracyTarget::max_error(0.01)).unwrap(),
-            json!({"error": 0.01, "accuracy_scope": "whole_result"})
+            json!({"max_error": 0.01, "accuracy_scope": "whole_result"})
         );
         for old in [
             json!("Exact"),
             json!({"Epsilon": 0.01}),
             json!({"EpsilonDelta": {"epsilon": 0.01, "delta": 0.001}}),
-            json!({"error": 0.1, "typo": true}),
+            json!({"max_error": 0.1, "typo": true}),
         ] {
             assert!(read(old.clone()).is_err(), "{old}");
         }

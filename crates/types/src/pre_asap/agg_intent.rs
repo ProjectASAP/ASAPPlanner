@@ -710,7 +710,7 @@ pub fn agg_accuracy(op: &AggIntent) -> f64 {
 }
 
 fn accuracy_target_to_f64(t: &AccuracyTarget) -> f64 {
-    t.error
+    t.max_error
 }
 
 /// Default `Cardinality` intent over the sample value — HLL standard error at
@@ -914,9 +914,9 @@ mod tests {
     #[test]
     fn cardinality_rejects_legacy_col_payloads() {
         for payload in [
-            r#"{"kind":"cardinality","col":2,"accuracy":{"accuracy_metric":"absolute","error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
-            r#"{"kind":"cardinality","col":null,"accuracy":{"accuracy_metric":"absolute","error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
-            r#"{"kind":"cardinality","col":2,"cols":[1],"accuracy":{"accuracy_metric":"absolute","error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
+            r#"{"kind":"cardinality","col":2,"accuracy":{"accuracy_metric":"absolute","max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
+            r#"{"kind":"cardinality","col":null,"accuracy":{"accuracy_metric":"absolute","max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
+            r#"{"kind":"cardinality","col":2,"cols":[1],"accuracy":{"accuracy_metric":"absolute","max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
         ] {
             assert!(
                 serde_json::from_str::<AggIntent>(payload).is_err(),
@@ -929,7 +929,7 @@ mod tests {
     /// with no `col` key — still deserializes, as the sample-value convention `None`.
     #[test]
     fn agg_intent_serde_reads_pre_115_payloads() {
-        let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":{"error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
+        let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":{"max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::Quantile {
@@ -939,7 +939,7 @@ mod tests {
             }
         );
 
-        let legacy = r#"{"kind":"top_k","k":5,"accuracy":{"error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
+        let legacy = r#"{"kind":"top_k","k":5,"accuracy":{"max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::TopK {
@@ -948,7 +948,7 @@ mod tests {
             }
         );
 
-        let legacy = r#"{"kind":"cardinality","accuracy":{"error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
+        let legacy = r#"{"kind":"cardinality","accuracy":{"max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::Cardinality {
