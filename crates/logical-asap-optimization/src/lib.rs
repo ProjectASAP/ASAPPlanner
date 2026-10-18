@@ -7,10 +7,13 @@
 //! invisible at the logical level ([`asap_aware_cse`], Pass 2), e.g.
 //! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
 //!
-//! It depends only on `asap-types`, never on a front end or a later stage:
-//! Stage 2 (`asap-physical-asap-optimization`) and Stage 3
-//! (`asap-plan-selection`) depend on it, and Cargo enforces that one-way
-//! flow.
+//! It depends only on `asap-types`, never on a later stage: Stage 2
+//! (`asap-physical-asap-optimization`) and Stage 3 (`asap-plan-selection`)
+//! depend on it, and Cargo enforces that one-way flow. It depends on no
+//! query-language frontend either, except with the `test-support` feature,
+//! whose test helpers (`test_support`) lower PromQL test queries through
+//! `asap-frontend-promql`; the later stages enable that feature only for
+//! their tests.
 //!
 //! Post-lowering **canonicalization** is *not* here: it lives in
 //! `asap_types::ir::canonicalize`, run inside `asap_frontend_common`'s shared

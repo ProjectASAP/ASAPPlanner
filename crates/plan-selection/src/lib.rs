@@ -3186,7 +3186,9 @@ mod tests {
     /// unknown.
     #[test]
     fn classic_hll_failure_probability_binds_only_its_own_sources_bound() {
-        let statistic = hll::classic_failure_statistic(15, 0.05, "a");
+        let statistic = asap_logical_asap_optimization::test_support::hll_classic_failure_statistic(
+            15, 0.05, "a",
+        );
         let bounded = |source: &str| {
             let mut data = data();
             data.sources
