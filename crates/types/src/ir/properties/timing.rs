@@ -44,7 +44,7 @@
 //!
 //! | Consumer | Accepts from an input |
 //! |---|---|
-//! | `SummaryAgg.child`, `PaneChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained |
+//! | `SummaryAgg.child`, `PaneChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained; a query-time build reads an ingestion-time input (rows or exact-accumulator state) only as a `MatAtIngestion` input's stored output |
 //! | `SummaryEstimate.summary_input` | Summary state at either timing |
 //! | `SummaryMerge.children` | Summary state at either timing; at ingestion time only for a merge at ingestion time |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
@@ -516,6 +516,10 @@ fn validate_asap(
 ) -> Result<(), ExecutionDataStateError> {
     match op {
         ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. } => {
+            let edge = match op {
+                ASAPOp::PaneChain { .. } => "PaneChain.child",
+                _ => "SummaryAgg.child",
+            };
             let avail = state_of(child);
             match avail {
                 ExecutionDataState::INGESTION_ROWS | ExecutionDataState::QUERY_ROWS => {}
@@ -525,18 +529,32 @@ fn validate_asap(
                 other => {
                     return Err(
                         ExecutionDataStateError::QueryTimeValueUnderIngestionSummary {
-                            edge: "SummaryAgg.child",
+                            edge,
                             child: other,
                         },
                     )
                 }
+            }
+            // A query-time build reads an ingestion-time input (rows or
+            // exact-accumulator state) only from where it is stored, as a
+            // `NonASAP` consumer does.
+            if timing == ExecutionTiming::QueryTime
+                && avail.timing == ExecutionTiming::IngestionTime
+                && child.materialization.timing() != ExecutionTiming::IngestionTime
+            {
+                return Err(
+                    ExecutionDataStateError::UnstoredIngestionInputUnderQueryTimeSummary {
+                        edge,
+                        operator: child.operator.kind_name(),
+                    },
+                );
             }
             if timing == ExecutionTiming::IngestionTime
                 && avail.timing == ExecutionTiming::QueryTime
             {
                 return Err(
                     ExecutionDataStateError::QueryTimeValueUnderIngestionSummary {
-                        edge: "SummaryAgg.child",
+                        edge,
                         child: avail,
                     },
                 );
@@ -1548,6 +1566,65 @@ mod tests {
                 }
             )
         );
+    }
+
+    /// A query-time summary build cannot read ingestion-time rows that are
+    /// not stored: at query time they no longer exist. Storing the rows node
+    /// at ingestion time makes the same build valid (#738).
+    #[test]
+    fn query_time_summary_over_unstored_ingestion_rows_is_rejected() {
+        let rows = placed_at_ingestion(max(scan()));
+        let summary = agg(Rc::clone(&rows), kll());
+        assert_eq!(
+            apply_materialization_timings(
+                &summary,
+                &MaterializationAssignment::default(),
+                &mut TimingMemo::new()
+            )
+            .err(),
+            Some(
+                ExecutionDataStateError::UnstoredIngestionInputUnderQueryTimeSummary {
+                    edge: "SummaryAgg.child",
+                    operator: "Aggregate",
+                }
+            )
+        );
+
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&rows, AT_INGESTION);
+        let timed =
+            apply_materialization_timings(&summary, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(child(&timed).materialization, AT_INGESTION);
+    }
+
+    /// The same holds for exact-accumulator state: a query-time build cannot
+    /// read an ingestion-time exact state that is not stored.
+    #[test]
+    fn query_time_summary_over_unstored_ingestion_state_is_rejected() {
+        let state = placed_at_ingestion(agg(scan(), exact_sum()));
+        let summary = agg(Rc::clone(&state), kll());
+        assert_eq!(
+            apply_materialization_timings(
+                &summary,
+                &MaterializationAssignment::default(),
+                &mut TimingMemo::new()
+            )
+            .err(),
+            Some(
+                ExecutionDataStateError::UnstoredIngestionInputUnderQueryTimeSummary {
+                    edge: "SummaryAgg.child",
+                    operator: "SummaryAgg",
+                }
+            )
+        );
+
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&state, AT_INGESTION);
+        let timed =
+            apply_materialization_timings(&summary, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(child(&timed).materialization, AT_INGESTION);
     }
 
     /// A root stored at ingestion time is valid: the query reads the stored

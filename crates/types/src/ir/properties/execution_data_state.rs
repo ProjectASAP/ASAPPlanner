@@ -97,6 +97,18 @@ pub enum ExecutionDataStateError {
         edge: &'static str,
         child: ExecutionDataState,
     },
+    /// A summary build at query time over an input (rows or exact-accumulator
+    /// state) produced at ingestion time and not stored there (the input node
+    /// is not `MatAtIngestion`): at query time that input no longer exists.
+    /// Bad input (a hand-built or candidate-fixed plan), not an internal bug.
+    #[error(
+        "a query-time {edge} reads {operator} output produced at ingestion time that is not \
+         stored (not MatAtIngestion)"
+    )]
+    UnstoredIngestionInputUnderQueryTimeSummary {
+        edge: &'static str,
+        operator: &'static str,
+    },
     /// Any other edge whose child data_state the parent does not accept
     /// (e.g. plain update rows fed straight into a `SummaryEstimate`, or a
     /// sketch's opaque state fed into a query-time operator).
