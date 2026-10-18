@@ -885,3 +885,42 @@ fn logical_candidate_labels_are_distinct() {
     assert_eq!(labels.len(), 9, "{labels:#?}");
     assert_eq!(distinct.len(), 9, "{labels:#?}");
 }
+
+/// `--plan-selection-settings <file>` loads Stage 3's settings from JSON:
+/// cost model 2 with the illustrative prices selects what
+/// `--cost-model provisioned-capacity` selects for Example 4 (P1). The file
+/// replaces the cost-model flags, so combining them is refused.
+#[test]
+fn plan_selection_settings_flag_loads_the_settings_from_json() {
+    let path = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_plan_selection_settings.json",
+        std::process::id()
+    ));
+    let settings = asap_plan_selection::PlanSelectionSettings {
+        cost_model: asap_plan_selection::CostModel::ProvisionedCapacity(
+            asap_plan_selection::ResourceUnitCost::illustrative(),
+        ),
+        ..Default::default()
+    };
+    std::fs::write(&path, serde_json::to_string(&settings).unwrap()).unwrap();
+    let path_arg = path.to_str().unwrap();
+    let document = generate_example(
+        "planner-layering-3b",
+        &["--plan-selection-settings", path_arg],
+    );
+    assert_eq!(document["stage3_plan_selection"]["selected"], "P1");
+    let (code, stderr) = failure(&[
+        "--example",
+        "planner-layering-3b",
+        "--plan-selection-settings",
+        path_arg,
+        "--cost-model",
+        "usage-over-time",
+    ]);
+    assert_eq!(code, Some(2));
+    assert!(
+        stderr.contains("--plan-selection-settings replaces --cost-model"),
+        "{stderr}"
+    );
+    std::fs::remove_file(path).unwrap();
+}
