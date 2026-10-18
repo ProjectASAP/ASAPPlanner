@@ -329,7 +329,9 @@ function stageCandidateRows(doc) {
   const order = { selected: 0, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4 };
   rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
   let rank = 0;
-  rows.forEach((row) => { if (row.total !== null) row.rank = ++rank; });
+  // Only valid candidates are ranked: the selected one and those that lost
+  // under the cost model, whether or not the document carries their cost.
+  rows.forEach((row) => { if (row.status === 'selected' || row.status === 'costlier') row.rank = ++rank; });
   return rows;
 }
 
