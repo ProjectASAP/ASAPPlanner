@@ -262,9 +262,13 @@ impl PlanOutput {
         nodes
     }
 
-    /// The workload as one physical ASAP DAG, every node computed at query
-    /// time (the default [`MaterializationAssignment`]), with shared
-    /// sub-DAGs exported once: operator queries become its `roots` and standalone scalar
+    /// The workload as one physical ASAP DAG, with shared sub-DAGs exported
+    /// once. A node keeps the timing and materialization its pass gave it:
+    /// for [`Stage1ToStage3Pass`] that is Stage 3's selected plan as
+    /// selected (e.g. ingestion-time panes), the document a deployment
+    /// runtime executes. Only a node the pass left untimed takes the default
+    /// [`MaterializationAssignment`] (not materialized, computed when its
+    /// consumer runs). Operator queries become its `roots` and standalone scalar
     /// queries its `scalar_roots`, keyed by position in the batch. That
     /// position is the entry index, because `check_contract` requires dense
     /// entry indices.
