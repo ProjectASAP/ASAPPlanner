@@ -426,6 +426,16 @@ pub enum PerComputationCandidateError {
     InvalidChoice,
     #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
     Unsupported(&'static str),
+    /// A Pass 2 rule found more than `max` candidates of one kind, whose
+    /// 2^n subsets it would enumerate: the workload is too large to plan
+    /// this way, not bad input.
+    #[error("more than {max} {candidates} (2^n Pass 2 candidates)")]
+    TooManyCandidates {
+        /// What was counted, e.g. "rollup candidates".
+        candidates: &'static str,
+        /// The cap that was exceeded.
+        max: usize,
+    },
 }
 
 /// Enumerate exact, rewrite and summary choices of one measure in stable catalog
