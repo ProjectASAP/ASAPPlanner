@@ -20,8 +20,7 @@ use asap_types::workload::{
 };
 
 /// A deployment that trusts no approximate estimate: only an exact
-/// guarantee meets a target. Composition is the trait's default (the
-/// built-in rules).
+/// guarantee meets a target.
 struct ExactOnlyAccuracyModel;
 
 impl AccuracyModel for ExactOnlyAccuracyModel {

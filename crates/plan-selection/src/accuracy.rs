@@ -4,42 +4,26 @@
 //! Stage 1 composes each candidate's guarantee with the planner's built-in
 //! analytical rules (`asap_logical_asap_optimization::accuracy`) and keeps a
 //! candidate it has no rule for with `guarantee = None`. This stage decides,
-//! with the model here, whether a guarantee meets its query's target, how
-//! guarantees compose once the data workload and the deployment's evidence
-//! ([`AccuracyEvidenceProvider`]) bind the statistics Stage 1 left unknown,
+//! with the model here, whether a guarantee meets its query's target (after
+//! the data workload and the deployment's evidence,
+//! [`AccuracyEvidenceProvider`], bind the statistics Stage 1 left unknown),
 //! and whether the deployment accepts an output directly, whatever its
 //! guarantee says.
 
-use asap_logical_asap_optimization::accuracy::{
-    self as analytical, OperandDomain, PropagationStats,
-};
-use asap_types::ir::properties::{
-    AccuracyError, AccuracyGuarantee, AccuracyTarget, CompositionOperator,
-};
+use asap_logical_asap_optimization::accuracy::{self as analytical, OperandDomain};
+use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
 use asap_types::ir::{OperatorNode, QueryRoot};
 
-/// The deployment-extensible accuracy algebra plan selection uses. This
-/// crate ships [`BuiltinAccuracyModel`]; a deployment with a proof for a
-/// composition the default rejects (a registered cross-metric conversion,
-/// say) implements this trait and passes it in
+/// The deployment's accuracy decisions in plan selection: whether a
+/// guarantee meets a query's target, and whether the deployment accepts an
+/// output directly, whatever its guarantee. This crate ships
+/// [`BuiltinAccuracyModel`]; a deployment with its own target check (a
+/// registered cross-metric conversion, say) or its own measurements
+/// implements this trait and passes it in
 /// [`PlanningModels::accuracy`](crate::PlanningModels::accuracy).
+/// Guarantees are composed with the built-in rules only
+/// (`asap_logical_asap_optimization::accuracy::composition::propagate`).
 pub trait AccuracyModel {
-    /// Compose `inputs`' guarantees (in the parent's child order) with the
-    /// parent's own `local` guarantee under `op`, given the statistics
-    /// plan selection bound (`stats`). `Err` is the fail-closed answer: no
-    /// registered rule, or a missing input guarantee. The default is the
-    /// built-in rules (`asap_logical_asap_optimization::accuracy::composition::propagate`);
-    /// a deployment overrides it only to add a rule.
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: Option<&AccuracyGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        analytical::composition::propagate(op, inputs, local, stats)
-    }
-
     /// Whether `guarantee` meets `target`: a bound within its ε, and within
     /// its δ when it states one, over the values the target's scope covers
     /// (a per-value δ does not meet a whole-result target). When the target
@@ -56,9 +40,11 @@ pub trait AccuracyModel {
     /// this for every query output before any guarantee check; when it
     /// returns `true`, no guarantee or evidence check runs for that output.
     /// It does not override the executability check before it: a plan that
-    /// reads Count-Min over update weights not proven non-negative is
-    /// rejected (`RejectionCause::CountMinWeightsNotProvenNonNegative`)
-    /// whatever this returns. The default accepts
+    /// reads Count-Min (plain, CmsWithHeap or Hydra Count-Min) over update
+    /// weights not proven non-negative is rejected
+    /// (`RejectionCause::CountMinWeightsNotProvenNonNegative`) whatever this
+    /// returns, because the executor refuses CmsWithHeap and HydraCms when it
+    /// builds the plan and plain Count-Min fails at the first negative weight. The default accepts
     /// none, so Stage 3 checks the Stage 1 guarantee, then the evidence
     /// ([`AccuracyEvidenceProvider::output_guarantee`]) with
     /// [`Self::satisfies`].
@@ -72,7 +58,7 @@ pub trait AccuracyModel {
 }
 
 /// The planner's built-in analytical rules as an [`AccuracyModel`]: the
-/// trait's default composition, the conservative target check Stage 1's
+/// conservative target check Stage 1's
 /// `accuracy::satisfies` makes, and no output accepted regardless of its
 /// guarantee.
 /// The default in [`PlanningModels::builtin`](crate::PlanningModels::builtin).
