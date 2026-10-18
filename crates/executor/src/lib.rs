@@ -13,6 +13,8 @@ pub use traits::*;
 
 pub use expressions::arithmetic;
 pub mod capability;
+mod samples;
+pub use samples::{input_rows_from_samples, series_labels_of_output_row, Sample};
 mod supported_summaries;
 pub use summary_kernels::factory;
 pub use supported_summaries::supported_summary_families;

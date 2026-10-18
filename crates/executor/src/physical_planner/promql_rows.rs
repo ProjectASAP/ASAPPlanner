@@ -1,5 +1,10 @@
 //! A bounded PromQL source row carries the entire label set, not just labels
 //! mentioned by the query. The source adapter owns this lossless encoding.
+// Some helpers here serve only the Planner's own tests (`test-support`).
+#![cfg_attr(
+    not(any(test, feature = "test-support")),
+    allow(dead_code, unused_imports)
+)]
 use super::*;
 use planner_types::ir::physical_export::{
     compile_physical_asap_dag, compile_physical_asap_dag_with_node_ids,
