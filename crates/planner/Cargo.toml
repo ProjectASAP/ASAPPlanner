@@ -16,10 +16,18 @@ asap-plan-selection = { path = "../plan-selection" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-metricsql = { path = "../frontend-metricsql" }
+asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+# The Planner's own executor: `plan_installable` offers only the summary
+# families it runs when the caller leaves them unrestricted.
+asap-executor = { path = "../executor" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
 thiserror = "2"
 
 [dev-dependencies]
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is
 # therefore async and its tests need a runtime.
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+# The runtime end-to-end test runs the executor as a runtime does.
+futures = "0.3"
