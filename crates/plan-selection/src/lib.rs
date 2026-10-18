@@ -9,8 +9,10 @@
 //! candidate's output does (`AccuracyEvidenceProvider::output_guarantee`,
 //! read only here). Before either, the deployment's accuracy model may accept
 //! the output directly, whatever its guarantee says
-//! (`AccuracyModel::accepts_output_regardless_of_guarantee`). For a query with a target, Count-Min is admitted only
-//! over weights proven non-negative; a query without one constrains nothing.
+//! (`AccuracyModel::accepts_output_regardless_of_guarantee`). Before that, for
+//! a query with a target, Count-Min is admitted only over weights proven
+//! non-negative, which the executor needs to run it; a query without one
+//! constrains nothing.
 //! A miss rejects the candidate as invalid, with a reason; only this stage
 //! discards valid candidates.
 //! A candidate whose evaluation of some query takes longer than that
@@ -573,7 +575,7 @@ pub struct Rejection {
     pub reason: String,
 }
 
-/// Why Stage 3 did not select a candidate. The first six mean the
+/// Why Stage 3 did not select a candidate. The first seven mean the
 /// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
 /// rest mean it was valid and lost under the cost model. JSON: the
 /// snake_case variant name, e.g. `"costlier"`.
@@ -584,9 +586,13 @@ pub enum RejectionCause {
     /// not rebuild into a plan.
     FailureProbabilityResizeFailed,
     /// A query's accuracy target is not met: its output's guarantee misses
-    /// it (or does not hold, as for a Count-Min sketch whose update weights
-    /// are not proven non-negative) and no deployment evidence meets it.
+    /// it and no deployment evidence meets it.
     AccuracyTargetMissed,
+    /// A query's plan reads a Count-Min sketch whose update weights are not
+    /// proven non-negative (e.g. samples of a metric not declared a
+    /// counter). The executor cannot run it, so the deployment's accuracy
+    /// model cannot accept it either.
+    CountMinWeightsNotProvenNonNegative,
     /// A query's output has no accuracy guarantee (Stage 1 has no
     /// analytical rule for it and the deployment's evidence supplies none),
     /// and the deployment's accuracy model did not accept it directly
@@ -626,6 +632,7 @@ impl RejectionCause {
             self,
             Self::FailureProbabilityResizeFailed
                 | Self::AccuracyTargetMissed
+                | Self::CountMinWeightsNotProvenNonNegative
                 | Self::NoAccuracyGuarantee
                 | Self::RawDataNotRetained
                 | Self::LatencyBoundExceeded
@@ -1411,7 +1418,7 @@ pub fn resize_for_failure_probability(
 /// or ratio of certified estimates can be unbounded. The root guarantee's
 /// symbolic statistics are bound first ([`bound_root_guarantee`]); one still
 /// unknown leaves the target unmet. Count-Min is admitted only over update
-/// weights proven non-negative, which its bound assumes: an open
+/// weights proven non-negative, which its bound and the executor assume: an open
 /// [`WeightDomain::SamplesOfMetric`] requirement is met when `data` declares
 /// the metric a counter ([`confirmed_weights`]), and unmet otherwise.
 ///
@@ -1419,10 +1426,12 @@ pub fn resize_for_failure_probability(
 /// its ε, δ and scope ([`AccuracyModel::satisfies`]); one that sets a metric
 /// accepts only guarantees in it (or convertible to it).
 ///
-/// The deployment's accuracy model is asked first
+/// The Count-Min weight check runs first and rejects as
+/// [`RejectionCause::CountMinWeightsNotProvenNonNegative`]: the executor
+/// cannot run such a plan. Then the deployment's accuracy model is asked
 /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]): an output it
-/// accepts is accepted whatever its guarantee says, and none of the checks
-/// above runs for it. Otherwise, an output with no guarantee from either
+/// accepts is accepted whatever its guarantee says, and no guarantee or
+/// evidence check runs for it. Otherwise, an output with no guarantee from either
 /// source (Stage 1 had no rule, and the evidence has none) is rejected as
 /// [`RejectionCause::NoAccuracyGuarantee`], and any other miss as
 /// [`RejectionCause::AccuracyTargetMissed`].
@@ -1436,9 +1445,6 @@ fn accuracy_check(
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
         let query = query + 1;
         let mut sketches: Vec<String> = Vec::new();
-        // The first Count-Min whose update weights are not proven
-        // non-negative, which its bound assumes, as a rejection reason.
-        let mut unproven_weights: Option<String> = None;
         for node in root_operators(root)
             .iter()
             .flat_map(|node| OperatorNode::reachable(node))
@@ -1468,13 +1474,17 @@ fn accuracy_check(
                     }
                     _ => String::new(),
                 };
-                unproven_weights.get_or_insert_with(|| {
+                // The executor cannot run Count-Min over weights not proven
+                // non-negative, so this rejects the plan whatever the
+                // deployment's accuracy model accepts.
+                return Err((
+                    RejectionCause::CountMinWeightsNotProvenNonNegative,
                     format!(
                         "q{query}: {} needs non-negative update weights, and these are not \
                          proven non-negative{unconfirmed}",
                         family_name(family)
-                    )
-                });
+                    ),
+                ));
             }
         }
         // The deployment's model may accept the output directly, whatever
@@ -1490,9 +1500,6 @@ fn accuracy_check(
                 sketches,
             });
             continue;
-        }
-        if let Some(reason) = unproven_weights {
-            return Err((RejectionCause::AccuracyTargetMissed, reason));
         }
         // A guarantee per value is stated over the whole result's `G`
         // values for a whole-result target.
@@ -3380,7 +3387,10 @@ mod tests {
         )
         .unwrap();
         let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
-        assert_eq!(p2.cause, RejectionCause::AccuracyTargetMissed);
+        assert_eq!(
+            p2.cause,
+            RejectionCause::CountMinWeightsNotProvenNonNegative
+        );
         assert!(p2.reason.contains("non-negative"), "{}", p2.reason);
     }
 
@@ -3415,11 +3425,11 @@ mod tests {
             let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
             // Admitted weights leave the top-k output without a guarantee,
             // which the built-in model does not accept; unproven weights
-            // miss the target outright.
+            // reject the plan before any accuracy check.
             let expected_cause = if admitted {
                 RejectionCause::NoAccuracyGuarantee
             } else {
-                RejectionCause::AccuracyTargetMissed
+                RejectionCause::CountMinWeightsNotProvenNonNegative
             };
             assert_eq!(p2.cause, expected_cause);
             assert_eq!(
@@ -4285,6 +4295,44 @@ mod tests {
             _target: &AccuracyTarget,
         ) -> bool {
             true
+        }
+    }
+
+    /// The hook overrides guarantees, not the executor's requirement on
+    /// Count-Min update weights: over samples of a metric declared a gauge,
+    /// the CmsWithHeap candidate (P2) is rejected as
+    /// `CountMinWeightsNotProvenNonNegative` under a model that accepts
+    /// every output, as under the built-in one.
+    #[test]
+    fn unproven_count_min_weights_reject_even_an_accepting_model() {
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
+        let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        for accuracy in [
+            &AcceptsEveryOutput as &dyn AccuracyModel,
+            &BuiltinAccuracyModel,
+        ] {
+            let selection = select_plan(
+                &candidates(),
+                &[entry_with(target.clone(), repeating(10_000))],
+                &gauge,
+                PlanningModels::builtin().with_accuracy(accuracy),
+            )
+            .unwrap();
+            let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
+            assert_eq!(
+                p2.cause,
+                RejectionCause::CountMinWeightsNotProvenNonNegative,
+                "{}",
+                p2.reason
+            );
+            assert!(
+                p2.reason.contains("not declared a counter"),
+                "{}",
+                p2.reason
+            );
+            assert!(p2.cause.failed_a_check());
         }
     }
 
