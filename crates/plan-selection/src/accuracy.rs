@@ -7,7 +7,8 @@
 //! with the model here, whether a guarantee meets its query's target, how
 //! guarantees compose once the data workload and the deployment's evidence
 //! ([`AccuracyEvidenceProvider`]) bind the statistics Stage 1 left unknown,
-//! and whether an output with no guarantee at all is accepted.
+//! and whether the deployment accepts an output directly, whatever its
+//! guarantee says.
 
 use asap_logical_asap_optimization::accuracy::{
     self as analytical, OperandDomain, PropagationStats,
@@ -50,13 +51,14 @@ pub trait AccuracyModel {
     fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool;
 
     /// Whether the deployment accepts `output`, one query's output in a
-    /// candidate, for `target` although the output has no guarantee: Stage 1
-    /// had no analytical rule for it and the deployment's evidence supplies
-    /// none ([`AccuracyEvidenceProvider::output_guarantee`]). Stage 3 asks only
-    /// then; a guarantee from either source is checked with
-    /// [`Self::satisfies`] instead. The default accepts none, and Stage 3
-    /// rejects such a candidate (`RejectionCause::NoAccuracyGuarantee`).
-    fn accepts_output_without_guarantee(
+    /// candidate, for `target` directly, whatever its guarantee says:
+    /// missing (Stage 1 had no analytical rule), met or missed. Stage 3 asks
+    /// this first for every query output; when it returns `true`, no
+    /// guarantee or evidence check runs for that output. The default accepts
+    /// none, so Stage 3 checks the Stage 1 guarantee, then the evidence
+    /// ([`AccuracyEvidenceProvider::output_guarantee`]) with
+    /// [`Self::satisfies`].
+    fn accepts_output_regardless_of_guarantee(
         &self,
         _output: &QueryRoot,
         _target: &AccuracyTarget,
@@ -67,7 +69,8 @@ pub trait AccuracyModel {
 
 /// The planner's built-in analytical rules as an [`AccuracyModel`]: the
 /// trait's default composition, the conservative target check Stage 1's
-/// `accuracy::satisfies` makes, and no output accepted without a guarantee.
+/// `accuracy::satisfies` makes, and no output accepted regardless of its
+/// guarantee.
 /// The default in [`PlanningModels::builtin`](crate::PlanningModels::builtin).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BuiltinAccuracyModel;
