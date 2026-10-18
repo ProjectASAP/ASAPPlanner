@@ -31,6 +31,9 @@
 //! and keeps no query-time result across evaluations, which is the
 //! planner's behavior without deployment inputs.
 
+// The executor lists the families it builds as `SupportedSummary`s, so the
+// type lives with the readout vocabulary in `asap-types`.
+pub use asap_types::ir::schema::SupportedSummary;
 use asap_types::ir::schema::{SketchAlgorithm, StatisticKind};
 use asap_types::workload::{DataArrival, DataWorkload};
 use serde::{Deserialize, Serialize};
@@ -52,17 +55,6 @@ pub struct DeploymentCapabilities {
     /// Whether a query-time result may be kept across evaluations
     /// (`MatAtQueryKeptAcrossEvaluations`); default `false`.
     pub query_time_results_retained: bool,
-}
-
-/// One sketch family the executor can build, with the readouts it can
-/// answer from the family's state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SupportedSummary {
-    /// The family the executor can build.
-    pub family: SketchAlgorithm,
-    /// The statistics it can answer from one state of the family.
-    pub readouts: Vec<StatisticKind>,
 }
 
 impl Default for DeploymentCapabilities {
