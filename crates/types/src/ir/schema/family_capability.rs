@@ -47,6 +47,18 @@ pub enum StatisticKind {
     TopK,
 }
 
+/// One sketch family a deployment's executor can build, with the readouts
+/// it can answer from the family's state: an entry of
+/// `DeploymentCapabilities::supported_summaries`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportedSummary {
+    /// The family the executor can build.
+    pub family: SketchAlgorithm,
+    /// The statistics it can answer from one state of the family.
+    pub readouts: Vec<StatisticKind>,
+}
+
 impl SketchStatistic {
     /// The kind of statistic this is.
     pub fn kind(&self) -> StatisticKind {
