@@ -105774,6 +105774,7 @@
       }
     },
     "front": [],
+    "pane_retention_ms": {},
     "rejected": [
       {
         "cause": "no_accuracy_guarantee",

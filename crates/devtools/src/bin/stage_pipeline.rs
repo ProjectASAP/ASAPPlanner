@@ -4,6 +4,11 @@
 // planner-layering-3a and planner-layering-3b: #509 Example 3, Patterns A
 // and B; 3a has 972 candidates, all priced, 64 shown by default)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
+//     --workload dashboard.json --out run.json
+// (a `PlanningWorkload` JSON file, e.g. with a repeating query's
+// `"range_evaluation": {"step_ms": 60000, "span_ms": 3600000}`; PromQL, or
+// SQL over `--table` declarations)
+// cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --max-error 0.01 --failure-probability 0.001 --out run.json
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --table '{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"},
@@ -47,7 +52,10 @@
 //     once if materialized, else once per query (or materialized node)
 //     that reads it, so a shared NotMaterialized node is charged once per
 //     query. When selection fails, `selected` is null, with the rejections,
-//     or with `error` for any other failure.
+//     or with `error` for any other failure. `pane_retention_ms` maps each
+//     pane chain the selected plan keeps beyond one evaluation (by node id)
+//     to how far back from the newest evaluation the runtime must keep its
+//     panes: the window plus the longest range-evaluation span reading it.
 // When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
 // `error` and no candidates, and nothing is selected.
 //
@@ -223,6 +231,7 @@ fn document_of(
 
 fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut example = None;
+    let mut workload_path: Option<String> = None;
     // (language, text, name) in workload order.
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
@@ -242,6 +251,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         let number = |v: String| v.parse::<f64>().map_err(|e| format!("{v}: {e}"));
         match flag.as_str() {
             "--example" => example = Some(value()?),
+            "--workload" => workload_path = Some(value()?),
             "--promql" => queries.push((QueryLanguage::PromQL, value()?, None)),
             "--sql" => queries.push((
                 QueryLanguage::SQL(SqlDialect::DataFusionSQL),
@@ -295,7 +305,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let has_sql = queries
         .iter()
         .any(|(language, _, _)| *language != QueryLanguage::PromQL);
-    if !tables.is_empty() && !has_sql {
+    if !tables.is_empty() && !has_sql && workload_path.is_none() {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
@@ -355,7 +365,43 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         measured_operation_costs,
         ..default_settings
     };
+    let from_file = match &workload_path {
+        Some(path) if example.is_none() && queries.is_empty() => {
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("--workload {path}: {e}"))?;
+            let workload: PlanningWorkload =
+                serde_json::from_str(&text).map_err(|e| format!("--workload {path}: {e}"))?;
+            workload
+                .validate()
+                .map_err(|e| format!("--workload {path}: {e}"))?;
+            Some((workload, sql_catalog(&tables)?))
+        }
+        Some(_) => {
+            return Err(
+                "give exactly one of --example, --workload or --promql/--sql queries".into(),
+            )
+        }
+        None => None,
+    };
     let mut document = match (example.as_deref(), queries.is_empty()) {
+        (None, true) if from_file.is_some() => {
+            let (workload, catalog) = from_file.expect("checked");
+            let roots = match workload.query_workload.language {
+                QueryLanguage::PromQL => lower_promql_roots(&workload)?,
+                _ => lower_sql_roots(&workload, &catalog)?,
+            };
+            let entries: Vec<_> = workload.query_workload.entries().collect();
+            let data = workload.data_workload.clone().unwrap_or_default();
+            let result = run_planning_stages_over(
+                roots.clone(),
+                &entries,
+                &data,
+                Some(max_combinations),
+                &plan_selection,
+                &deployment_capabilities,
+            );
+            document_of(workload_queries(&workload), &roots, result, max_displayed)?
+        }
         (Some(example), true) => {
             let (workload, catalog) = match example {
                 "planner-layering-1" => (example1(), SqlCatalog::new()),
@@ -458,7 +504,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             );
             document_of(described, &roots, result, max_displayed)?
         }
-        _ => return Err("give exactly one of --example or --promql/--sql queries".into()),
+        _ => {
+            return Err(
+                "give exactly one of --example, --workload or --promql/--sql queries".into(),
+            )
+        }
     };
     // Read-only: the deployment inputs the run planned with.
     document["deployment_capabilities"] =
@@ -647,6 +697,11 @@ fn plan_selection_json(
         "selected": selection.selected,
         "rejected": rejections_json(&selection.rejected),
         "front": selection.front,
+        "pane_retention_ms": selection
+            .pane_retention_ms
+            .iter()
+            .map(|(node, ms)| (node.to_string(), json!(ms)))
+            .collect::<serde_json::Map<_, _>>(),
     })
 }
 
@@ -698,6 +753,9 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
                 &entry.recurrence
             {
                 requirements["repeat_interval_ms"] = json!(interval.0);
+            }
+            if let Some(range) = entry.range_evaluation {
+                requirements["range_evaluation"] = json!(range);
             }
             json!({
                 "id": format!("q{}", index + 1),
@@ -810,6 +868,7 @@ fn query_batch(
                         predictability: Default::default(),
                         invocations: 1,
                         execute_at: None,
+                        range_evaluation: None,
                     })
                     .collect(),
             ),

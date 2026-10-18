@@ -173,9 +173,8 @@ pub fn run_planning_stages_over(
             .without_unsupported_summaries(deployment);
     // Count Stage 1 candidates as they are enumerated and stop as soon as
     // the count passes the limit; never truncate.
-    let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let mut stage1 = Vec::new();
-    for candidate in stage1_logical_asap_optimization(&per_computation, &recurrence) {
+    for candidate in stage1_logical_asap_optimization(&per_computation, entries) {
         if max_combinations.is_some_and(|limit| stage1.len() == limit) {
             return Err(PlanningStagesError::TooManyCandidates {
                 limit: stage1.len(),

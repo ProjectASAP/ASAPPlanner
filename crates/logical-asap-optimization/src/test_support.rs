@@ -31,6 +31,7 @@ pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
+                range_evaluation: None,
             }]),
             repeating_queries: None,
         },
@@ -205,7 +206,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
         .without_unsupported_summaries(&DeploymentCapabilities::default());
     let summary = stage1_logical_asap_optimization(
         &per_computation,
-        &[asap_types::workload::QueryRecurrence::Unknown],
+        &[entry(asap_types::workload::QueryRecurrence::Unknown)],
     )
     .filter_map(|candidate| candidate.roots.ok())
     .flat_map(|roots| match &roots[0] {
@@ -281,5 +282,6 @@ pub fn entry_with(
         },
         predictability: Default::default(),
         recurrence,
+        range_evaluation: None,
     }
 }
