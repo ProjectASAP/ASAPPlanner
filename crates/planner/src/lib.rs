@@ -10,7 +10,9 @@
 //! optimization), Stage 2 (physical ASAP-aware optimization) and Stage 3 (plan
 //! selection) in order ([`run_stage1_to_stage3`]).
 //!
-//! [`e2e_plan`] runs both steps. A caller who already holds pre-ASAP IR — a
+//! [`e2e_plan`] runs both steps. [`plan_installable`] runs them for a
+//! deployment runtime and returns the single selected DAG ready to install
+//! ([`InstallablePlan`]). A caller who already holds pre-ASAP IR — a
 //! new frontend, a deserialized plan, a test that does not want to build SQL
 //! and a catalog — skips this crate and calls
 //! [`asap_plan_selection::optimize`] directly.
@@ -31,6 +33,12 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 pub use asap_plan_selection::pass::{
     optimize, run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError,
     PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
+};
+
+mod installable;
+pub use installable::{
+    plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery, InstalledQueryRoot,
+    RawSampleInput, SelectedPlanReport, StoredOutput,
 };
 
 // ── Input ────────────────────────────────────────────────────────────────
@@ -154,6 +162,10 @@ pub enum PlanError {
     Parsed(#[from] ParsedWorkloadError),
     #[error(transparent)]
     Optimize(OptimizeError),
+    /// The selected plan could not be made installable
+    /// ([`plan_installable`]); an internal bug.
+    #[error("installable plan: {0}")]
+    Installable(InstallablePlanError),
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────
