@@ -287,9 +287,10 @@ impl Pass2List {
         if candidates.len() + topk_reuse_candidates(roots).len() > MAX_REUSE_CANDIDATES {
             self.out.push(Pass2::failed(
                 rules,
-                PerComputationCandidateError::Unsupported(
-                    "more than 20 rollup and top-k reuse candidates together (2^n Pass 2 candidates)",
-                ),
+                PerComputationCandidateError::TooManyCandidates {
+                    candidates: "rollup and top-k reuse candidates together",
+                    max: MAX_REUSE_CANDIDATES,
+                },
             ));
             return;
         }
@@ -414,7 +415,20 @@ mod tests {
         };
         assert!(matches!(
             failed.roots,
-            Err(PerComputationCandidateError::Unsupported(_))
+            Err(PerComputationCandidateError::TooManyCandidates {
+                max: MAX_REUSE_CANDIDATES,
+                ..
+            })
         ));
+        let Err(error) = &failed.roots else {
+            unreachable!()
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "more than {MAX_REUSE_CANDIDATES} rollup and top-k reuse candidates together \
+                 (2^n Pass 2 candidates)"
+            )
+        );
     }
 }

@@ -517,9 +517,10 @@ pub fn summary_capability_pass2_candidates(
         .iter()
         .any(|candidate| candidate.members.len() > MAX_CAPABILITY_SHARING_MEMBERS)
     {
-        return Err(PerComputationCandidateError::Unsupported(
-            "a capability sharing candidate of more than 20 summary builds (2^n sharing subsets)",
-        ));
+        return Err(PerComputationCandidateError::TooManyCandidates {
+            candidates: "summary builds in one capability sharing candidate",
+            max: MAX_CAPABILITY_SHARING_MEMBERS,
+        });
     }
     // Each capability sharing candidate's options: `None` (no sharing),
     // then its subsets.
@@ -787,9 +788,10 @@ pub fn window_composition_pass2_candidates(
     candidates: &[PaneCandidate],
 ) -> Result<Vec<WindowCompositionPass2Candidate>, PerComputationCandidateError> {
     if candidates.len() > MAX_PANE_CANDIDATES {
-        return Err(PerComputationCandidateError::Unsupported(
-            "more than 20 summary builds that could be built in tumbling panes (2^n candidates)",
-        ));
+        return Err(PerComputationCandidateError::TooManyCandidates {
+            candidates: "summary builds that could be built in tumbling panes",
+            max: MAX_PANE_CANDIDATES,
+        });
     }
     let mut pass2_candidates = Vec::new();
     for mask in 1u64..(1u64 << candidates.len()) {
@@ -1271,10 +1273,13 @@ fn subsets<T: Clone>(
 ) -> Result<Vec<Vec<T>>, PerComputationCandidateError> {
     let n = candidates.len();
     if n > MAX_REUSE_CANDIDATES {
-        return Err(PerComputationCandidateError::Unsupported(match rule {
-            "rollup" => "more than 20 rollup candidates (2^n Pass 2 candidates)",
-            _ => "more than 20 top-k reuse candidates (2^n Pass 2 candidates)",
-        }));
+        return Err(PerComputationCandidateError::TooManyCandidates {
+            candidates: match rule {
+                "rollup" => "rollup candidates",
+                _ => "top-k reuse candidates",
+            },
+            max: MAX_REUSE_CANDIDATES,
+        });
     }
     Ok((1u64..(1u64 << n))
         .map(|mask| {
@@ -1942,10 +1947,18 @@ mod tests {
             .take(MAX_CAPABILITY_SHARING_MEMBERS + 1)
             .cloned()
             .collect();
+        let error = summary_capability_pass2_candidates(&roots, &sharing).unwrap_err();
         assert!(matches!(
-            summary_capability_pass2_candidates(&roots, &sharing),
-            Err(PerComputationCandidateError::Unsupported(_))
+            error,
+            PerComputationCandidateError::TooManyCandidates {
+                max: MAX_CAPABILITY_SHARING_MEMBERS,
+                ..
+            }
         ));
+        // The message names the cap from its constant, not a copy of it.
+        assert!(error
+            .to_string()
+            .contains(&format!("more than {MAX_CAPABILITY_SHARING_MEMBERS} ")));
     }
 
     /// Equal targets give identical builds, which are the

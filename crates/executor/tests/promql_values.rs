@@ -422,7 +422,7 @@ fn exact_state_evaluations_recover_and_finalize_panes() {
                     )
                     .unwrap();
                     for sample in samples {
-                        state.update_single(sample, 0);
+                        state.update_single(sample, 0).unwrap();
                     }
                     let labels = row(&[("__name__", "m"), ("instance", "a")], 0.).remove(0);
                     vec![
@@ -469,9 +469,9 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
                     &GroupingStrategy::PerSubpopulationInstance,
                 )
                 .unwrap();
-                state.update_single(100., -50_000);
+                state.update_single(100., -50_000).unwrap();
                 if count == 2 {
-                    state.update_single(140., -10_000);
+                    state.update_single(140., -10_000).unwrap();
                 }
                 vec![
                     row(&[("instance", if count == 1 { "one" } else { "two" })], 0.).remove(0),

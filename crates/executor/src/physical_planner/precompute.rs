@@ -88,16 +88,22 @@ pub fn boundary_schema(
     node: &PhysicalASAPDAGNode,
     nodes: &BTreeMap<u64, &PhysicalASAPDAGNode>,
 ) -> Result<SchemaRef, Error> {
+    let resolve = |child: &usize| {
+        nodes
+            .get(&(*child as u64))
+            .copied()
+            .ok_or_else(|| invalid("missing precompute node"))
+    };
     let mut scan = node;
     if let Payload::NonASAP(NonASAPOp::TimeRange { child, .. }) = &scan.payload {
-        scan = nodes
-            .get(&(*child as u64))
-            .ok_or_else(|| invalid("missing precompute node"))?;
-        while let Payload::NonASAP(NonASAPOp::TimeShift { child, .. }) = &scan.payload {
-            scan = nodes
-                .get(&(*child as u64))
-                .ok_or_else(|| invalid("missing precompute node"))?;
-        }
+        scan = below_time_shifts(
+            resolve(child)?,
+            |node| match &node.payload {
+                Payload::NonASAP(operator) => Some(operator),
+                Payload::ASAP(_) => None,
+            },
+            resolve,
+        )?;
     }
     if !matches!(
         &scan.payload,

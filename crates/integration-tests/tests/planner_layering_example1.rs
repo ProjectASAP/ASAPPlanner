@@ -134,8 +134,10 @@ fn every_10s() -> asap_types::workload::QueryRecurrence {
 /// The workload entry of an exact query evaluated every 10 s.
 fn exact_every_10s() -> asap_types::workload::QueryWorkloadEntry {
     asap_types::workload::QueryWorkloadEntry {
+        query: Default::default(),
+        requirements: Default::default(),
+        predictability: Default::default(),
         recurrence: every_10s(),
-        ..Default::default()
     }
 }
 

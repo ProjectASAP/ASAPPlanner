@@ -670,7 +670,9 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
                         asap_executor::factory::create_planner_accumulator(family, input, grouping)
                             .unwrap();
                     for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
-                        accumulator.update_single(value, end - 60_000 + offset);
+                        accumulator
+                            .update_single(value, end - 60_000 + offset)
+                            .unwrap();
                     }
                     let summary = Value::Summary {
                         family: family.clone(),

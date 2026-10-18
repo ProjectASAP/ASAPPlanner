@@ -537,6 +537,62 @@ fn offset_counter_window_ends_at_the_offset() {
     }
 }
 
+/// A counter over `[5m] @ 300` reads the window ending at 300 s whatever the
+/// evaluation time, and `@ 300 offset 1m` the one ending at 240 s: the same
+/// values as the unanchored counter evaluated at 300 s and at 240 s. Today
+/// it reads the window ending at the evaluation time (#748).
+#[test]
+#[ignore = "the counter window drops an @ anchor and its offset: #748"]
+fn anchored_counter_window_ends_at_the_anchor() {
+    let samples = samples(7_000);
+    for function in ["rate", "increase"] {
+        let at_300 = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS, &samples);
+        let at_240 = whole_build_values_at(
+            &format!("{function}(m[5m])"),
+            EVALUATION_MS - PANE_MS,
+            &samples,
+        );
+        assert_ne!(at_300, at_240, "{function}: the two windows differ");
+        let anchored = whole_build_values_at(
+            &format!("{function}(m[5m] @ 300)"),
+            EVALUATION_MS + PANE_MS,
+            &samples,
+        );
+        assert_eq!(anchored, at_300, "{function} @ 300");
+        let anchored_offset = whole_build_values_at(
+            &format!("{function}(m[5m] @ 300 offset 1m)"),
+            EVALUATION_MS + PANE_MS,
+            &samples,
+        );
+        assert_eq!(anchored_offset, at_240, "{function} @ 300 offset 1m");
+    }
+}
+
+/// Panes whose ranges read the scan through two stacked `TimeShift`s (the
+/// pane's shift over a zero shift) compile and answer as the single build:
+/// the per-entity build looks through every shift to its raw source.
+#[test]
+fn panes_over_stacked_time_shifts_match_single_build() {
+    let single = single_build("increase(m[5m])", AccuracyTarget::exact());
+    let (panes, _) = tumbling_panes(&single);
+    let agg = summary_agg(&single);
+    let Some(NonASAPOp::TimeRange { child: scan, .. }) = agg.children()[0].non_asap() else {
+        panic!("expected a raw time range under the summary");
+    };
+    let zero_shift = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+        shift: TimeShift {
+            offset_ms: 0,
+            at: None,
+        },
+        child: scan.clone(),
+    }))
+    .unwrap();
+    let stacked = replace(&panes, scan, &zero_shift);
+    let expected = render(&execute(&single, &samples(0)));
+    assert_eq!(expected.len(), 2, "{expected:?}");
+    assert_eq!(render(&execute(&stacked, &samples(0))), expected);
+}
+
 /// Exact counter Increase over 5 merged 1-minute panes equals one 5-minute
 /// build: the merge joins consecutive panes across their boundaries.
 #[test]

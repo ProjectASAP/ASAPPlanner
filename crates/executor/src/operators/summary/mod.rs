@@ -63,15 +63,20 @@ impl Operator {
         })
     }
     /// One HydraCms state shared by every group, emitted as one row per group
-    /// that reads it. Each row adds its `weight` column's value (1 without
-    /// one) to its `item` value; a row whose weight is NULL adds nothing.
+    /// that reads it. Each row adds its `weight` column's value (or
+    /// `constant_weight` without one, which must be positive) to its `item`
+    /// value; a row whose weight is NULL adds nothing.
     pub fn shared_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
         item: usize,
         weight: Option<usize>,
+        constant_weight: i32,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
+        if constant_weight <= 0 {
+            return Err(invalid("HydraCms constant weight must be positive"));
+        }
         crate::values::validate_family(&family)?;
         crate::factory::create_hydra_cms(&family).map_err(Error::Invalid)?;
         validate_groups(&input, &groups)?;
@@ -106,6 +111,7 @@ impl Operator {
                 family,
                 item,
                 weight,
+                constant_weight,
                 groups,
                 filter: None,
             },
@@ -340,13 +346,22 @@ pub(super) fn execute<'a>(
             family,
             item,
             weight,
+            constant_weight,
             groups,
             filter,
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_shared_summary(input, family, *item, *weight, groups, filter.as_deref(), &context)
-                    .await?,
+                build_shared_summary(
+                    input,
+                    family,
+                    *item,
+                    (*weight, *constant_weight),
+                    groups,
+                    filter.as_deref(),
+                    &context,
+                )
+                .await?,
             )
         })
         .boxed_local()),
@@ -785,7 +800,7 @@ async fn build_shared_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
     item: usize,
-    weight: Option<usize>,
+    (weight, constant_weight): (Option<usize>, i32),
     groups: &[usize],
     filter: Option<&Expression>,
     context: &RunContext,
@@ -820,7 +835,7 @@ async fn build_shared_summary(
                 continue;
             }
             let weight = match weight.map(|i| &row[i]) {
-                None => 1,
+                None => constant_weight,
                 Some(Value::Null) => continue,
                 Some(value) => hydra_weight(value)?,
             };

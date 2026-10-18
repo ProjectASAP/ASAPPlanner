@@ -68,11 +68,13 @@ fn run_stage1_to_stage3(
     asap_plan_selection::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],
         &[planner_types::workload::QueryWorkloadEntry {
+            query: Default::default(),
             requirements: planner_types::workload::QueryRequirements {
                 accuracy,
                 max_latency_ms: None,
             },
-            ..Default::default()
+            predictability: Default::default(),
+            recurrence: Default::default(),
         }],
         &data,
         asap_plan_selection::PlanningModels::builtin(),

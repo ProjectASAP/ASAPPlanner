@@ -170,10 +170,18 @@ impl TryFrom<UncheckedOperator> for Operator {
                 family,
                 item,
                 weight,
+                constant_weight,
                 groups,
                 filter,
             } => with_filter(
-                Operator::shared_summary_build(input(0)?, family, item, weight, groups)?,
+                Operator::shared_summary_build(
+                    input(0)?,
+                    family,
+                    item,
+                    weight,
+                    constant_weight,
+                    groups,
+                )?,
                 filter,
             )?,
             Kind::KeyedEvaluation { state, k } => {

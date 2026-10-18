@@ -28,7 +28,7 @@ fn build(values: &[f64]) -> Box<dyn AggregateCore> {
     .unwrap();
     for (at, value) in values.iter().enumerate() {
         operator.validate_single_input(*value).unwrap();
-        operator.update_single(*value, at as i64);
+        operator.update_single(*value, at as i64).unwrap();
     }
     operator.into_accumulator()
 }
@@ -85,7 +85,7 @@ fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let mut operator = create_planner_accumulator(&family, &update, &Default::default()).unwrap();
     let key = KeyByLabelValues::new_with_labels(vec!["a".into()]);
-    operator.update_keyed(&key, 7.0, 1000);
+    operator.update_keyed(&key, 7.0, 1000).unwrap();
     let state = operator.into_accumulator();
     let state = state
         .as_any()
@@ -132,7 +132,7 @@ fn build_weighted_frequency(
     let mut operator = create_planner_accumulator(family, &update, &Default::default()).unwrap();
     for (at, (i, weight)) in updates.into_iter().enumerate() {
         operator.validate_single_input(weight).unwrap();
-        operator.update_keyed(&host(i), weight, at as i64);
+        operator.update_keyed(&host(i), weight, at as i64).unwrap();
     }
     operator.into_accumulator()
 }
@@ -397,4 +397,22 @@ fn plain_count_sketch_merge_equals_union_build() {
             [0]
         ))
         .is_err());
+}
+
+// A keyed weighted-frequency update whose sum would pass `f64::MAX` returns
+// an error from `update_keyed` instead of panicking; the state keeps the
+// last good sum.
+#[test]
+fn keyed_update_overflow_is_an_error_not_a_panic() {
+    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
+    update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
+    let family = plain_count_sketch(64, 3);
+    let mut operator = create_planner_accumulator(&family, &update, &Default::default()).unwrap();
+    operator.validate_single_input(f64::MAX).unwrap();
+    operator.update_keyed(&host(0), f64::MAX, 0).unwrap();
+    let error = operator.update_keyed(&host(0), f64::MAX, 1).unwrap_err();
+    assert!(error.contains("overflow"), "{error}");
+    let state = operator.into_accumulator();
+    assert_eq!(plain_estimate(&*state, 0), f64::MAX);
 }

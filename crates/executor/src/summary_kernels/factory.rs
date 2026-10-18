@@ -59,15 +59,24 @@ pub trait AccumulatorUpdater: Send {
             return Err("summary update requires Float64".into());
         };
         self.validate_single_input(*value)?;
-        self.update_single(*value, timestamp_ms);
-        Ok(())
+        self.update_single(*value, timestamp_ms)
     }
 
-    /// Feed a single (value, timestamp_ms) pair — for SingleSubpopulation types.
-    fn update_single(&mut self, value: f64, timestamp_ms: i64);
+    /// Feed a single (value, timestamp_ms) pair — for SingleSubpopulation
+    /// types. An error when the state cannot take the value (a counter or a
+    /// sum past its range) or when the updater is keyed; the state is then
+    /// unchanged.
+    fn update_single(&mut self, value: f64, timestamp_ms: i64) -> Result<(), String>;
 
-    /// Feed a keyed (key, value, timestamp_ms) triple, e.g. a frequency item or an exact keyed state.
-    fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, timestamp_ms: i64);
+    /// Feed a keyed (key, value, timestamp_ms) triple, e.g. a frequency item
+    /// or an exact keyed state. An error when the state cannot take the
+    /// value (a sum past `f64::MAX`); the state is then unchanged.
+    fn update_keyed(
+        &mut self,
+        key: &KeyByLabelValues,
+        value: f64,
+        timestamp_ms: i64,
+    ) -> Result<(), String>;
 
     /// Extract the final accumulator as a boxed `AggregateCore`.
     fn take_accumulator(&mut self) -> Box<dyn AggregateCore>;
@@ -112,12 +121,18 @@ impl KllAccumulatorUpdater {
 }
 
 impl AccumulatorUpdater for KllAccumulatorUpdater {
-    fn update_single(&mut self, value: f64, _timestamp_ms: i64) {
+    fn update_single(&mut self, value: f64, _timestamp_ms: i64) -> Result<(), String> {
         self.acc.update(value);
+        Ok(())
     }
 
-    fn update_keyed(&mut self, _key: &KeyByLabelValues, value: f64, timestamp_ms: i64) {
-        self.update_single(value, timestamp_ms);
+    fn update_keyed(
+        &mut self,
+        _key: &KeyByLabelValues,
+        value: f64,
+        timestamp_ms: i64,
+    ) -> Result<(), String> {
+        self.update_single(value, timestamp_ms)
     }
 
     impl_clone_accumulator_methods!(acc);
@@ -164,12 +179,18 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
         }
     }
 
-    fn update_single(&mut self, value: f64, _timestamp_ms: i64) {
+    fn update_single(&mut self, value: f64, _timestamp_ms: i64) -> Result<(), String> {
         self.acc.inner.update(value);
+        Ok(())
     }
 
-    fn update_keyed(&mut self, _key: &KeyByLabelValues, value: f64, timestamp_ms: i64) {
-        self.update_single(value, timestamp_ms);
+    fn update_keyed(
+        &mut self,
+        _key: &KeyByLabelValues,
+        value: f64,
+        timestamp_ms: i64,
+    ) -> Result<(), String> {
+        self.update_single(value, timestamp_ms)
     }
 
     impl_clone_accumulator_methods!(acc);
@@ -215,15 +236,18 @@ impl CmsAccumulatorUpdater {
 }
 
 impl AccumulatorUpdater for CmsAccumulatorUpdater {
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) {
-        debug_assert!(
-            false,
-            "update_single called on keyed updater; use update_keyed"
-        );
+    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) -> Result<(), String> {
+        Err("update_single called on a keyed updater; use update_keyed".into())
     }
 
-    fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, _timestamp_ms: i64) {
+    fn update_keyed(
+        &mut self,
+        key: &KeyByLabelValues,
+        value: f64,
+        _timestamp_ms: i64,
+    ) -> Result<(), String> {
         self.acc.inner.update(&key.to_semicolon_str(), value);
+        Ok(())
     }
 
     impl_clone_accumulator_methods!(acc);
@@ -284,19 +308,21 @@ impl AccumulatorUpdater for WeightedFrequencyUpdater {
             .map_err(|error| error.to_string())
     }
 
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) {
-        debug_assert!(
-            false,
-            "update_single called on keyed updater; use update_keyed"
-        );
+    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) -> Result<(), String> {
+        Err("update_single called on a keyed updater; use update_keyed".into())
     }
 
-    fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, _timestamp_ms: i64) {
+    fn update_keyed(
+        &mut self,
+        key: &KeyByLabelValues,
+        value: f64,
+        _timestamp_ms: i64,
+    ) -> Result<(), String> {
         // Inputs pass `validate_single_input` first; only a sum past
         // `f64::MAX` can fail here.
         self.acc
             .update_labels(&key.labels, value)
-            .expect("weighted frequency counter overflow");
+            .map_err(|error| error.to_string())
     }
 
     impl_clone_accumulator_methods!(acc);
@@ -337,15 +363,18 @@ impl HydraKllAccumulatorUpdater {
 }
 
 impl AccumulatorUpdater for HydraKllAccumulatorUpdater {
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) {
-        debug_assert!(
-            false,
-            "update_single called on keyed updater; use update_keyed"
-        );
+    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) -> Result<(), String> {
+        Err("update_single called on a keyed updater; use update_keyed".into())
     }
 
-    fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, _timestamp_ms: i64) {
+    fn update_keyed(
+        &mut self,
+        key: &KeyByLabelValues,
+        value: f64,
+        _timestamp_ms: i64,
+    ) -> Result<(), String> {
         self.acc.update(key, value);
+        Ok(())
     }
 
     impl_clone_accumulator_methods!(acc);
@@ -503,11 +532,18 @@ struct PlannerExactUpdater {
     acc: crate::summary_kernels::exact::ExactAccumulator,
 }
 impl AccumulatorUpdater for PlannerExactUpdater {
-    fn update_single(&mut self, value: f64, timestamp: i64) {
+    fn update_single(&mut self, value: f64, timestamp: i64) -> Result<(), String> {
         self.acc.update(None, value, timestamp);
+        Ok(())
     }
-    fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, timestamp: i64) {
+    fn update_keyed(
+        &mut self,
+        key: &KeyByLabelValues,
+        value: f64,
+        timestamp: i64,
+    ) -> Result<(), String> {
         self.acc.update(Some(key), value, timestamp);
+        Ok(())
     }
     impl_clone_accumulator_methods!(acc);
     fn reset(&mut self) {
@@ -540,14 +576,20 @@ impl AccumulatorUpdater for HllUpdater {
     fn memory_usage_bytes(&self) -> usize {
         self.acc.approx_memory_bytes()
     }
-    fn update_single(&mut self, value: f64, _: i64) {
+    fn update_single(&mut self, value: f64, _: i64) -> Result<(), String> {
         if !value.is_nan() {
             let bits = if value == 0.0 { 0 } else { value.to_bits() };
             self.acc.inner.update(&bits.to_le_bytes());
         }
+        Ok(())
     }
-    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, timestamp_ms: i64) {
-        self.update_single(value, timestamp_ms);
+    fn update_keyed(
+        &mut self,
+        _: &KeyByLabelValues,
+        value: f64,
+        timestamp_ms: i64,
+    ) -> Result<(), String> {
+        self.update_single(value, timestamp_ms)
     }
     impl_clone_accumulator_methods!(acc);
     fn reset(&mut self) {
@@ -568,13 +610,18 @@ impl AccumulatorUpdater for UnivMonUpdater {
     fn memory_usage_bytes(&self) -> usize {
         self.acc.approx_memory_bytes()
     }
-    fn update_single(&mut self, value: f64, _: i64) {
+    fn update_single(&mut self, value: f64, _: i64) -> Result<(), String> {
         self.acc
             .insert_sample(value)
-            .expect("UnivMon sample counter overflow");
+            .map_err(|error| error.to_string())
     }
-    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, timestamp_ms: i64) {
-        self.update_single(value, timestamp_ms);
+    fn update_keyed(
+        &mut self,
+        _: &KeyByLabelValues,
+        value: f64,
+        timestamp_ms: i64,
+    ) -> Result<(), String> {
+        self.update_single(value, timestamp_ms)
     }
     impl_clone_accumulator_methods!(acc);
     fn reset(&mut self) {

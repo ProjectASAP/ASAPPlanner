@@ -430,12 +430,9 @@ fn compile_internal(
                         "per-entity summary requires a resolved raw time range",
                     ));
                 };
-                // A tumbling pane reads its window through a `TimeShift`; the
+                // A tumbling pane reads its window through `TimeShift`s; the
                 // deployment supplies the shifted raw rows.
-                let source = match child.non_asap() {
-                    Some(NonASAPOp::TimeShift { child, .. }) => child,
-                    _ => child,
-                };
+                let source = below_time_shifts(child, |node| node.non_asap(), Ok)?;
                 let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
@@ -596,6 +593,21 @@ fn compile_internal(
     }
     physical_dag.validate()?;
     Ok(physical_dag)
+}
+
+/// The first node at or below `node` that is not a `TimeShift`, following
+/// each shift's child: a range reads its raw source through any number of
+/// stacked shifts. `operator` gives a node's non-ASAP operator (`None` for an
+/// ASAP one) and `resolve` a child's node; an error when a child is missing.
+pub(crate) fn below_time_shifts<'a, N, C: 'a>(
+    mut node: &'a N,
+    operator: impl Fn(&'a N) -> Option<&'a NonASAPOp<C>>,
+    resolve: impl Fn(&'a C) -> Result<&'a N, Error>,
+) -> Result<&'a N, Error> {
+    while let Some(NonASAPOp::TimeShift { child, .. }) = operator(node) {
+        node = resolve(child)?;
+    }
+    Ok(node)
 }
 
 /// The logical window of the counter evaluation `id`, as `(offset,
@@ -1013,16 +1025,22 @@ fn summary_build(
         let Some(SummaryInputExpr::Column(item)) = &update.item else {
             unreachable!("validated HydraCms item column")
         };
-        // Validated: the unit count, or a non-negative weight column.
-        let weight = match &update.weight {
-            SummaryInputExpr::Column(weight) => Some(named_column(input, weight)?),
-            _ => None,
+        // Validated: the unit count, a positive integer constant or a
+        // non-negative weight column.
+        let (weight, constant_weight) = match &update.weight {
+            SummaryInputExpr::Column(weight) => (Some(named_column(input, weight)?), 1),
+            SummaryInputExpr::Constant(weight) => (
+                None,
+                crate::capability::hydra_constant_weight(*weight).map_err(Error::Invalid)?,
+            ),
+            _ => (None, 1),
         };
         return Operator::shared_summary_build(
             input.clone(),
             family.clone(),
             named_column(input, item)?,
             weight,
+            constant_weight,
             groups(input, keys)?,
         );
     }

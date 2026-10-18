@@ -383,7 +383,9 @@ fn check(
             .entry(population(reduction, &keys, labels))
             .or_insert_with(|| create_planner_accumulator(family, input, grouping).unwrap());
         let unit = input.item.is_some();
-        updater.update_single(if unit { *value } else { weight(input, *value) }, *time);
+        updater
+            .update_single(if unit { *value } else { weight(input, *value) }, *time)
+            .unwrap();
     }
     assert_eq!(actual.len(), expected.len(), "{query}");
     for (labels, state) in actual {

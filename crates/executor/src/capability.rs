@@ -146,8 +146,29 @@ fn validate_hydra_cms(
     };
     match (&input.weight, proof) {
         (SummaryInputExpr::Constant(w), NonNegativeWeightProof::UnitCount) if *w == 1.0 => Ok(()),
+        (SummaryInputExpr::Constant(w), NonNegativeWeightProof::PositiveConstant) => {
+            hydra_constant_weight(*w).map(|_| ())
+        }
         (SummaryInputExpr::Column(_), _) => Ok(()),
-        _ => Err("HydraCms weight must be the unit count or a non-negative weight column".into()),
+        _ => Err(
+            "HydraCms weight must be the unit count, a positive constant or a non-negative \
+             weight column"
+                .into(),
+        ),
+    }
+}
+
+/// A HydraCms constant weight as the `i32` sketchlib's Hydra adds: a
+/// positive integer within `i32`; an error otherwise.
+pub(crate) fn hydra_constant_weight(weight: f64) -> Result<i32, String> {
+    if weight.is_finite() && weight > 0.0 && weight.fract() == 0.0 && weight <= f64::from(i32::MAX)
+    {
+        Ok(weight as i32)
+    } else {
+        Err(format!(
+            "HydraCms constant weight must be a positive integer within i32 (asap_sketchlib's \
+             Hydra adds i32 weights), got {weight}"
+        ))
     }
 }
 

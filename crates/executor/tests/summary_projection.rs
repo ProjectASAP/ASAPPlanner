@@ -137,7 +137,7 @@ fn post_asap_summary_projection_survives_recovery() {
         &GroupingStrategy::PerSubpopulationInstance,
     )
     .unwrap();
-    accumulator.update_single(7., 1);
+    accumulator.update_single(7., 1).unwrap();
     let state = Arc::from(accumulator.into_accumulator());
     let batch = Batch::try_new(
         schema.clone(),

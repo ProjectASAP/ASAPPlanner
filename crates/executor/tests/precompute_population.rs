@@ -196,7 +196,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     &GroupingStrategy::PerSubpopulationInstance,
                 )
                 .unwrap();
-                state.update_single(value, time);
+                state.update_single(value, time).unwrap();
                 vec![
                     Value::Map(
                         vec![(Value::Utf8("instance".into()), Value::Utf8(group.into()))].into(),

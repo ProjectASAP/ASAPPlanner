@@ -35,6 +35,13 @@ pub use aggregate::Reduction;
 pub use series_window::SubquerySteps;
 pub use sort::SortKey;
 pub use summary::SummaryEvaluation;
+/// A shared summary build's default row weight: one per row, a count.
+fn unit_weight() -> i32 {
+    1
+}
+fn is_unit_weight(weight: &i32) -> bool {
+    *weight == 1
+}
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Kind {
     #[serde(skip)]
@@ -157,9 +164,13 @@ enum Kind {
     SharedSummaryBuild {
         family: SummaryFamilyType,
         item: usize,
-        /// The weight column; each row adds 1 without one.
+        /// The weight column; each row adds `constant_weight` without one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<usize>,
+        /// What each row adds when there is no weight column: 1 for a count,
+        /// or a positive integer constant weight.
+        #[serde(default = "unit_weight", skip_serializing_if = "is_unit_weight")]
+        constant_weight: i32,
         groups: Vec<usize>,
         /// Rows for which this is not true update no state; their group is kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]

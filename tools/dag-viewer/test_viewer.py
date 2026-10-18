@@ -180,8 +180,14 @@ class CandidateRowTests(unittest.TestCase):
         lost = next(r for r in selection["rejected"] if r["cause"] == "costlier")
         selection["costs"][failed["id"]] = selection["costs"][lost["id"]]
         del selection["costs"][lost["id"]]
-        status = {row["id"]: row["status"] for row in self.js.call("stageCandidateRows", self.doc)}
+        rows = self.js.call("stageCandidateRows", self.doc)
+        status = {row["id"]: row["status"] for row in rows}
         self.assertEqual((status[failed["id"]], status[lost["id"]]), ("rejected", "costlier"))
+        # Ranks follow the status too: the costlier row is ranked without a
+        # cost, the rejected one is not ranked although it has one.
+        rank = {row["id"]: row["rank"] for row in rows}
+        self.assertIsNone(rank[failed["id"]])
+        self.assertIsInstance(rank[lost["id"]], int)
 
     def test_pruned_and_composition_errors_come_last_with_their_reasons(self):
         """A Stage 2 pruned candidate and a Stage 1 candidate that did not
