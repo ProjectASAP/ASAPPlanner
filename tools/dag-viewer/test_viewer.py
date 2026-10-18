@@ -161,7 +161,7 @@ class CandidateRowTests(unittest.TestCase):
         costlier = [row for row in rows if row["status"] == "costlier"]
         self.assertEqual([r["total"] for r in costlier], sorted(r["total"] for r in costlier))
         self.assertEqual([r["rank"] for r in costlier], list(range(2, len(costlier) + 2)))
-        failed_a_check = {"failure_probability_resize_failed", "accuracy_target_missed", "raw_data_not_retained", "latency_bound_exceeded", "over_cluster_capacity"}
+        failed_a_check = set(json.loads(self.js.eval("JSON.stringify(FAILED_CHECK_CAUSES)")))
         rejected = {r["id"]: r["reason"] for r in selection["rejected"] if r["cause"] in failed_a_check}
         self.assertTrue(rejected)
         for row in rows:
@@ -170,6 +170,18 @@ class CandidateRowTests(unittest.TestCase):
         physical = self.doc["stage2_physical_asap_optimization"]["candidates"]
         self.assertEqual(len(rows), len(physical))
         self.assertTrue(all(row["display_name"] and row["logical"] for row in rows))
+
+    def test_status_follows_the_rejection_cause_not_the_cost(self):
+        """A candidate's row says "costlier" when it lost under the cost
+        model and "rejected" when it failed a check, whether or not the
+        document carries its cost."""
+        selection = self.doc["stage3_plan_selection"]
+        failed = next(r for r in selection["rejected"] if r["cause"] == "accuracy_target_missed")
+        lost = next(r for r in selection["rejected"] if r["cause"] == "costlier")
+        selection["costs"][failed["id"]] = selection["costs"][lost["id"]]
+        del selection["costs"][lost["id"]]
+        status = {row["id"]: row["status"] for row in self.js.call("stageCandidateRows", self.doc)}
+        self.assertEqual((status[failed["id"]], status[lost["id"]]), ("rejected", "costlier"))
 
     def test_pruned_and_composition_errors_come_last_with_their_reasons(self):
         """A Stage 2 pruned candidate and a Stage 1 candidate that did not
