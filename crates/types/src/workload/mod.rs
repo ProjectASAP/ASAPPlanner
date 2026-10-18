@@ -211,6 +211,54 @@ impl QueryRecurrence {
     }
 }
 
+/// The most evaluation steps one range request may have, as Prometheus
+/// allows for `/api/v1/query_range` (it rejects a request with more).
+pub const MAX_RANGE_EVALUATION_STEPS: u64 = 11_000;
+
+/// How one request of a query is answered as a range request: it evaluates
+/// the query at every `step_ms` from `end − span_ms` to the request's `end`,
+/// both included, as a dashboard panel over the last hour at 1-minute steps
+/// does (`/api/v1/query_range?...&start=now-1h&end=now&step=60`).
+/// [`QueryRecurrence`] still says how often a request runs.
+///
+/// JSON: `{"step_ms": 60000, "span_ms": 3600000}`.
+///
+/// # Example
+///
+/// ```
+/// use asap_types::workload::RangeEvaluation;
+///
+/// let last_hour_by_minute = RangeEvaluation { step_ms: 60_000, span_ms: 3_600_000 };
+/// assert_eq!(last_hour_by_minute.evaluations_per_request(), 61);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeEvaluation {
+    /// Time between consecutive evaluation steps of one request, in
+    /// milliseconds; must be positive.
+    pub step_ms: u64,
+    /// How far before the request's end its first step may be, in
+    /// milliseconds; 0 for one step per request.
+    pub span_ms: u64,
+}
+
+impl RangeEvaluation {
+    /// Steps one request evaluates, `span_ms / step_ms + 1` (rounded down):
+    /// 61 for a 1 h span at 1 min steps. Stage 3 prices each step as one
+    /// evaluation.
+    pub fn evaluations_per_request(&self) -> u64 {
+        self.span_ms / self.step_ms.max(1) + 1
+    }
+
+    /// Time from a request's first step to its last,
+    /// `(evaluations_per_request − 1) · step_ms`: `span_ms` rounded down to
+    /// whole steps. Its earliest step reads this much further back than
+    /// the latest, so kept panes are retained this much longer.
+    pub fn evaluated_span_ms(&self) -> u64 {
+        (self.evaluations_per_request() - 1) * self.step_ms
+    }
+}
+
 /// One query submitted as part of a finite batch, including how many times it
 /// will run and, when known, its execution time.
 ///
@@ -227,6 +275,7 @@ impl QueryRecurrence {
 ///     },
 ///     invocations: 1,
 ///     execute_at: Some(TimestampMs(10_000)),
+///     range_evaluation: None,
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,6 +286,10 @@ pub struct BatchEntry {
     pub predictability: Predictability,
     pub invocations: u64,
     pub execute_at: Option<TimestampMs>,
+    /// How each invocation is answered as a range request: `None` (the
+    /// default) for one evaluation per invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_evaluation: Option<RangeEvaluation>,
 }
 
 /// One query with repeated demand. Its recurrence does not imply that the
@@ -253,6 +306,8 @@ pub struct BatchEntry {
 ///     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
 ///     requirements: QueryRequirements::default(),
 ///     predictability: Predictability::Predictable { known_at: None },
+///     // Each refresh evaluates the last hour at 1-minute steps.
+///     range_evaluation: Some(RangeEvaluation { step_ms: 60_000, span_ms: 3_600_000 }),
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -262,6 +317,10 @@ pub struct RepeatingEntry {
     pub demand: RepeatedDemand,
     pub requirements: QueryRequirements,
     pub predictability: Predictability,
+    /// How each request is answered as a range request: `None` (the
+    /// default) for one evaluation per request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_evaluation: Option<RangeEvaluation>,
 }
 
 /// Planner-facing normalized form of either [`BatchEntry`] or
@@ -283,6 +342,7 @@ pub struct RepeatingEntry {
 ///     recurrence: QueryRecurrence::Repeated(
 ///         RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
 ///     ),
+///     range_evaluation: None,
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -298,6 +358,35 @@ pub struct QueryWorkloadEntry {
     /// How often it runs: sets how often each node is priced, and only
     /// repeated queries may keep state from ingestion time (default: unknown).
     pub recurrence: QueryRecurrence,
+    /// How each run is answered as a range request, one evaluation per
+    /// step; `None` (the default) for one evaluation per run. Stage 1 and
+    /// Stage 2 keep pane widths on its step grid, and Stage 3 prices
+    /// [`RangeEvaluation::evaluations_per_request`] evaluations per run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_evaluation: Option<RangeEvaluation>,
+}
+
+impl QueryWorkloadEntry {
+    /// The grid every evaluation of this query falls on, in milliseconds:
+    /// its fixed interval ([`QueryRecurrence::fixed_interval_ms`]), or with
+    /// a range evaluation the greatest common divisor of the interval and
+    /// the step, since each run evaluates at every step back from its end.
+    /// `None` when it does not repeat at a positive fixed interval.
+    pub fn evaluation_grid_ms(&self) -> Option<u64> {
+        let interval_ms = self.recurrence.fixed_interval_ms()?;
+        Some(match self.range_evaluation {
+            Some(range) if range.step_ms > 0 => gcd(interval_ms, range.step_ms),
+            _ => interval_ms,
+        })
+    }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
 }
 
 impl From<&BatchEntry> for QueryWorkloadEntry {
@@ -310,6 +399,7 @@ impl From<&BatchEntry> for QueryWorkloadEntry {
                 invocations: entry.invocations,
                 execute_at: entry.execute_at,
             },
+            range_evaluation: entry.range_evaluation,
         }
     }
 }
@@ -321,6 +411,7 @@ impl From<&RepeatingEntry> for QueryWorkloadEntry {
             requirements: entry.requirements.clone(),
             predictability: entry.predictability.clone(),
             recurrence: QueryRecurrence::Repeated(entry.demand.clone()),
+            range_evaluation: entry.range_evaluation,
         }
     }
 }
@@ -614,6 +705,15 @@ fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
         }
         _ => {}
     }
+    if let Some(range) = entry.range_evaluation {
+        if range.step_ms == 0 {
+            return Err(WorkloadError::ZeroRangeEvaluationStep);
+        }
+        let steps = range.evaluations_per_request();
+        if steps > MAX_RANGE_EVALUATION_STEPS {
+            return Err(WorkloadError::TooManyRangeEvaluationSteps { steps });
+        }
+    }
     Ok(())
 }
 
@@ -649,6 +749,19 @@ pub enum WorkloadError {
     /// Bad input: a repeating query whose fixed interval is zero.
     #[error("a fixed repetition interval must be greater than zero")]
     ZeroRepetitionInterval,
+    /// Bad input: a range evaluation whose `step_ms` is zero.
+    #[error("a range evaluation's step_ms must be greater than zero")]
+    ZeroRangeEvaluationStep,
+    /// Bad input: a range evaluation with more steps per request than
+    /// [`MAX_RANGE_EVALUATION_STEPS`], which Prometheus would reject.
+    #[error(
+        "a range evaluation has {steps} steps per request, more than {}",
+        MAX_RANGE_EVALUATION_STEPS
+    )]
+    TooManyRangeEvaluationSteps {
+        /// The steps one request would evaluate, `span_ms / step_ms + 1`.
+        steps: u64,
+    },
     /// Bad input: a scheduled repeating query with no timestamps.
     #[error("a repeated-query schedule must not be empty")]
     EmptySchedule,
@@ -850,11 +963,97 @@ mod tests {
             demand: RepeatedDemand::FixedInterval(RepetitionInterval(0)),
             requirements: QueryRequirements::default(),
             predictability: Predictability::Predictable { known_at: None },
+            range_evaluation: None,
         }]);
         assert_eq!(
             workload.validate(),
             Err(WorkloadError::ZeroRepetitionInterval)
         );
+    }
+
+    /// A range evaluation is optional JSON on a repeating entry, carried to
+    /// its normalized entry; its step must be positive and a request may
+    /// have at most `MAX_RANGE_EVALUATION_STEPS` steps. An entry without
+    /// one serializes as before, with no `range_evaluation` key.
+    #[test]
+    fn range_evaluation_is_optional_carried_and_validated() {
+        let dashboard = |range: serde_json::Value| {
+            let mut entry = serde_json::json!({
+                "query": "rate(requests_total[5m])",
+                "demand": {"fixed_interval": 30000},
+                "requirements": {},
+                "predictability": {"predictable": {"known_at": null}},
+            });
+            if !range.is_null() {
+                entry["range_evaluation"] = range;
+            }
+            serde_json::from_value::<RepeatingEntry>(entry).unwrap()
+        };
+        let plain = dashboard(serde_json::Value::Null);
+        assert_eq!(plain.range_evaluation, None);
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("range_evaluation")
+            .is_none());
+
+        let hour = dashboard(serde_json::json!({"step_ms": 60000, "span_ms": 3600000}));
+        let range = RangeEvaluation {
+            step_ms: 60_000,
+            span_ms: 3_600_000,
+        };
+        assert_eq!(hour.range_evaluation, Some(range));
+        assert_eq!(range.evaluations_per_request(), 61);
+        assert_eq!(range.evaluated_span_ms(), 3_600_000);
+        let entry = QueryWorkloadEntry::from(&hour);
+        assert_eq!(entry.range_evaluation, Some(range));
+        // Refreshes every 30 s and steps every 60 s: evaluations on a 30 s grid.
+        assert_eq!(entry.evaluation_grid_ms(), Some(30_000));
+        assert_eq!(
+            QueryWorkloadEntry::from(&plain).evaluation_grid_ms(),
+            Some(30_000)
+        );
+        // A span that is not a whole number of steps is rounded down.
+        let ragged = RangeEvaluation {
+            step_ms: 60_000,
+            span_ms: 90_000,
+        };
+        assert_eq!(
+            (ragged.evaluations_per_request(), ragged.evaluated_span_ms()),
+            (2, 60_000)
+        );
+
+        let validate = |range: RangeEvaluation| {
+            let mut workload = base_workload();
+            workload.repeating_queries = Some(vec![RepeatingEntry {
+                range_evaluation: Some(range),
+                ..hour.clone()
+            }]);
+            workload.validate()
+        };
+        assert_eq!(validate(range), Ok(()));
+        assert_eq!(
+            validate(RangeEvaluation {
+                step_ms: 0,
+                span_ms: 60_000
+            }),
+            Err(WorkloadError::ZeroRangeEvaluationStep)
+        );
+        assert_eq!(
+            validate(RangeEvaluation {
+                step_ms: 1_000,
+                span_ms: 11_000_000
+            }),
+            Err(WorkloadError::TooManyRangeEvaluationSteps { steps: 11_001 })
+        );
+        assert_eq!(
+            validate(RangeEvaluation {
+                step_ms: 1_000,
+                span_ms: 10_999_000
+            }),
+            Ok(())
+        );
+        let unknown = serde_json::json!({"step_ms": 1, "span_ms": 0, "start": 0});
+        assert!(serde_json::from_value::<RangeEvaluation>(unknown).is_err());
     }
 
     fn base_workload() -> QueryWorkload {
@@ -874,12 +1073,14 @@ mod tests {
             predictability: Predictability::AdHoc,
             invocations: 1,
             execute_at: None,
+            range_evaluation: None,
         }]);
         workload.repeating_queries = Some(vec![RepeatingEntry {
             query: Query("dashboard".into()),
             demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
             requirements: QueryRequirements::default(),
             predictability: Predictability::Predictable { known_at: None },
+            range_evaluation: None,
         }]);
 
         let entries: Vec<_> = workload.entries().collect();
@@ -920,6 +1121,7 @@ mod tests {
                         max_latency_ms: Some(100.0),
                     },
                     predictability: Predictability::Predictable { known_at: None },
+                    range_evaluation: None,
                 }]),
             },
             data_workload: Some(DataWorkload {
@@ -1062,6 +1264,7 @@ mod tests {
             }),
             requirements: QueryRequirements::default(),
             predictability: Predictability::Unknown,
+            range_evaluation: None,
         }]);
         assert_eq!(workload.validate(), Err(WorkloadError::InvalidRate(-1.0)));
     }

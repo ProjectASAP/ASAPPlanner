@@ -66,6 +66,7 @@ fn panel(query: &str, (epsilon, delta): (f64, f64), scope: AccuracyScope) -> Rep
             max_latency_ms: None,
         },
         predictability: Predictability::Predictable { known_at: None },
+        range_evaluation: None,
     }
 }
 

@@ -53,6 +53,7 @@ pub fn example1() -> PlanningWorkload {
             max_latency_ms,
         },
         predictability: Predictability::Predictable { known_at: None },
+        range_evaluation: None,
     };
     PlanningWorkload {
         query_workload: QueryWorkload {
@@ -130,6 +131,7 @@ pub fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
                             max_latency_ms: None,
                         },
                         predictability: Predictability::Predictable { known_at: None },
+                        range_evaluation: None,
                     })
                     .collect(),
             ),
@@ -239,6 +241,7 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
                         predictability: Predictability::AdHoc,
                         invocations: 1,
                         execute_at: Some(TimestampMs(T_MS)),
+                        range_evaluation: None,
                     })
                     .collect(),
             ),
@@ -258,6 +261,7 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
                         predictability: Predictability::Predictable {
                             known_at: Some(TimestampMs(T_MS)),
                         },
+                        range_evaluation: None,
                     })
                     .collect(),
             ),
@@ -295,6 +299,7 @@ pub fn pattern_b() -> PlanningWorkload {
                     max_latency_ms: Some(200.0),
                 },
                 predictability: Predictability::Predictable { known_at: None },
+                range_evaluation: None,
             }]),
         },
         data_workload: Some(shared_data_workload(

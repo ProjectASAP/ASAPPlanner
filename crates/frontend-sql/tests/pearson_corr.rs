@@ -159,6 +159,7 @@ async fn corr_survives_exact_plan_compilation() {
             },
             predictability: Default::default(),
             recurrence: Default::default(),
+            range_evaluation: None,
         }],
         &Default::default(),
         asap_plan_selection::PlanningModels::builtin(),

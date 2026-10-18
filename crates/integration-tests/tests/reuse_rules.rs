@@ -61,6 +61,7 @@ fn exact(recurrence: QueryRecurrence) -> QueryWorkloadEntry {
         requirements: Default::default(),
         predictability: Default::default(),
         recurrence,
+        range_evaluation: None,
     }
 }
 
