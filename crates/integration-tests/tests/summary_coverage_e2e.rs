@@ -12,12 +12,12 @@ use std::rc::Rc;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::logical_candidates;
-use asap_types::ir::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
+use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::expr_ir::ScalarValue;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-use asap_types::pre_asap::expr_ir::ScalarValue;
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
 
 fn accuracy() -> AccuracyTarget {
     AccuracyTarget::max_error(0.01).failure_probability(0.01)

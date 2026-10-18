@@ -6,20 +6,20 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::logical_candidates;
-use asap_physical_operators::physical_planner::{
+use asap_executor::physical_planner::{
     compile_candidate, frontier_from_timing, promql_rows, InputContract,
 };
-use asap_physical_operators::runtime::Scope;
-use asap_physical_operators::values::{Batch, Value};
+use asap_executor::runtime::Scope;
+use asap_executor::values::{Batch, Value};
+use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::planning::logical_candidates;
 use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOperatorPayload};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, OperatorNode,
     TimingMemo,
 };
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-use asap_types::types::AccuracyTarget;
 
 mod physical_common;
 

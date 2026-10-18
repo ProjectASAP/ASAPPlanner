@@ -15,13 +15,13 @@ mod planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use asap_aware_mapping::stage3_plan_selection::{
+use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, RejectionCause,
     ResourceUnitCost,
 };
-use asap_aware_mapping::DeploymentCapabilities;
 use asap_types::ir::flat::NodeId;
-use asap_types::post_asap::SketchAlgorithm;
+use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::workload::{DataArrival, PlanningWorkload};
 use planner_layering_common::*;
 

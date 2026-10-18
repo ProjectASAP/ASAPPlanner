@@ -22,10 +22,10 @@
 //! the reason: exact accumulators, Hydra structures (shared across groups,
 //! measured at one label width) and sketch names with no planner sketch.
 //!
-//! [`PlanSelectionSettings::measured_operation_costs`]: asap_aware_mapping::stage3_plan_selection::PlanSelectionSettings::measured_operation_costs
+//! [`PlanSelectionSettings::measured_operation_costs`]: asap_plan_selection::PlanSelectionSettings::measured_operation_costs
 
-use asap_aware_mapping::stage3_plan_selection::{MeasuredOperationCost, SummaryOperation};
-use asap_types::post_asap::SketchParams;
+use asap_plan_selection::{MeasuredOperationCost, SummaryOperation};
+use asap_types::ir::schema::SketchParams;
 use serde_json::Value;
 
 /// A sketch-bench row that gave no entries, and why.

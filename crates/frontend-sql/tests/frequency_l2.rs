@@ -2,11 +2,10 @@
 //! (#509 Example 2's Q3, in its Float64 form).
 use asap_frontend_common::resolve_root;
 use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlLowerer};
-use asap_types::{
-    ir::{NonASAPOp, OperatorNode},
-    pre_asap::{AggIntent, DataType, Field, Schema},
-    types::AccuracyTarget,
-};
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use std::rc::Rc;
 
 fn catalog(nullable: bool) -> SqlCatalog {
@@ -149,7 +148,7 @@ async fn batch_lowering_recognizes_frequency_l2() {
 /// recognized L2 intent.
 #[tokio::test]
 async fn stage1_offers_exact_and_summary_l2_candidates() {
-    use asap_aware_mapping::per_computation_candidates::{
+    use asap_logical_asap_optimization::per_computation_candidates::{
         generate_per_computation_candidates, ComputationCandidate,
     };
     use asap_types::ir::QueryRoot;

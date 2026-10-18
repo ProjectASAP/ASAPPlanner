@@ -15,17 +15,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
-use asap_aware_mapping::stage3_plan_selection::PlanSelectionSettings;
-use asap_aware_mapping::stage3_plan_selection::Selection;
-use asap_aware_mapping::DeploymentCapabilities;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
+use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_plan_selection::PlanSelectionSettings;
+use asap_plan_selection::Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
-use asap_types::post_asap::{
-    FieldDataType, Materialization, SketchAlgorithm, SketchParams, SketchStatistic,
-};
+use asap_types::physical::Materialization;
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
 
 pub use asap_devtools::planner_layering_examples::*;
@@ -643,7 +642,7 @@ pub fn materialization(p: &Physical, node: NodeId) -> MaterializationOption {
 
 pub fn runs_at_ingestion(p: &Physical, node: NodeId) -> bool {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
-    n.output_state.timing == asap_types::post_asap::ExecutionTiming::IngestionTime
+    n.output_state.timing == asap_types::ir::properties::ExecutionTiming::IngestionTime
 }
 
 /// Every node upstream of an ingestion-time node also runs at ingestion time.

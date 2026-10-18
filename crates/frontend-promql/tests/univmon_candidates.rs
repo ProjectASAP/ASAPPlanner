@@ -1,13 +1,12 @@
 use std::rc::Rc;
 
-use asap_aware_mapping::accuracy::{AccuracyModel, DefaultAccuracyModel};
+use asap_logical_asap_optimization::accuracy::{AccuracyModel, DefaultAccuracyModel};
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
+use asap_types::ir::properties::AccuracyMetric;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
-    AccuracyMetric, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
-};
-use asap_types::types::AccuracyTarget;
 use support::{logical_candidates, lower_promql, post_asap_dag, run_stage1_to_stage3};
 
 /// The summary evaluation over a UnivMon state that `root` reads, if any.

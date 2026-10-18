@@ -1,10 +1,12 @@
 [workspace]
 members = [
-    "crates/asap-physical-operators",
+    "crates/executor",
     "crates/types",
     "crates/frontend-common",
     "crates/sql-function-catalog",
-    "crates/asap-aware-mapping",
+    "crates/logical-asap-optimization",
+    "crates/physical-asap-optimization",
+    "crates/plan-selection",
     "crates/frontend-promql",
     "crates/frontend-metricsql",
     "crates/metricsql-common-parser-support",

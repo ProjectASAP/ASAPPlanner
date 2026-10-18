@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
+use asap_types::ir::operator::{AggIntent, Reduction, Source};
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
-use asap_types::pre_asap::{AggIntent, Reduction, Source};
-use asap_types::types::AccuracyTarget;
 
 fn lower(q: &str) -> Rc<OperatorNode> {
     lower_promql(q, AccuracyTarget::exact())

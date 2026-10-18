@@ -5,13 +5,16 @@ use std::ops::Bound;
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_types::ir::operator_properties::{Reduction, Source, TimeShift};
-use asap_types::ir::pane_chain::{expand_pane_chains, merged_chain, pane, whole_window_build};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
-use asap_types::post_asap::{
+use asap_types::ir::operator::operator_properties::{Reduction, Source, TimeShift};
+use asap_types::ir::operator::pane_chain::{
+    expand_pane_chains, merged_chain, pane, whole_window_build,
+};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::schema::{
     GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
 };
-use asap_types::pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 
 const MINUTE: u64 = 60_000;
 
@@ -168,11 +171,9 @@ fn expansion_merges_the_panes() {
 /// An unmaterialized chain expands into query-time panes.
 #[test]
 fn expansion_carries_the_chains_timing_onto_its_panes() {
-    use asap_types::ir::{
-        apply_materialization_timings, Materialization, MaterializationAssignment, Medium,
-        TimingMemo,
-    };
-    use asap_types::post_asap::ExecutionTiming;
+    use asap_types::ir::properties::ExecutionTiming;
+    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    use asap_types::physical::{Materialization, Medium};
     let at_ingestion = Materialization::MatAtIngestion(Medium::Memory);
     for (materialization, timing) in [
         (at_ingestion, ExecutionTiming::IngestionTime),

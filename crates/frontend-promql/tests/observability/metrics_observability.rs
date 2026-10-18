@@ -7,7 +7,7 @@
 use asap_frontend_promql::PromqlError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::properties::AccuracyTarget;
 use support::{logical_plan, lower_promql};
 
 const CORPORA: &[(&str, &str)] = &[

@@ -7,9 +7,7 @@ use asap_types::ir::OperatorNode;
 use physical_common::compile_at_ingestion_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
-use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::logical_candidates;
-use asap_physical_operators::{
+use asap_executor::{
     factory::create_planner_accumulator,
     operators::Operator,
     physical_planner::{precompute, Source},
@@ -18,12 +16,15 @@ use asap_physical_operators::{
     values::{Batch, Value},
     AggregateCore, KeyByLabelValues, Statistic,
 };
-use asap_types::post_asap::{
+use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::planning::logical_candidates;
+use asap_types::ir::operator::Reduction;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::expr_ir::ColumnRef;
+use asap_types::ir::schema::{
     EntityIdentity, ExactKind, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
     SummaryUpdate,
 };
-use asap_types::pre_asap::{expr_ir::ColumnRef, Reduction};
-use asap_types::types::AccuracyTarget;
 use futures::{executor::block_on, StreamExt};
 
 type Series = BTreeMap<String, String>;
@@ -54,7 +55,7 @@ fn canonical(labels: &Series) -> Series {
 /// requirement that its weights are counter samples, which the executor
 /// needs before it builds a Count-Min heap.
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
-    use asap_aware_mapping::stage3_plan_selection::with_confirmed_weights;
+    use asap_plan_selection::with_confirmed_weights;
     use asap_types::ir::QueryRoot;
     use asap_types::workload::{DataWorkload, MetricType, SourceFacts};
     let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
@@ -139,9 +140,9 @@ fn execute(
                 .map(|n| (&n.output_schema, &n.payload))
         );
     });
-    let program = serde_json::from_slice::<
-        asap_physical_operators::physical_planner::CompiledPhysicalDAG,
-    >(&serde_json::to_vec(&program).unwrap())
+    let program = serde_json::from_slice::<asap_executor::physical_planner::CompiledPhysicalDAG>(
+        &serde_json::to_vec(&program).unwrap(),
+    )
     .unwrap();
     let schema = precompute::raw_sample_schema();
     let batch = Batch::try_new(
@@ -324,8 +325,8 @@ fn check(
         Reduction::PerEntity => vec![],
     };
     let stored_only = matches!(family, FieldDataType::Sketch(kind, _)
-        if kind.algorithm() == &asap_types::post_asap::SketchAlgorithm::Cms);
-    if stored_only || asap_physical_operators::capability::validate_native_family(family).is_err() {
+        if kind.algorithm() == &asap_types::ir::schema::SketchAlgorithm::Cms);
+    if stored_only || asap_executor::capability::validate_native_family(family).is_err() {
         // Families without a native state, or with native stored state only (plain CMS), are outside precompute execution;
         // their compile must fail.
         assert!(precompute::compile(dag, &[source], &[root]).is_err());
@@ -376,7 +377,7 @@ fn check(
         }
     }
     let mut expected =
-        BTreeMap::<Series, Box<dyn asap_physical_operators::factory::AccumulatorUpdater>>::new();
+        BTreeMap::<Series, Box<dyn asap_executor::factory::AccumulatorUpdater>>::new();
     for (labels, time, value) in rows {
         let updater = expected
             .entry(population(reduction, &keys, labels))
@@ -520,10 +521,8 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
 // estimate each item's exact total; invalid weight contracts do not compile.
 #[test]
 fn raw_sample_heaps_resolve_items_from_labels() {
-    use asap_types::post_asap::{
-        GroupingStrategy::PerSubpopulationInstance, NonNegativeWeightProof, SketchKind,
-        SketchParams, WeightDomain,
-    };
+    use asap_types::ir::schema::GroupingStrategy::PerSubpopulationInstance;
+    use asap_types::ir::schema::{NonNegativeWeightProof, SketchKind, SketchParams, WeightDomain};
     let heap = |algorithm, params| {
         FieldDataType::Sketch(SketchKind::new(algorithm, params), PerSubpopulationInstance)
     };
@@ -604,9 +603,9 @@ fn raw_sample_heaps_resolve_items_from_labels() {
 // `without` grouping over raw samples drops the listed labels and `__name__`.
 #[test]
 fn raw_sample_without_grouping_drops_labels_and_name() {
-    use asap_types::pre_asap::GroupKeys;
+    use asap_types::ir::operator::GroupKeys;
     let family =
-        FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::post_asap::ExactParams::Sum);
+        FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::ir::schema::ExactParams::Sum);
     let (mut dag, source, root) =
         grouped_raw_summary(family, SummaryUpdate::column(ColumnRef::SampleValue));
     let service = dag

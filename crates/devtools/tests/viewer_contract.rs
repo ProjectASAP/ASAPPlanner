@@ -7,17 +7,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_types::ir::{
-    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
-};
-use asap_types::post_asap::maintained_population::{
+use asap_types::ir::operator::maintained_population::{
     MaintainedPopulation, PopulationInput, PopulationStatistic,
 };
-use asap_types::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
-use asap_types::pre_asap::{
-    ArithmeticOpKind, BinaryOpKind, ColumnRef, DataType, FieldDataType, GroupKeys, JoinKind,
-    Reduction, RelationalSetOpKind, SampleKind, ScalarValue, Schema, Source, TimeShift,
-    WindowFuncKind,
+use asap_types::ir::operator::{
+    BinaryOpKind, GroupKeys, JoinKind, Reduction, RelationalSetOpKind, SampleKind, Source,
+    TimeShift, WindowFuncKind,
+};
+use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, ScalarValue};
+use asap_types::ir::schema::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
+use asap_types::ir::schema::{DataType, FieldDataType, Schema};
+use asap_types::ir::{
+    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
 };
 
 /// One instance of every `NonASAPOp` variant, children elided. The

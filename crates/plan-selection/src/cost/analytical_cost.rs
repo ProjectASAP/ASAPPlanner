@@ -1,0 +1,4002 @@
+//! Analytical, resource-dimensional cost estimates.
+//!
+//! This module deliberately keeps CPU work, retained state, and scan I/O
+//! separate. Plan selection (Stage 3) turns them into one objective with
+//! [`crate::ResourceUnitCost`].
+
+use std::collections::{HashMap, HashSet};
+
+use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
+pub use asap_types::workload::resources::{
+    CacheCapacityEvidence, CacheEvidence, CacheProfile, ModeledCpu,
+};
+use asap_types::workload::DataArrival;
+use serde::{Deserialize, Serialize};
+
+use crate::cost::physical_operator_statistics::{
+    validate_comparison_scopes, ComparisonScope, EdgeStatistics, OperatorStatistics,
+    OperatorStatisticsProvider, PromqlEdgeStatistics, PromqlValueKind, ScanSelection,
+};
+
+/// Version of the analytical formulas applied to evidenced physical plans.
+///
+/// This identifies the estimation method, not a physical executor or runtime
+/// implementation version.
+pub const ANALYTICAL_COST_MODEL_VERSION: &str = "analytical-cost-v2-cache-aware";
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedCacheProfile {
+    integer_executions: Option<u64>,
+    cpu_execution_factor: f64,
+    scan_execution_factor: f64,
+    result_hit_ratio: f64,
+    buffer_hit_ratio: f64,
+    buffer_miss_bytes: u64,
+    buffer_working_set_bytes: u64,
+}
+
+fn resolve_cache_profile(
+    profile: &CacheProfile,
+    evaluation_count: u64,
+    data_arrival: DataArrival,
+) -> Result<ResolvedCacheProfile, AnalyticalCostError> {
+    if profile.version().trim().is_empty() {
+        return Err(AnalyticalCostError::InvalidCacheEvidence(
+            "blank cache profile version",
+        ));
+    }
+    let CacheProfile::Evidence(evidence) = profile else {
+        return Ok(ResolvedCacheProfile {
+            integer_executions: Some(evaluation_count),
+            cpu_execution_factor: evaluation_count as f64,
+            scan_execution_factor: evaluation_count as f64,
+            result_hit_ratio: 0.0,
+            buffer_hit_ratio: 0.0,
+            buffer_miss_bytes: 1,
+            buffer_working_set_bytes: 1,
+        });
+    };
+    let declared = evidence
+        .distinct_evaluations
+        .checked_add(evidence.repeated_identical_evaluations)
+        .ok_or(AnalyticalCostError::Overflow)?;
+    if declared != evaluation_count || evidence.distinct_evaluations == 0 {
+        return Err(AnalyticalCostError::InvalidCacheEvidence(
+            "cache demand requires an initial distinct evaluation and must sum to evaluation count",
+        ));
+    }
+    fn miss_fraction(value: CacheCapacityEvidence) -> Result<f64, AnalyticalCostError> {
+        if value.working_set_bytes == 0 {
+            return Err(AnalyticalCostError::InvalidCacheEvidence(
+                "cache working set must be non-zero",
+            ));
+        }
+        Ok(
+            value.working_set_bytes.saturating_sub(value.capacity_bytes) as f64
+                / value.working_set_bytes as f64,
+        )
+    }
+    if evidence
+        .result_invalidation_ratio
+        .is_some_and(|ratio| !ratio.is_finite() || !(0.0..=1.0).contains(&ratio))
+    {
+        return Err(AnalyticalCostError::InvalidCacheEvidence(
+            "result-cache invalidation ratio must be finite and in [0, 1]",
+        ));
+    }
+    let invalidation =
+        match data_arrival {
+            DataArrival::AtRest => {
+                if evidence
+                    .result_invalidation_ratio
+                    .is_some_and(|ratio| ratio != 0.0)
+                {
+                    return Err(AnalyticalCostError::InvalidCacheEvidence(
+                        "at-rest data cannot invalidate cached results",
+                    ));
+                }
+                0.0
+            }
+            DataArrival::Ingesting { .. } => evidence.result_invalidation_ratio.ok_or(
+                AnalyticalCostError::InvalidCacheEvidence(
+                    "continuous ingestion requires result-cache invalidation evidence",
+                ),
+            )?,
+            DataArrival::Mixed { .. } | DataArrival::Unknown => {
+                return Err(AnalyticalCostError::InvalidCacheEvidence(
+                    "cache invalidation cannot be derived for mixed or unknown data arrival",
+                ));
+            }
+        };
+    // Subtract integer byte counts before conversion: 1 - residency can
+    // round a nonempty uncovered working set to zero near full capacity.
+    let result_miss_ratio =
+        invalidation + miss_fraction(evidence.result_cache)? * (1.0 - invalidation);
+    let buffer_miss_ratio = miss_fraction(evidence.buffer_cache)?;
+    let result_hit_ratio = 1.0 - result_miss_ratio;
+    let buffer_hit_ratio = 1.0 - buffer_miss_ratio;
+    let cpu_execution_factor = evidence.distinct_evaluations as f64
+        + evidence.repeated_identical_evaluations as f64 * result_miss_ratio;
+    Ok(ResolvedCacheProfile {
+        integer_executions: if evidence.result_cache.capacity_bytes == 0 || invalidation == 1.0 {
+            Some(evaluation_count)
+        } else if evidence.result_cache.capacity_bytes >= evidence.result_cache.working_set_bytes
+            && invalidation == 0.0
+        {
+            Some(evidence.distinct_evaluations)
+        } else {
+            None
+        },
+        cpu_execution_factor,
+        scan_execution_factor: cpu_execution_factor * buffer_miss_ratio,
+        result_hit_ratio,
+        buffer_hit_ratio,
+        buffer_miss_bytes: evidence
+            .buffer_cache
+            .working_set_bytes
+            .saturating_sub(evidence.buffer_cache.capacity_bytes),
+        buffer_working_set_bytes: evidence.buffer_cache.working_set_bytes,
+    })
+}
+
+/// Derive cache hit ratios from the shared assumptions for this workload.
+pub fn cache_hit_ratios(
+    profile: &CacheProfile,
+    evaluation_count: u64,
+    data_arrival: DataArrival,
+) -> Result<(f64, f64), AnalyticalCostError> {
+    let resolved = resolve_cache_profile(profile, evaluation_count, data_arrival)?;
+    Ok((resolved.result_hit_ratio, resolved.buffer_hit_ratio))
+}
+
+/// An analytical estimate requires CPU work, peak memory, and scanned bytes.
+/// The shared resource container keeps other dimensions explicitly unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(from = "ResourceEstimateWire", into = "ResourceEstimateWire")]
+pub struct ResourceEstimate {
+    resources: asap_types::workload::resources::PhysicalResources<ModeledCpu, u64>,
+}
+
+// Keep the established three-field JSON format. Required fields make a missing
+// analytical quantity an import error instead of silently supplying zero.
+#[derive(Serialize, Deserialize)]
+struct ResourceEstimateWire {
+    cpu_ops: f64,
+    peak_memory_bytes: u64,
+    scan_bytes: u64,
+}
+
+impl From<ResourceEstimateWire> for ResourceEstimate {
+    fn from(wire: ResourceEstimateWire) -> Self {
+        Self::new(wire.cpu_ops, wire.peak_memory_bytes, wire.scan_bytes)
+    }
+}
+
+impl From<ResourceEstimate> for ResourceEstimateWire {
+    fn from(estimate: ResourceEstimate) -> Self {
+        Self {
+            cpu_ops: estimate.cpu_ops(),
+            peak_memory_bytes: estimate.peak_memory_bytes(),
+            scan_bytes: estimate.scan_bytes(),
+        }
+    }
+}
+
+impl ResourceEstimate {
+    pub const fn new(cpu_ops: f64, peak_memory_bytes: u64, scan_bytes: u64) -> Self {
+        Self {
+            resources: asap_types::workload::resources::PhysicalResources {
+                cpu: ModeledCpu { cpu_ops },
+                peak_memory_bytes: Some(peak_memory_bytes),
+                retained_memory_bytes: None,
+                scan_bytes: Some(scan_bytes),
+                serialized_bytes: None,
+                disk_bytes: None,
+            },
+        }
+    }
+
+    pub fn cpu_ops(&self) -> f64 {
+        self.resources.cpu.cpu_ops
+    }
+
+    pub fn peak_memory_bytes(&self) -> u64 {
+        self.resources
+            .peak_memory_bytes
+            .expect("analytical peak memory is required by construction")
+    }
+
+    pub fn scan_bytes(&self) -> u64 {
+        self.resources
+            .scan_bytes
+            .expect("analytical scan bytes are required by construction")
+    }
+
+    pub fn resources(
+        &self,
+    ) -> &asap_types::workload::resources::PhysicalResources<ModeledCpu, u64> {
+        &self.resources
+    }
+}
+
+/// Physical operator classes used to expose CPU, memory, and disk formulas
+/// independently of a particular front-end IR spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhysicalOperator {
+    Scan,
+    Filter {
+        /// Scalar predicate operations evaluated for each input row.
+        predicate_operations_per_row: u64,
+    },
+    Project {
+        /// Scalar expression/copy operations evaluated for each input row.
+        expression_operations_per_row: u64,
+    },
+    HashAggregate {
+        grouping_key_count: u64,
+        accumulator_count: u64,
+    },
+    InMemoryComparisonSort {
+        ordering_key_count: u64,
+        partitioned: bool,
+    },
+    /// Heap-based bounded ordering. The heap retains `limit + offset` rows
+    /// while the operator returns at most `limit` rows after skipping offset.
+    TopK {
+        limit: u64,
+        offset: u64,
+        ordering_key_count: u64,
+    },
+    HashJoin {
+        build_side: HashJoinBuildSide,
+        equality_key_count: u64,
+    },
+    HashDeduplicate {
+        key_count: u64,
+    },
+    Concat,
+    /// SQL analytic window evaluated over ordered in-memory partitions. This
+    /// is unrelated to streaming tumbling/sliding/EH window layouts.
+    InMemoryAnalyticWindow {
+        partition_key_count: u64,
+        ordering_key_count: u64,
+        function_operations_per_row: u64,
+    },
+    Limit {
+        limit: u64,
+        offset: u64,
+    },
+    PassThrough,
+    /// Moves when its input is evaluated (PromQL `offset`): the rows pass
+    /// unchanged and nothing is computed.
+    TimeShift,
+    /// Keeps the rows of its input inside a time window: priced by the
+    /// rows it keeps.
+    TimeRange,
+    PromqlRange {
+        range_millis: u64,
+    },
+    PromqlSubquery {
+        range_millis: u64,
+        resolution_millis: Option<u64>,
+    },
+    PromqlBinary {
+        operation: PromqlBinaryOperation,
+        operand_mode: PromqlBinaryOperandMode,
+        cardinality: PromqlVectorCardinality,
+        build_side: Option<HashJoinBuildSide>,
+    },
+    PromqlRelabel {
+        expression_operations_per_row: u64,
+    },
+    PromqlInfoEnrich {
+        matcher_operations_per_info_row: u64,
+    },
+    PromqlSeriesSample {
+        kind: PromqlSeriesSampleKind,
+        grouping_key_count: u64,
+    },
+    PromqlScalarToVector,
+    PromqlVectorToScalar,
+    PromqlScalarLeaf,
+    PromqlPerSeries {
+        operations_per_row: u64,
+        accumulator_count: u64,
+    },
+    PromqlPresence {
+        kind: PromqlPresenceKind,
+        operations_per_row: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlBinaryOperandMode {
+    VectorVector,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlBinaryOperation {
+    ArithmeticOrComparison,
+    And,
+    Or,
+    Unless,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlVectorCardinality {
+    OneToOne,
+    ManyToOne,
+    OneToMany,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlSeriesSampleKind {
+    LimitK { k: u64 },
+    LimitRatio { ratio_bits: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlPresenceKind {
+    /// `absent` and `absent_over_time`: synthesize at most one output series.
+    Absent,
+    /// `present_over_time`: emit independently for each input series.
+    PresentPerSeries,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HashJoinBuildSide {
+    Left,
+    Right,
+}
+
+/// One node in an already-selected physical DAG. Logical output cardinality,
+/// transient edge buffering, and state retained across the horizon are
+/// separate values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalDAGNode {
+    pub id: String,
+    pub operator: PhysicalOperator,
+    pub children: Vec<String>,
+    /// Exact comparison-scope coverage consumed by a scan. Non-scan nodes
+    /// leave this empty. Reusing `ScanSelection` prevents a physical plan
+    /// from naming a source independently of its snapshot and predicates.
+    pub scan_selection: Option<ScanSelection>,
+    /// Maximum transient edge buffer, distinct from logical `output_bytes`.
+    pub output_buffer_bytes: u64,
+    /// State that remains live after this node finishes (zero for ordinary
+    /// streaming operators).
+    pub retained_bytes: u64,
+    pub execution: ExecutionMultiplicity,
+}
+
+/// Authoritative statistics and allocation evidence for one physical node.
+/// The identity is repeated so a map entry cannot be accidentally rebound to
+/// a different node while an estimate is in progress.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalNodeEvidence {
+    pub physical_id: String,
+    pub statistics: OperatorStatistics,
+    pub output_buffer_bytes: u64,
+}
+
+/// A complete physical DAG together with the evidence used to cost it.
+///
+/// This representation is shared by query lowering and summary-maintenance
+/// lowering. Keeping the root and evidence beside the nodes prevents callers
+/// from estimating a valid node list with a different entry point or snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceBackedPhysicalDAG {
+    pub nodes: Vec<PhysicalDAGNode>,
+    pub root: String,
+    pub evidence: HashMap<String, PhysicalNodeEvidence>,
+}
+
+impl OperatorStatisticsProvider for HashMap<String, PhysicalNodeEvidence> {
+    fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
+        let evidence = self
+            .get(node_id)
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
+        if evidence.physical_id != node_id {
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
+                "evidence map key differs from embedded physical identity",
+            ));
+        }
+        Ok(evidence.statistics.clone())
+    }
+}
+
+impl OperatorStatisticsProvider for EvidenceBackedPhysicalDAG {
+    fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
+        let evidence = self
+            .evidence
+            .get(node_id)
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
+        let node = self.nodes.iter().find(|node| node.id == node_id).ok_or(
+            AnalyticalCostError::InvalidPhysicalDAG("evidence has no matching physical node"),
+        )?;
+        if evidence.physical_id != node_id {
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
+                "evidence map key differs from embedded physical identity",
+            ));
+        }
+        if node.output_buffer_bytes != evidence.output_buffer_bytes {
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
+                "physical node buffer differs from evidence snapshot",
+            ));
+        }
+        Ok(evidence.statistics.clone())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionMultiplicity {
+    Once,
+    PerEvaluation,
+}
+
+/// Borrowed inputs for one physical-DAG estimate. This remains available
+/// independently for diagnostics; plan selection should use
+/// [`estimate_physical_dag_comparison`] so scope equality is mandatory.
+pub struct PhysicalDAGEstimateRequest<'a> {
+    pub nodes: &'a [PhysicalDAGNode],
+    pub root: &'a str,
+    pub scope: &'a ComparisonScope,
+    pub statistics: &'a dyn OperatorStatisticsProvider,
+    pub cache_profile: &'a CacheProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalDAGComparisonEstimate {
+    pub raw: ResourceEstimate,
+    pub candidate: ResourceEstimate,
+}
+
+/// Estimate two plans only after proving that their source, snapshot,
+/// predicate, event-time, recurrence, and horizon scopes are identical.
+pub fn estimate_physical_dag_comparison(
+    raw: PhysicalDAGEstimateRequest<'_>,
+    candidate: PhysicalDAGEstimateRequest<'_>,
+) -> Result<PhysicalDAGComparisonEstimate, AnalyticalCostError> {
+    validate_comparison_scopes(raw.scope, candidate.scope)?;
+    if raw.cache_profile != candidate.cache_profile {
+        return Err(AnalyticalCostError::ComparisonScopeMismatch(
+            "cache profile",
+        ));
+    }
+    Ok(PhysicalDAGComparisonEstimate {
+        raw: estimate_physical_dag_with_cache(
+            raw.nodes,
+            raw.root,
+            raw.scope,
+            raw.statistics,
+            raw.cache_profile,
+        )?,
+        candidate: estimate_physical_dag_with_cache(
+            candidate.nodes,
+            candidate.root,
+            candidate.scope,
+            candidate.statistics,
+            candidate.cache_profile,
+        )?,
+    })
+}
+
+/// Compose local operator estimates once per physical identity. CPU and disk
+/// are additive; peak memory is simulated over a child-before-parent schedule
+/// and releases transient child outputs after their last consumer.
+pub fn estimate_physical_dag(
+    nodes: &[PhysicalDAGNode],
+    root: &str,
+    scope: &ComparisonScope,
+    statistics: &(impl OperatorStatisticsProvider + ?Sized),
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    estimate_physical_dag_with_cache(nodes, root, scope, statistics, &CacheProfile::no_cache())
+}
+
+pub fn estimate_physical_dag_with_cache(
+    nodes: &[PhysicalDAGNode],
+    root: &str,
+    scope: &ComparisonScope,
+    statistics: &(impl OperatorStatisticsProvider + ?Sized),
+    cache_profile: &CacheProfile,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    let evaluation_count = scope.validate()?;
+    let cache = resolve_cache_profile(cache_profile, evaluation_count, scope.data_arrival)?;
+    let by_id: HashMap<&str, &PhysicalDAGNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    if by_id.len() != nodes.len() {
+        return Err(AnalyticalCostError::InvalidPhysicalDAG("duplicate node id"));
+    }
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut order = Vec::new();
+    fn visit<'a>(
+        id: &'a str,
+        nodes: &HashMap<&'a str, &'a PhysicalDAGNode>,
+        visiting: &mut HashSet<&'a str>,
+        visited: &mut HashSet<&'a str>,
+        order: &mut Vec<&'a str>,
+    ) -> Result<(), AnalyticalCostError> {
+        if visited.contains(id) {
+            return Ok(());
+        }
+        if !visiting.insert(id) {
+            return Err(AnalyticalCostError::InvalidPhysicalDAG("cycle"));
+        }
+        let node = nodes
+            .get(id)
+            .ok_or(AnalyticalCostError::InvalidPhysicalDAG("missing node"))?;
+        for child in &node.children {
+            visit(child, nodes, visiting, visited, order)?;
+        }
+        visiting.remove(id);
+        visited.insert(id);
+        order.push(id);
+        Ok(())
+    }
+    visit(root, &by_id, &mut visiting, &mut visited, &mut order)?;
+
+    // Resolve each reachable node exactly once. A provider may be backed by a
+    // live catalog; one estimate must not mix observations from two refreshes.
+    let resolved_statistics: HashMap<&str, OperatorStatistics> = order
+        .iter()
+        .map(|id| statistics.statistics(id).map(|value| (*id, value)))
+        .collect::<Result<_, _>>()?;
+
+    let mut consumed_sources = Vec::new();
+    for id in &order {
+        let node = by_id[id];
+        let node_statistics = &resolved_statistics[id];
+        match node.operator {
+            PhysicalOperator::Scan => {
+                let coverage = node
+                    .scan_selection
+                    .as_ref()
+                    .ok_or_else(|| AnalyticalCostError::MissingScanSelection(node.id.clone()))?;
+                if !scope.sources.contains(coverage) {
+                    return Err(AnalyticalCostError::ScanOutsideComparisonScope(
+                        node.id.clone(),
+                    ));
+                }
+                if !consumed_sources.contains(&coverage) {
+                    consumed_sources.push(coverage);
+                }
+            }
+            _ if node.scan_selection.is_some() => {
+                return Err(AnalyticalCostError::InvalidPhysicalDAG(
+                    "only scan nodes may declare scan selection",
+                ));
+            }
+            _ => {}
+        }
+        validate_operator_statistics(node, node_statistics, &by_id, &resolved_statistics)?;
+        if node.retained_bytes > 0 && matches!(node.execution, ExecutionMultiplicity::PerEvaluation)
+        {
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
+                "per-evaluation node cannot retain state across the horizon",
+            ));
+        }
+        for child in &node.children {
+            let child = by_id[child.as_str()];
+            if matches!(node.execution, ExecutionMultiplicity::Once)
+                && matches!(child.execution, ExecutionMultiplicity::PerEvaluation)
+            {
+                return Err(AnalyticalCostError::InvalidPhysicalDAG(
+                    "build-once node cannot consume a per-evaluation child",
+                ));
+            }
+            if matches!(node.execution, ExecutionMultiplicity::PerEvaluation)
+                && matches!(child.execution, ExecutionMultiplicity::Once)
+                && child.retained_bytes == 0
+            {
+                return Err(AnalyticalCostError::InvalidPhysicalDAG(
+                    "per-evaluation node reads a non-retained build-once child",
+                ));
+            }
+        }
+    }
+    if scope
+        .sources
+        .iter()
+        .any(|expected| !consumed_sources.contains(&expected))
+    {
+        return Err(AnalyticalCostError::InvalidPhysicalDAG(
+            "physical scans omit a comparison-scope source",
+        ));
+    }
+
+    let mut remaining_consumers: HashMap<&str, usize> = HashMap::new();
+    for id in &order {
+        for child in &by_id[id].children {
+            *remaining_consumers.entry(child).or_default() += 1;
+        }
+    }
+    let mut cpu_ops = 0.0;
+    let mut scan_bytes = 0_u64;
+    let mut live_bytes = 0_u64;
+    let mut peak_memory_bytes = 0_u64;
+    let mut live_outputs: HashMap<&str, u64> = HashMap::new();
+    for id in order {
+        let node = by_id[id];
+        let local = estimate_operator(node.operator, resolved_statistics[id].clone())?;
+        let (cpu_executions, scan_executions) = match node.execution {
+            ExecutionMultiplicity::Once => (
+                1.0,
+                cache.buffer_miss_bytes as f64 / cache.buffer_working_set_bytes as f64,
+            ),
+            ExecutionMultiplicity::PerEvaluation => {
+                (cache.cpu_execution_factor, cache.scan_execution_factor)
+            }
+        };
+        cpu_ops += local.cpu_ops() * cpu_executions;
+        let integer_executions = match node.execution {
+            ExecutionMultiplicity::Once => Some(1),
+            ExecutionMultiplicity::PerEvaluation => cache.integer_executions,
+        };
+        let local_scan = if let Some(executions) = integer_executions {
+            let total = u128::from(local.scan_bytes()) * u128::from(executions);
+            let denominator = u128::from(cache.buffer_working_set_bytes);
+            let numerator = u128::from(cache.buffer_miss_bytes);
+            // Split the product before scaling. Both products fit u128 because
+            // numerator <= denominator; retain exact bytes even above 2^53.
+            let adjusted = (total / denominator) * numerator
+                + ((total % denominator) * numerator).div_ceil(denominator);
+            u64::try_from(adjusted).map_err(|_| AnalyticalCostError::Overflow)?
+        } else {
+            let adjusted = local.scan_bytes() as f64 * scan_executions;
+            // u64::MAX rounds up to 2^64 in f64. Equality is already outside
+            // the integer domain; casting it would silently saturate.
+            if !adjusted.is_finite() || adjusted >= u64::MAX as f64 {
+                return Err(AnalyticalCostError::Overflow);
+            }
+            adjusted.ceil() as u64
+        };
+        scan_bytes = scan_bytes
+            .checked_add(local_scan)
+            .ok_or(AnalyticalCostError::Overflow)?;
+        peak_memory_bytes = peak_memory_bytes.max(
+            live_bytes
+                .checked_add(local.peak_memory_bytes())
+                .and_then(|bytes| bytes.checked_add(node.output_buffer_bytes))
+                .ok_or(AnalyticalCostError::Overflow)?,
+        );
+        if node.retained_bytes > 0 {
+            live_bytes = live_bytes
+                .checked_add(node.retained_bytes)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            peak_memory_bytes = peak_memory_bytes.max(live_bytes);
+        }
+        let output = node.output_buffer_bytes;
+        if remaining_consumers.get(id).copied().unwrap_or(0) > 0 || id == root {
+            live_bytes = live_bytes
+                .checked_add(output)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            live_outputs.insert(id, output);
+            peak_memory_bytes = peak_memory_bytes.max(live_bytes);
+        }
+        for child in &node.children {
+            let remaining = remaining_consumers.get_mut(child.as_str()).ok_or(
+                AnalyticalCostError::InvalidPhysicalDAG("invalid consumer count"),
+            )?;
+            *remaining -= 1;
+            if *remaining == 0 {
+                if let Some(bytes) = live_outputs.remove(child.as_str()) {
+                    live_bytes = live_bytes
+                        .checked_sub(bytes)
+                        .ok_or(AnalyticalCostError::Overflow)?;
+                }
+            }
+        }
+    }
+    if !cpu_ops.is_finite() {
+        return Err(AnalyticalCostError::Overflow);
+    }
+    Ok(ResourceEstimate::new(
+        cpu_ops,
+        peak_memory_bytes,
+        scan_bytes,
+    ))
+}
+
+fn validate_operator_statistics(
+    node: &PhysicalDAGNode,
+    node_statistics: &OperatorStatistics,
+    nodes: &HashMap<&str, &PhysicalDAGNode>,
+    statistics: &HashMap<&str, OperatorStatistics>,
+) -> Result<(), AnalyticalCostError> {
+    let arity = expected_input_arity(node.operator, node.children.len());
+    if node_statistics.input_count() != arity.statistics_inputs {
+        return Err(AnalyticalCostError::InvalidOperatorStatistics {
+            node: node.id.clone(),
+            reason: "operator-statistics input count does not match physical arity",
+        });
+    }
+    if node.children.len() != arity.dag_children {
+        return Err(AnalyticalCostError::InvalidPhysicalDAG(
+            "operator child count does not match physical arity",
+        ));
+    }
+    if !statistics_match_operator(node.operator, node_statistics) {
+        return Err(AnalyticalCostError::InvalidOperatorStatistics {
+            node: node.id.clone(),
+            reason: "statistics variant does not match physical operator",
+        });
+    }
+    for edge in (0..node_statistics.input_count())
+        .filter_map(|index| node_statistics.input(index))
+        .chain(std::iter::once(node_statistics.output()))
+    {
+        if !edge.is_consistent() {
+            return Err(AnalyticalCostError::InvalidOperatorStatistics {
+                node: node.id.clone(),
+                reason: "edge rows and logical bytes are inconsistent",
+            });
+        }
+    }
+    for (input_index, child_id) in node.children.iter().enumerate() {
+        let child = nodes
+            .get(child_id.as_str())
+            .ok_or(AnalyticalCostError::InvalidPhysicalDAG("missing node"))?;
+        let child_statistics = &statistics[child.id.as_str()];
+        if node_statistics.input(input_index) != Some(child_statistics.output()) {
+            return Err(AnalyticalCostError::ConflictingEdgeStatistics {
+                parent: node.id.clone(),
+                child: child.id.clone(),
+                input_index,
+            });
+        }
+    }
+    validate_operator_semantics(node.operator, node_statistics)?;
+    validate_promql_child_edges(node, node_statistics, statistics)?;
+    Ok(())
+}
+
+fn validate_promql_child_edges(
+    node: &PhysicalDAGNode,
+    node_statistics: &OperatorStatistics,
+    statistics: &HashMap<&str, OperatorStatistics>,
+) -> Result<(), AnalyticalCostError> {
+    let output = node_statistics.promql_output();
+    let child_has_promql = node
+        .children
+        .iter()
+        .any(|child_id| statistics[child_id.as_str()].promql_output().is_some());
+    if output.is_none() && child_has_promql {
+        return Err(AnalyticalCostError::InvalidOperatorStatistics {
+            node: node.id.clone(),
+            reason: "operator drops child PromQL edge statistics",
+        });
+    }
+    let Some(output) = output else { return Ok(()) };
+    validate_promql_edge(output)?;
+    for (index, child_id) in node.children.iter().enumerate() {
+        let input =
+            node_statistics
+                .promql_input(index)
+                .ok_or(AnalyticalCostError::MissingOrStale(
+                    "promql_input_edge_statistics",
+                ))?;
+        let child = statistics[child_id.as_str()].promql_output().ok_or(
+            AnalyticalCostError::MissingOrStale("promql_child_output_statistics"),
+        )?;
+        validate_promql_edge(input)?;
+        if input != child {
+            return Err(AnalyticalCostError::InvalidOperatorStatistics {
+                node: node.id.clone(),
+                reason: "PromQL parent input does not match child output",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_promql_edge(edge: PromqlEdgeStatistics) -> Result<(), AnalyticalCostError> {
+    if edge.evaluation_steps == 0 {
+        return Err(AnalyticalCostError::MissingOrZero("evaluation_steps"));
+    }
+    if matches!(edge.value_kind, PromqlValueKind::Scalar) && edge.series != 0 {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "PromQL scalar edge cannot carry series",
+        ));
+    }
+    Ok(())
+}
+
+fn statistics_match_operator(operator: PhysicalOperator, statistics: &OperatorStatistics) -> bool {
+    match operator {
+        PhysicalOperator::Scan => matches!(statistics, OperatorStatistics::Scan { .. }),
+        PhysicalOperator::Filter { .. } => matches!(statistics, OperatorStatistics::Filter { .. }),
+        PhysicalOperator::Project { .. } => {
+            matches!(statistics, OperatorStatistics::Project { .. })
+        }
+        PhysicalOperator::HashAggregate { .. } => {
+            matches!(statistics, OperatorStatistics::HashAggregate { .. })
+        }
+        PhysicalOperator::InMemoryComparisonSort { .. } => {
+            matches!(
+                statistics,
+                OperatorStatistics::InMemoryComparisonSort { .. }
+            )
+        }
+        PhysicalOperator::TopK { .. } => matches!(statistics, OperatorStatistics::TopK { .. }),
+        PhysicalOperator::HashJoin { .. } => {
+            matches!(statistics, OperatorStatistics::HashJoin { .. })
+        }
+        PhysicalOperator::HashDeduplicate { .. } => {
+            matches!(statistics, OperatorStatistics::HashDeduplicate { .. })
+        }
+        PhysicalOperator::Concat => matches!(statistics, OperatorStatistics::Concat { .. }),
+        PhysicalOperator::InMemoryAnalyticWindow { .. } => {
+            matches!(
+                statistics,
+                OperatorStatistics::InMemoryAnalyticWindow { .. }
+            )
+        }
+        PhysicalOperator::Limit { .. } => matches!(statistics, OperatorStatistics::Limit { .. }),
+        PhysicalOperator::PassThrough
+        | PhysicalOperator::TimeShift
+        | PhysicalOperator::TimeRange => {
+            matches!(statistics, OperatorStatistics::PassThrough { .. })
+        }
+        PhysicalOperator::PromqlRange { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlRange { .. })
+        }
+        PhysicalOperator::PromqlSubquery { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlSubquery { .. })
+        }
+        PhysicalOperator::PromqlBinary { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlBinary { .. })
+        }
+        PhysicalOperator::PromqlRelabel { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlRelabel { .. })
+        }
+        PhysicalOperator::PromqlInfoEnrich { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlInfoEnrich { .. })
+        }
+        PhysicalOperator::PromqlSeriesSample { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlSeriesSample { .. })
+        }
+        PhysicalOperator::PromqlScalarToVector => {
+            matches!(statistics, OperatorStatistics::PromqlScalarToVector { .. })
+        }
+        PhysicalOperator::PromqlVectorToScalar => {
+            matches!(statistics, OperatorStatistics::PromqlVectorToScalar { .. })
+        }
+        PhysicalOperator::PromqlScalarLeaf => {
+            matches!(statistics, OperatorStatistics::PromqlScalarLeaf { .. })
+        }
+        PhysicalOperator::PromqlPerSeries { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlPerSeries { .. })
+        }
+        PhysicalOperator::PromqlPresence { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlPresence { .. })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OperatorInputArity {
+    /// Number of logical input-edge records required in `OperatorStatistics`.
+    statistics_inputs: usize,
+    /// Number of upstream physical nodes required in the DAG.
+    dag_children: usize,
+}
+
+/// Declare both notions of operator input explicitly. A scan has one external
+/// source-input statistics record but no upstream DAG node. Every other
+/// operator's statistics inputs correspond one-to-one with its DAG children.
+///
+/// Keep this match exhaustive: adding a physical operator must also define its
+/// statistics and DAG arity instead of silently inheriting unary behavior.
+fn expected_input_arity(
+    operator: PhysicalOperator,
+    variadic_child_count: usize,
+) -> OperatorInputArity {
+    let unary = OperatorInputArity {
+        statistics_inputs: 1,
+        dag_children: 1,
+    };
+    match operator {
+        PhysicalOperator::Scan => OperatorInputArity {
+            statistics_inputs: 1,
+            dag_children: 0,
+        },
+        // The row input, then one input per scalar the expressions read.
+        PhysicalOperator::Filter { .. } | PhysicalOperator::Project { .. } => OperatorInputArity {
+            statistics_inputs: variadic_child_count.max(1),
+            dag_children: variadic_child_count.max(1),
+        },
+        PhysicalOperator::HashAggregate { .. }
+        | PhysicalOperator::InMemoryComparisonSort { .. }
+        | PhysicalOperator::TopK { .. }
+        | PhysicalOperator::HashDeduplicate { .. }
+        | PhysicalOperator::InMemoryAnalyticWindow { .. }
+        | PhysicalOperator::Limit { .. }
+        | PhysicalOperator::PassThrough
+        | PhysicalOperator::TimeShift
+        | PhysicalOperator::TimeRange
+        | PhysicalOperator::PromqlRange { .. }
+        | PhysicalOperator::PromqlSubquery { .. }
+        | PhysicalOperator::PromqlRelabel { .. }
+        | PhysicalOperator::PromqlSeriesSample { .. }
+        | PhysicalOperator::PromqlScalarToVector
+        | PhysicalOperator::PromqlVectorToScalar
+        | PhysicalOperator::PromqlPerSeries { .. }
+        | PhysicalOperator::PromqlPresence { .. } => unary,
+        PhysicalOperator::HashJoin { .. }
+        | PhysicalOperator::PromqlBinary { .. }
+        | PhysicalOperator::PromqlInfoEnrich { .. } => OperatorInputArity {
+            statistics_inputs: 2,
+            dag_children: 2,
+        },
+        PhysicalOperator::PromqlScalarLeaf => OperatorInputArity {
+            statistics_inputs: 0,
+            dag_children: 0,
+        },
+        PhysicalOperator::Concat => OperatorInputArity {
+            statistics_inputs: variadic_child_count,
+            dag_children: variadic_child_count,
+        },
+    }
+}
+
+fn checked_cpu_product(rows: u64, operations_per_row: u64) -> Result<f64, AnalyticalCostError> {
+    Ok(rows
+        .checked_mul(operations_per_row)
+        .ok_or(AnalyticalCostError::Overflow)? as f64)
+}
+
+fn partitioned_order_estimate(
+    partitioning: &crate::cost::physical_operator_statistics::PartitionStatistics,
+    comparison_operations: u64,
+    row_operations: u64,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    let mut cpu_ops = 0.0;
+    let mut peak_memory_bytes = 0;
+    for partition in &partitioning.partitions {
+        let comparisons = partition.rows as f64
+            * (partition.rows.max(2) as f64).log2().ceil()
+            * comparison_operations as f64;
+        cpu_ops += comparisons + checked_cpu_product(partition.rows, row_operations)?;
+        peak_memory_bytes = peak_memory_bytes.max(partition.bytes);
+    }
+    if !cpu_ops.is_finite() {
+        return Err(AnalyticalCostError::Overflow);
+    }
+    Ok(ResourceEstimate::new(cpu_ops, peak_memory_bytes, 0))
+}
+
+fn validate_partitioning(
+    input: EdgeStatistics,
+    partitioning: &crate::cost::physical_operator_statistics::PartitionStatistics,
+    partitioned: bool,
+) -> Result<(), AnalyticalCostError> {
+    let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if input.rows == 0 {
+        return if partitioning.partitions.is_empty() {
+            Ok(())
+        } else {
+            inconsistent("empty input has non-empty partition evidence")
+        };
+    }
+    if partitioning.partitions.is_empty() {
+        return inconsistent("non-empty ordered input has no partition evidence");
+    }
+    if !partitioned && partitioning.partitions.len() != 1 {
+        return inconsistent("global ordering must have exactly one partition");
+    }
+    let total = partitioning.partitions.iter().try_fold(
+        EdgeStatistics { rows: 0, bytes: 0 },
+        |total, partition| {
+            if !partition.is_consistent() || partition.rows == 0 {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "ordered partition evidence is invalid",
+                ));
+            }
+            Ok(EdgeStatistics {
+                rows: total
+                    .rows
+                    .checked_add(partition.rows)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+                bytes: total
+                    .bytes
+                    .checked_add(partition.bytes)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            })
+        },
+    )?;
+    if total != input {
+        return inconsistent("ordered partitions do not sum to the input edge");
+    }
+    Ok(())
+}
+
+/// Estimate one physical operator. Child costs are deliberately excluded;
+/// a DAG walker sums CPU/disk once per node and combines simultaneously
+/// retained state separately.
+pub fn estimate_operator(
+    operator: PhysicalOperator,
+    statistics: OperatorStatistics,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    validate_operator_semantics(operator, &statistics)?;
+    let per_row_width = |rows: u64, bytes: u64| -> Result<u64, AnalyticalCostError> {
+        match (rows, bytes) {
+            (0, 0) => return Ok(0),
+            (0, _) | (_, 0) => {
+                return Err(AnalyticalCostError::MissingOrZero("operator rows/bytes"));
+            }
+            _ => {}
+        }
+        Ok(bytes.div_ceil(rows))
+    };
+    let input = |index: usize| {
+        statistics
+            .input(index)
+            .ok_or(AnalyticalCostError::MissingOrZero("operator input edge"))
+    };
+    let output = statistics.output();
+    if let (
+        PhysicalOperator::PromqlScalarLeaf,
+        OperatorStatistics::PromqlScalarLeaf { promql_output, .. },
+    ) = (operator, &statistics)
+    {
+        validate_promql_edge(*promql_output)?;
+        if promql_output.value_kind != PromqlValueKind::Scalar
+            || output.rows != promql_output.evaluation_steps
+        {
+            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL scalar leaf must emit one scalar row per evaluation step",
+            ));
+        }
+        return Ok(ResourceEstimate::new(
+            output.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ));
+    }
+    let left = input(0)?;
+    let estimate = match (operator, &statistics) {
+        (
+            PhysicalOperator::Scan,
+            OperatorStatistics::Scan {
+                source_read_bytes, ..
+            },
+        ) => ResourceEstimate::new(
+            left.rows as f64,
+            per_row_width(left.rows, left.bytes)?,
+            *source_read_bytes,
+        ),
+        (
+            PhysicalOperator::Filter {
+                predicate_operations_per_row,
+            },
+            _,
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, predicate_operations_per_row)?,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (
+            PhysicalOperator::Project {
+                expression_operations_per_row,
+            },
+            _,
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, expression_operations_per_row)?,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (PhysicalOperator::TimeShift, _) => ResourceEstimate::new(0.0, 0, 0),
+        (PhysicalOperator::TimeRange, _) => ResourceEstimate::new(
+            output.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (PhysicalOperator::PassThrough, _) => ResourceEstimate::new(
+            left.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (
+            PhysicalOperator::HashAggregate {
+                grouping_key_count,
+                accumulator_count,
+            },
+            OperatorStatistics::HashAggregate {
+                group_count,
+                key_bytes,
+                accumulator_bytes_per_group,
+                ..
+            },
+        ) => ResourceEstimate::new(
+            checked_cpu_product(
+                left.rows,
+                grouping_key_count
+                    .checked_add(accumulator_count)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            )?,
+            checked_bytes(&[
+                *group_count,
+                key_bytes
+                    .checked_add(*accumulator_bytes_per_group)
+                    .and_then(|bytes| bytes.checked_add(16))
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            ])?,
+            0,
+        ),
+        (
+            PhysicalOperator::HashDeduplicate { key_count },
+            OperatorStatistics::HashDeduplicate {
+                distinct_key_count,
+                key_bytes,
+                ..
+            },
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, key_count)?,
+            checked_bytes(&[
+                *distinct_key_count,
+                key_bytes
+                    .checked_add(16)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            ])?,
+            0,
+        ),
+        (
+            PhysicalOperator::InMemoryComparisonSort {
+                ordering_key_count, ..
+            },
+            OperatorStatistics::InMemoryComparisonSort {
+                input_partitioning, ..
+            },
+        ) => partitioned_order_estimate(input_partitioning, ordering_key_count, 0)?,
+        (
+            PhysicalOperator::InMemoryAnalyticWindow {
+                partition_key_count,
+                ordering_key_count,
+                function_operations_per_row,
+            },
+            OperatorStatistics::InMemoryAnalyticWindow {
+                input_partitioning, ..
+            },
+        ) => partitioned_order_estimate(
+            input_partitioning,
+            partition_key_count
+                .checked_add(ordering_key_count)
+                .ok_or(AnalyticalCostError::Overflow)?,
+            function_operations_per_row,
+        )?,
+        (
+            PhysicalOperator::TopK {
+                limit,
+                offset,
+                ordering_key_count,
+            },
+            _,
+        ) => {
+            let heap_capacity = limit
+                .checked_add(offset)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            let heap_rows = heap_capacity.min(left.rows);
+            ResourceEstimate::new(
+                left.rows as f64
+                    * (heap_rows.max(2) as f64).log2().ceil()
+                    * ordering_key_count as f64,
+                checked_bytes(&[heap_rows, per_row_width(left.rows, left.bytes)?])?,
+                0,
+            )
+        }
+        (
+            PhysicalOperator::HashJoin {
+                build_side,
+                equality_key_count,
+            },
+            _,
+        ) => {
+            let right = input(1)?;
+            ResourceEstimate::new(
+                checked_cpu_product(
+                    left.rows
+                        .checked_add(right.rows)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                    equality_key_count,
+                )? + output.rows as f64,
+                match build_side {
+                    HashJoinBuildSide::Left => left
+                        .rows
+                        .checked_mul(16)
+                        .and_then(|metadata| left.bytes.checked_add(metadata)),
+                    HashJoinBuildSide::Right => right
+                        .rows
+                        .checked_mul(16)
+                        .and_then(|metadata| right.bytes.checked_add(metadata)),
+                }
+                .ok_or(AnalyticalCostError::Overflow)?,
+                0,
+            )
+        }
+        (PhysicalOperator::Concat, _) => ResourceEstimate::new(
+            output.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (PhysicalOperator::Limit { limit, offset }, _) => {
+            let consumed = if limit == 0 {
+                0
+            } else {
+                left.rows.min(
+                    offset
+                        .checked_add(limit)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                )
+            };
+            ResourceEstimate::new(
+                consumed as f64,
+                per_row_width(output.rows, output.bytes)?,
+                0,
+            )
+        }
+        (
+            PhysicalOperator::PromqlRange { .. },
+            OperatorStatistics::PromqlRange {
+                edges,
+                max_window_samples_per_series,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            ResourceEstimate::new(
+                left.rows as f64,
+                checked_bytes(&[
+                    promql.input.series,
+                    *max_window_samples_per_series,
+                    per_row_width(left.rows, left.bytes)?,
+                ])?,
+                0,
+            )
+        }
+        (
+            PhysicalOperator::PromqlSubquery { .. },
+            OperatorStatistics::PromqlSubquery { edges, .. },
+        ) => ResourceEstimate::new(left.rows as f64 + output.rows as f64, edges.input.bytes, 0),
+        (
+            PhysicalOperator::PromqlBinary {
+                operand_mode,
+                build_side,
+                ..
+            },
+            OperatorStatistics::PromqlBinary {
+                edges,
+                matching_key_bytes,
+            },
+        ) => {
+            let promql = require_promql_binary(edges)?;
+            let right = input(1)?;
+            let matching_bytes = match operand_mode {
+                PromqlBinaryOperandMode::VectorVector => {
+                    let build_series = match build_side.ok_or(
+                        AnalyticalCostError::MissingOrStale("vector_match_build_side"),
+                    )? {
+                        HashJoinBuildSide::Left => promql.inputs[0].series,
+                        HashJoinBuildSide::Right => promql.inputs[1].series,
+                    };
+                    checked_bytes(&[
+                        build_series,
+                        matching_key_bytes
+                            .checked_add(16)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    ])?
+                }
+            };
+            ResourceEstimate::new(
+                left.rows as f64 + right.rows as f64 + output.rows as f64,
+                matching_bytes,
+                0,
+            )
+        }
+        (
+            PhysicalOperator::PromqlRelabel {
+                expression_operations_per_row,
+            },
+            OperatorStatistics::PromqlRelabel { .. },
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, expression_operations_per_row)?,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (
+            PhysicalOperator::PromqlInfoEnrich {
+                matcher_operations_per_info_row,
+            },
+            OperatorStatistics::PromqlInfoEnrich {
+                edges,
+                matching_key_bytes,
+            },
+        ) => {
+            let promql = require_promql_binary(edges)?;
+            let right = input(1)?;
+            ResourceEstimate::new(
+                left.rows as f64
+                    + right.rows as f64
+                    + output.rows as f64
+                    + checked_cpu_product(right.rows, matcher_operations_per_info_row)?,
+                checked_bytes(&[
+                    promql.inputs[1].series,
+                    matching_key_bytes
+                        .checked_add(16)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
+                0,
+            )
+        }
+        (
+            PhysicalOperator::PromqlSeriesSample { .. },
+            OperatorStatistics::PromqlSeriesSample {
+                edges, key_bytes, ..
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            ResourceEstimate::new(
+                left.rows as f64 + promql.input.series as f64,
+                checked_bytes(&[
+                    promql.output.series,
+                    key_bytes
+                        .checked_add(16)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
+                0,
+            )
+        }
+        (PhysicalOperator::PromqlScalarToVector | PhysicalOperator::PromqlVectorToScalar, _) => {
+            ResourceEstimate::new(
+                left.rows as f64 + output.rows as f64,
+                per_row_width(output.rows, output.bytes)?,
+                0,
+            )
+        }
+        (
+            PhysicalOperator::PromqlPerSeries {
+                operations_per_row, ..
+            },
+            OperatorStatistics::PromqlPerSeries {
+                edges,
+                accumulator_bytes_per_series,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            ResourceEstimate::new(
+                checked_cpu_product(left.rows, operations_per_row)?,
+                checked_bytes(&[promql.input.series, *accumulator_bytes_per_series])?,
+                0,
+            )
+        }
+        (
+            PhysicalOperator::PromqlPresence {
+                operations_per_row, ..
+            },
+            OperatorStatistics::PromqlPresence { .. },
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, operations_per_row)? + output.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (PhysicalOperator::PromqlScalarLeaf, _) => unreachable!(),
+        _ => {
+            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "statistics variant does not match physical operator",
+            ));
+        }
+    };
+    if estimate.cpu_ops().is_finite() {
+        Ok(estimate)
+    } else {
+        Err(AnalyticalCostError::Overflow)
+    }
+}
+
+pub(crate) fn validate_operator_semantics(
+    operator: PhysicalOperator,
+    statistics: &OperatorStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if !statistics_match_operator(operator, statistics) {
+        return inconsistent("statistics variant does not match physical operator");
+    }
+    if matches!(
+        (operator, statistics),
+        (
+            PhysicalOperator::Concat,
+            OperatorStatistics::Concat { inputs, .. }
+        ) if inputs.is_empty()
+    ) {
+        return inconsistent("Concat must have at least one input");
+    }
+    if let (
+        PhysicalOperator::PromqlScalarLeaf,
+        OperatorStatistics::PromqlScalarLeaf {
+            output,
+            promql_output,
+        },
+    ) = (operator, statistics)
+    {
+        validate_promql_edge_shape(*output, *promql_output)?;
+        return if promql_output.value_kind == PromqlValueKind::Scalar {
+            Ok(())
+        } else {
+            inconsistent("PromQL scalar leaf output is not scalar")
+        };
+    }
+    let input = statistics
+        .input(0)
+        .ok_or(AnalyticalCostError::InconsistentOperatorStatistics(
+            "operator input is missing",
+        ))?;
+    let output = statistics.output();
+    match (operator, statistics) {
+        (
+            PhysicalOperator::Scan,
+            OperatorStatistics::Scan {
+                edges,
+                source_read_bytes,
+            },
+        ) => {
+            if input != output {
+                return inconsistent("Scan input and output edges differ");
+            }
+            if input.rows > 0 && *source_read_bytes == 0 {
+                return inconsistent("non-empty Scan has zero source-read bytes");
+            }
+            if let Some(promql) = edges.promql {
+                validate_promql_edge_shape(edges.input, promql.input)?;
+                validate_promql_edge_shape(edges.output, promql.output)?;
+                if promql.input != promql.output {
+                    return inconsistent("Scan changes its PromQL edge shape");
+                }
+            }
+        }
+        (
+            PhysicalOperator::Filter {
+                predicate_operations_per_row,
+            },
+            _,
+        ) => {
+            if predicate_operations_per_row == 0 {
+                return inconsistent("Filter has no predicate work");
+            }
+            if output.rows > input.rows || output.bytes > input.bytes {
+                return inconsistent("Filter output expands its input");
+            }
+            if let Some(promql) = statistics.unary_promql() {
+                validate_promql_filter_shape(promql)?;
+            }
+        }
+        (
+            PhysicalOperator::Project {
+                expression_operations_per_row,
+            },
+            _,
+        ) => {
+            if expression_operations_per_row == 0 {
+                return inconsistent("Project has no expression work");
+            }
+            if output.rows != input.rows {
+                return inconsistent("Project changes row cardinality");
+            }
+            if let Some(promql) = statistics.unary_promql() {
+                validate_promql_cardinality_preserving_shape(promql)?;
+            }
+        }
+        (
+            PhysicalOperator::HashAggregate {
+                grouping_key_count,
+                accumulator_count,
+            },
+            OperatorStatistics::HashAggregate {
+                group_count,
+                key_bytes,
+                accumulator_bytes_per_group,
+                ..
+            },
+        ) => {
+            if statistics.promql_output().is_some() {
+                return inconsistent(
+                    "PromQL cross-series aggregation needs an explicit physical operator",
+                );
+            }
+            if accumulator_count == 0 || *accumulator_bytes_per_group == 0 {
+                return inconsistent("HashAggregate accumulator work and width must be positive");
+            }
+            if grouping_key_count == 0 {
+                if *key_bytes != 0 || *group_count != 1 {
+                    return inconsistent(
+                        "ungrouped HashAggregate must have one zero-key-width group",
+                    );
+                }
+            } else if *key_bytes == 0 || *group_count > input.rows {
+                return inconsistent("grouped HashAggregate has invalid group evidence");
+            }
+            if output.rows != *group_count {
+                return inconsistent("grouped output differs from distinct group cardinality");
+            }
+        }
+        (
+            PhysicalOperator::HashDeduplicate { key_count },
+            OperatorStatistics::HashDeduplicate {
+                distinct_key_count,
+                key_bytes,
+                ..
+            },
+        ) => {
+            if key_count == 0 || *key_bytes == 0 {
+                return inconsistent("Deduplicate key count and width must be positive");
+            }
+            if *distinct_key_count > input.rows || output.rows != *distinct_key_count {
+                return inconsistent("deduplicated output differs from distinct key cardinality");
+            }
+        }
+        (
+            PhysicalOperator::InMemoryComparisonSort {
+                ordering_key_count,
+                partitioned,
+            },
+            OperatorStatistics::InMemoryComparisonSort {
+                input_partitioning, ..
+            },
+        ) => {
+            if ordering_key_count == 0 {
+                return inconsistent("Sort has no ordering keys");
+            }
+            if input != output {
+                return inconsistent("cardinality-preserving operator changes its edge");
+            }
+            validate_partitioning(input, input_partitioning, partitioned)?;
+        }
+        (PhysicalOperator::TimeRange, _) => {
+            if output.rows > input.rows || output.bytes > input.bytes {
+                return inconsistent("a time range keeps more rows than it reads");
+            }
+        }
+        (PhysicalOperator::PassThrough | PhysicalOperator::TimeShift, _) => {
+            if input != output {
+                return inconsistent("cardinality-preserving operator changes its edge");
+            }
+            if let Some(promql) = statistics.unary_promql() {
+                validate_promql_cardinality_preserving_shape(promql)?;
+            }
+        }
+        (
+            PhysicalOperator::InMemoryAnalyticWindow {
+                partition_key_count,
+                ordering_key_count,
+                function_operations_per_row,
+            },
+            OperatorStatistics::InMemoryAnalyticWindow {
+                input_partitioning, ..
+            },
+        ) => {
+            if ordering_key_count == 0 || function_operations_per_row == 0 {
+                return inconsistent("analytic Window work must be positive");
+            }
+            if input.rows != output.rows {
+                return inconsistent("Window changes row cardinality");
+            }
+            validate_partitioning(input, input_partitioning, partition_key_count > 0)?;
+        }
+        (PhysicalOperator::Concat, OperatorStatistics::Concat { inputs, .. }) => {
+            if inputs.is_empty() {
+                return inconsistent("Concat must have at least one input");
+            }
+            let total =
+                inputs
+                    .iter()
+                    .try_fold(EdgeStatistics { rows: 0, bytes: 0 }, |total, edge| {
+                        Ok::<_, AnalyticalCostError>(EdgeStatistics {
+                            rows: total
+                                .rows
+                                .checked_add(edge.rows)
+                                .ok_or(AnalyticalCostError::Overflow)?,
+                            bytes: total
+                                .bytes
+                                .checked_add(edge.bytes)
+                                .ok_or(AnalyticalCostError::Overflow)?,
+                        })
+                    })?;
+            if output != total {
+                return inconsistent("Concat output differs from the sum of its inputs");
+            }
+            if let OperatorStatistics::Concat {
+                promql: Some(promql),
+                ..
+            } = statistics
+            {
+                if promql.inputs.len() != inputs.len() || promql.inputs.is_empty() {
+                    return inconsistent("PromQL Concat edge arity is invalid");
+                }
+                let first = promql.inputs[0];
+                let series_bound = promql.inputs.iter().try_fold(0_u64, |total, edge| {
+                    if edge.evaluation_steps != first.evaluation_steps
+                        || edge.value_kind != first.value_kind
+                    {
+                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                            "PromQL Concat inputs have different shapes",
+                        ));
+                    }
+                    total
+                        .checked_add(edge.series)
+                        .ok_or(AnalyticalCostError::Overflow)
+                })?;
+                if promql.output.evaluation_steps != first.evaluation_steps
+                    || promql.output.value_kind != first.value_kind
+                    || promql.output.series > series_bound
+                {
+                    return inconsistent("PromQL Concat output exceeds its input-series bound");
+                }
+            }
+        }
+        (
+            PhysicalOperator::TopK {
+                limit,
+                offset,
+                ordering_key_count,
+            },
+            _,
+        ) => {
+            if limit == 0 || ordering_key_count == 0 {
+                return inconsistent("Top-K limit and ordering-key count must be positive");
+            }
+            let expected = input.rows.saturating_sub(offset).min(limit);
+            if output.rows != expected {
+                return inconsistent("Top-K output differs from its cardinality bound");
+            }
+        }
+        (PhysicalOperator::Limit { limit, offset }, _) => {
+            let expected = input.rows.saturating_sub(offset).min(limit);
+            if output.rows != expected {
+                return inconsistent("Limit output differs from limit and offset");
+            }
+        }
+        (
+            PhysicalOperator::HashJoin {
+                equality_key_count, ..
+            },
+            _,
+        ) => {
+            if equality_key_count == 0 {
+                return inconsistent("HashJoin has no equality keys");
+            }
+        }
+        (
+            PhysicalOperator::PromqlRange { range_millis },
+            OperatorStatistics::PromqlRange {
+                edges,
+                max_window_samples_per_series,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            if range_millis == 0 || *max_window_samples_per_series == 0 {
+                return inconsistent("PromQL range needs a positive range and window bound");
+            }
+            if promql.input.value_kind != PromqlValueKind::Vector
+                || promql.output.value_kind != PromqlValueKind::RangeVector
+                || promql.input.series != promql.output.series
+                || promql.input.evaluation_steps != promql.output.evaluation_steps
+            {
+                return inconsistent("PromQL range edge shape is invalid");
+            }
+        }
+        (
+            PhysicalOperator::PromqlSubquery {
+                range_millis,
+                resolution_millis,
+            },
+            OperatorStatistics::PromqlSubquery {
+                edges,
+                subquery_steps,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            if range_millis == 0
+                || resolution_millis == Some(0)
+                || *subquery_steps == 0
+                || promql.input.value_kind != PromqlValueKind::RangeVector
+                || promql.output.value_kind != PromqlValueKind::RangeVector
+                || promql.input.series != promql.output.series
+            {
+                return inconsistent("PromQL subquery configuration or edge shape is invalid");
+            }
+            let expected = promql
+                .output
+                .evaluation_steps
+                .checked_mul(*subquery_steps)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            if promql.input.evaluation_steps != expected {
+                return inconsistent(
+                    "subquery child steps do not equal output steps times subquery steps",
+                );
+            }
+        }
+        (
+            PhysicalOperator::PromqlBinary {
+                operation,
+                operand_mode,
+                cardinality,
+                build_side,
+            },
+            OperatorStatistics::PromqlBinary {
+                edges,
+                matching_key_bytes,
+            },
+        ) => validate_promql_binary(
+            operation,
+            operand_mode,
+            cardinality,
+            build_side,
+            *matching_key_bytes,
+            edges,
+        )?,
+        (
+            PhysicalOperator::PromqlRelabel {
+                expression_operations_per_row,
+            },
+            OperatorStatistics::PromqlRelabel { edges },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            validate_instant_vector_rows(output, promql.output)?;
+            if expression_operations_per_row == 0
+                || input.rows != output.rows
+                || promql.input.series != promql.output.series
+                || promql.input.evaluation_steps != promql.output.evaluation_steps
+                || promql.input.value_kind != PromqlValueKind::Vector
+                || promql.output.value_kind != PromqlValueKind::Vector
+            {
+                return inconsistent("PromQL relabel configuration or edge shape is invalid");
+            }
+        }
+        (
+            PhysicalOperator::PromqlInfoEnrich {
+                matcher_operations_per_info_row,
+            },
+            OperatorStatistics::PromqlInfoEnrich {
+                edges,
+                matching_key_bytes,
+            },
+        ) => {
+            let promql = require_promql_binary(edges)?;
+            validate_instant_vector_rows(output, promql.output)?;
+            if matcher_operations_per_info_row == 0
+                || *matching_key_bytes == 0
+                || input.rows != output.rows
+                || promql.inputs[0].series != promql.output.series
+                || promql.inputs[0].evaluation_steps != promql.output.evaluation_steps
+                || promql.inputs[1].evaluation_steps != promql.output.evaluation_steps
+                || promql
+                    .inputs
+                    .iter()
+                    .any(|edge| edge.value_kind != PromqlValueKind::Vector)
+                || promql.output.value_kind != PromqlValueKind::Vector
+            {
+                return inconsistent(
+                    "PromQL info enrichment configuration or edge shape is invalid",
+                );
+            }
+        }
+        (
+            PhysicalOperator::PromqlSeriesSample {
+                kind,
+                grouping_key_count,
+            },
+            OperatorStatistics::PromqlSeriesSample {
+                edges,
+                group_count,
+                key_bytes,
+            },
+        ) => validate_promql_series_sample(
+            kind,
+            grouping_key_count,
+            *group_count,
+            *key_bytes,
+            edges,
+        )?,
+        (
+            PhysicalOperator::PromqlScalarToVector,
+            OperatorStatistics::PromqlScalarToVector { edges },
+        )
+        | (
+            PhysicalOperator::PromqlVectorToScalar,
+            OperatorStatistics::PromqlVectorToScalar { edges },
+        ) => {
+            validate_promql_bridge(operator, edges)?;
+        }
+        (PhysicalOperator::PromqlScalarLeaf, _) => unreachable!(),
+        (
+            PhysicalOperator::PromqlPerSeries {
+                operations_per_row,
+                accumulator_count,
+            },
+            OperatorStatistics::PromqlPerSeries {
+                edges,
+                accumulator_bytes_per_series,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            validate_instant_vector_rows(output, promql.output)?;
+            if operations_per_row == 0
+                || accumulator_count == 0
+                || *accumulator_bytes_per_series == 0
+                || promql.output.value_kind != PromqlValueKind::Vector
+                || promql.output.series > promql.input.series
+                || promql.output.evaluation_steps != promql.input.evaluation_steps
+            {
+                return inconsistent("PromQL per-series configuration or edge shape is invalid");
+            }
+        }
+        (
+            PhysicalOperator::PromqlPresence {
+                kind,
+                operations_per_row,
+            },
+            OperatorStatistics::PromqlPresence { edges },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            validate_instant_vector_rows(output, promql.output)?;
+            if operations_per_row == 0 || promql.output.value_kind != PromqlValueKind::Vector {
+                return inconsistent("PromQL presence output violates its per-step bound");
+            }
+            match kind {
+                PromqlPresenceKind::Absent
+                    if promql.output.series > 1
+                        || output.rows > promql.output.evaluation_steps
+                        || (input.rows == 0 && output.rows != promql.output.evaluation_steps)
+                        || (output.rows == 0 && promql.output.series != 0)
+                        || (output.rows > 0 && promql.output.series != 1) =>
+                {
+                    return inconsistent("PromQL absence output violates its per-step bound");
+                }
+                PromqlPresenceKind::PresentPerSeries
+                    if output.rows > input.rows
+                        || promql.output.series > promql.input.series
+                        || promql.output.evaluation_steps != promql.input.evaluation_steps
+                        || (input.rows == 0 && (output.rows != 0 || promql.output.series != 0)) =>
+                {
+                    return inconsistent(
+                        "PromQL present-over-time output exceeds its per-series bound",
+                    );
+                }
+                _ => {}
+            }
+        }
+        _ => return inconsistent("statistics variant does not match physical operator"),
+    }
+    Ok(())
+}
+
+fn require_promql_unary(
+    edges: &crate::cost::physical_operator_statistics::UnaryEdgeStatistics,
+) -> Result<crate::cost::physical_operator_statistics::PromqlUnaryEdgeStatistics, AnalyticalCostError>
+{
+    let promql = edges.promql.ok_or(AnalyticalCostError::MissingOrStale(
+        "promql_edge_statistics",
+    ))?;
+    validate_promql_edge_shape(edges.input, promql.input)?;
+    validate_promql_edge_shape(edges.output, promql.output)?;
+    Ok(promql)
+}
+
+fn require_promql_binary(
+    edges: &crate::cost::physical_operator_statistics::BinaryEdgeStatistics,
+) -> Result<
+    crate::cost::physical_operator_statistics::PromqlBinaryEdgeStatistics,
+    AnalyticalCostError,
+> {
+    let promql = edges.promql.ok_or(AnalyticalCostError::MissingOrStale(
+        "promql_edge_statistics",
+    ))?;
+    validate_promql_edge_shape(edges.inputs[0], promql.inputs[0])?;
+    validate_promql_edge_shape(edges.inputs[1], promql.inputs[1])?;
+    validate_promql_edge_shape(edges.output, promql.output)?;
+    Ok(promql)
+}
+
+fn validate_promql_cardinality_preserving_shape(
+    promql: crate::cost::physical_operator_statistics::PromqlUnaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    validate_promql_edge(promql.input)?;
+    validate_promql_edge(promql.output)?;
+    if promql.input == promql.output {
+        Ok(())
+    } else {
+        Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "cardinality-preserving operator changes its PromQL edge shape",
+        ))
+    }
+}
+
+fn validate_promql_filter_shape(
+    promql: crate::cost::physical_operator_statistics::PromqlUnaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    validate_promql_edge(promql.input)?;
+    validate_promql_edge(promql.output)?;
+    if promql.input.evaluation_steps == promql.output.evaluation_steps
+        && promql.input.value_kind == promql.output.value_kind
+        && promql.output.series <= promql.input.series
+    {
+        Ok(())
+    } else {
+        Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "Filter changes PromQL steps/kind or expands its series",
+        ))
+    }
+}
+
+fn validate_instant_vector_rows(
+    logical: EdgeStatistics,
+    promql: PromqlEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    if promql.value_kind != PromqlValueKind::Vector {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "instant-vector result has a non-vector value kind",
+        ));
+    }
+    let bound = promql
+        .series
+        .checked_mul(promql.evaluation_steps)
+        .ok_or(AnalyticalCostError::Overflow)?;
+    if logical.rows <= bound {
+        Ok(())
+    } else {
+        Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "instant-vector rows exceed series times evaluation steps",
+        ))
+    }
+}
+
+fn validate_promql_edge_shape(
+    logical: EdgeStatistics,
+    promql: PromqlEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    validate_promql_edge(promql)?;
+    let max_rows = promql.series.checked_mul(promql.evaluation_steps);
+    match promql.value_kind {
+        PromqlValueKind::Scalar if logical.rows != promql.evaluation_steps => {
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL scalar rows do not equal evaluation steps",
+            ))
+        }
+        PromqlValueKind::RangeVector if max_rows.is_none_or(|bound| logical.rows > bound) => {
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL vector rows exceed series times evaluation steps",
+            ))
+        }
+        PromqlValueKind::Vector if logical.rows > 0 && promql.series == 0 => {
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL samples have no source series",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_promql_bridge(
+    operator: PhysicalOperator,
+    edges: &crate::cost::physical_operator_statistics::UnaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let promql = require_promql_unary(edges)?;
+    let valid = match operator {
+        PhysicalOperator::PromqlScalarToVector => {
+            validate_instant_vector_rows(edges.output, promql.output)?;
+            promql.input.value_kind == PromqlValueKind::Scalar
+                && promql.output.value_kind == PromqlValueKind::Vector
+                && promql.output.series == 1
+                && promql.input.evaluation_steps == promql.output.evaluation_steps
+                && edges.input.rows == edges.output.rows
+        }
+        PhysicalOperator::PromqlVectorToScalar => {
+            promql.input.value_kind == PromqlValueKind::Vector
+                && promql.output.value_kind == PromqlValueKind::Scalar
+                && promql.input.evaluation_steps == promql.output.evaluation_steps
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "PromQL scalar/vector bridge edge shape is invalid",
+        ))
+    }
+}
+
+fn validate_promql_binary(
+    operation: PromqlBinaryOperation,
+    operand_mode: PromqlBinaryOperandMode,
+    cardinality: PromqlVectorCardinality,
+    build_side: Option<HashJoinBuildSide>,
+    matching_key_bytes: u64,
+    edges: &crate::cost::physical_operator_statistics::BinaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let promql = require_promql_binary(edges)?;
+    validate_instant_vector_rows(edges.output, promql.output)?;
+    let invalid = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if matches!(
+        operation,
+        PromqlBinaryOperation::And | PromqlBinaryOperation::Or | PromqlBinaryOperation::Unless
+    ) && cardinality != PromqlVectorCardinality::OneToOne
+    {
+        return invalid("PromQL set operations cannot use group_left or group_right");
+    }
+    if promql.output.value_kind != PromqlValueKind::Vector
+        || promql.inputs[0].evaluation_steps != promql.output.evaluation_steps
+        || promql.inputs[1].evaluation_steps != promql.output.evaluation_steps
+    {
+        return invalid("PromQL binary evaluation steps or output kind are invalid");
+    }
+    let (row_bound, series_bound) = match operand_mode {
+        PromqlBinaryOperandMode::VectorVector => {
+            if promql
+                .inputs
+                .iter()
+                .any(|input| input.value_kind != PromqlValueKind::Vector)
+                || build_side.is_none()
+                || matching_key_bytes == 0
+            {
+                return invalid("vector/vector binary label-match configuration is invalid");
+            }
+            match operation {
+                PromqlBinaryOperation::And | PromqlBinaryOperation::Unless => {
+                    (edges.inputs[0].rows, promql.inputs[0].series)
+                }
+                PromqlBinaryOperation::Or => (
+                    edges.inputs[0]
+                        .rows
+                        .checked_add(edges.inputs[1].rows)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                    promql.inputs[0]
+                        .series
+                        .checked_add(promql.inputs[1].series)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ),
+                PromqlBinaryOperation::ArithmeticOrComparison => match cardinality {
+                    PromqlVectorCardinality::OneToOne => (
+                        edges.inputs[0].rows.min(edges.inputs[1].rows),
+                        promql.inputs[0].series.min(promql.inputs[1].series),
+                    ),
+                    PromqlVectorCardinality::ManyToOne => {
+                        (edges.inputs[0].rows, promql.inputs[0].series)
+                    }
+                    PromqlVectorCardinality::OneToMany => {
+                        (edges.inputs[1].rows, promql.inputs[1].series)
+                    }
+                },
+            }
+        }
+    };
+    if edges.output.rows > row_bound || promql.output.series > series_bound {
+        return invalid("PromQL binary output exceeds its semantic cardinality bound");
+    }
+    Ok(())
+}
+
+fn validate_promql_series_sample(
+    kind: PromqlSeriesSampleKind,
+    grouping_key_count: u64,
+    group_count: u64,
+    key_bytes: u64,
+    edges: &crate::cost::physical_operator_statistics::UnaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let promql = require_promql_unary(edges)?;
+    validate_instant_vector_rows(edges.output, promql.output)?;
+    let invalid = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if key_bytes == 0
+        || promql.input.value_kind != PromqlValueKind::Vector
+        || promql.output.value_kind != PromqlValueKind::Vector
+        || promql.input.evaluation_steps != promql.output.evaluation_steps
+        || edges.output.rows > edges.input.rows
+        || promql.output.series > promql.input.series
+        || (grouping_key_count == 0 && group_count != 1)
+        || (grouping_key_count > 0 && group_count == 0 && promql.input.series > 0)
+    {
+        return invalid("PromQL series-sample configuration or edge shape is invalid");
+    }
+    if let PromqlSeriesSampleKind::LimitK { k } = kind {
+        if k == 0 {
+            return invalid("PromQL limitk must be positive");
+        }
+        let bound = group_count
+            .checked_mul(k)
+            .ok_or(AnalyticalCostError::Overflow)?;
+        if promql.output.series > promql.input.series.min(bound) {
+            return invalid("PromQL limitk output exceeds its group bound");
+        }
+    } else if let PromqlSeriesSampleKind::LimitRatio { ratio_bits } = kind {
+        let ratio = f64::from_bits(ratio_bits);
+        if !ratio.is_finite() || !(-1.0..=1.0).contains(&ratio) {
+            return invalid("PromQL limit_ratio is outside [-1, 1]");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum AnalyticalCostError {
+    #[error("data arrival {0:?} is unsupported by the selected analytical adapter")]
+    UnsupportedDataArrival(DataArrival),
+    #[error("ingestion rate must be finite and non-negative, got {0}")]
+    InvalidIngestionRate(f64),
+    #[error("bootstrap row and byte evidence must either both be zero or both be non-zero")]
+    InconsistentBootstrapEvidence,
+    #[error("required summary operation cost {0} must be finite and positive, got {1}")]
+    InvalidOperationCost(&'static str, f64),
+    #[error("required analytical input {0} is missing or zero")]
+    MissingOrZero(&'static str),
+    #[error("required analytical evidence {0} is missing or stale")]
+    MissingOrStale(&'static str),
+    #[error("query recurrence cannot be resolved over the planning horizon")]
+    InvalidRecurrence,
+    #[error("query has no evaluations in the planning horizon")]
+    NoEvaluationsInHorizon,
+    #[error("calibration {0} must be finite and non-negative, got {1}")]
+    InvalidCalibration(&'static str, f64),
+    #[error("at least one calibration coefficient must be positive")]
+    ZeroCalibration,
+    #[error("invalid or incomplete cache evidence: {0}")]
+    InvalidCacheEvidence(&'static str),
+    #[error("algorithm {0:?} does not match parameters {1:?}")]
+    ParameterMismatch(SketchAlgorithm, SketchParams),
+    #[error("{0} needs a value-range/bin-count model before it can be estimated")]
+    UnsupportedWithoutDistribution(&'static str),
+    #[error("analytical arithmetic overflowed")]
+    Overflow,
+    #[error("candidate has no supported exact or sketch state")]
+    UnsupportedCandidate,
+    #[error("query operator has no physical implementation in the analytical model")]
+    UnsupportedQueryOperator,
+    #[error("inconsistent operator statistics: {0}")]
+    InconsistentOperatorStatistics(&'static str),
+    #[error("summary operation {0} has no cost formula")]
+    UnsupportedSummaryOperation(&'static str),
+    #[error("required comparison-scope field {0} is missing")]
+    MissingComparisonScope(&'static str),
+    #[error("scan node {0} does not declare scan selection")]
+    MissingScanSelection(String),
+    #[error("scan node {0} reads scan selection outside the comparison scope")]
+    ScanOutsideComparisonScope(String),
+    #[error("raw and candidate comparison scopes differ in {0}")]
+    ComparisonScopeMismatch(&'static str),
+    #[error("operator statistics are unavailable for physical node {0}")]
+    MissingOperatorStatistics(String),
+    #[error("invalid operator statistics for {node}: {reason}")]
+    InvalidOperatorStatistics { node: String, reason: &'static str },
+    #[error(
+        "operator statistics conflict: parent {parent} input {input_index} does not match child {child} output"
+    )]
+    ConflictingEdgeStatistics {
+        parent: String,
+        child: String,
+        input_index: usize,
+    },
+    #[error("invalid physical DAG: {0}")]
+    InvalidPhysicalDAG(&'static str),
+    /// Bad input: plan selection's measured table has two entries for one
+    /// sketch configuration and operation.
+    #[error("measured_operation_costs has two entries for {operation:?} on {sketch:?}")]
+    DuplicateMeasuredOperationCost {
+        sketch: SketchParams,
+        operation: crate::SummaryOperation,
+    },
+    /// Bad input: a non-empty measured table with `ms_per_cpu_op` not
+    /// positive, so a measured time cannot be counted in CPU operations.
+    #[error(
+        "measured_operation_costs needs a positive ms_per_cpu_op to count measured times as operations, got {0}"
+    )]
+    MeasuredCostsWithoutCpuSpeed(f64),
+}
+
+fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
+    parts
+        .iter()
+        .try_fold(1_u64, |acc, value| acc.checked_mul(*value))
+        .ok_or(AnalyticalCostError::Overflow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cost::physical_operator_statistics::{
+        validate_comparison_scopes, BinaryEdgeStatistics, ComparisonScope, EdgeStatistics,
+        OperatorStatistics, PartitionStatistics, PromqlBinaryEdgeStatistics, PromqlEdgeStatistics,
+        PromqlUnaryEdgeStatistics, PromqlValueKind, ScanSelection, UnaryEdgeStatistics,
+    };
+
+    /// Analytical estimates reuse the shared dimensions while preserving exact
+    /// integer bytes and keeping unmodeled storage quantities unavailable.
+    #[test]
+    fn analytical_estimate_uses_shared_resources() {
+        let estimate = ResourceEstimate::new(12.5, u64::MAX, 0);
+        assert_eq!(estimate.cpu_ops(), 12.5);
+        assert_eq!(estimate.peak_memory_bytes(), u64::MAX);
+        assert_eq!(estimate.scan_bytes(), 0);
+        let shared: &asap_types::workload::resources::PhysicalResources<ModeledCpu, u64> =
+            estimate.resources();
+        assert_eq!(shared.cpu.cpu_ops, 12.5);
+        assert_eq!(shared.peak_memory_bytes, Some(u64::MAX));
+        assert_eq!(shared.scan_bytes, Some(0));
+        assert_eq!(shared.retained_memory_bytes, None);
+        assert_eq!(shared.serialized_bytes, None);
+        assert_eq!(shared.disk_bytes, None);
+    }
+
+    /// Existing JSON retains its three required fields; omitted or null
+    /// analytical quantities must not silently become a zero estimate.
+    #[test]
+    fn analytical_resource_wire_format_remains_compatible() {
+        let wire = serde_json::json!({"cpu_ops": 12.5, "peak_memory_bytes": 9007199254740993_u64, "scan_bytes": 0});
+        let estimate: ResourceEstimate = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(estimate.peak_memory_bytes(), 9007199254740993);
+        assert_eq!(serde_json::to_value(estimate).unwrap(), wire);
+        for field in ["cpu_ops", "peak_memory_bytes", "scan_bytes"] {
+            let mut missing = wire.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ResourceEstimate>(missing).is_err());
+            let mut unknown = wire.clone();
+            unknown[field] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<ResourceEstimate>(unknown).is_err());
+        }
+    }
+
+    /// A time shift only moves when its input is evaluated: it costs
+    /// nothing. A time range is priced by the rows it keeps, and keeps no
+    /// more than it reads.
+    #[test]
+    fn time_shift_is_free_and_time_range_is_priced_by_the_rows_it_keeps() {
+        let shift = estimate_operator(
+            PhysicalOperator::TimeShift,
+            OperatorStatistics::PassThrough {
+                edges: unary_row_edges(1_000, 1_000),
+            },
+        )
+        .unwrap();
+        assert_eq!(shift.cpu_ops(), 0.0);
+        assert_eq!(shift.scan_bytes(), 0);
+        let range = estimate_operator(
+            PhysicalOperator::TimeRange,
+            OperatorStatistics::PassThrough {
+                edges: unary_row_edges(1_000, 200),
+            },
+        )
+        .unwrap();
+        assert_eq!(range.cpu_ops(), 200.0);
+        assert!(estimate_operator(
+            PhysicalOperator::TimeRange,
+            OperatorStatistics::PassThrough {
+                edges: unary_row_edges(200, 1_000),
+            },
+        )
+        .is_err());
+        assert!(estimate_operator(
+            PhysicalOperator::TimeShift,
+            OperatorStatistics::PassThrough {
+                edges: unary_row_edges(1_000, 200),
+            },
+        )
+        .is_err());
+    }
+
+    fn filter_operator() -> PhysicalOperator {
+        PhysicalOperator::Filter {
+            predicate_operations_per_row: 1,
+        }
+    }
+
+    fn project_operator() -> PhysicalOperator {
+        PhysicalOperator::Project {
+            expression_operations_per_row: 1,
+        }
+    }
+
+    fn aggregate_operator() -> PhysicalOperator {
+        PhysicalOperator::HashAggregate {
+            grouping_key_count: 1,
+            accumulator_count: 1,
+        }
+    }
+
+    fn unary_row_edges(input_rows: u64, output_rows: u64) -> UnaryEdgeStatistics {
+        UnaryEdgeStatistics {
+            input: EdgeStatistics {
+                rows: input_rows,
+                bytes: input_rows.saturating_mul(8),
+            },
+            output: EdgeStatistics {
+                rows: output_rows,
+                bytes: output_rows.saturating_mul(8),
+            },
+            promql: None,
+        }
+    }
+
+    fn promql_edge(
+        series: u64,
+        evaluation_steps: u64,
+        value_kind: PromqlValueKind,
+    ) -> PromqlEdgeStatistics {
+        PromqlEdgeStatistics {
+            series,
+            evaluation_steps,
+            value_kind,
+        }
+    }
+
+    fn promql_binary_statistics(output_rows: u64, output_series: u64) -> OperatorStatistics {
+        let left = EdgeStatistics {
+            rows: 100,
+            bytes: 1_600,
+        };
+        let right = EdgeStatistics {
+            rows: 50,
+            bytes: 800,
+        };
+        let output = EdgeStatistics {
+            rows: output_rows,
+            bytes: output_rows.saturating_mul(16),
+        };
+        OperatorStatistics::PromqlBinary {
+            edges: BinaryEdgeStatistics {
+                inputs: [left, right],
+                output,
+                promql: Some(PromqlBinaryEdgeStatistics {
+                    inputs: [
+                        promql_edge(10, 10, PromqlValueKind::Vector),
+                        promql_edge(5, 10, PromqlValueKind::Vector),
+                    ],
+                    output: promql_edge(output_series, 10, PromqlValueKind::Vector),
+                }),
+            },
+            matching_key_bytes: 8,
+        }
+    }
+
+    #[test]
+    fn operator_arity_distinguishes_source_statistics_from_dag_children() {
+        assert_eq!(
+            expected_input_arity(PhysicalOperator::Scan, 0),
+            OperatorInputArity {
+                statistics_inputs: 1,
+                dag_children: 0,
+            }
+        );
+        assert_eq!(
+            expected_input_arity(filter_operator(), 1),
+            OperatorInputArity {
+                statistics_inputs: 1,
+                dag_children: 1,
+            }
+        );
+        assert_eq!(
+            expected_input_arity(
+                PhysicalOperator::HashJoin {
+                    build_side: HashJoinBuildSide::Left,
+                    equality_key_count: 1,
+                },
+                2,
+            ),
+            OperatorInputArity {
+                statistics_inputs: 2,
+                dag_children: 2,
+            }
+        );
+        assert_eq!(
+            expected_input_arity(PhysicalOperator::Concat, 3),
+            OperatorInputArity {
+                statistics_inputs: 3,
+                dag_children: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn promql_binary_operation_controls_cardinality_bounds() {
+        let operator = |operation| PhysicalOperator::PromqlBinary {
+            operation,
+            operand_mode: PromqlBinaryOperandMode::VectorVector,
+            cardinality: PromqlVectorCardinality::OneToOne,
+            build_side: Some(HashJoinBuildSide::Right),
+        };
+
+        assert!(estimate_operator(
+            operator(PromqlBinaryOperation::Or),
+            promql_binary_statistics(150, 15),
+        )
+        .is_ok());
+        assert!(matches!(
+            estimate_operator(
+                operator(PromqlBinaryOperation::ArithmeticOrComparison),
+                promql_binary_statistics(60, 5),
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+        assert!(matches!(
+            estimate_operator(
+                operator(PromqlBinaryOperation::And),
+                promql_binary_statistics(101, 10),
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
+
+    #[test]
+    fn promql_bridges_require_directional_edge_kinds() {
+        let scalar = promql_edge(0, 10, PromqlValueKind::Scalar);
+        let vector = promql_edge(1, 10, PromqlValueKind::Vector);
+        let edges = |input, output| UnaryEdgeStatistics {
+            input: EdgeStatistics {
+                rows: 10,
+                bytes: 80,
+            },
+            output: EdgeStatistics {
+                rows: 10,
+                bytes: 80,
+            },
+            promql: Some(PromqlUnaryEdgeStatistics { input, output }),
+        };
+        assert!(estimate_operator(
+            PhysicalOperator::PromqlScalarToVector,
+            OperatorStatistics::PromqlScalarToVector {
+                edges: edges(scalar, vector),
+            },
+        )
+        .is_ok());
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::PromqlScalarToVector,
+                OperatorStatistics::PromqlScalarToVector {
+                    edges: edges(vector, scalar),
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
+
+    #[test]
+    fn promql_scalar_leaf_has_no_input_and_one_row_per_step() {
+        let statistics = OperatorStatistics::PromqlScalarLeaf {
+            output: EdgeStatistics {
+                rows: 10,
+                bytes: 80,
+            },
+            promql_output: promql_edge(0, 10, PromqlValueKind::Scalar),
+        };
+        let estimate = estimate_operator(PhysicalOperator::PromqlScalarLeaf, statistics).unwrap();
+
+        assert_eq!(estimate.cpu_ops(), 10.0);
+        assert_eq!(estimate.peak_memory_bytes(), 8);
+    }
+
+    #[test]
+    fn physical_dag_cannot_drop_promql_edge_evidence() {
+        let edge = EdgeStatistics {
+            rows: 10,
+            bytes: 80,
+        };
+        let promql = promql_edge(1, 10, PromqlValueKind::Vector);
+        let nodes = vec![
+            PhysicalDAGNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                scan_selection: Some(comparison_scope().sources[0].clone()),
+                output_buffer_bytes: 8,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDAGNode {
+                id: "filter".into(),
+                operator: filter_operator(),
+                children: vec!["scan".into()],
+                scan_selection: None,
+                output_buffer_bytes: 8,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let provided = HashMap::from([
+            (
+                "scan".into(),
+                OperatorStatistics::Scan {
+                    edges: UnaryEdgeStatistics {
+                        input: edge,
+                        output: edge,
+                        promql: Some(PromqlUnaryEdgeStatistics {
+                            input: promql,
+                            output: promql,
+                        }),
+                    },
+                    source_read_bytes: 80,
+                },
+            ),
+            (
+                "filter".into(),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(edge, edge),
+                    scalar_inputs: vec![],
+                },
+            ),
+        ]);
+
+        assert!(matches!(
+            estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::InvalidOperatorStatistics {
+                reason: "operator drops child PromQL edge statistics",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn generic_hash_aggregate_cannot_masquerade_as_promql_aggregation() {
+        let input = EdgeStatistics {
+            rows: 10,
+            bytes: 80,
+        };
+        let output = EdgeStatistics { rows: 1, bytes: 8 };
+        let statistics = OperatorStatistics::HashAggregate {
+            edges: UnaryEdgeStatistics {
+                input,
+                output,
+                promql: Some(PromqlUnaryEdgeStatistics {
+                    input: promql_edge(1, 10, PromqlValueKind::Vector),
+                    output: promql_edge(1, 10, PromqlValueKind::Vector),
+                }),
+            },
+            group_count: 1,
+            key_bytes: 0,
+            accumulator_bytes_per_group: 8,
+        };
+
+        assert_eq!(
+            estimate_operator(
+                PhysicalOperator::HashAggregate {
+                    grouping_key_count: 0,
+                    accumulator_count: 1,
+                },
+                statistics,
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL cross-series aggregation needs an explicit physical operator"
+            ))
+        );
+    }
+
+    #[test]
+    fn present_over_time_keeps_per_series_cardinality() {
+        let input = EdgeStatistics {
+            rows: 100,
+            bytes: 1_600,
+        };
+        let output = EdgeStatistics {
+            rows: 80,
+            bytes: 1_280,
+        };
+        let valid = OperatorStatistics::PromqlPresence {
+            edges: UnaryEdgeStatistics {
+                input,
+                output,
+                promql: Some(PromqlUnaryEdgeStatistics {
+                    input: promql_edge(10, 10, PromqlValueKind::RangeVector),
+                    output: promql_edge(8, 10, PromqlValueKind::Vector),
+                }),
+            },
+        };
+
+        assert!(estimate_operator(
+            PhysicalOperator::PromqlPresence {
+                kind: PromqlPresenceKind::PresentPerSeries,
+                operations_per_row: 1,
+            },
+            valid.clone(),
+        )
+        .is_ok());
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::PromqlPresence {
+                    kind: PromqlPresenceKind::Absent,
+                    operations_per_row: 1,
+                },
+                valid,
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
+
+    #[test]
+    fn operator_estimator_rejects_contradictory_cardinality_evidence() {
+        assert!(matches!(
+            estimate_operator(
+                filter_operator(),
+                OperatorStatistics::Filter {
+                    edges: unary_row_edges(10, 11),
+                    scalar_inputs: vec![],
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+        assert!(matches!(
+            estimate_operator(
+                project_operator(),
+                OperatorStatistics::Project {
+                    edges: unary_row_edges(10, 9),
+                    scalar_inputs: vec![],
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+
+        assert!(matches!(
+            estimate_operator(
+                aggregate_operator(),
+                OperatorStatistics::HashAggregate {
+                    edges: unary_row_edges(10, 3),
+                    group_count: 2,
+                    key_bytes: 8,
+                    accumulator_bytes_per_group: 8,
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::TopK {
+                    limit: 3,
+                    offset: 0,
+                    ordering_key_count: 1,
+                },
+                OperatorStatistics::TopK {
+                    edges: unary_row_edges(10, 4),
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
+
+    #[test]
+    fn physical_operator_formulas_keep_disk_at_scan_and_require_join_stats() {
+        let scan = estimate_operator(
+            PhysicalOperator::Scan,
+            OperatorStatistics::Scan {
+                source_read_bytes: 64_000,
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
+                        rows: 1_000,
+                        bytes: 64_000,
+                    },
+                    output: EdgeStatistics {
+                        rows: 1_000,
+                        bytes: 64_000,
+                    },
+                    promql: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.scan_bytes(), 64_000);
+
+        let topk = estimate_operator(
+            PhysicalOperator::TopK {
+                limit: 10,
+                offset: 0,
+                ordering_key_count: 1,
+            },
+            OperatorStatistics::TopK {
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
+                        rows: 1_000,
+                        bytes: 40_000,
+                    },
+                    output: EdgeStatistics {
+                        rows: 10,
+                        bytes: 400,
+                    },
+                    promql: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(topk.scan_bytes(), 0);
+        assert_eq!(topk.cpu_ops(), 4_000.0);
+        assert_eq!(topk.peak_memory_bytes(), 400);
+
+        let mismatched_join_statistics = estimate_operator(
+            PhysicalOperator::HashJoin {
+                build_side: HashJoinBuildSide::Left,
+                equality_key_count: 1,
+            },
+            OperatorStatistics::Filter {
+                edges: unary_row_edges(1_000, 100),
+                scalar_inputs: vec![],
+            },
+        );
+        assert_eq!(
+            mismatched_join_statistics,
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "statistics variant does not match physical operator"
+            ))
+        );
+
+        let build_left = estimate_operator(
+            PhysicalOperator::HashJoin {
+                build_side: HashJoinBuildSide::Left,
+                equality_key_count: 1,
+            },
+            OperatorStatistics::HashJoin {
+                edges: BinaryEdgeStatistics {
+                    inputs: [
+                        EdgeStatistics {
+                            rows: 1_000,
+                            bytes: 64_000,
+                        },
+                        EdgeStatistics {
+                            rows: 10,
+                            bytes: 1_280,
+                        },
+                    ],
+                    output: EdgeStatistics {
+                        rows: 100,
+                        bytes: 12_800,
+                    },
+                    promql: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(build_left.peak_memory_bytes(), 80_000);
+
+        let aggregate = estimate_operator(
+            aggregate_operator(),
+            OperatorStatistics::HashAggregate {
+                group_count: 100,
+                key_bytes: 16,
+                accumulator_bytes_per_group: 24,
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
+                        rows: 1_000,
+                        bytes: 64_000,
+                    },
+                    output: EdgeStatistics {
+                        rows: 100,
+                        bytes: 4_000,
+                    },
+                    promql: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(aggregate.peak_memory_bytes(), 5_600);
+
+        let oversized_topk = estimate_operator(
+            PhysicalOperator::TopK {
+                limit: 1_000,
+                offset: 0,
+                ordering_key_count: 1,
+            },
+            OperatorStatistics::TopK {
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
+                        rows: 4,
+                        bytes: 160,
+                    },
+                    output: EdgeStatistics {
+                        rows: 4,
+                        bytes: 160,
+                    },
+                    promql: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(oversized_topk.cpu_ops(), 8.0);
+
+        let offset_limit = estimate_operator(
+            PhysicalOperator::Limit {
+                limit: 10,
+                offset: 900_000,
+            },
+            OperatorStatistics::Limit {
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
+                        rows: 1_000_000,
+                        bytes: 40_000_000,
+                    },
+                    output: EdgeStatistics {
+                        rows: 10,
+                        bytes: 400,
+                    },
+                    promql: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(offset_limit.cpu_ops(), 900_010.0);
+    }
+
+    #[test]
+    fn physical_dag_counts_shared_scan_once_and_uses_live_memory() {
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![
+            PhysicalDAGNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                scan_selection: Some(coverage),
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDAGNode {
+                id: "left".into(),
+                operator: filter_operator(),
+                children: vec!["scan".into()],
+                scan_selection: None,
+                output_buffer_bytes: 4,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDAGNode {
+                id: "right".into(),
+                operator: filter_operator(),
+                children: vec!["scan".into()],
+                scan_selection: None,
+                output_buffer_bytes: 4,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDAGNode {
+                id: "root".into(),
+                operator: PhysicalOperator::Concat,
+                children: vec!["left".into(), "right".into()],
+                scan_selection: None,
+                output_buffer_bytes: 8,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let scan_edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let branch_edge = EdgeStatistics {
+            rows: 40,
+            bytes: 400,
+        };
+        let provided = HashMap::from([
+            (
+                "scan".into(),
+                OperatorStatistics::Scan {
+                    edges: unary_edges(scan_edge, scan_edge),
+                    source_read_bytes: 1_000,
+                },
+            ),
+            (
+                "left".into(),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(scan_edge, branch_edge),
+                    scalar_inputs: vec![],
+                },
+            ),
+            (
+                "right".into(),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(scan_edge, branch_edge),
+                    scalar_inputs: vec![],
+                },
+            ),
+            (
+                "root".into(),
+                OperatorStatistics::Concat {
+                    inputs: vec![branch_edge, branch_edge],
+                    output: EdgeStatistics {
+                        rows: 80,
+                        bytes: 800,
+                    },
+                    promql: None,
+                },
+            ),
+        ]);
+        let mut scope = comparison_scope();
+        scope.horizon.0 = 20_000;
+        let estimate = estimate_physical_dag(&nodes, "root", &scope, &provided).unwrap();
+        assert_eq!(estimate.cpu_ops(), 760.0);
+        assert_eq!(estimate.scan_bytes(), 2_000);
+        // This is neither the sum of every node's memory nor just the largest
+        // node: it is the maximum state simultaneously live at the fan-out.
+        assert_eq!(estimate.peak_memory_bytes(), 28);
+    }
+
+    #[test]
+    fn physical_dag_separates_build_once_from_per_evaluation_work() {
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![
+            PhysicalDAGNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                scan_selection: Some(coverage),
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::Once,
+            },
+            PhysicalDAGNode {
+                id: "state".into(),
+                operator: aggregate_operator(),
+                children: vec!["scan".into()],
+                scan_selection: None,
+                output_buffer_bytes: 16,
+                retained_bytes: 32,
+                execution: ExecutionMultiplicity::Once,
+            },
+            PhysicalDAGNode {
+                id: "read".into(),
+                operator: PhysicalOperator::Limit {
+                    limit: 1,
+                    offset: 0,
+                },
+                children: vec!["state".into()],
+                scan_selection: None,
+                output_buffer_bytes: 16,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let scan_edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let state_edge = EdgeStatistics { rows: 1, bytes: 16 };
+        let provided = HashMap::from([
+            (
+                "scan".into(),
+                OperatorStatistics::Scan {
+                    edges: unary_edges(scan_edge, scan_edge),
+                    source_read_bytes: 1_000,
+                },
+            ),
+            (
+                "state".into(),
+                OperatorStatistics::HashAggregate {
+                    edges: unary_edges(scan_edge, state_edge),
+                    group_count: 1,
+                    key_bytes: 8,
+                    accumulator_bytes_per_group: 8,
+                },
+            ),
+            (
+                "read".into(),
+                OperatorStatistics::Limit {
+                    edges: unary_edges(state_edge, state_edge),
+                },
+            ),
+        ]);
+        let mut scope = comparison_scope();
+        scope.horizon.0 = 100_000;
+        let estimate = estimate_physical_dag(&nodes, "read", &scope, &provided).unwrap();
+        assert_eq!(estimate.cpu_ops(), 310.0);
+        assert_eq!(estimate.scan_bytes(), 1_000);
+    }
+
+    fn comparison_scope() -> ComparisonScope {
+        use asap_types::ir::operator::operator_properties::Source;
+        use asap_types::workload::{
+            DurationMs, QueryRecurrence, RepeatedDemand, RepetitionInterval, TimestampMs,
+        };
+
+        ComparisonScope {
+            data_arrival: DataArrival::AtRest,
+            planning_time: TimestampMs(1_000),
+            horizon: DurationMs(60_000),
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                RepetitionInterval(10_000),
+            )),
+            sources: vec![ScanSelection {
+                source: Source::Table {
+                    table_ref: "metrics".into(),
+                },
+                source_snapshot_id: "catalog-version-42".into(),
+                predicates: vec![],
+                info_matchers: vec![],
+            }],
+        }
+    }
+
+    fn unary_edges(input: EdgeStatistics, output: EdgeStatistics) -> UnaryEdgeStatistics {
+        UnaryEdgeStatistics {
+            input,
+            output,
+            promql: None,
+        }
+    }
+
+    #[test]
+    fn comparison_rejects_different_snapshot_predicate_time_or_horizon() {
+        use asap_types::ir::{Predicate, ScalarExpr};
+        use asap_types::workload::DurationMs;
+
+        let raw = comparison_scope();
+        assert_eq!(validate_comparison_scopes(&raw, &raw).unwrap(), 6);
+
+        let mut candidate = raw.clone();
+        candidate.sources[0].source_snapshot_id = "catalog-version-43".into();
+        assert_eq!(
+            validate_comparison_scopes(&raw, &candidate),
+            Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
+        );
+
+        candidate = raw.clone();
+        candidate.sources[0]
+            .predicates
+            .push(Predicate(ScalarExpr::literal_f64(1.0)));
+        assert_eq!(
+            validate_comparison_scopes(&raw, &candidate),
+            Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
+        );
+
+        candidate = raw.clone();
+        candidate.horizon = DurationMs(120_000);
+        assert_eq!(
+            validate_comparison_scopes(&raw, &candidate),
+            Err(AnalyticalCostError::ComparisonScopeMismatch("horizon"))
+        );
+    }
+
+    #[test]
+    fn physical_dag_fails_closed_on_missing_or_conflicting_edge_statistics() {
+        use std::collections::HashMap;
+
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![
+            PhysicalDAGNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                scan_selection: Some(coverage),
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDAGNode {
+                id: "filter".into(),
+                operator: filter_operator(),
+                children: vec!["scan".into()],
+                scan_selection: None,
+                output_buffer_bytes: 4,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let scope = comparison_scope();
+        let mut provided = HashMap::from([(
+            "scan".to_string(),
+            OperatorStatistics::Scan {
+                edges: unary_edges(
+                    EdgeStatistics {
+                        rows: 100,
+                        bytes: 1_000,
+                    },
+                    EdgeStatistics {
+                        rows: 100,
+                        bytes: 1_000,
+                    },
+                ),
+                source_read_bytes: 1_000,
+            },
+        )]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "filter", &scope, &provided),
+            Err(AnalyticalCostError::MissingOperatorStatistics(
+                "filter".into()
+            ))
+        );
+
+        provided.insert(
+            "filter".into(),
+            OperatorStatistics::Filter {
+                edges: unary_edges(
+                    EdgeStatistics {
+                        rows: 99,
+                        bytes: 990,
+                    },
+                    EdgeStatistics {
+                        rows: 40,
+                        bytes: 400,
+                    },
+                ),
+                scalar_inputs: vec![],
+            },
+        );
+        assert_eq!(
+            estimate_physical_dag(&nodes, "filter", &scope, &provided),
+            Err(AnalyticalCostError::ConflictingEdgeStatistics {
+                parent: "filter".into(),
+                child: "scan".into(),
+                input_index: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn provider_statistics_drive_a_consistent_physical_dag_estimate() {
+        use std::collections::HashMap;
+
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![
+            PhysicalDAGNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                scan_selection: Some(coverage),
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDAGNode {
+                id: "filter".into(),
+                operator: filter_operator(),
+                children: vec!["scan".into()],
+                scan_selection: None,
+                output_buffer_bytes: 4,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let provided = HashMap::from([
+            (
+                "scan".to_string(),
+                OperatorStatistics::Scan {
+                    edges: unary_edges(
+                        EdgeStatistics {
+                            rows: 100,
+                            bytes: 1_000,
+                        },
+                        EdgeStatistics {
+                            rows: 100,
+                            bytes: 1_000,
+                        },
+                    ),
+                    source_read_bytes: 1_000,
+                },
+            ),
+            (
+                "filter".to_string(),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(
+                        EdgeStatistics {
+                            rows: 100,
+                            bytes: 1_000,
+                        },
+                        EdgeStatistics {
+                            rows: 40,
+                            bytes: 400,
+                        },
+                    ),
+                    scalar_inputs: vec![],
+                },
+            ),
+        ]);
+
+        let estimate =
+            estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided).unwrap();
+        assert_eq!(estimate.cpu_ops(), 1_200.0);
+        assert_eq!(estimate.scan_bytes(), 6_000);
+    }
+
+    #[test]
+    fn physical_dag_accepts_an_empty_operator_output() {
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![
+            PhysicalDAGNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                scan_selection: Some(coverage),
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDAGNode {
+                id: "filter".into(),
+                operator: filter_operator(),
+                children: vec!["scan".into()],
+                scan_selection: None,
+                output_buffer_bytes: 0,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let input = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([
+            (
+                "scan".into(),
+                OperatorStatistics::Scan {
+                    edges: unary_edges(input, input),
+                    source_read_bytes: 1_000,
+                },
+            ),
+            (
+                "filter".into(),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(input, EdgeStatistics { rows: 0, bytes: 0 }),
+                    scalar_inputs: vec![],
+                },
+            ),
+        ]);
+
+        let estimate =
+            estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided).unwrap();
+        assert_eq!(estimate.cpu_ops(), 1_200.0);
+        assert_eq!(estimate.peak_memory_bytes(), 20);
+        assert_eq!(estimate.scan_bytes(), 6_000);
+    }
+
+    #[test]
+    fn physical_dag_rejects_a_scan_not_covered_by_its_scope() {
+        let nodes = vec![PhysicalDAGNode {
+            id: "scan".into(),
+            operator: PhysicalOperator::Scan,
+            children: vec![],
+            scan_selection: Some(ScanSelection {
+                source: asap_types::ir::operator::operator_properties::Source::Table {
+                    table_ref: "other_metrics".into(),
+                },
+                source_snapshot_id: "catalog-version-42".into(),
+                predicates: vec![],
+                info_matchers: vec![],
+            }),
+            output_buffer_bytes: 10,
+            retained_bytes: 0,
+            execution: ExecutionMultiplicity::PerEvaluation,
+        }];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([(
+            "scan".into(),
+            OperatorStatistics::Scan {
+                edges: unary_edges(edge, edge),
+                source_read_bytes: 250,
+            },
+        )]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "scan", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::ScanOutsideComparisonScope(
+                "scan".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn physical_dag_rejects_a_scan_without_explicit_coverage() {
+        let nodes = vec![PhysicalDAGNode {
+            id: "scan".into(),
+            operator: PhysicalOperator::Scan,
+            children: vec![],
+            scan_selection: None,
+            output_buffer_bytes: 10,
+            retained_bytes: 0,
+            execution: ExecutionMultiplicity::PerEvaluation,
+        }];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([(
+            "scan".into(),
+            OperatorStatistics::Scan {
+                edges: unary_edges(edge, edge),
+                source_read_bytes: 250,
+            },
+        )]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "scan", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::MissingScanSelection("scan".into()))
+        );
+    }
+
+    #[test]
+    fn physical_dag_rejects_an_unconsumed_scope_source() {
+        let mut scope = comparison_scope();
+        let coverage = scope.sources[0].clone();
+        scope.sources.push(ScanSelection {
+            source: asap_types::ir::operator::operator_properties::Source::Table {
+                table_ref: "auxiliary".into(),
+            },
+            source_snapshot_id: "catalog-version-42".into(),
+            predicates: vec![],
+            info_matchers: vec![],
+        });
+        let nodes = vec![PhysicalDAGNode {
+            id: "scan".into(),
+            operator: PhysicalOperator::Scan,
+            children: vec![],
+            scan_selection: Some(coverage),
+            output_buffer_bytes: 10,
+            retained_bytes: 0,
+            execution: ExecutionMultiplicity::PerEvaluation,
+        }];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([(
+            "scan".into(),
+            OperatorStatistics::Scan {
+                edges: unary_edges(edge, edge),
+                source_read_bytes: 250,
+            },
+        )]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "scan", &scope, &provided),
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
+                "physical scans omit a comparison-scope source"
+            ))
+        );
+    }
+
+    #[test]
+    fn build_once_parent_cannot_consume_a_per_evaluation_child() {
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![
+            PhysicalDAGNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                scan_selection: Some(coverage),
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDAGNode {
+                id: "aggregate".into(),
+                operator: aggregate_operator(),
+                children: vec!["scan".into()],
+                scan_selection: None,
+                output_buffer_bytes: 16,
+                retained_bytes: 32,
+                execution: ExecutionMultiplicity::Once,
+            },
+        ];
+        let input = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let output = EdgeStatistics { rows: 1, bytes: 16 };
+        let provided = HashMap::from([
+            (
+                "scan".into(),
+                OperatorStatistics::Scan {
+                    edges: unary_edges(input, input),
+                    source_read_bytes: 250,
+                },
+            ),
+            (
+                "aggregate".into(),
+                OperatorStatistics::HashAggregate {
+                    edges: unary_edges(input, output),
+                    group_count: 1,
+                    key_bytes: 8,
+                    accumulator_bytes_per_group: 8,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "aggregate", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
+                "build-once node cannot consume a per-evaluation child"
+            ))
+        );
+    }
+
+    #[test]
+    fn scoped_comparison_rejects_different_source_snapshots() {
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![PhysicalDAGNode {
+            id: "scan".into(),
+            operator: PhysicalOperator::Scan,
+            children: vec![],
+            scan_selection: Some(coverage),
+            output_buffer_bytes: 10,
+            retained_bytes: 0,
+            execution: ExecutionMultiplicity::PerEvaluation,
+        }];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([(
+            "scan".into(),
+            OperatorStatistics::Scan {
+                edges: unary_edges(edge, edge),
+                source_read_bytes: 250,
+            },
+        )]);
+        let raw_scope = comparison_scope();
+        let mut candidate_scope = raw_scope.clone();
+        let no_cache = CacheProfile::no_cache();
+        candidate_scope.sources[0].source_snapshot_id = "catalog-version-43".into();
+
+        assert_eq!(
+            estimate_physical_dag_comparison(
+                PhysicalDAGEstimateRequest {
+                    nodes: &nodes,
+                    root: "scan",
+                    scope: &raw_scope,
+                    statistics: &provided,
+                    cache_profile: &no_cache,
+                },
+                PhysicalDAGEstimateRequest {
+                    nodes: &nodes,
+                    root: "scan",
+                    scope: &candidate_scope,
+                    statistics: &provided,
+                    cache_profile: &no_cache,
+                },
+            ),
+            Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
+        );
+    }
+
+    #[test]
+    fn scan_uses_physical_source_bytes_not_decoded_logical_bytes() {
+        let logical = EdgeStatistics {
+            rows: 100,
+            bytes: 10_000,
+        };
+        let estimate = estimate_operator(
+            PhysicalOperator::Scan,
+            OperatorStatistics::Scan {
+                edges: unary_edges(logical, logical),
+                source_read_bytes: 2_500,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(estimate.scan_bytes(), 2_500);
+        assert_eq!(estimate.peak_memory_bytes(), 100);
+    }
+
+    #[test]
+    fn non_scan_operator_estimates_cannot_charge_source_reads() {
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let filter = OperatorStatistics::Filter {
+            edges: unary_edges(edge, edge),
+            scalar_inputs: vec![],
+        };
+
+        assert_eq!(
+            estimate_operator(filter_operator(), filter)
+                .unwrap()
+                .scan_bytes(),
+            0
+        );
+    }
+
+    #[test]
+    fn non_empty_scan_cannot_claim_zero_source_reads() {
+        let logical = EdgeStatistics {
+            rows: 10,
+            bytes: 80,
+        };
+        assert_eq!(
+            estimate_operator(
+                PhysicalOperator::Scan,
+                OperatorStatistics::Scan {
+                    edges: unary_edges(logical, logical),
+                    source_read_bytes: 0,
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "non-empty Scan has zero source-read bytes"
+            ))
+        );
+    }
+
+    #[test]
+    fn hash_aggregate_handles_empty_grouped_and_ungrouped_inputs() {
+        let empty = EdgeStatistics { rows: 0, bytes: 0 };
+        let ungrouped = estimate_operator(
+            PhysicalOperator::HashAggregate {
+                grouping_key_count: 0,
+                accumulator_count: 1,
+            },
+            OperatorStatistics::HashAggregate {
+                edges: unary_edges(empty, EdgeStatistics { rows: 1, bytes: 8 }),
+                group_count: 1,
+                key_bytes: 0,
+                accumulator_bytes_per_group: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(ungrouped.cpu_ops(), 0.0);
+        assert_eq!(ungrouped.peak_memory_bytes(), 24);
+
+        let grouped = estimate_operator(
+            PhysicalOperator::HashAggregate {
+                grouping_key_count: 1,
+                accumulator_count: 1,
+            },
+            OperatorStatistics::HashAggregate {
+                edges: unary_edges(empty, empty),
+                group_count: 0,
+                key_bytes: 8,
+                accumulator_bytes_per_group: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(grouped.peak_memory_bytes(), 0);
+    }
+
+    #[test]
+    fn operator_local_work_and_partition_distribution_change_cpu_and_memory() {
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 800,
+        };
+        let filter = OperatorStatistics::Filter {
+            edges: unary_edges(edge, edge),
+            scalar_inputs: vec![],
+        };
+        assert_eq!(
+            estimate_operator(
+                PhysicalOperator::Filter {
+                    predicate_operations_per_row: 3,
+                },
+                filter,
+            )
+            .unwrap()
+            .cpu_ops(),
+            300.0
+        );
+
+        let sort = estimate_operator(
+            PhysicalOperator::InMemoryComparisonSort {
+                ordering_key_count: 1,
+                partitioned: true,
+            },
+            OperatorStatistics::InMemoryComparisonSort {
+                edges: unary_edges(edge, edge),
+                input_partitioning: PartitionStatistics {
+                    partitions: vec![
+                        EdgeStatistics {
+                            rows: 50,
+                            bytes: 400,
+                        },
+                        EdgeStatistics {
+                            rows: 50,
+                            bytes: 400,
+                        },
+                    ],
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(sort.cpu_ops(), 600.0);
+        assert_eq!(sort.peak_memory_bytes(), 400);
+    }
+
+    #[test]
+    fn concat_requires_at_least_one_physical_input() {
+        assert_eq!(
+            estimate_operator(
+                PhysicalOperator::Concat,
+                OperatorStatistics::Concat {
+                    inputs: vec![],
+                    output: EdgeStatistics { rows: 0, bytes: 0 },
+                    promql: None,
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "Concat must have at least one input"
+            ))
+        );
+    }
+
+    #[test]
+    fn serialized_operator_statistics_reject_unrelated_fields() {
+        let edge = serde_json::json!({ "rows": 100, "bytes": 1_000 });
+        let edges = serde_json::json!({ "input": edge, "output": edge });
+
+        assert!(
+            serde_json::from_value::<OperatorStatistics>(serde_json::json!({
+                "operator": "filter",
+                "edges": edges.clone(),
+                "source_read_bytes": 1_000
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<OperatorStatistics>(serde_json::json!({
+                "operator": "top_k",
+                "edges": edges,
+                "k": 10
+            }))
+            .is_err()
+        );
+    }
+
+    fn cache_test_scan() -> (Vec<PhysicalDAGNode>, HashMap<String, OperatorStatistics>) {
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        (
+            vec![PhysicalDAGNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                scan_selection: Some(comparison_scope().sources[0].clone()),
+                output_buffer_bytes: 0,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            }],
+            HashMap::from([(
+                "scan".into(),
+                OperatorStatistics::Scan {
+                    edges: unary_edges(edge, edge),
+                    source_read_bytes: 1_000,
+                },
+            )]),
+        )
+    }
+
+    fn cache_profile(result_capacity: u64, buffer_capacity: u64) -> CacheProfile {
+        CacheProfile::Evidence(CacheEvidence {
+            version: "cache-evidence-7".into(),
+            distinct_evaluations: 2,
+            repeated_identical_evaluations: 4,
+            result_cache: CacheCapacityEvidence {
+                working_set_bytes: 100,
+                capacity_bytes: result_capacity,
+            },
+            buffer_cache: CacheCapacityEvidence {
+                working_set_bytes: 100,
+                capacity_bytes: buffer_capacity,
+            },
+            result_invalidation_ratio: None,
+        })
+    }
+
+    // Legacy mapping imports are aliases of the shared schema, not a second type.
+    #[test]
+    fn shared_cache_types_work_through_legacy_mapping_imports() {
+        let central: asap_types::workload::resources::CacheProfile = cache_profile(100, 50);
+        let legacy: CacheProfile =
+            serde_json::from_value(serde_json::to_value(&central).unwrap()).unwrap();
+        fn accepts_shared(_: &asap_types::workload::resources::CacheProfile) {}
+        accepts_shared(&legacy);
+        assert_eq!(central, legacy);
+        assert_eq!(
+            cache_hit_ratios(&central, 6, DataArrival::AtRest).unwrap(),
+            (1.0, 0.5)
+        );
+    }
+
+    #[test]
+    fn no_cache_reproduces_legacy_estimate_and_cache_effects_are_distinct() {
+        let (nodes, evidence) = cache_test_scan();
+        let scope = comparison_scope();
+        let legacy = estimate_physical_dag(&nodes, "scan", &scope, &evidence).unwrap();
+        let explicit_no_cache = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &CacheProfile::no_cache(),
+        )
+        .unwrap();
+        assert_eq!(legacy, explicit_no_cache);
+        assert_eq!(legacy.cpu_ops(), 600.0);
+        assert_eq!(legacy.scan_bytes(), 6_000);
+
+        let result_only = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(100, 0),
+        )
+        .unwrap();
+        assert_eq!(result_only.cpu_ops(), 200.0);
+        assert_eq!(result_only.scan_bytes(), 2_000);
+
+        let result_and_buffer = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(100, 50),
+        )
+        .unwrap();
+        assert_eq!(result_and_buffer.cpu_ops(), result_only.cpu_ops());
+        assert_eq!(result_and_buffer.scan_bytes(), 1_000);
+    }
+
+    #[test]
+    fn cache_hits_are_monotone_and_reduce_summary_benefit() {
+        let (nodes, evidence) = cache_test_scan();
+        let scope = comparison_scope();
+        let low = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(0, 0),
+        )
+        .unwrap();
+        let high = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(100, 0),
+        )
+        .unwrap();
+        assert!(high.cpu_ops() <= low.cpu_ops());
+        assert!(high.scan_bytes() <= low.scan_bytes());
+
+        // A build-once summary has fixed work; as exact result-cache hits
+        // rise, the raw-minus-summary advantage cannot increase.
+        let mut summary_nodes = nodes.clone();
+        summary_nodes[0].execution = ExecutionMultiplicity::Once;
+        let summary = estimate_physical_dag_with_cache(
+            &summary_nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(0, 0),
+        )
+        .unwrap();
+        assert!(high.cpu_ops() - summary.cpu_ops() <= low.cpu_ops() - summary.cpu_ops());
+    }
+
+    #[test]
+    fn cache_evidence_fails_closed_for_bad_demand_and_streaming_invalidation() {
+        let mut profile = cache_profile(100, 100);
+        let CacheProfile::Evidence(evidence) = &mut profile else {
+            unreachable!()
+        };
+        evidence.distinct_evaluations = 1;
+        assert!(matches!(
+            cache_hit_ratios(&profile, 6, DataArrival::AtRest),
+            Err(AnalyticalCostError::InvalidCacheEvidence(_))
+        ));
+
+        let profile = cache_profile(100, 100);
+        assert!(matches!(
+            cache_hit_ratios(
+                &profile,
+                6,
+                DataArrival::Ingesting {
+                    rows_per_second: 1_000.0,
+                }
+            ),
+            Err(AnalyticalCostError::InvalidCacheEvidence(_))
+        ));
+    }
+
+    // Cache-enabled I/O must keep exact integers and reject unrepresentable totals.
+    #[test]
+    fn cache_io_preserves_large_integer_bytes_and_detects_overflow() {
+        let (mut nodes, mut evidence) = cache_test_scan();
+        let mut scope = comparison_scope();
+        scope.horizon.0 = 20_000;
+        let mut cache = cache_profile(0, 0);
+        let CacheProfile::Evidence(inputs) = &mut cache else {
+            unreachable!()
+        };
+        inputs.distinct_evaluations = 1;
+        inputs.repeated_identical_evaluations = 1;
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = 1_u64 << 63;
+        assert_eq!(
+            estimate_physical_dag_with_cache(&nodes, "scan", &scope, &evidence, &cache),
+            Err(AnalyticalCostError::Overflow)
+        );
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = (1_u64 << 53) + 1;
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        assert_eq!(
+            estimate_physical_dag_with_cache(&nodes, "scan", &scope, &evidence, &cache)
+                .unwrap()
+                .scan_bytes(),
+            (1_u64 << 53) + 1
+        );
+    }
+
+    // Repeated demand needs an initial evaluation; contradictory AtRest evidence is invalid.
+    #[test]
+    fn cache_evidence_rejects_impossible_demand_and_invalid_at_rest_invalidation() {
+        let mut cache = cache_profile(100, 0);
+        let CacheProfile::Evidence(inputs) = &mut cache else {
+            unreachable!()
+        };
+        inputs.distinct_evaluations = 0;
+        inputs.repeated_identical_evaluations = 6;
+        assert!(cache_hit_ratios(&cache, 6, DataArrival::AtRest).is_err());
+        for ratio in [f64::NAN, f64::INFINITY, -1.0, 0.5] {
+            let mut cache = cache_profile(100, 0);
+            let CacheProfile::Evidence(inputs) = &mut cache else {
+                unreachable!()
+            };
+            inputs.result_invalidation_ratio = Some(ratio);
+            assert!(cache_hit_ratios(&cache, 6, DataArrival::AtRest).is_err());
+        }
+    }
+
+    // Buffer residency affects source reads equally for raw scans and summary builds.
+    #[test]
+    fn buffer_cache_applies_to_build_once_scans_without_reducing_cpu() {
+        let (mut nodes, evidence) = cache_test_scan();
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        let scope = comparison_scope();
+        let estimate = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(100, 50),
+        )
+        .unwrap();
+        assert_eq!(estimate.cpu_ops(), 100.0);
+        assert_eq!(estimate.scan_bytes(), 500);
+    }
+
+    // A sub-ULP uncovered fraction must not become a fabricated full cache hit.
+    #[test]
+    fn partial_cache_preserves_tiny_buffer_misses() {
+        let (mut nodes, mut evidence) = cache_test_scan();
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        let working_set = 1_u64 << 63;
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = working_set;
+        let mut profile = cache_profile(0, 0);
+        let CacheProfile::Evidence(inputs) = &mut profile else {
+            unreachable!()
+        };
+        inputs.buffer_cache = CacheCapacityEvidence {
+            working_set_bytes: working_set,
+            capacity_bytes: working_set - 1,
+        };
+        let estimate = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &comparison_scope(),
+            &evidence,
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(estimate.scan_bytes(), 1);
+    }
+
+    // A result-cache miss remains chargeable even when the displayed hit rounds to one.
+    #[test]
+    fn partial_cache_preserves_tiny_result_misses() {
+        let working_set = 1_u64 << 63;
+        let mut profile = cache_profile(0, 0);
+        let CacheProfile::Evidence(inputs) = &mut profile else {
+            unreachable!()
+        };
+        inputs.distinct_evaluations = 1;
+        inputs.repeated_identical_evaluations = working_set;
+        inputs.result_cache = CacheCapacityEvidence {
+            working_set_bytes: working_set,
+            capacity_bytes: working_set - 1,
+        };
+        assert_eq!(
+            resolve_cache_profile(&profile, working_set + 1, DataArrival::AtRest)
+                .unwrap()
+                .cpu_execution_factor,
+            2.0
+        );
+    }
+
+    // Byte accounting remains exact above f64 integer precision after cache scaling.
+    #[test]
+    fn partial_buffer_cache_rounds_integer_bytes_without_precision_loss() {
+        let (mut nodes, mut evidence) = cache_test_scan();
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = (1_u64 << 54) + 2;
+        let estimate = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &comparison_scope(),
+            &evidence,
+            &cache_profile(0, 50),
+        )
+        .unwrap();
+        assert_eq!(estimate.scan_bytes(), (1_u64 << 53) + 1);
+    }
+
+    // A one-third miss fraction must not round five ordinary bytes up to six.
+    #[test]
+    fn partial_buffer_cache_does_not_round_an_exact_small_total_up() {
+        let (mut nodes, mut evidence) = cache_test_scan();
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = 15;
+        let mut profile = cache_profile(0, 0);
+        let CacheProfile::Evidence(inputs) = &mut profile else {
+            unreachable!()
+        };
+        inputs.buffer_cache = CacheCapacityEvidence {
+            working_set_bytes: 3,
+            capacity_bytes: 2,
+        };
+        assert_eq!(
+            estimate_physical_dag_with_cache(
+                &nodes,
+                "scan",
+                &comparison_scope(),
+                &evidence,
+                &profile
+            )
+            .unwrap()
+            .scan_bytes(),
+            5
+        );
+    }
+
+    // Declared invalidations bound otherwise-resident results under ingestion.
+    #[test]
+    fn streaming_invalidation_bounds_result_hits_and_changes_physical_work() {
+        let (nodes, evidence) = cache_test_scan();
+        let mut scope = comparison_scope();
+        scope.data_arrival = DataArrival::Ingesting {
+            rows_per_second: 1_000.0,
+        };
+        let mut profile = cache_profile(100, 50);
+        let CacheProfile::Evidence(inputs) = &mut profile else {
+            unreachable!()
+        };
+        inputs.result_invalidation_ratio = Some(0.5);
+        let estimate =
+            estimate_physical_dag_with_cache(&nodes, "scan", &scope, &evidence, &profile).unwrap();
+        assert_eq!(
+            cache_hit_ratios(&profile, 6, scope.data_arrival).unwrap(),
+            (0.5, 0.5)
+        );
+        assert_eq!(estimate.cpu_ops(), 400.0);
+        assert_eq!(estimate.scan_bytes(), 2_000);
+    }
+}

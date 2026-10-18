@@ -15,7 +15,7 @@ plan, and a serializable DAG is not evidence of runtime readiness.
 | --- | --- | --- |
 | Pre-ASAP IR | Frontend `lower_*` | [Lower a query](#lower-a-query-into-pre-asap-ir) |
 | Selected plan for a workload (Stages 0–3) | `asap_planner::e2e_plan` | [Plan a workload](#plan-a-workload-through-the-stages) |
-| Every stage's candidates for already lowered roots | `asap_aware_mapping::run_stage1_to_stage3` | [Plan a workload](#plan-a-workload-through-the-stages) |
+| Every stage's candidates for already lowered roots | `asap_plan_selection::run_stage1_to_stage3` | [Plan a workload](#plan-a-workload-through-the-stages) |
 | Physical DAG for an executor | `PlanOutput::physical_asap_dag`, or timing and export functions | [Export](#export) |
 
 Each recipe ends at a different artifact. Use only the stages needed for that
@@ -23,19 +23,22 @@ artifact, while preserving the checks required by its intended consumer.
 
 ## Dependencies
 
-Inside this workspace, depend on the frontend you need, `asap-aware-mapping`,
-and `asap-types`, or on `asap-planner`, which wraps every frontend and the
-planning stages. External users can use Git dependencies pinned to a compatible
-revision; use the same revision across these crates, and pick a revision at
-least as new as the APIs you call (this guide describes `main` at `775e21ee`).
+Inside this workspace, depend on the frontend you need, the stage crates
+(`asap-logical-asap-optimization` for Stage 1, `asap-physical-asap-optimization`
+for Stage 2, `asap-plan-selection` for Stage 3 and the Stage 1 to Stage 3
+driver), and `asap-types`, or on `asap-planner`, which wraps every frontend and
+the planning stages. External users can use Git dependencies pinned to a
+compatible revision; use the same revision across these crates, and pick a
+revision at least as new as the APIs you call. Replace `REV` below with a
+`main` revision that has the stage crates (`crates/plan-selection`).
 For the examples below:
 
 ```toml
 [dependencies]
-asap-planner = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "775e21ee38879631fe9752c105d50bea890d3d4a" }
-asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "775e21ee38879631fe9752c105d50bea890d3d4a" }
-asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "775e21ee38879631fe9752c105d50bea890d3d4a" }
-asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "775e21ee38879631fe9752c105d50bea890d3d4a" }
+asap-planner = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
+asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
+asap-plan-selection = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
+asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 # For the async e2e_plan example:
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 ```
@@ -101,7 +104,7 @@ use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::properties::AccuracyTarget;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workload = PlanningWorkload {
@@ -163,7 +166,7 @@ UserInput::new(workload: &PlanningWorkload, frontend_specific: FrontendInput<'_>
 FrontendInput::{Sql { catalog: &SqlCatalog }, Promql { histograms: Option<HistogramCatalog> }, Metricsql}
 
 // A caller that already holds lowered roots calls the stages directly:
-asap_aware_mapping::run_stage1_to_stage3<Id>(
+asap_plan_selection::run_stage1_to_stage3<Id>(
     roots: Vec<(Id, QueryRoot)>,
     entries: &[QueryWorkloadEntry],   // one per root: accuracy, latency bound, recurrence
     data: &DataWorkload,
@@ -175,8 +178,8 @@ asap_aware_mapping::run_stage1_to_stage3<Id>(
 | --- | --- |
 | `PlanningModels::new(accuracy, evidence)` | Your `&dyn AccuracyModel` and `&dyn AccuracyEvidenceProvider`, with default plan selection settings and deployment capabilities; `with_accuracy` and `with_evidence` replace one of them |
 | `PlanningModels::builtin()` | Built-in accuracy model (`DefaultAccuracyModel`) and no extra evidence (`NoAccuracyEvidence`). `with_plan_selection(&settings)` sets the deployment's `PlanSelectionSettings`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
-| `DeploymentCapabilities` (`asap_aware_mapping::deployment_capabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is invalid, and stored data is refused with `SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling panes) |
-| `PlanSelectionSettings` (`asap_aware_mapping::stage3_plan_selection`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (default empty: one `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` per measured sketch configuration and `SummaryOperation` (`Update`, `Merge`, `Estimate`); a sketch node with an exactly matching entry is priced from it, every other node from the formulas, and each node's `NodeCost::price_source` says which) |
+| `DeploymentCapabilities` (`asap_logical_asap_optimization::deployment_capabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is invalid, and stored data is refused with `SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling panes) |
+| `PlanSelectionSettings` (`asap_plan_selection`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (default empty: one `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` per measured sketch configuration and `SummaryOperation` (`Update`, `Merge`, `Estimate`); a sketch node with an exactly matching entry is priced from it, every other node from the formulas, and each node's `NodeCost::price_source` says which) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory, ParetoFront}` chooses among the candidates that fit |
@@ -194,7 +197,7 @@ dependencies):
 
 ```rust
 use asap_planner::{e2e_plan, FrontendInput, PlanningModels, UserInput};
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload, Query,
     QueryLanguage, QueryRequirements, QueryWorkload, SourceFacts,
@@ -258,7 +261,7 @@ rejected heap top-k candidates, `P2` and `P3`, each with the reason
 model 3 instead:
 
 ```rust
-use asap_aware_mapping::stage3_plan_selection::{
+use asap_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings,
 };
 
@@ -329,13 +332,14 @@ cost/guarantee evidence needed downstream instead of exporting only a bare DAG.
 For public symbol details, build local API documentation with:
 
 ```sh
-cargo doc -p asap-aware-mapping -p asap-types --no-deps
+cargo doc -p asap-logical-asap-optimization -p asap-physical-asap-optimization \
+  -p asap-plan-selection -p asap-types --no-deps
 ```
 
 ## Source references
 
 - [Frontend PromQL](../../crates/frontend-promql/src/lib.rs), [SQL](../../crates/frontend-sql/src/lib.rs), [MetricsQL](../../crates/frontend-metricsql/src/lib.rs)
-- [Planner facade](../../crates/planner/src/lib.rs), [planning stages](../../crates/asap-aware-mapping/src/pass/stage1_to_stage3.rs), [plan selection and cost models 1–3](../../crates/asap-aware-mapping/src/stage3_plan_selection.rs)
-- [Deployment capabilities](../../crates/asap-aware-mapping/src/deployment_capabilities.rs)
-- [Workload types](../../crates/types/src/workload.rs)
+- [Planner facade](../../crates/planner/src/lib.rs), [planning stages](../../crates/plan-selection/src/pass/stage1_to_stage3.rs), [plan selection and cost models 1–3](../../crates/plan-selection/src/lib.rs)
+- [Deployment capabilities](../../crates/logical-asap-optimization/src/deployment_capabilities.rs)
+- [Workload types](../../crates/types/src/workload/mod.rs)
 - [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)

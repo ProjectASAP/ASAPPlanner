@@ -294,7 +294,7 @@ PlanningWorkload + frontend dependencies + PlanningModels
 | Purpose | Operation | Result |
 |---|---|---|
 | Plan a workload end to end | `asap_planner::e2e_plan` | `PlanOutput` |
-| Plan already-lowered roots and inspect every stage | `asap_aware_mapping::run_stage1_to_stage3` | `Stage1ToStage3Run`, whose `stage3_plan_selection` is the `Selection` |
+| Plan already-lowered roots and inspect every stage | `asap_plan_selection::run_stage1_to_stage3` | `Stage1ToStage3Run`, whose `stage3_plan_selection` is the `Selection` |
 | Inspect a workload's stages as a document | `stage_pipeline` (devtools) | The stage document the [Stage Viewer](../../user_guide_docs/stage-viewer.md) shows |
 
 The integration associates each lowered root with a caller-owned `Id` and its

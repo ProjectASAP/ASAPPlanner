@@ -7,7 +7,7 @@ This document is the single source of truth for the schema, and column design fo
 Unlike existing Database engines, which work on raw data or explicitly defined materialized tables with schema and column names provided by the users, ASAPPlanner is designed for querying and execution over the mix of raw data and ASAP Primitives. ASAP primitives are usually compact summaries over raw data. Therefore, it introduces new requirement when we design the schema and node definitions for LogicalASAPDAG and PhysicalASAPDAG.
 
 Assuming we have the Logical DAG defined for a canonicalized representation for a batch of queries (the `LogicalDAG` produced by the frontends, [planning stages §0](planner-layering.md#0-language-specific-frontends); the stages that follow are in [planner-layering.md](planner-layering.md#stages)).
-The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG ([decoupling operators from scalar expressions](decoupling_op_and_expr.md), with the unified operator type in [operator sharing §1.1](operator-sharing.md#11-unified-operator-type)), but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives. The complete list is `ASAPOp` in `crates/types/src/ir/asap.rs`:
+The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG ([decoupling operators from scalar expressions](decoupling_op_and_expr.md), with the unified operator type in [operator sharing §1.1](operator-sharing.md#11-unified-operator-type)), but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives. The complete list is `ASAPOp` in `crates/types/src/ir/operator/asap.rs`:
 
 | Operator | Input → output | Status |
 |---|---|---|
@@ -49,7 +49,7 @@ This section fixes the words used below. They follow relational databases and Ap
 | **Relation / table** | A set (bag) of rows with the same columns. A base table is stored; a derived relation is the output of a query operator. | Every edge in the DAG carries a relation. A `Scan` reads a base table (SQL table or PromQL metric); every other operator outputs a derived relation. |
 | **Row / tuple** | One element of a relation: one value per column. | One output row of a node. For PromQL, one sample of one series at one time. |
 | **Column** | One position in every row, with a name and a type. Qualified as `table.column` when names can collide (DataFusion `Column { relation, name }`). | `ColumnId` refers to a column of the input schema; `(table, name)` identifies it across nodes (§4.2.2). |
-| **Schema** | The ordered list of columns of a relation: name, data type, nullability (Arrow `Schema` of `Field { name, data_type, nullable }`; DataFusion `DFSchema` adds the table qualifier). The schema is *metadata*: it describes rows, it contains none. | `Schema` of `Field { name, dtype, nullable, table }` in `crates/types/src/pre_asap/schema.rs`. Unlike Arrow, `dtype` can be a summary state type (§3). |
+| **Schema** | The ordered list of columns of a relation: name, data type, nullability (Arrow `Schema` of `Field { name, data_type, nullable }`; DataFusion `DFSchema` adds the table qualifier). The schema is *metadata*: it describes rows, it contains none. | `Schema` of `Field { name, dtype, nullable, table }` in `crates/types/src/ir/schema/mod.rs`. Unlike Arrow, `dtype` can be a summary state type (§3). |
 | **Data type** | The type of a column's values (`Int64`, `Utf8`, `Timestamp`, …). | `DataType`, wrapped as `FieldDataType::Plain`. |
 | **Aggregate state** | The intermediate value of an aggregate function before its final result, e.g. `(sum, count)` for `AVG` (DataFusion `Accumulator::state`, partial/final aggregation). It is never exposed as a column type to users. | Summary state *is* a column type here (`FieldDataType::Sketch`, `ExactAggregate`, …), so state can flow along edges and be merged, stored and read by later operators. |
 | **View / materialized view** | A view is a named query (its *definition*). A materialized view also stores the query's result rows; a query can then be answered from it when its definition matches (view matching, §4.1). | A built summary state is a materialized aggregation view whose aggregate is a summary family. Its definition and which rows it took are its coverage (§4). |
@@ -65,7 +65,7 @@ Schema represents the **metadata** of information flow along an **edge** between
 
 Schema definition here is shared between LogicalDAG, LogicalASAPDAG, and PhysicalASAPDAG. The schema contain fields, and each field is mapping to a column in the physical data representation. 
 Based on our requirement, each field should contain the following information.
-1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcpre_asapschemars) (`crates/types/src/pre_asap/schema.rs`). A column is either a raw value or a summary state:
+1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcirschemamodrs) (`crates/types/src/ir/schema/mod.rs`). A column is either a raw value or a summary state:
 
    - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
    - **Summary state**: described from coarse to fine by four levels:
@@ -77,12 +77,12 @@ Based on our requirement, each field should contain the following information.
    | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
    | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
 
-   - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcpost_asapsketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
+   - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcirschemasketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
    - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, PerSubpopulationInstance)`.
 
 2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
 
-   - **Statistical aggregation intents** (`AggIntent`, `crates/types/src/pre_asap/agg_intent.rs`): which aggregate the state can answer, and how it is read out.
+   - **Statistical aggregation intents** (`AggIntent`, `crates/types/src/ir/operator/agg_intent.rs`): which aggregate the state can answer, and how it is read out.
 
      | Intent | Candidate types | Evaluation |
      |---|---|---|
@@ -93,7 +93,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `per_computation_candidates.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-post_asapsketchrs-post_asapmaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/logical-asap-optimization/src/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `per_computation_candidates.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-irschemasketchrs-iroperatormaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint panes combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
@@ -886,7 +886,7 @@ OperatorNode                                         §6.1
 
 **Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5). Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
 
-### 6.1 DAG node (`crates/types/src/ir/node.rs`)
+### 6.1 DAG node (`crates/types/src/ir/operator/node.rs`)
 
 Every operator in a DAG is wrapped in an `OperatorNode`. `coverage()` is explained in §6.6.
 
@@ -922,7 +922,7 @@ impl OperatorNode {
 }
 ```
 
-### 6.2 ASAP operators (`crates/types/src/ir/asap.rs`)
+### 6.2 ASAP operators (`crates/types/src/ir/operator/asap.rs`)
 
 `ASAPOp<C>` is generic over how it refers to its inputs: `C` is `Rc<OperatorNode>` by default, and can also be a node id (e.g. in a flat DAG).
 
@@ -1024,7 +1024,7 @@ impl ASAPOp {
 }
 ```
 
-### 6.3 Schema and field types (`crates/types/src/pre_asap/schema.rs`)
+### 6.3 Schema and field types (`crates/types/src/ir/schema/mod.rs`)
 
 ```rust
 /// Position of a column in one schema (0-based). Local to that schema:
@@ -1125,7 +1125,7 @@ pub enum DataType {
 }
 ```
 
-### 6.4 Summary-family parameters (`crates/types/src/post_asap/sketch.rs`)
+### 6.4 Summary-family parameters (`crates/types/src/ir/schema/sketch.rs`)
 
 ```rust
 /// Which exact accumulator. None of them has parameters, so `ExactParams`
@@ -1221,14 +1221,14 @@ pub enum WaveletKind   { Haar }         pub enum WaveletParams   { Haar { coeffi
 pub enum StatModelKind { Parametric }   pub enum StatModelParams { Parametric { family: String } }
 ```
 
-### 6.5 Update input and evaluations (`post_asap/sketch.rs`, `post_asap/maintained_population.rs`)
+### 6.5 Update input and evaluations (`ir/schema/sketch.rs`, `ir/operator/maintained_population.rs`)
 
 This part of the code answers two questions about summary state:
 
 1. **Update input** (`SummaryUpdate`): when a `SummaryAgg` reads one input row, what does it add to the state? It adds a **weight**, optionally under an **item** key.
 2. **Evaluations**: once the state is built, what can be asked of it? `SketchStatistic` is what `SummaryEstimate` asks a sketch (§5.2). `MaintainedPopulation` and `PopulationStatistic` are the exact-population counterpart, used by `MaintainPopulation` and `EvaluatePopulation` (§5.4, §5.5).
 
-**Update input examples** (as the planner builds them in `asap-aware-mapping`):
+**Update input examples** (as the planner builds them in Stage 1, `asap-logical-asap-optimization`):
 
 | Query | Sketch | `item` | `weight` | `weight_domain` |
 |---|---|---|---|---|
@@ -1325,9 +1325,9 @@ pub struct CurrentSeriesInput {
 }
 ```
 
-A finalized value's accuracy statement is `AccuracyGuarantee` (`post_asap/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
+A finalized value's accuracy statement is `AccuracyGuarantee` (`ir/properties/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
-### 6.6 Summary coverage (`crates/types/src/ir/summary_coverage.rs`)
+### 6.6 Summary coverage (`crates/types/src/ir/properties/summary_coverage.rs`)
 
 The code for §4, as of #646. On `main` today `SummaryCoverage` is still the older declared form (`source` plus `regions`).
 

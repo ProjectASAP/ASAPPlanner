@@ -13,7 +13,7 @@ mod planner_layering_common;
 use std::collections::BTreeSet;
 
 use asap_types::ir::flat::NodeId;
-use asap_types::post_asap::{SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::ir::schema::{SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::workload::DataArrival;
 
 use planner_layering_common::*;

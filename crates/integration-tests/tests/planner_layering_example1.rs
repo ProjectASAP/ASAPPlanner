@@ -20,12 +20,12 @@ mod planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_aware_mapping::stage3_plan_selection::select_plan;
-use asap_aware_mapping::PlanningModels;
+use asap_plan_selection::select_plan;
+use asap_plan_selection::PlanningModels;
 use asap_types::ir::flat::NodeId;
+use asap_types::ir::schema::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
-use asap_types::post_asap::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
-use asap_types::post_asap::{Materialization, Medium};
+use asap_types::physical::{Materialization, Medium};
 use planner_layering_common::*;
 
 // ── Example 1 workload ───────────────────────────────────────────────────
@@ -502,8 +502,8 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
                     if matches!(
                         family,
                         FieldDataType::ExactAggregate(
-                            asap_types::post_asap::ExactKind::Rate
-                                | asap_types::post_asap::ExactKind::Increase,
+                            asap_types::ir::schema::ExactKind::Rate
+                                | asap_types::ir::schema::ExactKind::Increase,
                             _
                         )
                     ) {
@@ -535,7 +535,7 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
 /// Compile `p` in the physical planner (the runtime capability check), with
 /// the samples each time range reads as its input.
 fn compile_in_runtime(p: &Physical) -> Result<(), String> {
-    use asap_physical_operators::physical_planner::{compile, InputContract};
+    use asap_executor::physical_planner::{compile, InputContract};
     use std::sync::Arc;
     let dag = p.dag();
     let mut inputs = BTreeMap::new();

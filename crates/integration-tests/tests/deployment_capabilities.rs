@@ -4,12 +4,13 @@
 
 mod planner_layering_common;
 
-use asap_aware_mapping::stage3_plan_selection::PlanSelectionSettings;
-use asap_aware_mapping::{DeploymentCapabilities, SupportedSummary};
 use asap_devtools::planning_stages::lower_sql_roots;
+use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
+use asap_plan_selection::PlanSelectionSettings;
 use asap_types::ir::flat::FlatDag;
-use asap_types::ir::{ASAPOp, Materialization, Operator};
-use asap_types::post_asap::{SketchAlgorithm, StatisticKind};
+use asap_types::ir::schema::{SketchAlgorithm, StatisticKind};
+use asap_types::ir::{ASAPOp, Operator};
+use asap_types::physical::Materialization;
 use planner_layering_common::*;
 
 /// A deployment whose executor supports only `supported`: each family with

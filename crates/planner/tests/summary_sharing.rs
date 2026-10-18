@@ -7,18 +7,18 @@
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use std::rc::Rc;
 
-use asap_aware_mapping::pass::{
-    run_stage1_to_stage3, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
-};
-use asap_aware_mapping::realization::{default_size_params, DEFAULT_DELTA};
-use asap_aware_mapping::stage3_plan_selection::RejectionCause;
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_frontend_sql::SqlCatalog;
+use asap_logical_asap_optimization::realization::{default_size_params, DEFAULT_DELTA};
+use asap_plan_selection::pass::{
+    run_stage1_to_stage3, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
+};
+use asap_plan_selection::RejectionCause;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
-use asap_types::pre_asap::agg_intent::default_quantile;
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{AccuracyMetric, AccuracyTarget};
+use asap_types::ir::operator::agg_intent::default_quantile;
+use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
@@ -554,7 +554,7 @@ async fn exact_state_roots_are_finalized() {
         );
         // With nothing materialized, the root and the exact state it reads
         // run at query time.
-        use asap_types::post_asap::{DataPrimitive, ExecutionDataState, ExecutionTiming};
+        use asap_types::ir::properties::{DataPrimitive, ExecutionDataState, ExecutionTiming};
         assert_eq!(root.output_state, ExecutionDataState::QUERY_ROWS, "{query}");
         let state = dag
             .edges

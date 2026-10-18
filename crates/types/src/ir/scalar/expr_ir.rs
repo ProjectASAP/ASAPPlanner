@@ -1,0 +1,123 @@
+//! Column-reference and scalar-operator vocabulary shared by the IR's scalar
+//! expressions ([`crate::ir::ScalarExpr`]) and the front ends' unresolved
+//! form: [`ColumnRef`] (name-based, front-end-emitted; positional
+//! [`ColumnId`](crate::ir::schema::ColumnId) once bound), and [`ScalarValue`],
+//! [`CompareOpKind`], [`ArithmeticOpKind`] — the **union** of what the two
+//! front ends need: PromQL contributes `Regex` / `NotRegex` (`=~` / `!~`); SQL
+//! contributes arithmetic, `CASE`, `IN`, `CAST`, `IS [NOT] NULL`, scalar
+//! function calls, and the `LIKE` / `ILIKE` comparison family.
+
+use serde::{Deserialize, Serialize};
+
+/// A name-based column reference — the front-end-emitted, unresolved form of
+/// [`ScalarExpr::Column`](crate::ir::ScalarExpr::Column); front-end name
+/// resolution turns it into a positional [`ColumnId`](crate::ir::schema::ColumnId).
+/// This is a logical reference, not schema metadata or a runtime data array.
+/// `SampleValue` names the implicit PromQL sample column; `Wildcard` represents
+/// an all-columns/rows request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColumnRef {
+    Named(String),
+    /// Table-qualified reference (`t.col` / `alias.col`). Resolved by
+    /// `(table, name)` so a column name shared across a join (`a.k` vs `b.k`)
+    /// binds to the correct side.
+    Qualified {
+        table: String,
+        name: String,
+    },
+    /// The implicit metric sample value (PromQL — always the series value).
+    SampleValue,
+    /// All rows / COUNT(*).
+    Wildcard,
+}
+
+/// A typed scalar constant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ScalarValue {
+    Int64(i64),
+    Float64(#[serde(with = "crate::serde_f64")] f64),
+    Utf8(String),
+    Boolean(bool),
+    Null,
+    /// A calendar duration, in Arrow's three independent fields. Not collapsed
+    /// into one nanosecond count: a month is not a fixed number of nanoseconds,
+    /// so `INTERVAL '1' MONTH` has no faithful scalar form. DataFusion's three
+    /// interval scalars (`YearMonth`, `DayTime`, `MonthDayNano`) all lower here.
+    Interval {
+        months: i32,
+        days: i32,
+        nanos: i64,
+    },
+}
+
+/// Binary comparison operators.
+///
+/// `Regex` / `NotRegex` carry PromQL/RE2 regex-match semantics (`=~` / `!~`):
+/// the right-hand side is a regular-expression pattern, not a literal value.
+/// `Like` / `ILike` (+ negations) are the SQL pattern-match analogues.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompareOpKind {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    /// SQL `LIKE` — RHS is a `%`/`_` glob pattern.
+    Like,
+    /// SQL `NOT LIKE`.
+    NotLike,
+    /// SQL `ILIKE` — case-insensitive `LIKE`.
+    ILike,
+    /// SQL `NOT ILIKE`.
+    NotILike,
+    /// RHS is a regular-expression pattern; matches PromQL `=~`.
+    Regex,
+    /// RHS is a regular-expression pattern; matches PromQL `!~`.
+    NotRegex,
+}
+
+impl std::fmt::Display for CompareOpKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CompareOpKind::Eq => "==",
+            CompareOpKind::Ne => "!=",
+            CompareOpKind::Lt => "<",
+            CompareOpKind::Le => "<=",
+            CompareOpKind::Gt => ">",
+            CompareOpKind::Ge => ">=",
+            CompareOpKind::Like => "LIKE",
+            CompareOpKind::NotLike => "NOT LIKE",
+            CompareOpKind::ILike => "ILIKE",
+            CompareOpKind::NotILike => "NOT ILIKE",
+            CompareOpKind::Regex => "=~",
+            CompareOpKind::NotRegex => "!~",
+        })
+    }
+}
+
+/// Binary arithmetic operators.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArithmeticOpKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    Atan2,
+}
+
+impl std::fmt::Display for ArithmeticOpKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ArithmeticOpKind::Add => "+",
+            ArithmeticOpKind::Sub => "-",
+            ArithmeticOpKind::Mul => "*",
+            ArithmeticOpKind::Div => "/",
+            ArithmeticOpKind::Mod => "%",
+            ArithmeticOpKind::Pow => "^",
+            ArithmeticOpKind::Atan2 => "atan2",
+        })
+    }
+}

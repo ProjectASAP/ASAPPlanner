@@ -13,14 +13,14 @@
 // every corpus lowers with. Without an approximate target, Pass 1 offers no
 // summary candidate.
 
-use asap_aware_mapping::per_computation_candidates::{
-    generate_per_computation_candidates, ComputationCandidate,
-};
 use asap_devtools::lower_promql_with_sample_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_logical_asap_optimization::per_computation_candidates::{
+    generate_per_computation_candidates, ComputationCandidate,
+};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
 use std::rc::Rc;

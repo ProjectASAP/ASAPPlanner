@@ -2,16 +2,17 @@
 //! one pipeline behind `stage_pipeline` and the planner-layering acceptance
 //! tests, so both see the same candidates, ids and selection.
 
-use asap_aware_mapping::pass::{run_stage2_and_stage3, stage1_logical_asap_optimization};
-pub use asap_aware_mapping::pass::{LogicalCandidate, Pass2Candidate, PrunedCandidate};
-use asap_aware_mapping::per_computation_candidates::generate_per_computation_candidates;
-use asap_aware_mapping::per_computation_candidates::PerComputationCandidates;
-use asap_aware_mapping::stage2_physical_asap_optimization::{
-    physical_candidate_count, PhysicalCandidate,
-};
-use asap_aware_mapping::stage3_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
-use asap_aware_mapping::{DeploymentCapabilities, PlanningModels};
-use asap_types::ir::schema_support::with_promql_series_identity;
+use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
+use asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_optimization;
+pub use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
+use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_physical_asap_optimization::{physical_candidate_count, PhysicalCandidate};
+use asap_plan_selection::pass::run_stage2_and_stage3;
+pub use asap_plan_selection::pass::{LogicalCandidate, PrunedCandidate};
+use asap_plan_selection::PlanningModels;
+use asap_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
+use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 

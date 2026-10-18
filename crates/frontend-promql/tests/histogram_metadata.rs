@@ -7,9 +7,9 @@
 
 use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 mod support;
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::pre_asap::AggIntent;
-use asap_types::types::AccuracyTarget;
 use support::{lower_promql, lower_promql_with_histograms};
 
 /// The histogram/quantile intent kind in the lowered DAG: `"HQ"` for the

@@ -1,7 +1,7 @@
 # Shared maintained population rule
 
 > Status: planner rule implemented; deployment support is conditional. See
-> [MaintainedPopulationStrategy](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
+> [MaintainedPopulationStrategy](../../../../crates/logical-asap-optimization/src/maintained_population.rs).
 > A deployment must provide the membership, freshness, state and operation
 > capabilities described below. Planner representation alone does not implement
 > population maintenance in a runtime.
@@ -51,7 +51,7 @@ column and grouping determine whether consumers refer to the same population.
 ## Rule: share one population across compatible readouts
 
 **Realization:** `MaintainedPopulationStrategy::candidate` builds the sub-DAG;
-Pass 1 does not offer it yet. Code: [maintained_population.rs](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
+Pass 1 does not offer it yet. Code: [maintained_population.rs](../../../../crates/logical-asap-optimization/src/maintained_population.rs).
 
 **Target sub-DAGs:**
 

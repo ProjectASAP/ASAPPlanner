@@ -5,18 +5,23 @@ use std::ops::Bound;
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_types::ir::operator_properties::{Reduction, Source};
-use asap_types::ir::summary_coverage::{ColumnIdentity, Constraint, CoverageError, SelectionBox};
+use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::operator::TimeShift;
+use asap_types::ir::properties::summary_coverage::{
+    ColumnIdentity, Constraint, CoverageError, SelectionBox,
+};
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::schema::{
+    ExactKind, ExactParams, GroupingStrategy, MergeInputRule, SketchAlgorithm, SketchKind,
+    SketchParams, SummaryUpdate,
+};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
     SchemaDerivationError, TimeRangeKind,
 };
-use asap_types::post_asap::{
-    ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, MergeInputRule, SketchAlgorithm,
-    SketchKind, SketchParams, SummaryUpdate,
-};
-use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-use asap_types::pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema, TimeShift};
 
 const JOB: usize = 0;
 const REGION: usize = 1;

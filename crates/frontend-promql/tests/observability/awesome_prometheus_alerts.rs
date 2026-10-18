@@ -31,9 +31,10 @@ use asap_frontend_promql::PromqlError as LoweringError;
 mod support;
 use std::rc::Rc;
 
+use asap_types::ir::operator::{AggIntent, BinaryOpKind, Reduction};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
 use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ScalarExpr};
-use asap_types::pre_asap::{AggIntent, BinaryOpKind, CompareOpKind, Reduction, ScalarValue};
-use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");

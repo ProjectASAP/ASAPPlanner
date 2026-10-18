@@ -20,8 +20,8 @@
 use std::rc::Rc;
 
 mod support;
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::OperatorNode;
-use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
 fn lo(q: &str) -> Rc<OperatorNode> {

@@ -1,17 +1,19 @@
 //! Window composition merges compatible summary states without consuming raw rows.
-use asap_types::{
-    ir::operator_properties::{Reduction, Source},
-    ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo},
-    ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr},
-    post_asap::{
-        ExactKind, ExactParams, ExecutionTiming, FamilyCapability, GroupingStrategy, HydraKind,
-        HydraParams, Materialization, Medium, MergeInputRule, MergedError, SamplingKind,
-        SamplingParams, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, StatModelKind,
-        StatModelParams, StatisticKind, SummaryUpdate, WaveletKind, WaveletParams,
-    },
-    pre_asap::expr_ir::{CompareOpKind, ScalarValue},
-    pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema},
+use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{
+    DataType, ExactKind, ExactParams, FamilyCapability, Field, FieldDataType, GroupingStrategy,
+    HydraKind, HydraParams, MergeInputRule, MergedError, SamplingKind, SamplingParams, Schema,
+    SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
+    StatisticKind, SummaryUpdate, WaveletKind, WaveletParams,
 };
+use asap_types::ir::{
+    apply_materialization_timings, ASAPOp, ExprSemantics, MaterializationAssignment, NonASAPOp,
+    Operator, OperatorNode, Predicate, ScalarExpr, TimingMemo,
+};
+use asap_types::physical::{Materialization, Medium};
 use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are
 /// disjoint.

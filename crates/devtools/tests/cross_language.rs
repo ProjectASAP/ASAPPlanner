@@ -14,10 +14,10 @@
 //! explicit inner `Aggregate([Count])`.
 
 use asap_devtools::{lower_promql_with_sample_interval, lower_sql, SqlCatalog};
+use asap_types::ir::operator::{AggIntent, GroupKeys};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys};
-use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
 fn col(name: &str, dtype: DataType) -> Field {

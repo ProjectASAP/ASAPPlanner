@@ -114,8 +114,8 @@ fn lower_promql_query_workload_inner(
 mod tests {
     use std::time::Duration;
 
+    use asap_types::ir::operator::Source;
     use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
-    use asap_types::pre_asap::Source;
     use asap_types::workload::{
         BatchEntry, DataArrival, DataWorkload, PlanningWorkload, Query, QueryRequirements,
         QueryWorkload, SourceFacts, WorkloadError,

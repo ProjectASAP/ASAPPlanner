@@ -1,7 +1,7 @@
 # Physical compile coverage for deployment computation
 
 Audience: developers moving computation from ASAPQuery-backend into
-`asap_physical_operators::physical_planner`.
+`asap_executor::physical_planner`.
 
 ## Contract
 

@@ -5,10 +5,10 @@
 //! into IR scalar functions, and DataFusion never executes them (evaluation
 //! is the query engine's responsibility).
 use super::types::{arrow_to_dtype, dtype_to_arrow, scalar_value_to_asap};
+use asap_types::ir::scalar::scalar_type_rules::MapScalarFunction;
 use asap_types::ir::scalar::{element_access_type, struct_field_type};
+use asap_types::ir::schema::{Field, Schema};
 use asap_types::ir::ScalarExpr;
-use asap_types::pre_asap::scalar_type_rules::MapScalarFunction;
-use asap_types::pre_asap::{Field, Schema};
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, FieldRef};
 use datafusion::common::{DataFusionError, Result, ScalarValue as DfScalarValue};
 use datafusion::logical_expr::{

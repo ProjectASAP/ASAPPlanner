@@ -2,7 +2,7 @@
 //!
 //! The flattened operators of [`super::flat`], plus the materialization and
 //! execution timing (data state) of every node and edge. The input must
-//! already be timed ([`super::timing::apply_materialization_timings`]); export
+//! already be timed ([`crate::ir::properties::timing::apply_materialization_timings`]); export
 //! reads each node's timing and materialization and does not re-run
 //! data-state validation. The deployment executes the plan as given
 //! (#509 Assumption 8): it does not change materialization or timing.
@@ -13,19 +13,20 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::asap::ASAPOp;
 use super::flat::{flatten, NodeId};
-use super::node::{Operator, OperatorNode};
-use super::non_asap::NonASAPOp;
-use super::operator_properties::Reduction;
-use super::query::QueryRoot;
 use super::scalar::ScalarExpr;
-use super::timing::{data_state, is_materialization_point};
-use crate::post_asap::execution_data_state::{
-    ExecutionDataState, ExecutionDataStateError, ExecutionTiming, Materialization,
+use crate::ir::operator::asap::ASAPOp;
+use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::non_asap::NonASAPOp;
+use crate::ir::operator::operator_properties::Reduction;
+use crate::ir::operator::query::QueryRoot;
+use crate::ir::properties::execution_data_state::{
+    ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
-use crate::post_asap::guarantee::AccuracyGuarantee;
-use crate::pre_asap::schema::{FieldDataType, Schema};
+use crate::ir::properties::guarantee::AccuracyGuarantee;
+use crate::ir::properties::timing::{data_state, is_materialization_point};
+use crate::ir::schema::{FieldDataType, Schema};
+use crate::physical::materialization::Materialization;
 
 pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 10;
 
@@ -409,7 +410,7 @@ pub fn compile_physical_asap_dag(
 }
 
 /// Export the timed DAG below `root`. Every reachable node must carry a
-/// timing (see [`super::timing::apply_materialization_timings`]); the data-state
+/// timing (see [`crate::ir::properties::timing::apply_materialization_timings`]); the data-state
 /// rules were checked by that pass and are not re-run here.
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,

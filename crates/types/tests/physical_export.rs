@@ -1,16 +1,18 @@
 //! A timed plan exports as a PhysicalASAPDAG that keeps timing.
+use asap_types::ir::operator::{Reduction, Source};
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, compile_physical_asap_workload, PhysicalASAPDAGDocument,
     PhysicalASAPDAGValidationError,
 };
+use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
-    NonASAPOp, Operator, OperatorNode, QueryRoot, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
+    OperatorNode, QueryRoot, TimingMemo,
 };
-use asap_types::post_asap::{
-    ExactKind, ExactParams, ExecutionDataStateError, ExecutionTiming, SummaryUpdate,
-};
-use asap_types::pre_asap::{ColumnRef, DataType, Field, FieldDataType, Reduction, Schema, Source};
+use asap_types::physical::{Materialization, Medium};
 use std::rc::Rc;
 
 /// Scan(t) → SummaryAgg(sum by key) → FinalizeExactAccumulator, untimed.
@@ -152,8 +154,8 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
 /// in the batch, reading the shared nodes by id; operator queries keep `roots`.
 #[test]
 fn scalar_roots_export_in_batch_order_and_reference_nodes() {
+    use asap_types::ir::scalar::ArithmeticOpKind;
     use asap_types::ir::{ExprSemantics, ScalarExpr};
-    use asap_types::pre_asap::ArithmeticOpKind;
     let timed = apply_materialization_timings(
         &plan(),
         &MaterializationAssignment::default(),
@@ -227,7 +229,7 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
 
     // Keys must strictly ascend: a duplicate or a descending key is rejected.
     let literal: ScalarExpr<usize> =
-        ScalarExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(2.0));
+        ScalarExpr::Literal(asap_types::ir::scalar::ScalarValue::Float64(2.0));
     let mut duplicate = valid_scalar_only.clone();
     duplicate.scalar_roots.push((0, literal.clone()));
     assert_eq!(
@@ -248,8 +250,8 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
 #[test]
 fn a_reference_read_twice_is_one_scalar_ref_edge() {
     use asap_types::ir::physical_export::EdgeRole;
+    use asap_types::ir::scalar::ArithmeticOpKind;
     use asap_types::ir::{ExprSemantics, ProjectItem, ScalarExpr};
-    use asap_types::pre_asap::ArithmeticOpKind;
     let series = |metric: &str| {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries {
@@ -297,9 +299,10 @@ fn a_reference_read_twice_is_one_scalar_ref_edge() {
 /// `Left` and `Right` would reorder the operands of `a - b`.
 #[test]
 fn swapped_edge_roles_are_rejected() {
+    use asap_types::ir::operator::JoinKind;
     use asap_types::ir::physical_export::EdgeRole;
+    use asap_types::ir::scalar::ScalarValue;
     use asap_types::ir::{Predicate, ScalarExpr};
-    use asap_types::pre_asap::{JoinKind, ScalarValue};
     let scan = |table: &str| {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
@@ -358,7 +361,7 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     use asap_types::ir::physical_export::{
         compile_physical_asap_dag_with_node_ids, GroupingEdgeCompatibility, WindowEdgeCompatibility,
     };
-    use asap_types::post_asap::ExecutionDataState;
+    use asap_types::ir::properties::ExecutionDataState;
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
         source: Source::TimeSeries { metric: "m".into() },
         predicates: vec![],

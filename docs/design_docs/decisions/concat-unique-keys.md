@@ -4,7 +4,7 @@
 > legacy `replacement.rs` and `explanation.rs` it mentions have been removed.
 
 > Historical: `crates/types/src/pre_asap/query_expr.rs` was removed in #543;
-> `Concat` is now `NonASAPOp::Concat` (`crates/types/src/ir/non_asap.rs`).
+> `Concat` is now `NonASAPOp::Concat` (`crates/types/src/ir/operator/non_asap.rs`).
 
 > **Update**: the investigation below found no current call site paying for a
 > redundant `Dedup` that this override would remove, and the original version
@@ -18,7 +18,7 @@
 
 ## Context
 
-[`QueryExpr::Concat`](../../../crates/types/src/ir/non_asap.rs) (the
+[`QueryExpr::Concat`](../../../crates/types/src/ir/operator/non_asap.rs) (the
 n-ary exact `UNION ALL` node, renamed from `Merge` in #226) always drops
 `unique_keys` on its output — `merge_drops_the_branches_unique_keys` and
 `merge_and_setop_agree_on_unique_keys` pin this down. Issue #228 asks whether

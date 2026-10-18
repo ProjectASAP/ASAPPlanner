@@ -2,9 +2,9 @@
 use std::time::Duration;
 
 use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
-use asap_types::pre_asap::AggIntent;
-use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, SourceFacts, WorkloadError,

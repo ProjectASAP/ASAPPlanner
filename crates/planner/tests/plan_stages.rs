@@ -1,9 +1,9 @@
 //! The planner pipeline ([`run_stage1_to_stage3`]): the planning stages in order over
 //! the frontends' roots, enumerating every whole-workload candidate.
 
-use asap_aware_mapping::pass::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
 use asap_frontend_promql::lower_promql_query_workload;
-use asap_types::types::AccuracyTarget;
+use asap_plan_selection::pass::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,

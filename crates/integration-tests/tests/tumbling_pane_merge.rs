@@ -8,23 +8,24 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_aware_mapping::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
+use asap_executor::physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract};
+use asap_executor::runtime::Scope;
+use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::selected_dag;
-use asap_physical_operators::physical_planner::{
-    compile, promql_rows, CompiledPhysicalDAG, InputContract,
+use asap_logical_asap_optimization::asap_aware_cse::{
+    pane_candidates, window_composition_pass2_candidates,
 };
-use asap_physical_operators::runtime::Scope;
-use asap_physical_operators::values::{Batch, Value};
-use asap_types::ir::operator_properties::TimeShift;
-use asap_types::ir::pane_chain::expand_pane_chains;
+use asap_types::ir::operator::operator_properties::TimeShift;
+use asap_types::ir::operator::pane_chain::expand_pane_chains;
 use asap_types::ir::physical_export::{compile_physical_asap_dag_with_node_ids, PhysicalASAPDAG};
+use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+use asap_types::ir::schema::Schema;
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
-    NonASAPOp, Operator, OperatorNode, QueryRoot, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
+    OperatorNode, QueryRoot, TimingMemo,
 };
-use asap_types::post_asap::Schema;
-use asap_types::types::{AccuracyMetric, AccuracyTarget};
+use asap_types::physical::{Materialization, Medium};
 
 const EVALUATION_MS: i64 = 300_000;
 const PANE_MS: i64 = 60_000;

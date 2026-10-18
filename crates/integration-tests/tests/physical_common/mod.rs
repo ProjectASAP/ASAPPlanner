@@ -1,4 +1,4 @@
-use asap_physical_operators::{
+use asap_executor::{
     operators::Operator,
     physical_planner::{CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
@@ -58,7 +58,9 @@ pub fn compile_at_ingestion_physical_asap_dag(
     compile_with(
         root,
         &asap_types::ir::MaterializationAssignment::with_default(
-            asap_types::ir::Materialization::MatAtIngestion(asap_types::ir::Medium::Memory),
+            asap_types::physical::Materialization::MatAtIngestion(
+                asap_types::physical::Medium::Memory,
+            ),
         ),
     )
 }
@@ -80,9 +82,9 @@ fn compile_with(
 #[allow(dead_code)]
 pub fn execute_raw_rows(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
-    rows: Vec<Vec<asap_physical_operators::values::Value>>,
-) -> Vec<Vec<asap_physical_operators::values::Value>> {
-    use asap_physical_operators::dag::{
+    rows: Vec<Vec<asap_executor::values::Value>>,
+) -> Vec<Vec<asap_executor::values::Value>> {
+    use asap_executor::dag::{
         planner::bind_with_data_sources,
         scan::{DataSources, MemorySource},
     };

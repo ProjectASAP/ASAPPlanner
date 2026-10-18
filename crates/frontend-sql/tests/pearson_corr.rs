@@ -2,12 +2,13 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{
     apply_materialization_timings, physical_export::compile_physical_asap_dag,
     MaterializationAssignment, NonASAPOp, OperatorNode, ScalarExpr, TimingMemo,
 };
-use asap_types::pre_asap::{AggIntent, DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
 
 fn catalog() -> SqlCatalog {
     let schema = Schema::new(vec![
@@ -148,17 +149,17 @@ async fn corr_filter_is_a_measure_filter() {
 #[tokio::test]
 async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
-    let run = asap_aware_mapping::run_stage1_to_stage3(
+    let run = asap_plan_selection::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
         &[asap_types::workload::QueryWorkloadEntry {
             requirements: asap_types::workload::QueryRequirements {
-                accuracy: asap_types::types::AccuracyTarget::exact(),
+                accuracy: asap_types::ir::properties::AccuracyTarget::exact(),
                 max_latency_ms: None,
             },
             ..Default::default()
         }],
         &Default::default(),
-        asap_aware_mapping::PlanningModels::builtin(),
+        asap_plan_selection::PlanningModels::builtin(),
     )
     .unwrap();
     let [asap_types::ir::QueryRoot::Operator(plan)] = run.selected_logical().unwrap() else {

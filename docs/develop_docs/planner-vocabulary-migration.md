@@ -28,7 +28,7 @@ names.
 | `resources::boundary` | `resources::physical_handoff` |
 | `BoundaryKind` | `PhysicalHandoffKind` |
 | `BoundaryResources` | `PhysicalHandoffBytes` |
-| `asap_aware_mapping::boundary_cost` | `asap_aware_mapping::physical_handoff_cost` |
+| `asap_aware_mapping::boundary_cost` | `asap_plan_selection::cost::physical_handoff_cost` |
 | `PhysicalBoundary` | `PhysicalHandoff` |
 | `BoundaryNodeEvidence`, `BoundaryPlanEvidence` | `PhysicalHandoffNodeEvidence`, `PhysicalHandoffPlanEvidence` |
 | `BoundaryProfile`, `BoundaryCalibration`, `BoundaryEstimate` | `PhysicalHandoffProfile`, `PhysicalHandoffCalibration`, `PhysicalHandoffEstimate` |

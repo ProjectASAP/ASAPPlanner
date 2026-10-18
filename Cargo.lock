@@ -314,29 +314,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "asap-aware-mapping"
-version = "0.1.0"
-dependencies = [
- "asap-frontend-promql",
- "asap-types",
- "asap_sketchlib",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-frontend-sql",
+ "asap-logical-asap-optimization",
+ "asap-physical-asap-optimization",
+ "asap-plan-selection",
  "asap-types",
  "serde",
  "serde_json",
  "serde_yaml",
  "tokio",
+]
+
+[[package]]
+name = "asap-executor"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-logical-asap-optimization",
+ "asap-plan-selection",
+ "asap-types",
+ "asap_sketchlib",
+ "chrono",
+ "futures",
+ "regex",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -362,8 +371,9 @@ dependencies = [
 name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-common",
+ "asap-logical-asap-optimization",
+ "asap-plan-selection",
  "asap-types",
  "promql-parser",
 ]
@@ -372,8 +382,9 @@ dependencies = [
 name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-common",
+ "asap-logical-asap-optimization",
+ "asap-plan-selection",
  "asap-sql-function-catalog",
  "asap-types",
  "datafusion",
@@ -387,11 +398,13 @@ dependencies = [
 name = "asap-integration-tests"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-devtools",
+ "asap-executor",
  "asap-frontend-promql",
  "asap-frontend-sql",
- "asap-physical-operators",
+ "asap-logical-asap-optimization",
+ "asap-physical-asap-optimization",
+ "asap-plan-selection",
  "asap-planner",
  "asap-types",
  "asap_sketchlib",
@@ -401,31 +414,49 @@ dependencies = [
 ]
 
 [[package]]
-name = "asap-physical-operators"
+name = "asap-logical-asap-optimization"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-types",
  "asap_sketchlib",
- "chrono",
- "futures",
- "regex",
- "rmp-serde",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tracing",
+]
+
+[[package]]
+name = "asap-physical-asap-optimization"
+version = "0.1.0"
+dependencies = [
+ "asap-logical-asap-optimization",
+ "asap-types",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "asap-plan-selection"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-logical-asap-optimization",
+ "asap-physical-asap-optimization",
+ "asap-types",
+ "asap_sketchlib",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "asap-planner"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-metricsql",
  "asap-frontend-promql",
  "asap-frontend-sql",
+ "asap-logical-asap-optimization",
+ "asap-plan-selection",
  "asap-types",
  "thiserror 2.0.18",
  "tokio",

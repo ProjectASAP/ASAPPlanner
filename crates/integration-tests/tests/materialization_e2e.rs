@@ -7,25 +7,26 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
-use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::{logical_candidates, selected_dag};
-use asap_physical_operators::physical_planner::{
+use asap_executor::physical_planner::{
     compile_candidate, frontier_from_timing, promql_rows, CompiledPhysicalDAG, InputContract,
 };
-use asap_physical_operators::runtime::Scope;
-use asap_physical_operators::values::{Batch, SchemaRef, Value};
+use asap_executor::runtime::Scope;
+use asap_executor::values::{Batch, SchemaRef, Value};
+use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::planning::{logical_candidates, selected_dag};
+use asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy;
+use asap_types::ir::operator::maintained_population::PopulationInput;
+use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, PhysicalASAPDAG, PhysicalASAPOperatorPayload,
 };
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
-    NonASAPOp, OperatorNode, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, OperatorNode,
+    TimingMemo,
 };
-use asap_types::post_asap::maintained_population::PopulationInput;
-use asap_types::post_asap::ExecutionTiming;
-use asap_types::pre_asap::Source;
-use asap_types::types::{AccuracyMetric, AccuracyTarget};
+use asap_types::physical::{Materialization, Medium};
 
 mod physical_common;
 
@@ -67,7 +68,7 @@ fn sketch_candidate(query: &str) -> Rc<OperatorNode> {
                 matches!(
                     node.asap(),
                     Some(ASAPOp::SummaryAgg {
-                        family: asap_types::post_asap::FieldDataType::Sketch(..),
+                        family: asap_types::ir::schema::FieldDataType::Sketch(..),
                         ..
                     })
                 )
@@ -217,11 +218,11 @@ fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
                 .fields
                 .iter()
                 .map(|field| match field.dtype {
-                    asap_types::post_asap::FieldDataType::Plain(
-                        asap_types::pre_asap::DataType::Float64,
+                    asap_types::ir::schema::FieldDataType::Plain(
+                        asap_types::ir::schema::DataType::Float64,
                     ) => Value::Float64(f64::from(value)),
-                    asap_types::post_asap::FieldDataType::Plain(
-                        asap_types::pre_asap::DataType::Timestamp,
+                    asap_types::ir::schema::FieldDataType::Plain(
+                        asap_types::ir::schema::DataType::Timestamp,
                     ) => Value::Timestamp(300_000),
                     _ => panic!("unexpected field {field:?}"),
                 })
@@ -272,7 +273,7 @@ fn mixed_placement_answers_like_query_time() {
                 matches!(
                     node.asap(),
                     Some(ASAPOp::SummaryAgg {
-                        family: asap_types::post_asap::FieldDataType::Sketch(..),
+                        family: asap_types::ir::schema::FieldDataType::Sketch(..),
                         ..
                     })
                 )

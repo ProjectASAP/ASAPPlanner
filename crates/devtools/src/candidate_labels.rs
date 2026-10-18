@@ -6,15 +6,16 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_aware_mapping::asap_aware_cse::PaneCandidate;
-use asap_aware_mapping::pass::Pass2Candidate;
-use asap_aware_mapping::per_computation_candidates::{
+use asap_logical_asap_optimization::asap_aware_cse::PaneCandidate;
+use asap_logical_asap_optimization::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates,
 };
-use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
+use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
+use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::post_asap::{FieldDataType, Materialization, SketchAlgorithm};
+use asap_types::physical::Materialization;
 
 use crate::planning_stages::PlanningStagesRun;
 
@@ -471,7 +472,7 @@ mod tests {
     #[test]
     fn identical_pane_chains_in_two_queries_are_listed_once() {
         use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
-        use asap_types::types::AccuracyTarget;
+        use asap_types::ir::properties::AccuracyTarget;
         use asap_types::workload::{
             DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
             QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
@@ -532,7 +533,7 @@ mod tests {
     #[test]
     fn fused_computations_and_avg_states_have_their_own_labels() {
         use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
-        use asap_types::types::AccuracyTarget;
+        use asap_types::ir::properties::AccuracyTarget;
         use asap_types::workload::{
             DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
             QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
