@@ -537,6 +537,37 @@ fn offset_counter_window_ends_at_the_offset() {
     }
 }
 
+/// A counter over `[5m] @ 300` reads the window ending at 300 s whatever the
+/// evaluation time, and `@ 300 offset 1m` the one ending at 240 s: the same
+/// values as the unanchored counter evaluated at 300 s and at 240 s. Today
+/// it reads the window ending at the evaluation time (#748).
+#[test]
+#[ignore = "the counter window drops an @ anchor and its offset: #748"]
+fn anchored_counter_window_ends_at_the_anchor() {
+    let samples = samples(7_000);
+    for function in ["rate", "increase"] {
+        let at_300 = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS, &samples);
+        let at_240 = whole_build_values_at(
+            &format!("{function}(m[5m])"),
+            EVALUATION_MS - PANE_MS,
+            &samples,
+        );
+        assert_ne!(at_300, at_240, "{function}: the two windows differ");
+        let anchored = whole_build_values_at(
+            &format!("{function}(m[5m] @ 300)"),
+            EVALUATION_MS + PANE_MS,
+            &samples,
+        );
+        assert_eq!(anchored, at_300, "{function} @ 300");
+        let anchored_offset = whole_build_values_at(
+            &format!("{function}(m[5m] @ 300 offset 1m)"),
+            EVALUATION_MS + PANE_MS,
+            &samples,
+        );
+        assert_eq!(anchored_offset, at_240, "{function} @ 300 offset 1m");
+    }
+}
+
 /// Exact counter Increase over 5 merged 1-minute panes equals one 5-minute
 /// build: the merge joins consecutive panes across their boundaries.
 #[test]
