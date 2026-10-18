@@ -55,7 +55,8 @@ fn query_scope() -> Scope {
 }
 fn fixture() -> (CompiledPhysicalDAG, Operator, SchemaRef) {
     let raw = raw_schema();
-    let build = Operator::summary_build(raw.clone(), family(200), 0, None, vec![]).unwrap();
+    let build =
+        Operator::per_group_summary_build(raw.clone(), family(200), 0, None, vec![]).unwrap();
     let state = build.schema();
     let maintenance = CompiledPhysicalDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(raw))]),

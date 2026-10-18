@@ -128,7 +128,7 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
         .map(|v| Batch::try_new(schema.clone(), vec![vec![Value::Float64(v as f64)]]).unwrap())
         .collect();
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let build = Operator::summary_build(schema.clone(), family, 0, None, vec![]).unwrap();
+    let build = Operator::per_group_summary_build(schema.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], Operator::source(schema, batches).unwrap())
@@ -285,7 +285,7 @@ fn scalar_negation_and_vector_conversion() {
 #[test]
 fn binding_rejects_unsupported_operations() {
     let schema = schema(&[("v", DataType::Float64, false)]);
-    assert!(Operator::summary_build(
+    assert!(Operator::per_group_summary_build(
         schema.clone(),
         FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
         0,
@@ -293,7 +293,7 @@ fn binding_rejects_unsupported_operations() {
         vec![]
     )
     .is_err());
-    let sum = Operator::summary_build(
+    let sum = Operator::per_group_summary_build(
         schema.clone(),
         FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
         0,
@@ -328,7 +328,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
         ),
         GroupingStrategy::PerSubpopulationInstance,
     );
-    let build = Operator::summary_build(input.clone(), family, 0, None, vec![]).unwrap();
+    let build = Operator::per_group_summary_build(input.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
     let build_range = |start: u32, end: u32| {
         let mut dag = PhysicalDAG::default();
@@ -581,7 +581,7 @@ fn bind_post_asap_before_execution() {
 #[test]
 fn empty_exact_count_is_an_integer_state_evaluation() {
     let input = schema(&[("value", DataType::Float64, false)]);
-    let build = Operator::summary_build(
+    let build = Operator::per_group_summary_build(
         input.clone(),
         FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
         0,
@@ -1110,7 +1110,14 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         ),
         Default::default(),
     );
-    let build = Operator::keyed_summary_build(rates.schema(), family, 3, vec![0], vec![1]).unwrap();
+    let build = Operator::per_group_keyed_summary_build(
+        rates.schema(),
+        family,
+        vec![0],
+        asap_executor::dag::operators::RowWeight::Column(3),
+        vec![1],
+    )
+    .unwrap();
     let output = schema(&[
         ("job", DataType::Utf8, false),
         ("service", DataType::Utf8, false),

@@ -566,8 +566,20 @@ fn raw_sample_heaps_resolve_items_from_labels() {
         (count_sketch.clone(), identity),
         (count_sketch, by_instance.clone()),
     ] {
+        let unit_count = input.weight == SummaryInputExpr::Constant(1.0);
         let (dag, source, root) = grouped_raw_summary(family, input);
         assert!(check("heap", &dag, source, root, &rows).is_ok());
+        // A unit count adds the constant 1 per row; no column of ones is
+        // projected for it.
+        let compiled =
+            serde_json::to_value(precompute::compile(&dag, &[source], &[root]).unwrap()).unwrap();
+        assert_eq!(
+            compiled
+                .to_string()
+                .contains(r#""row_weight":{"Constant":1}"#),
+            unit_count,
+            "{compiled}"
+        );
     }
     let signed_cms = grouped_raw_summary(cms.clone(), by_instance.clone());
     assert!(precompute::compile(&signed_cms.0, &[signed_cms.1], &[signed_cms.2]).is_err());
@@ -630,4 +642,48 @@ fn raw_sample_without_grouping_drops_labels_and_name() {
         check("without", &dag, source, root, &samples()),
         Ok("Sum".into())
     );
+}
+
+// End to end: `topk(2, count by (service) (m))` at ε = 0.02 has a Count-Min
+// heap candidate whose update is the unit count (`Constant(1.0)`). Placed at
+// ingestion, its raw-sample precompute adds the constant 1 per sample to each
+// service's count, with no column of ones projected, and each heap reads the
+// exact per-service sample counts of the fixture.
+#[test]
+fn count_ranked_heap_precompute_adds_a_constant_row_weight() {
+    let query = "topk(2, count by (service) (m))";
+    let rows = samples();
+    let mut checked = 0;
+    for candidate in candidates(query, AccuracyTarget::max_error(0.02)) {
+        let dag = compile_at_ingestion_physical_asap_dag(&candidate).unwrap();
+        for (source, root) in raw_summaries(&dag) {
+            let node = dag.nodes.iter().find(|n| n.id as u64 == root).unwrap();
+            let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _),
+                input,
+                ..
+            }) = &node.payload
+            else {
+                continue;
+            };
+            if kind.algorithm() != &SketchAlgorithm::CmsWithHeap {
+                continue;
+            }
+            assert_eq!(input.weight, SummaryInputExpr::Constant(1.0));
+            let compiled =
+                serde_json::to_value(precompute::compile(&dag, &[source], &[root]).unwrap())
+                    .unwrap()
+                    .to_string();
+            assert!(
+                compiled.contains(r#""row_weight":{"Constant":1}"#),
+                "{compiled}"
+            );
+            assert_eq!(
+                check(query, &dag, source, root, &rows),
+                Ok("CmsWithHeap".into())
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "{query} has no Count-Min heap candidate");
 }

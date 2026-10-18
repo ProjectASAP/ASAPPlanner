@@ -2,7 +2,7 @@
 //! Compilation needs no readers; deployment resolves inputs after selection.
 //! A node without a native lowering fails compilation; the deployment runtime
 //! must execute it.
-use crate::operators::{HydraRowWeight, SummaryEvaluation};
+use crate::operators::{RowWeight, SummaryEvaluation};
 use crate::summary_kernels::exact::ExactEvaluation;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
@@ -464,7 +464,7 @@ fn compile_internal(
                 let groups = (0..input.fields.len())
                     .filter(|&column| column != value && column != coordinate)
                     .collect();
-                let build = Operator::summary_build(
+                let build = Operator::per_group_summary_build(
                     input,
                     family.clone(),
                     value,
@@ -971,7 +971,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 crate::capability::validate_ingestion_time_summary(filter.as_ref())
                     .map_err(Error::Invalid)?;
             }
-            let build = summary_build(input, family, update, reduction, grouping)?;
+            let build = summary_agg_build(input, family, update, reduction, grouping)?;
             match filter {
                 Some(filter) => build.with_row_filter(expression(&filter.0, input)?),
                 None => Ok(build),
@@ -1007,9 +1007,10 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
         )),
     }
 }
-/// The build for a `SummaryAgg` before its row filter: shared (Hydra),
-/// keyed, or one value column per row.
-fn summary_build(
+/// The build for a `SummaryAgg` before its row filter: all groups sharing
+/// one state (Hydra), a keyed state per group, or a state per group over
+/// one value column.
+fn summary_agg_build(
     input: &SchemaRef,
     family: &FieldDataType,
     update: &planner_types::ir::schema::SummaryUpdate,
@@ -1020,27 +1021,18 @@ fn summary_build(
         crate::capability::validate_summary_kernel(family, update, grouping)
             .map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
-            return Err(invalid("shared summary requires explicit groups"));
+            return Err(invalid("an all-groups summary requires explicit groups"));
         };
         let Some(SummaryInputExpr::Column(item)) = &update.item else {
             unreachable!("validated HydraCms item column")
         };
         // Validated: the unit count, a positive integer constant or a
         // non-negative weight column.
-        let row_weight = match &update.weight {
-            SummaryInputExpr::Column(weight) => {
-                HydraRowWeight::Column(named_column(input, weight)?)
-            }
-            SummaryInputExpr::Constant(weight) => HydraRowWeight::Constant(
-                crate::capability::hydra_constant_weight(*weight).map_err(Error::Invalid)?,
-            ),
-            _ => unreachable!("validated HydraCms weight"),
-        };
-        return Operator::shared_summary_build(
+        return Operator::all_groups_summary_build(
             input.clone(),
             family.clone(),
             named_column(input, item)?,
-            row_weight,
+            row_weight(input, &update.weight)?,
             groups(input, keys)?,
         );
     }
@@ -1057,7 +1049,7 @@ fn summary_build(
                 "summary construction requires explicit grouping columns",
             ));
         };
-        return Operator::summary_build(
+        return Operator::per_group_summary_build(
             input.clone(),
             family.clone(),
             named_column(input, item)?,
@@ -1068,11 +1060,6 @@ fn summary_build(
     if let Some(item) = &update.item {
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));
-        };
-        let SummaryInputExpr::Column(weight) = &update.weight else {
-            return Err(invalid(
-                "keyed summary weight must be a finalized value column",
-            ));
         };
         if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
             && !matches!(
@@ -1100,11 +1087,11 @@ fn summary_build(
         }
         let mut items = Vec::new();
         columns(item, input, &mut items)?;
-        return Operator::keyed_summary_build(
+        return Operator::per_group_keyed_summary_build(
             input.clone(),
             family.clone(),
-            named_column(input, weight)?,
             items,
+            row_weight(input, &update.weight)?,
             groups(input, keys)?,
         );
     }
@@ -1119,13 +1106,26 @@ fn summary_build(
             "summary construction requires explicit grouping columns",
         ));
     };
-    Operator::summary_build(
+    Operator::per_group_summary_build(
         input.clone(),
         family.clone(),
         named_column(input, column)?,
         input.time_index,
         groups(input, keys)?,
     )
+}
+/// What each row adds in a keyed build: a projected weight column, or a
+/// positive integer constant (1 for a row count) read without a column.
+fn row_weight(input: &SchemaRef, weight: &SummaryInputExpr) -> Result<RowWeight, Error> {
+    match weight {
+        SummaryInputExpr::Column(weight) => Ok(RowWeight::Column(named_column(input, weight)?)),
+        SummaryInputExpr::Constant(weight) => Ok(RowWeight::Constant(
+            crate::capability::constant_row_weight(*weight).map_err(Error::Invalid)?,
+        )),
+        _ => Err(invalid(
+            "keyed summary weight must be a projected column or a constant",
+        )),
+    }
 }
 /// Families whose state counts values of one column without keyed items:
 /// their unit-frequency update builds over that column.

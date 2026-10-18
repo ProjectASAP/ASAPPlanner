@@ -146,34 +146,40 @@ impl TryFrom<UncheckedOperator> for Operator {
                 &planner_types::ir::Predicate(predicate.expression().clone()),
                 output.clone(),
             )?,
-            Kind::SummaryBuild {
+            Kind::PerGroupSummaryBuild {
                 family,
                 value,
                 time,
                 groups,
                 filter,
             } => with_filter(
-                Operator::summary_build(input(0)?, family, value, time, groups)?,
+                Operator::per_group_summary_build(input(0)?, family, value, time, groups)?,
                 filter,
             )?,
-            Kind::KeyedSummaryBuild {
+            Kind::PerGroupKeyedSummaryBuild {
                 family,
-                value,
                 items,
+                row_weight,
                 groups,
                 filter,
             } => with_filter(
-                Operator::keyed_summary_build(input(0)?, family, value, items, groups)?,
+                Operator::per_group_keyed_summary_build(
+                    input(0)?,
+                    family,
+                    items,
+                    row_weight,
+                    groups,
+                )?,
                 filter,
             )?,
-            Kind::SharedSummaryBuild {
+            Kind::AllGroupsSummaryBuild {
                 family,
                 item,
                 row_weight,
                 groups,
                 filter,
             } => with_filter(
-                Operator::shared_summary_build(input(0)?, family, item, row_weight, groups)?,
+                Operator::all_groups_summary_build(input(0)?, family, item, row_weight, groups)?,
                 filter,
             )?,
             Kind::KeyedEvaluation { state, k } => {

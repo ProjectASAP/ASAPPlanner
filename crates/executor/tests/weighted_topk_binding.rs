@@ -269,7 +269,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
         ));
         assert_eq!(ranked.input_contracts().count(), 1);
         let encoded = String::from_utf8(serde_json::to_vec(&ranked).unwrap()).unwrap();
-        assert!(encoded.contains("KeyedSummaryBuild"));
+        assert!(encoded.contains("PerGroupKeyedSummaryBuild"));
         assert!(encoded.contains("KeyedEvaluation"));
         assert!(
             !encoded.contains("\"Rate\""),
@@ -736,12 +736,12 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
         }
         let precompute =
             String::from_utf8(serde_json::to_vec(&physical.precompute.unwrap()).unwrap()).unwrap();
-        assert!(precompute.contains("KeyedSummaryBuild"));
+        assert!(precompute.contains("PerGroupKeyedSummaryBuild"));
         assert!(precompute.contains("Rate"));
         assert!(
             !String::from_utf8(serde_json::to_vec(&physical.query).unwrap())
                 .unwrap()
-                .contains("KeyedSummaryBuild")
+                .contains("PerGroupKeyedSummaryBuild")
         );
     }
 }

@@ -2,7 +2,7 @@
 //! planner and answers each group's item point counts from one shared grid.
 use asap_executor::{
     dag::{
-        operators::{HydraRowWeight, Operator},
+        operators::{Operator, RowWeight},
         values::{Batch, SchemaRef, Value},
         Limits, RunContext, Scope,
     },
@@ -375,18 +375,18 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
     ] {
         let build = compile_node(&summary_agg(update, None), &[input_schema()]).unwrap();
         let wire = serde_json::to_value(&build).unwrap();
-        let fields = &wire["kind"]["SharedSummaryBuild"];
+        let fields = &wire["kind"]["AllGroupsSummaryBuild"];
         assert_eq!(fields["row_weight"], expected, "{wire}");
         assert!(fields.get("weight").is_none() && fields.get("constant_weight").is_none());
         let restored: Operator = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(&restored).unwrap(), wire);
     }
     let build = |weight: u32| {
-        Operator::shared_summary_build(
+        Operator::all_groups_summary_build(
             input_schema(),
             family(),
             1,
-            HydraRowWeight::Constant(std::num::NonZeroU32::new(weight).unwrap()),
+            RowWeight::Constant(std::num::NonZeroU32::new(weight).unwrap()),
             vec![0],
         )
     };
@@ -396,7 +396,7 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
         .expect("constant above i32::MAX");
     assert!(error.to_string().contains("i32::MAX"), "{error}");
     let mut wire = serde_json::to_value(build(2).unwrap()).unwrap();
-    wire["kind"]["SharedSummaryBuild"]["row_weight"] =
+    wire["kind"]["AllGroupsSummaryBuild"]["row_weight"] =
         serde_json::json!({"Constant": i32::MAX as u32 + 1});
     let error = serde_json::from_value::<Operator>(wire)
         .err()
