@@ -1,5 +1,20 @@
 use super::*;
 use planner_types::ir::schema::{FamilyCapability, MergeInputRule};
+use std::num::NonZeroU32;
+
+/// What each row of a shared HydraCms build adds to its item's count.
+/// Produced by the physical planner from a validated `SummaryUpdate`
+/// weight and read once per row by the build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HydraRowWeight {
+    /// The value of this input column (Float64 or Int64, non-negative); a
+    /// row whose value is NULL adds nothing.
+    Column(usize),
+    /// This positive integer per row: 1 for a row count. At most `i32::MAX`,
+    /// since asap_sketchlib's Hydra adds `i32` weights;
+    /// [`Operator::shared_summary_build`] refuses a larger one.
+    Constant(NonZeroU32),
+}
 /// A summary evaluation: a sketch query, or an exact evaluation with typed parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SummaryEvaluation {
@@ -63,20 +78,15 @@ impl Operator {
         })
     }
     /// One HydraCms state shared by every group, emitted as one row per group
-    /// that reads it. Each row adds its `weight` column's value (or
-    /// `constant_weight` without one, which must be positive) to its `item`
-    /// value; a row whose weight is NULL adds nothing.
+    /// that reads it. Each row adds its `row_weight` to its `item` value; a
+    /// row whose weight column is NULL adds nothing.
     pub fn shared_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
         item: usize,
-        weight: Option<usize>,
-        constant_weight: i32,
+        row_weight: HydraRowWeight,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
-        if constant_weight <= 0 {
-            return Err(invalid("HydraCms constant weight must be positive"));
-        }
         crate::values::validate_family(&family)?;
         crate::factory::create_hydra_cms(&family).map_err(Error::Invalid)?;
         validate_groups(&input, &groups)?;
@@ -88,12 +98,22 @@ impl Operator {
                 "HydraCms items must be non-null Utf8, Int64 or Bool",
             ));
         }
-        if let Some(weight) = weight {
-            if !matches!(
-                plain(&input, weight)?.0,
-                DataType::Float64 | DataType::Int64
-            ) {
-                return Err(invalid("HydraCms weights must be Float64 or Int64"));
+        match row_weight {
+            HydraRowWeight::Column(weight) => {
+                if !matches!(
+                    plain(&input, weight)?.0,
+                    DataType::Float64 | DataType::Int64
+                ) {
+                    return Err(invalid("HydraCms weights must be Float64 or Int64"));
+                }
+            }
+            HydraRowWeight::Constant(weight) => {
+                if i32::try_from(weight.get()).is_err() {
+                    return Err(Error::Invalid(format!(
+                        "HydraCms constant weight must be at most i32::MAX (asap_sketchlib's \
+                         Hydra adds i32 weights), got {weight}"
+                    )));
+                }
             }
         }
         let mut fields = groups
@@ -110,8 +130,7 @@ impl Operator {
             kind: Kind::SharedSummaryBuild {
                 family,
                 item,
-                weight,
-                constant_weight,
+                row_weight,
                 groups,
                 filter: None,
             },
@@ -345,8 +364,7 @@ pub(super) fn execute<'a>(
         Kind::SharedSummaryBuild {
             family,
             item,
-            weight,
-            constant_weight,
+            row_weight,
             groups,
             filter,
         } => Ok(futures::stream::once(async move {
@@ -356,7 +374,7 @@ pub(super) fn execute<'a>(
                     input,
                     family,
                     *item,
-                    (*weight, *constant_weight),
+                    *row_weight,
                     groups,
                     filter.as_deref(),
                     &context,
@@ -800,7 +818,7 @@ async fn build_shared_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
     item: usize,
-    (weight, constant_weight): (Option<usize>, i32),
+    row_weight: HydraRowWeight,
     groups: &[usize],
     filter: Option<&Expression>,
     context: &RunContext,
@@ -834,10 +852,14 @@ async fn build_shared_summary(
             if !selected(filter, row)? {
                 continue;
             }
-            let weight = match weight.map(|i| &row[i]) {
-                None => constant_weight,
-                Some(Value::Null) => continue,
-                Some(value) => hydra_weight(value)?,
+            let weight = match row_weight {
+                HydraRowWeight::Constant(weight) => {
+                    i32::try_from(weight.get()).expect("validated HydraCms constant weight")
+                }
+                HydraRowWeight::Column(i) => match &row[i] {
+                    Value::Null => continue,
+                    value => hydra_weight(value)?,
+                },
             };
             let item = match &row[item] {
                 Value::Utf8(v) => v.to_string(),

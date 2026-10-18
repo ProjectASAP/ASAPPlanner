@@ -2,7 +2,7 @@
 //! planner and answers each group's item point counts from one shared grid.
 use asap_executor::{
     dag::{
-        operators::Operator,
+        operators::{HydraRowWeight, Operator},
         values::{Batch, SchemaRef, Value},
         Limits, RunContext, Scope,
     },
@@ -353,6 +353,55 @@ fn positive_constant_weight_adds_the_constant_per_row() {
             .unwrap_or_else(|| panic!("constant weight {weight} accepted"));
         assert!(error.to_string().contains("HydraCms"), "{weight}: {error}");
     }
+}
+
+// The row weight is one serialized field: `{"Constant":2}` for a constant
+// weight, `{"Column":2}` for a weight column. A deserialized constant above
+// `i32::MAX` (asap_sketchlib's Hydra adds `i32` weights) is refused, as is
+// one passed to the constructor.
+#[test]
+fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
+    let constant = SummaryUpdate {
+        weight: SummaryInputExpr::Constant(2.0),
+        weight_domain: WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::PositiveConstant,
+        },
+        ..unit_count()
+    };
+    let column = weighted(non_negative());
+    for (update, expected) in [
+        (constant, serde_json::json!({"Constant": 2})),
+        (column, serde_json::json!({"Column": 2})),
+    ] {
+        let build = compile_node(&summary_agg(update, None), &[input_schema()]).unwrap();
+        let wire = serde_json::to_value(&build).unwrap();
+        let fields = &wire["kind"]["SharedSummaryBuild"];
+        assert_eq!(fields["row_weight"], expected, "{wire}");
+        assert!(fields.get("weight").is_none() && fields.get("constant_weight").is_none());
+        let restored: Operator = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&restored).unwrap(), wire);
+    }
+    let build = |weight: u32| {
+        Operator::shared_summary_build(
+            input_schema(),
+            family(),
+            1,
+            HydraRowWeight::Constant(std::num::NonZeroU32::new(weight).unwrap()),
+            vec![0],
+        )
+    };
+    assert!(build(i32::MAX as u32).is_ok());
+    let error = build(i32::MAX as u32 + 1)
+        .err()
+        .expect("constant above i32::MAX");
+    assert!(error.to_string().contains("i32::MAX"), "{error}");
+    let mut wire = serde_json::to_value(build(2).unwrap()).unwrap();
+    wire["kind"]["SharedSummaryBuild"]["row_weight"] =
+        serde_json::json!({"Constant": i32::MAX as u32 + 1});
+    let error = serde_json::from_value::<Operator>(wire)
+        .err()
+        .expect("deserialized constant above i32::MAX");
+    assert!(error.to_string().contains("i32::MAX"), "{error}");
 }
 
 // A weight column of unknown sign is rejected at binding: a Count-Min point

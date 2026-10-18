@@ -2,7 +2,7 @@
 //! Compilation needs no readers; deployment resolves inputs after selection.
 //! A node without a native lowering fails compilation; the deployment runtime
 //! must execute it.
-use crate::operators::SummaryEvaluation;
+use crate::operators::{HydraRowWeight, SummaryEvaluation};
 use crate::summary_kernels::exact::ExactEvaluation;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
@@ -1027,20 +1027,20 @@ fn summary_build(
         };
         // Validated: the unit count, a positive integer constant or a
         // non-negative weight column.
-        let (weight, constant_weight) = match &update.weight {
-            SummaryInputExpr::Column(weight) => (Some(named_column(input, weight)?), 1),
-            SummaryInputExpr::Constant(weight) => (
-                None,
+        let row_weight = match &update.weight {
+            SummaryInputExpr::Column(weight) => {
+                HydraRowWeight::Column(named_column(input, weight)?)
+            }
+            SummaryInputExpr::Constant(weight) => HydraRowWeight::Constant(
                 crate::capability::hydra_constant_weight(*weight).map_err(Error::Invalid)?,
             ),
-            _ => (None, 1),
+            _ => unreachable!("validated HydraCms weight"),
         };
         return Operator::shared_summary_build(
             input.clone(),
             family.clone(),
             named_column(input, item)?,
-            weight,
-            constant_weight,
+            row_weight,
             groups(input, keys)?,
         );
     }
