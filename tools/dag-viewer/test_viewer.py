@@ -176,7 +176,8 @@ class CandidateRowTests(unittest.TestCase):
         model and "rejected" when it failed a check, whether or not the
         document carries its cost."""
         selection = self.doc["stage3_plan_selection"]
-        failed = next(r for r in selection["rejected"] if r["cause"] == "accuracy_target_missed")
+        failed_a_check = set(json.loads(self.js.eval("JSON.stringify(FAILED_CHECK_CAUSES)")))
+        failed = next(r for r in selection["rejected"] if r["cause"] in failed_a_check)
         lost = next(r for r in selection["rejected"] if r["cause"] == "costlier")
         selection["costs"][failed["id"]] = selection["costs"][lost["id"]]
         del selection["costs"][lost["id"]]

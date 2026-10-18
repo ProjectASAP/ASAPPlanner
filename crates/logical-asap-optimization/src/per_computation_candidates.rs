@@ -113,13 +113,15 @@ use asap_types::ir::{
 use asap_types::physical::Materialization;
 use thiserror::Error;
 
+use crate::accuracy::composition::propagate;
 use crate::accuracy::composition::samples_sign_statistic;
 use crate::accuracy::composition::{
     additive_as_absolute, StreamNorm, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
+use crate::accuracy::estimators::local_guarantee;
 use crate::accuracy::estimators::{hll, univmon};
-use crate::accuracy::{local_guarantee, per_input_target, propagate, PropagationStats};
+use crate::accuracy::{per_input_target, PropagationStats};
 use crate::deployment_capabilities::DeploymentCapabilities;
 use crate::function_rules::approximate_input_composition;
 use crate::realization::{accuracy_budget, default_size_params, sizing_target, summary_candidates};

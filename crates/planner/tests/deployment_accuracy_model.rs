@@ -6,46 +6,33 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use asap_frontend_promql::promql_metric_names;
-use asap_logical_asap_optimization::accuracy::PropagationStats;
+use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_plan_selection::{
-    AccuracyModel, DefaultAccuracyModel, PlanOutput, PlanningModels, RejectionCause,
+    AccuracyModel, BuiltinAccuracyModel, PlanOutput, PlanningModels, RejectionCause,
 };
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
-use asap_types::ir::properties::{
-    AccuracyError, AccuracyGuarantee, AccuracyMetric, AccuracyTarget, CompositionOperator,
-};
+use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, OperatorNode};
+use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
 };
 
-/// A deployment that trusts no approximate estimate: the built-in
-/// composition rules, but only an exact guarantee meets a target.
+/// A deployment that trusts no approximate estimate: only an exact
+/// guarantee meets a target. Composition is the trait's default (the
+/// built-in rules).
 struct ExactOnlyAccuracyModel;
 
 impl AccuracyModel for ExactOnlyAccuracyModel {
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: Option<&AccuracyGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        DefaultAccuracyModel.propagate(op, inputs, local, stats)
-    }
-
     fn satisfies(&self, guarantee: &AccuracyGuarantee, _target: &AccuracyTarget) -> bool {
         guarantee.is_exact()
     }
 }
 
-/// `quantile_over_time(0.99, lat[5m])` with a 1% rank error, repeated every
-/// ten minutes over a metric sampled every 15 s.
-fn p99_workload() -> PlanningWorkload {
-    let query = "quantile_over_time(0.99, lat[5m])";
+/// `query` with a 1% rank error, repeated every ten minutes over metrics
+/// sampled every 15 s.
+fn rank_target_workload(query: &str) -> PlanningWorkload {
     PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -82,6 +69,24 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
     })
 }
 
+/// Every Stage 2 candidate for `workload` under `models`, rendered in full:
+/// its id and its query roots with every node's guarantee and summary
+/// parameters. Two runs that differ only in Stage 3's models must agree.
+fn stage2_candidates(workload: &PlanningWorkload, models: PlanningModels<'_>) -> Vec<String> {
+    let roots = lower_promql_query_workload(workload).expect("lowers");
+    let run = asap_plan_selection::run_stage1_to_stage3(
+        roots.into_iter().enumerate().collect(),
+        &workload.query_workload.entries().collect::<Vec<_>>(),
+        workload.data_workload.as_ref().unwrap(),
+        models,
+    )
+    .expect("Stage 1 accepts the workload");
+    run.stage2_physical_asap_optimization
+        .iter()
+        .map(|candidate| format!("{}: {:?}", candidate.id, candidate.roots))
+        .collect()
+}
+
 /// Every candidate Stage 3 was given: the valid ones it priced and the
 /// ones it rejected.
 fn stage3_candidate_ids(output: &PlanOutput) -> BTreeSet<String> {
@@ -109,9 +114,9 @@ fn approximate_accepted(output: &PlanOutput) -> BTreeSet<String> {
 #[tokio::test]
 async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
     // The user's workload: one p99 query with a 1% rank-error target.
-    let workload = p99_workload();
+    let workload = rank_target_workload("quantile_over_time(0.99, lat[5m])");
 
-    // The built-in models: Stage 3 checks guarantees with DefaultAccuracyModel.
+    // The built-in models: Stage 3 checks guarantees with BuiltinAccuracyModel.
     let builtin = e2e_plan(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
@@ -135,10 +140,18 @@ async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
     .await
     .expect("plans with the exact-only model");
 
-    // Stages 1 and 2 do not read the model: Stage 3 got the same candidates.
+    // Stages 1 and 2 do not read the model: Stage 3 got the same
+    // candidates, with the same guarantees and summary parameters.
     assert_eq!(
         stage3_candidate_ids(&builtin),
         stage3_candidate_ids(&exact_only)
+    );
+    assert_eq!(
+        stage2_candidates(&workload, PlanningModels::builtin()),
+        stage2_candidates(
+            &workload,
+            PlanningModels::builtin().with_accuracy(&exact_only_model)
+        )
     );
     // Stage 3 now rejects each of those candidates for missing its target,
     // accepts no approximate output and selects an exact plan.
@@ -151,4 +164,94 @@ async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
     }
     assert!(approximate_accepted(&exact_only).is_empty());
     assert!(!reads_sketch(&exact_only.plans[0].root));
+}
+
+/// A deployment whose own measurements cover every output that has no
+/// analytical guarantee: it accepts each such output for any target.
+struct AcceptsOutputsWithoutGuarantee;
+
+impl AccuracyModel for AcceptsOutputsWithoutGuarantee {
+    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+        BuiltinAccuracyModel.satisfies(guarantee, target)
+    }
+
+    fn accepts_output_without_guarantee(
+        &self,
+        _output: &QueryRoot,
+        _target: &AccuracyTarget,
+    ) -> bool {
+        true
+    }
+}
+
+/// The candidates for which Stage 3 accepted some query's output that has
+/// no guarantee.
+fn accepted_without_guarantee(output: &PlanOutput) -> BTreeSet<String> {
+    let selection = output.selection.as_ref().expect("plan selection ran");
+    selection
+        .accepted
+        .iter()
+        .filter(|(_, queries)| queries.iter().any(|q| q.accepted_without_guarantee))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_deployment_accuracy_model_decides_outputs_without_a_guarantee() {
+    // The user's workload: a difference of two quantile estimates, 1% rank
+    // error. Stage 1 has no analytical rule for a difference of rank
+    // estimates, so it keeps the summary candidates with no guarantee.
+    let workload = rank_target_workload("quantile(0.99, rate(x[5m])) - quantile(0.5, rate(x[5m]))");
+    let promql = || FrontendInput::Promql { histograms: None };
+
+    // The built-in model accepts no output without a guarantee: Stage 3
+    // rejects every summary candidate as having none and selects exact.
+    let builtin = e2e_plan(UserInput::new(
+        &workload,
+        promql(),
+        PlanningModels::builtin(),
+    ))
+    .await
+    .expect("plans with the built-in models");
+    let builtin_selection = builtin.selection.as_ref().unwrap();
+    let unguaranteed: BTreeSet<String> = builtin_selection
+        .rejected
+        .iter()
+        .filter(|r| r.cause == RejectionCause::NoAccuracyGuarantee)
+        .map(|r| r.id.clone())
+        .collect();
+    assert!(!unguaranteed.is_empty());
+    assert!(!reads_sketch(&builtin.plans[0].root));
+
+    // The deployment's model accepts those outputs through the hook.
+    let accepting_model = AcceptsOutputsWithoutGuarantee;
+    let accepting = e2e_plan(UserInput::new(
+        &workload,
+        promql(),
+        PlanningModels::builtin().with_accuracy(&accepting_model),
+    ))
+    .await
+    .expect("plans with the accepting model");
+    let accepting_selection = accepting.selection.as_ref().unwrap();
+    // Stages 1 and 2 produced the same candidates under both models.
+    assert_eq!(
+        stage2_candidates(&workload, PlanningModels::builtin()),
+        stage2_candidates(
+            &workload,
+            PlanningModels::builtin().with_accuracy(&accepting_model)
+        )
+    );
+    // Every candidate the built-in model rejected for having no guarantee
+    // is now valid and priced, accepted without a guarantee.
+    assert_eq!(accepted_without_guarantee(&accepting), unguaranteed);
+    for id in &unguaranteed {
+        assert!(accepting_selection.costs.contains_key(id), "{id}");
+    }
+    assert!(accepting_selection
+        .rejected
+        .iter()
+        .all(|r| r.cause != RejectionCause::NoAccuracyGuarantee));
+    // Stage 3 selects one of them, a plan that reads a sketch.
+    assert!(unguaranteed.contains(&accepting_selection.selected));
+    assert!(reads_sketch(&accepting.plans[0].root));
 }

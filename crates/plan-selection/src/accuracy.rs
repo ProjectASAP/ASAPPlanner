@@ -4,17 +4,21 @@
 //! Stage 1 composes each candidate's guarantee with the planner's built-in
 //! analytical rules (`asap_logical_asap_optimization::accuracy`) and keeps a
 //! candidate it has no rule for with `guarantee = None`. This stage decides,
-//! with the model here, whether a guarantee meets its query's target and
-//! how guarantees compose once the data workload and the deployment's
-//! evidence bind the statistics Stage 1 left unknown.
+//! with the model here, whether a guarantee meets its query's target, how
+//! guarantees compose once the data workload and the deployment's evidence
+//! ([`AccuracyEvidenceProvider`]) bind the statistics Stage 1 left unknown,
+//! and whether an output with no guarantee at all is accepted.
 
-use asap_logical_asap_optimization::accuracy::{self as analytical, PropagationStats};
+use asap_logical_asap_optimization::accuracy::{
+    self as analytical, OperandDomain, PropagationStats,
+};
 use asap_types::ir::properties::{
     AccuracyError, AccuracyGuarantee, AccuracyTarget, CompositionOperator,
 };
+use asap_types::ir::{OperatorNode, QueryRoot};
 
 /// The deployment-extensible accuracy algebra plan selection uses. This
-/// crate ships [`DefaultAccuracyModel`]; a deployment with a proof for a
+/// crate ships [`BuiltinAccuracyModel`]; a deployment with a proof for a
 /// composition the default rejects (a registered cross-metric conversion,
 /// say) implements this trait and passes it in
 /// [`PlanningModels::accuracy`](crate::PlanningModels::accuracy).
@@ -22,14 +26,18 @@ pub trait AccuracyModel {
     /// Compose `inputs`' guarantees (in the parent's child order) with the
     /// parent's own `local` guarantee under `op`, given the statistics
     /// plan selection bound (`stats`). `Err` is the fail-closed answer: no
-    /// registered rule, or a missing input guarantee.
+    /// registered rule, or a missing input guarantee. The default is the
+    /// built-in rules (`asap_logical_asap_optimization::accuracy::composition::propagate`);
+    /// a deployment overrides it only to add a rule.
     fn propagate(
         &self,
         op: &CompositionOperator,
         inputs: &[AccuracyGuarantee],
         local: Option<&AccuracyGuarantee>,
         stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError>;
+    ) -> Result<AccuracyGuarantee, AccuracyError> {
+        analytical::composition::propagate(op, inputs, local, stats)
+    }
 
     /// Whether `guarantee` meets `target`: a bound within its ε, and within
     /// its δ when it states one, over the values the target's scope covers
@@ -40,26 +48,65 @@ pub trait AccuracyModel {
     /// compared in its own metric. Unknown required dimensions fail;
     /// selection separately excludes missing accuracy evidence.
     fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool;
+
+    /// Whether the deployment accepts `output`, one query's output in a
+    /// candidate, for `target` although the output has no guarantee: Stage 1
+    /// had no analytical rule for it and the deployment's evidence supplies
+    /// none ([`AccuracyEvidenceProvider::output_guarantee`]). Stage 3 asks only
+    /// then; a guarantee from either source is checked with
+    /// [`Self::satisfies`] instead. The default accepts none, and Stage 3
+    /// rejects such a candidate (`RejectionCause::NoAccuracyGuarantee`).
+    fn accepts_output_without_guarantee(
+        &self,
+        _output: &QueryRoot,
+        _target: &AccuracyTarget,
+    ) -> bool {
+        false
+    }
 }
 
 /// The planner's built-in analytical rules as an [`AccuracyModel`]: the
-/// same composition rules and conservative target check Stage 1 uses. The
-/// default in [`PlanningModels::builtin`](crate::PlanningModels::builtin).
+/// trait's default composition, the conservative target check Stage 1's
+/// `accuracy::satisfies` makes, and no output accepted without a guarantee.
+/// The default in [`PlanningModels::builtin`](crate::PlanningModels::builtin).
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DefaultAccuracyModel;
+pub struct BuiltinAccuracyModel;
 
-impl AccuracyModel for DefaultAccuracyModel {
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: Option<&AccuracyGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        analytical::propagate(op, inputs, local, stats)
-    }
-
+impl AccuracyModel for BuiltinAccuracyModel {
     fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
         analytical::satisfies(guarantee, target)
     }
 }
+
+/// The deployment's planning-time accuracy evidence, read only by plan
+/// selection: enforced operand domains the propagation rules need, and
+/// empirical guarantees for whole query outputs. Passed in
+/// [`PlanningModels::evidence`](crate::PlanningModels::evidence). The trait
+/// moved here from `asap_logical_asap_optimization::accuracy`.
+pub trait AccuracyEvidenceProvider {
+    /// Enforced domain of `operand`'s true values ([`OperandDomain`]), scoped
+    /// to this complete expression, including its source, filters, grouping
+    /// and window: a quantile ratio's operands, or the operands of a
+    /// product or quotient of estimates. `None` means unknown, including
+    /// emptiness.
+    fn operand_domain(&self, _operand: &OperatorNode) -> Option<OperandDomain> {
+        None
+    }
+
+    /// The deployment's empirical accuracy for one candidate's whole query
+    /// output, as a guarantee. Plan selection (#509 Stage 3) accepts a
+    /// candidate whose output has no theoretical guarantee that meets the
+    /// target (e.g. a difference of two quantile estimates) when this shows
+    /// the output meets it. Stage 1 never reads it: root guarantees there
+    /// come from the built-in analytical rules. `None` means no evidence.
+    fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
+        None
+    }
+}
+
+/// No deployment evidence: every operand domain and output guarantee is
+/// unknown. The default in [`PlanningModels::builtin`](crate::PlanningModels::builtin).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoAccuracyEvidence;
+
+impl AccuracyEvidenceProvider for NoAccuracyEvidence {}
