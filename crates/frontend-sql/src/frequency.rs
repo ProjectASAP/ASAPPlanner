@@ -10,15 +10,16 @@
 //! bits, the SQL idiom's `LN` gives nats. Integer products and nullable
 //! keys are refused, because SQL integer overflow and NULL groups are
 //! observable; such queries stay relational.
-use asap_types::ir::non_asap::any_measure_filtered;
+use asap_types::ir::operator::non_asap::any_measure_filtered;
+use asap_types::ir::operator::{
+    AggIntent, GroupKeys, JoinKind, Reduction, WindowFrameBound, WindowFrameOffset, WindowFuncKind,
+};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
+use asap_types::ir::schema::DataType;
 use asap_types::ir::{
     ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
 };
-use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, CompareOpKind, DataType, GroupKeys, JoinKind, Reduction,
-    ScalarValue, WindowFrameBound, WindowFrameOffset, WindowFuncKind,
-};
-use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
 /// The recognized form of a query whose root is the L2 or natural-log entropy

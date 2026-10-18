@@ -35,7 +35,7 @@ pub use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlError, Sq
 /// default.
 pub fn lower_promql_with_sample_interval(
     query: &str,
-    accuracy: asap_types::types::AccuracyTarget,
+    accuracy: asap_types::ir::properties::AccuracyTarget,
     interval_ms: u64,
 ) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, PromqlError> {
     use asap_types::workload::{

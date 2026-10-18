@@ -106,14 +106,6 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use asap_aware_mapping::per_computation_candidates::{
-    ComputationCandidate, PerComputationCandidates, PruneReason,
-};
-use asap_aware_mapping::stage3_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCost, PlanSelectionSettings,
-    Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
-};
-use asap_aware_mapping::DeploymentCapabilities;
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
@@ -124,10 +116,18 @@ use asap_devtools::planning_stages::{
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::promql_metric_names;
+use asap_logical_asap_optimization::per_computation_candidates::{
+    ComputationCandidate, PerComputationCandidates, PruneReason,
+};
+use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_plan_selection::{
+    ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCost, PlanSelectionSettings,
+    Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
+};
 use asap_types::ir::flat::{flatten, FlatDag};
+use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
@@ -817,7 +817,7 @@ mod tests {
     fn failed_selection_lists_rejections_without_a_selection() {
         let rejected = vec![Rejection {
             id: "P1".into(),
-            cause: asap_aware_mapping::stage3_plan_selection::RejectionCause::AccuracyTargetMissed,
+            cause: asap_plan_selection::RejectionCause::AccuracyTargetMissed,
             reason: "q1: misses target".into(),
         }];
         let document =

@@ -13,11 +13,12 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use super::node::{Operator, OperatorNode, OperatorResultKind};
-use super::query::QueryRoot;
-use crate::post_asap::execution_data_state::{ExecutionTiming, Materialization};
-use crate::post_asap::guarantee::AccuracyGuarantee;
-use crate::pre_asap::schema::Schema;
+use crate::ir::operator::node::{Operator, OperatorNode, OperatorResultKind};
+use crate::ir::operator::query::QueryRoot;
+use crate::ir::properties::execution_data_state::ExecutionTiming;
+use crate::ir::properties::guarantee::AccuracyGuarantee;
+use crate::ir::schema::Schema;
+use crate::physical::materialization::Materialization;
 
 /// Index of a node in [`FlatDag::nodes`].
 pub type NodeId = usize;
@@ -88,9 +89,9 @@ fn visit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::scalar::expr_ir::ScalarValue;
+    use crate::ir::schema::{DataType, Field};
     use crate::ir::{NonASAPOp, Predicate, ProjectItem, ScalarExpr};
-    use crate::pre_asap::expr_ir::ScalarValue;
-    use crate::pre_asap::schema::{DataType, Field};
 
     fn values() -> Rc<OperatorNode> {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Values {

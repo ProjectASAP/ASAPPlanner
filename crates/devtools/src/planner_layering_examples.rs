@@ -2,7 +2,7 @@
 //! (`docs/design_docs/proposals/planner-layering.md`), shared by
 //! `stage_pipeline` and the planner-layering acceptance tests.
 
-use asap_types::types::{AccuracyMetric, AccuracyTarget};
+use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload,
     Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand,
@@ -92,7 +92,7 @@ pub fn example1() -> PlanningWorkload {
 /// design's Int64 `c * c` can overflow, so the SQL frontend recognizes
 /// only the Float64 product.
 pub fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
-    use asap_types::pre_asap::schema::{DataType, Field, Schema};
+    use asap_types::ir::schema::{DataType, Field, Schema};
     // (query, ε, δ) per panel.
     let panels = [
         (

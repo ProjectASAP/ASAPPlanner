@@ -3,14 +3,14 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::pass::{
+use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_plan_selection::pass::{
     run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
     PlanningModels, Stage1ToStage3Pass,
 };
-use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{AccuracyMetric, AccuracyTarget};
+use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,

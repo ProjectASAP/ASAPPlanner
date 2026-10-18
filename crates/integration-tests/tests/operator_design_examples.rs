@@ -1,11 +1,13 @@
 //! #511 examples: source text → unified dag → summary rewrite → flat export.
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
-use asap_types::post_asap::{
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{
     ExactKind, ExactParams, FieldDataType, GroupingStrategy, SummaryUpdate,
 };
-use asap_types::pre_asap::{AggIntent, ColumnRef, DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use std::rc::Rc;
 mod physical_common;
 
@@ -139,7 +141,7 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
 /// Execute the SQL SUM example for nonempty, empty and all-NULL populations.
 #[tokio::test]
 async fn sql_sum_example_executes_with_sql_null_semantics() {
-    use asap_physical_operators::{
+    use asap_executor::{
         physical_planner::{compile, InputContract, Source},
         runtime::{Limits, RunContext, Scope},
         sources::{DataSources, MemorySource},
@@ -261,12 +263,12 @@ async fn sql_window_and_filtered_aggregate_types() {
 /// state. No replacement dag is constructed by the test.
 #[tokio::test]
 async fn batch_planning_replaces_summary_operators() {
-    use asap_aware_mapping::pass::PlanningModels;
-    use asap_physical_operators::{
+    use asap_executor::{
         physical_planner::{compile, InputContract},
         runtime::Scope,
         values::{Batch, Value},
     };
+    use asap_plan_selection::pass::PlanningModels;
     use asap_planner::{e2e_plan, FrontendInput, UserInput};
     use asap_types::workload::*;
     use std::{collections::BTreeMap, sync::Arc};
@@ -322,7 +324,7 @@ async fn batch_planning_replaces_summary_operators() {
     };
     assert!(matches!(
         state.materialization,
-        asap_types::ir::Materialization::MatAtQuery(_)
+        asap_types::physical::Materialization::MatAtQuery(_)
     ));
     for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
         let root = &plan.root;
@@ -395,6 +397,6 @@ async fn batch_planning_replaces_summary_operators() {
     };
     assert!(matches!(
         state.materialization,
-        asap_types::ir::Materialization::MatAtQuery(_)
+        asap_types::physical::Materialization::MatAtQuery(_)
     ));
 }

@@ -8,24 +8,25 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_aware_mapping::pass::Pass2Candidate;
-use asap_aware_mapping::stage3_plan_selection::select_plan;
-use asap_aware_mapping::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
 use asap_devtools::candidate_labels::pass2_label;
 use asap_devtools::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
+use asap_executor::physical_planner::{compile, promql_rows, InputContract};
+use asap_executor::runtime::Scope;
+use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_physical_operators::physical_planner::{compile, promql_rows, InputContract};
-use asap_physical_operators::runtime::Scope;
-use asap_physical_operators::values::{Batch, Value};
+use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
+use asap_plan_selection::select_plan;
+use asap_plan_selection::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag_with_node_ids, PhysicalASAPOperatorPayload,
 };
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::Schema;
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
-    NonASAPOp, Operator, OperatorNode, QueryRoot, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
+    OperatorNode, QueryRoot, TimingMemo,
 };
-use asap_types::post_asap::Schema;
-use asap_types::types::AccuracyTarget;
+use asap_types::physical::{Materialization, Medium};
 use asap_types::workload::{
     DataArrival, DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
     RepetitionInterval,

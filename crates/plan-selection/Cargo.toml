@@ -1,0 +1,20 @@
+[package]
+name = "asap-plan-selection"
+version = "0.1.0"
+edition = "2021"
+
+# #509 Stage 3, plan selection: the only stage that prices plans, with the
+# planning models (cost and accuracy) and the Stage 1 to Stage 3 driver.
+# Depends on Stages 1 and 2, never on the executor.
+[dependencies]
+asap_sketchlib = { workspace = true }
+asap-types = { path = "../types" }
+asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
+asap-frontend-promql = { path = "../frontend-promql" }

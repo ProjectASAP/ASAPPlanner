@@ -2,12 +2,10 @@
 //! natively and exactly: entropy in nats (SQL's `LN`), L2 of the
 //! per-source counts, and NULL on empty input, decided by an exact count.
 mod physical_common;
+use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_physical_operators::values::Value;
-use asap_types::{
-    pre_asap::{DataType, Field, Schema},
-    types::AccuracyTarget,
-};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
 
 const ENTROPY: &str = "SELECT -SUM(p * LN(p)) FROM (\
     SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip)";

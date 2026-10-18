@@ -13,9 +13,9 @@
 
 pub mod fixtures {
 
+    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::OperatorNode;
-    use asap_types::pre_asap::schema::{DataType, Field, Schema};
-    use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
         QueryLanguage, QueryRequirements, QueryWorkload,
@@ -97,9 +97,9 @@ pub mod fixtures {
 pub mod post_asap {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
     use asap_types::ir::{
-        apply_materialization_timings, Materialization, MaterializationAssignment, Medium,
-        OperatorNode, TimingMemo,
+        apply_materialization_timings, MaterializationAssignment, OperatorNode, TimingMemo,
     };
+    use asap_types::physical::{Materialization, Medium};
     use std::rc::Rc;
 
     /// Time `root` under the default assignment (every sub-DAG
@@ -141,8 +141,8 @@ pub mod post_asap {
 /// Plans and candidates from the planner pipeline (`run_stage1_to_stage3`) for one
 /// query, with the built-in models.
 pub mod planning {
+    use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};
-    use asap_types::types::AccuracyTarget;
     use asap_types::workload::{DataWorkload, QueryRequirements, QueryWorkloadEntry};
     use std::rc::Rc;
 
@@ -150,8 +150,8 @@ pub mod planning {
     pub fn run_stage1_to_stage3(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
-    ) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
-        asap_aware_mapping::run_stage1_to_stage3(
+    ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+        asap_plan_selection::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
             &[QueryWorkloadEntry {
                 requirements: QueryRequirements {
@@ -161,7 +161,7 @@ pub mod planning {
                 ..Default::default()
             }],
             &DataWorkload::default(),
-            asap_aware_mapping::PlanningModels::builtin(),
+            asap_plan_selection::PlanningModels::builtin(),
         )
         .expect("Pass 1 accepts the query")
     }

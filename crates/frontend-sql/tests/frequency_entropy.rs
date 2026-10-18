@@ -2,11 +2,10 @@
 //! `FrequencyEntropy` intent (#509 Example 2's Q2).
 use asap_frontend_common::resolve_root;
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlLowerer};
-use asap_types::{
-    ir::{NonASAPOp, OperatorNode},
-    pre_asap::{AggIntent, DataType, Field, Schema},
-    types::AccuracyTarget,
-};
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::{NonASAPOp, OperatorNode};
 
 fn catalog(nullable: bool) -> SqlCatalog {
     SqlCatalog::new().with_table(

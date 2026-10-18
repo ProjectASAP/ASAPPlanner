@@ -8,24 +8,24 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::accuracy::{AccuracyEvidenceProvider, OperandDomain};
-use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
-use asap_aware_mapping::stage3_plan_selection::Selection;
-use asap_aware_mapping::PlanningModels;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::logical_candidates;
 use asap_integration_tests::post_asap::{at_ingestion, at_ingestion_post_asap_dag, post_asap_dag};
-use asap_types::ir::operator_properties::Reduction;
+use asap_logical_asap_optimization::accuracy::{AccuracyEvidenceProvider, OperandDomain};
+use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_plan_selection::PlanningModels;
+use asap_plan_selection::Selection;
+use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
-use asap_types::post_asap::{
+use asap_types::ir::properties::AccuracyMetric;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::expr_ir::ColumnRef;
+use asap_types::ir::schema::DataType;
+use asap_types::ir::schema::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Schema,
     SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
-use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::schema::DataType;
-use asap_types::types::AccuracyMetric;
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::workload::{DataWorkload, QueryRequirements, QueryWorkloadEntry};
 
 /// The first logical candidate (Stage 1, in enumeration order) of `root` as
@@ -334,7 +334,7 @@ fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
         panic!("expected temporal input")
     };
     let Some(NonASAPOp::Scan {
-        source: asap_types::pre_asap::Source::TimeSeries { metric },
+        source: asap_types::ir::operator::Source::TimeSeries { metric },
         predicates,
         ..
     }) = child.non_asap()
@@ -626,7 +626,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
     };
     assert_eq!(
         child.timing,
-        Some(asap_types::post_asap::ExecutionTiming::IngestionTime)
+        Some(asap_types::ir::properties::ExecutionTiming::IngestionTime)
     );
     assert!(matches!(
         source.asap(),
@@ -651,7 +651,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
 
 #[test]
 fn physical_node_owns_phase_independently_of_binary_payload() {
-    use asap_types::post_asap::ExecutionTiming;
+    use asap_types::ir::properties::ExecutionTiming;
     // The one-selector case (both operands over the same series, so the
     // BinaryOp may run at ingestion) is `arithmetic_over_one_selector_executes`
     // in materialization_e2e.rs, ignored until #580.
@@ -705,7 +705,7 @@ fn ddsketch_ratio_selection(
     evidence: &dyn AccuracyEvidenceProvider,
 ) -> (Vec<PhysicalCandidate>, Selection) {
     let root = lower_promql(query, planned).unwrap();
-    let run = asap_aware_mapping::run_stage1_to_stage3(
+    let run = asap_plan_selection::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],
         &[QueryWorkloadEntry {
             requirements: QueryRequirements {
@@ -751,7 +751,7 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
             };
             matches!(
                 measures.as_slice(),
-                [asap_types::pre_asap::agg_intent::AggIntent::Quantile { q, .. }] if *q == 0.9
+                [asap_types::ir::operator::agg_intent::AggIntent::Quantile { q, .. }] if *q == 0.9
             )
             .then(|| OperandDomain {
                 lower: -1.0,

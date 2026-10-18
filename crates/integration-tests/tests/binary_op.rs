@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind};
-use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, GroupSide, Reduction, Source,
-    VectorGrouping, VectorMatch, VectorMatchKind,
+use asap_types::ir::operator::{
+    AggIntent, BinaryOpKind, GroupSide, Reduction, Source, VectorGrouping, VectorMatch,
+    VectorMatchKind,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind};
+use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind};
 
 fn lower(q: &str) -> Rc<OperatorNode> {
     lower_promql(q, AccuracyTarget::exact())

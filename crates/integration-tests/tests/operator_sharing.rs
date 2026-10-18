@@ -11,9 +11,9 @@ use std::rc::Rc;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::planning::selected_dag;
 use asap_integration_tests::post_asap::post_asap_dag;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
 
 fn col(name: &str, dtype: DataType) -> Field {
     Field::plain(name, dtype, false)

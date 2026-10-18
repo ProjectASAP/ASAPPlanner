@@ -4,9 +4,9 @@ use std::time::Duration;
 use asap_frontend_metricsql::{
     canonical_metricsql, lower_metricsql, parse_metricsql, MetricsqlError,
 };
+use asap_types::ir::operator::{AggIntent, Reduction, Source};
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
-use asap_types::pre_asap::{AggIntent, Reduction, Source};
-use asap_types::types::AccuracyTarget;
 
 /// Every metric's sample interval, the lookback of a bare selector.
 const INTERVAL: Duration = Duration::from_secs(15);

@@ -10,7 +10,7 @@
 //! are label-preserving and keep the schema open.
 
 use asap_integration_tests::fixtures::lower_promql;
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::properties::AccuracyTarget;
 
 fn lower(q: &str) -> std::rc::Rc<asap_types::ir::OperatorNode> {
     lower_promql(q, AccuracyTarget::exact())

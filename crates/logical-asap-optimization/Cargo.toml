@@ -1,0 +1,24 @@
+[package]
+name = "asap-logical-asap-optimization"
+version = "0.1.0"
+edition = "2021"
+
+# #509 Stage 1, logical ASAP-aware optimization: Pass 1 per-computation
+# candidates and Pass 2 ASAP-aware CSE over asap-types' operator DAG, with
+# the analytical accuracy model. Depends on no front end and on no later
+# stage.
+[dependencies]
+asap_sketchlib = { workspace = true }
+asap-types = { path = "../types" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Only for `test-support`: lowering PromQL test queries.
+asap-frontend-promql = { path = "../frontend-promql", optional = true }
+
+[features]
+# The test helpers (`test_support`) the later stage crates' tests share.
+test-support = ["dep:asap-frontend-promql"]
+
+[dev-dependencies]
+asap-frontend-promql = { path = "../frontend-promql" }

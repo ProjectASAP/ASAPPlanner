@@ -2,16 +2,16 @@
 //! the guarantees composed over estimates, and what a Top-K heap sketch
 //! ranks.
 
-use asap_aware_mapping::per_computation_candidates::{
+use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_logical_asap_optimization::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     ComputationTarget, HavingPlacement,
 };
-use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SummaryInputExpr};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SummaryInputExpr};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::ColumnRef;
-use asap_types::types::AccuracyTarget;
 
 async fn targets(sql: &str) -> Vec<ComputationTarget> {
     let catalog = SqlCatalog::new().with_table(
@@ -66,14 +66,14 @@ async fn mixed_key_and_value_having_stays_above() {
 
 /// Whether `node` reads a quantile sketch (KLL or DDSketch) anywhere below it.
 fn reads_quantile_sketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
-    use asap_types::post_asap::SketchAlgorithm;
+    use asap_types::ir::schema::SketchAlgorithm;
     asap_types::ir::OperatorNode::reachable(node)
         .iter()
         .any(|node| {
             matches!(
                 node.asap(),
                 Some(asap_types::ir::ASAPOp::SummaryAgg {
-                    family: asap_types::post_asap::FieldDataType::Sketch(kind, _),
+                    family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
                     ..
                 }) if matches!(kind.algorithm(), SketchAlgorithm::Kll | SketchAlgorithm::DDSketch)
             )
@@ -136,14 +136,14 @@ async fn a_filter_or_group_key_over_an_estimate_has_no_guarantee() {
 
 /// Whether `node` reads a DDSketch anywhere below it.
 fn reads_ddsketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
-    use asap_types::post_asap::SketchAlgorithm;
+    use asap_types::ir::schema::SketchAlgorithm;
     asap_types::ir::OperatorNode::reachable(node)
         .iter()
         .any(|node| {
             matches!(
                 node.asap(),
                 Some(asap_types::ir::ASAPOp::SummaryAgg {
-                    family: asap_types::post_asap::FieldDataType::Sketch(kind, _),
+                    family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
                     ..
                 }) if matches!(kind.algorithm(), SketchAlgorithm::DDSketch)
             )

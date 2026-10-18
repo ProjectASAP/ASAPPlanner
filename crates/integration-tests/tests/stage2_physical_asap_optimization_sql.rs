@@ -3,15 +3,15 @@
 //! measure, descending, whatever the group keys are called or typed, and no
 //! valid candidate is pruned.
 
-use asap_aware_mapping::per_computation_candidates::{
+use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_logical_asap_optimization::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
 };
-use asap_aware_mapping::stage2_physical_asap_optimization::optimize_physical_asap;
-use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_physical_asap_optimization::optimize_physical_asap;
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::AggIntent;
-use asap_types::types::AccuracyTarget;
 
 fn approximate() -> AccuracyTarget {
     AccuracyTarget::max_error(0.01).failure_probability(0.001)
@@ -117,7 +117,7 @@ async fn check_every_choice(
             &roots,
             &[],
             &asap_types::workload::DataWorkload::default(),
-            &asap_aware_mapping::DeploymentCapabilities::default(),
+            &asap_logical_asap_optimization::DeploymentCapabilities::default(),
         )
         .unwrap_or_else(|e| panic!("{sql}, choice {choice:?} pruned: {e}"))
         .remove(0);

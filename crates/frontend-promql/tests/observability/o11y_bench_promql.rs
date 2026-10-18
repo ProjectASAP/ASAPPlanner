@@ -21,7 +21,7 @@
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::properties::AccuracyTarget;
 use support::lower_promql;
 
 const CORPUS: &str = include_str!("data/o11y_bench_promql.txt");

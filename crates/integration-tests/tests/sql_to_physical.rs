@@ -1,20 +1,17 @@
 //! SQL frontend, the planner pipeline's selection, physical compilation and
 //! fresh-run execution.
 mod physical_common;
-use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_integration_tests::planning::selected_dag;
-use asap_physical_operators::{
+use asap_executor::{
     physical_planner::{compile, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
     sources::{DataSources, MemorySource},
     values::{Batch, Value},
 };
+use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_integration_tests::planning::selected_dag;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::types::AccuracyTarget;
-use asap_types::{
-    post_asap::FieldDataType,
-    pre_asap::{DataType, Field, Schema},
-};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use futures::StreamExt;
 use physical_common::compile_physical_asap_dag;
 use std::{collections::BTreeMap, sync::Arc};

@@ -6,24 +6,24 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_aware_mapping::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
-};
-use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_physical_operators::{
+use asap_executor::{
     physical_planner::{compile, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
     sources::{DataSources, MemorySource},
     values::{Batch, Value},
 };
+use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_logical_asap_optimization::per_computation_candidates::{
+    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+};
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
-use asap_types::post_asap::{
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{
     ExactKind, FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate,
 };
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::{ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
@@ -571,7 +571,7 @@ async fn every_candidate(
     ComputationCandidate,
     Result<
         Vec<(i32, QueryRoot)>,
-        asap_aware_mapping::per_computation_candidates::PerComputationCandidateError,
+        asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError,
     >,
 )> {
     let root = lower_sql(query, catalog, accuracy()).await.unwrap();
@@ -603,7 +603,7 @@ fn count_updates(root: &QueryRoot) -> Vec<SummaryUpdate> {
             Some(ASAPOp::SummaryAgg { family, input, .. })
                 if !matches!(
                     family,
-                    FieldDataType::ExactAggregate(asap_types::post_asap::ExactKind::Sum, _)
+                    FieldDataType::ExactAggregate(asap_types::ir::schema::ExactKind::Sum, _)
                 ) =>
             {
                 Some(input.clone())
@@ -734,7 +734,7 @@ async fn sql_count_star_without_a_non_null_column_is_unsupported() {
             every_candidate(&catalog, "SELECT k, count(*) FROM t GROUP BY k").await
         {
             match composed {
-                Err(asap_aware_mapping::per_computation_candidates::PerComputationCandidateError::Unsupported(_)) => {}
+                Err(asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError::Unsupported(_)) => {}
                 other => panic!("{columns:?} {candidate:?}: {other:?}"),
             }
         }

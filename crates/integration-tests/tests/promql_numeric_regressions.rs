@@ -3,10 +3,11 @@
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::logical_candidates;
 use asap_integration_tests::post_asap::post_asap_dag;
+use asap_types::ir::operator::Reduction;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{ExactKind, FieldDataType, SummaryInputExpr, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{ExactKind, FieldDataType, SummaryInputExpr, SummaryUpdate};
-use asap_types::pre_asap::{ColumnRef, Reduction};
-use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
 /// The first logical candidate (in enumeration order) with an ASAP operator,
@@ -173,7 +174,7 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
 
 #[test]
 fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
-    use asap_types::post_asap::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
+    use asap_types::ir::schema::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
     for is_count in [true, false] {
         let query = if is_count {
             "topk(1, count_over_time(up[5m]))"

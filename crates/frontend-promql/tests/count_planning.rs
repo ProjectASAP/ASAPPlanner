@@ -1,12 +1,12 @@
 //! Query text through summary selection: counts use observations, never value weights.
 mod support;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{
     ExactKind, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm,
     SummaryInputExpr, WeightDomain,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
 use support::{logical_candidates, lower_promql, post_asap_dag, selected_dag};
 
@@ -29,7 +29,7 @@ fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     // Hydra hashes a non-null item per row: the series identity (PromQL
     // labels are nullable).
-    let root = asap_types::ir::schema_support::with_promql_series_identity(
+    let root = asap_types::ir::schema::schema_support::with_promql_series_identity(
         &lower_promql("count by(job)(up)", target.clone()).unwrap(),
     )
     .unwrap();
@@ -136,8 +136,8 @@ fn frequency_count_candidates_use_unit_weights() {
 // This narrow test oracle interprets the emitted aggregate, not Prometheus ingestion,
 // staleness, or scrape scheduling. Unsupported plan shapes fail explicitly.
 fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
+    use asap_types::ir::operator::{AggIntent, Reduction};
     use asap_types::ir::NonASAPOp;
-    use asap_types::pre_asap::{AggIntent, Reduction};
     let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
     let NonASAPOp::Aggregate {
         reduction,
@@ -226,7 +226,7 @@ fn count_over_time_counts_scrapes_not_sample_values() {
 // This checks the planner's numerical update contract, not a sketch-library runtime.
 #[test]
 fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
-    use asap_types::pre_asap::ColumnRef;
+    use asap_types::ir::scalar::ColumnRef;
     let accuracy = AccuracyTarget::max_error(0.02);
     let root = lower_promql("count_over_time(up[5m])", accuracy.clone()).unwrap();
     let candidates = logical_candidates(root, accuracy);

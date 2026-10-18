@@ -1,11 +1,9 @@
 //! The design's SQL distinct query executes natively and exactly.
 mod physical_common;
+use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_physical_operators::values::Value;
-use asap_types::{
-    pre_asap::{DataType, Field, Schema},
-    types::AccuracyTarget,
-};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
 
 // COUNT(DISTINCT src_ip) skips NULL and keeps the WHERE, Utf8 identities and
 // zero on no input.

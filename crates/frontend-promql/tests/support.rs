@@ -3,9 +3,9 @@ use std::rc::Rc;
 use asap_frontend_promql::{
     lower_promql_workload, lower_promql_workload_with_histograms, HistogramCatalog, PromqlError,
 };
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
-use asap_types::pre_asap::ScalarValue;
-use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
@@ -112,8 +112,8 @@ pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
 pub fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: AccuracyTarget,
-) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
-    asap_aware_mapping::run_stage1_to_stage3(
+) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+    asap_plan_selection::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(root))],
         &[asap_types::workload::QueryWorkloadEntry {
             requirements: asap_types::workload::QueryRequirements {
@@ -123,7 +123,7 @@ pub fn run_stage1_to_stage3(
             ..Default::default()
         }],
         &DataWorkload::default(),
-        asap_aware_mapping::PlanningModels::builtin(),
+        asap_plan_selection::PlanningModels::builtin(),
     )
     .expect("Pass 1 accepts the query")
 }
@@ -170,17 +170,17 @@ pub fn logical_candidates(
 /// compose (a candidate its input cannot feed), and selection skips it.
 #[allow(dead_code)]
 pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String> {
-    let run = asap_aware_mapping::run_stage1_to_stage3(
+    let run = asap_plan_selection::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(Rc::clone(root)))],
         &[asap_types::workload::QueryWorkloadEntry {
             requirements: asap_types::workload::QueryRequirements {
-                accuracy: asap_types::types::AccuracyTarget::exact(),
+                accuracy: asap_types::ir::properties::AccuracyTarget::exact(),
                 max_latency_ms: None,
             },
             ..Default::default()
         }],
         &DataWorkload::default(),
-        asap_aware_mapping::PlanningModels::builtin(),
+        asap_plan_selection::PlanningModels::builtin(),
     )
     .map_err(|e| e.to_string())?;
     let operator = |roots: &[asap_types::ir::QueryRoot]| match &roots[0] {

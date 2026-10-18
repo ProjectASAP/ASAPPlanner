@@ -19,12 +19,11 @@ mod planner_layering_common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_types::ir::properties::ProbabilityExpr;
+use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
+use asap_types::ir::schema::DataType;
+use asap_types::ir::schema::{Field, Schema, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::QueryRoot;
-use asap_types::post_asap::{
-    Field, ProbabilityExpr, Schema, SketchAlgorithm, SketchParams, SketchStatistic,
-};
-use asap_types::pre_asap::DataType;
-use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
@@ -929,11 +928,11 @@ fn stage3_plan_selection_selected_plan_has_at_most_one_univmon() {
 /// binding").
 #[test]
 fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
-    use asap_aware_mapping::stage3_plan_selection::select_plan;
-    use asap_aware_mapping::PlanningModels;
-    use asap_physical_operators::physical_planner::{compile, promql_rows, InputContract};
-    use asap_physical_operators::runtime::Scope;
-    use asap_physical_operators::values::{Batch, Value};
+    use asap_executor::physical_planner::{compile, promql_rows, InputContract};
+    use asap_executor::runtime::Scope;
+    use asap_executor::values::{Batch, Value};
+    use asap_plan_selection::select_plan;
+    use asap_plan_selection::PlanningModels;
     use std::sync::Arc;
 
     let workload = standin_workload();

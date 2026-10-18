@@ -7,19 +7,19 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_integration_tests::planning::{logical_candidates, selected_dag};
-use asap_physical_operators::{
+use asap_executor::{
     physical_planner::{compile, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
     sources::{DataSources, MemorySource},
     values::{Batch, Value},
 };
+use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_integration_tests::planning::{logical_candidates, selected_dag};
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{ExactKind, FieldDataType, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
-use asap_types::post_asap::{ExactKind, FieldDataType, SketchAlgorithm};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
 use futures::StreamExt;
 
 fn catalog() -> SqlCatalog {

@@ -30,14 +30,14 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::node::{Operator, OperatorNode};
-use super::non_asap::NonASAPOp;
 use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
-use crate::ir::operator_properties::{JoinKind, Reduction};
+use crate::ir::operator::agg_intent::{topk, AggIntent};
+use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::non_asap::NonASAPOp;
+use crate::ir::operator::operator_properties::{JoinKind, Reduction};
+use crate::ir::properties::AccuracyTarget;
+use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::SchemaDerivationError;
-use crate::pre_asap::agg_intent::{topk, AggIntent};
-use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-use crate::types::AccuracyTarget;
 
 /// Rewrite the DAG under `root` into its canonical form (bottom-up).
 /// Idempotent: an already-canonical DAG comes back as the same `Rc`. Only
@@ -220,7 +220,7 @@ fn try_promote_additive_top_ranking(
     };
     // A heavy-hitter sketch ranks the raw update stream; a filtered measure
     // counts only part of it, and no binding rule applies the filter (#466).
-    if crate::ir::non_asap::any_measure_filtered(filters) {
+    if crate::ir::operator::non_asap::any_measure_filtered(filters) {
         return Ok(None);
     }
     let [ranked_agg] = measures.as_slice() else {
@@ -374,12 +374,12 @@ fn contains_scalar_subquery(expr: &ScalarExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::operator_properties::WindowFuncKind;
-    use crate::ir::operator_properties::{
+    use crate::ir::operator::operator_properties::WindowFuncKind;
+    use crate::ir::operator::operator_properties::{
         ConcatDiscriminatorKey, GroupKeys, Source, WindowFrame, WindowFrameBound,
         WindowFrameOffset, WindowFrameUnits,
     };
-    use crate::pre_asap::schema::{DataType, Field, Schema};
+    use crate::ir::schema::{DataType, Field, Schema};
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
         Rc::new(OperatorNode::new(Operator::NonASAP(op)).expect("fixture derives a schema"))
@@ -514,8 +514,8 @@ mod tests {
     // `COUNT(col)` over a nullable column.
     #[test]
     fn does_not_promote_a_filtered_count_ranking() {
+        use crate::ir::scalar::{CompareOpKind, ScalarValue};
         use crate::ir::Predicate;
-        use crate::pre_asap::{CompareOpKind, ScalarValue};
         let greater = Predicate(ScalarExpr::Compare {
             left: Box::new(ScalarExpr::Column(2)),
             op: CompareOpKind::Gt,
