@@ -694,6 +694,12 @@ fn composed_provenance(
     provenance
 }
 
+/// The built-in composition rule: `inputs`' guarantees (in the parent's
+/// child order) composed with the parent's own `local` guarantee under `op`,
+/// given the statistics in `stats` (all unknown in Stage 1; plan selection
+/// binds some). `Err` is the fail-closed answer: no registered rule, or a
+/// missing input guarantee. It means "no rule", not "infeasible": Pass 1
+/// keeps the candidate with `guarantee = None`.
 pub fn propagate(
     op: &CompositionOperator,
     inputs: &[AccuracyGuarantee],

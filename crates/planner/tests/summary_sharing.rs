@@ -447,7 +447,7 @@ fn combined_scalar_references_keep_summary_candidates() {
         .expect("not selected");
     assert_eq!(
         rejection.cause,
-        RejectionCause::AccuracyTargetMissed,
+        RejectionCause::NoAccuracyGuarantee,
         "{rejection:?}"
     );
     assert!(
