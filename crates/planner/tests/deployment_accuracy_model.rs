@@ -255,3 +255,50 @@ async fn the_deployment_accuracy_model_decides_outputs_without_a_guarantee() {
     assert!(unguaranteed.contains(&accepting_selection.selected));
     assert!(reads_sketch(&accepting.plans[0].root));
 }
+
+/// The hook decides only outputs with no guarantee: a candidate whose
+/// guarantee misses its target under the built-in models (a relative bound
+/// for a rank target) is still rejected for that under the accepting model.
+#[tokio::test]
+async fn the_hook_does_not_override_a_guarantee_that_misses() {
+    // The user's workload: one p99 query with a 1% rank-error target.
+    let workload = rank_target_workload("quantile_over_time(0.99, lat[5m])");
+    let promql = || FrontendInput::Promql { histograms: None };
+    // The candidates whose guarantee misses the target under the built-in models.
+    let builtin = e2e_plan(UserInput::new(
+        &workload,
+        promql(),
+        PlanningModels::builtin(),
+    ))
+    .await
+    .expect("plans with the built-in models");
+    let missed: BTreeSet<String> = builtin
+        .selection
+        .as_ref()
+        .unwrap()
+        .rejected
+        .iter()
+        .filter(|r| r.cause == RejectionCause::AccuracyTargetMissed)
+        .map(|r| r.id.clone())
+        .collect();
+    assert!(!missed.is_empty());
+    // The same workload with the model that accepts every output without a guarantee.
+    let accepting_model = AcceptsOutputsWithoutGuarantee;
+    let accepting = e2e_plan(UserInput::new(
+        &workload,
+        promql(),
+        PlanningModels::builtin().with_accuracy(&accepting_model),
+    ))
+    .await
+    .expect("plans with the accepting model");
+    let accepting_selection = accepting.selection.as_ref().unwrap();
+    for id in &missed {
+        assert!(
+            accepting_selection
+                .rejected
+                .iter()
+                .any(|r| &r.id == id && r.cause == RejectionCause::AccuracyTargetMissed),
+            "{id}"
+        );
+    }
+}
