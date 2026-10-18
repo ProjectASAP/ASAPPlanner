@@ -89,7 +89,7 @@
 //!   any of its steps reads was built by an earlier request or step;
 //! * a pane chain kept beyond one evaluation (ingestion time or kept
 //!   across evaluations) retains its window plus the longest
-//!   `(S − 1) · step_ms` among its readers ([`Selection::pane_retention_ms`]),
+//!   `span_ms` among its readers ([`Selection::pane_retention_ms`]),
 //!   so the earliest step of the next request still finds its panes: that
 //!   many more panes are kept every second.
 //!
@@ -866,9 +866,9 @@ pub fn select_plan(
     let mut costs = BTreeMap::new();
     let mut accepted = BTreeMap::new();
     let mut rejected = Vec::new();
-    // Valid candidates in candidate order: the index into `cands`, the
-    // roots sized for their failure probabilities and their pane retention.
-    let mut valid: Vec<(usize, Vec<QueryRoot>, BTreeMap<PhysicalASAPNodeId, u64>)> = Vec::new();
+    // Valid candidates in candidate order: the index into `cands` and the
+    // candidate sized for its failure probabilities.
+    let mut valid: Vec<(usize, PhysicalCandidate)> = Vec::new();
     let recurrence: Vec<QueryRecurrence> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let range_evaluations: Vec<Option<RangeEvaluation>> =
         entries.iter().map(|e| e.range_evaluation).collect();
@@ -946,16 +946,11 @@ pub fn select_plan(
         }
         costs.insert(candidate.id.clone(), cost);
         accepted.insert(candidate.id.clone(), accepted_accuracy);
-        let retention = pane_retention_ms(
-            &candidate.dag,
-            &query_reach(&candidate.dag, &nodes),
-            &range_evaluations,
-        );
-        valid.push((index, candidate.roots, retention));
+        valid.push((index, candidate));
     }
     let id = |index: usize| cands[index].id.as_str();
     let ranking = Ranking::of(&settings.cost_model);
-    let valid_costs: Vec<&CandidateCost> = valid.iter().map(|(i, _, _)| &costs[id(*i)]).collect();
+    let valid_costs: Vec<&CandidateCost> = valid.iter().map(|(i, _)| &costs[id(*i)]).collect();
     let Some((best, front)) = choose(ranking, &valid_costs) else {
         return Err(SelectionError::NoValidCandidate(rejected));
     };
@@ -964,7 +959,7 @@ pub fn select_plan(
         .into_iter()
         .map(|f| id(valid[f].0).to_string())
         .collect();
-    for (index, _, _) in &valid {
+    for (index, _) in &valid {
         let id = id(*index);
         if id != selected {
             let (cause, reason) = ranking.lost_reason(id, &selected, &costs, &front);
@@ -975,8 +970,13 @@ pub fn select_plan(
             });
         }
     }
-    let (_, roots, pane_retention_ms) = valid.swap_remove(best);
-    let plan = with_confirmed_weights(&roots, data);
+    let (_, chosen) = valid.swap_remove(best);
+    let plan = with_confirmed_weights(&chosen.roots, data);
+    let pane_retention_ms = pane_retention_ms(
+        &chosen.dag,
+        &query_reach(&chosen.dag, &node_map(&chosen.dag)),
+        &range_evaluations,
+    );
     Ok(Selection {
         selected,
         plan,
@@ -2086,16 +2086,20 @@ fn priced_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> u64 {
 /// Evaluations per second of a node computed once for `queries` together,
 /// each a recurrence with its range evaluation: a request with a range
 /// evaluation is [`RangeEvaluation::evaluations_per_request`] evaluations,
-/// one without it one. Repeating queries with equal intervals and equal
-/// range evaluations are evaluated together, so each such pair counts once;
-/// estimated rates add. One-off, scheduled and unknown queries run as one
+/// one without it one. Repeating queries with equal intervals are
+/// evaluated together: those with equal steps evaluate at the same
+/// instants, so each (interval, step) counts the most steps among its
+/// queries, and a query evaluated once per request (no range, or one step)
+/// adds nothing when a range on its interval already evaluates at the
+/// request's end; estimated rates add. One-off, scheduled and unknown queries run as one
 /// batch: the most evaluations among them, spread over
 /// `non_repeating_query_horizon_seconds`.
 fn evaluation_rate<'r>(
     queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
-    let mut intervals = BTreeSet::new();
+    // Per interval, per step (`None`: once per request), the most steps.
+    let mut intervals: BTreeMap<u32, BTreeMap<Option<u64>, u64>> = BTreeMap::new();
     let mut estimated = 0.0;
     let mut invocations = 0u64;
     for (recurrence, range_evaluation) in queries {
@@ -2108,7 +2112,15 @@ fn evaluation_rate<'r>(
                 if interval.0 == 0 {
                     return Err(AnalyticalCostError::InvalidRecurrence);
                 }
-                intervals.insert((interval.0, range_evaluation, steps));
+                let step_ms = range_evaluation
+                    .filter(|_| steps > 1)
+                    .map(|range| range.step_ms);
+                let most = intervals
+                    .entry(interval.0)
+                    .or_default()
+                    .entry(step_ms)
+                    .or_default();
+                *most = (*most).max(steps);
             }
             QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
                 let rate = estimate.expected_rate.0;
@@ -2128,7 +2140,14 @@ fn evaluation_rate<'r>(
     }
     let repeated: f64 = intervals
         .into_iter()
-        .map(|(ms, _, steps)| 1_000.0 / ms as f64 * steps as f64)
+        .map(|(ms, mut steps_by_step)| {
+            // A range's last step is the request's end: one evaluation per
+            // request is already among its steps.
+            if steps_by_step.len() > 1 {
+                steps_by_step.remove(&None);
+            }
+            1_000.0 / f64::from(ms) * steps_by_step.into_values().sum::<u64>() as f64
+        })
         .sum();
     Ok(repeated + estimated + invocations as f64 / non_repeating_query_horizon_seconds)
 }
@@ -3010,7 +3029,7 @@ fn ingest_workers(
 /// ingestion time, or at query time across evaluations), how far back
 /// from the newest evaluation its completed panes must be kept, in
 /// milliseconds: its window `pane_count · pane_width_ms`, plus the longest
-/// [`RangeEvaluation::evaluated_span_ms`] among the queries reaching it,
+/// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
 /// whose earliest step reads that much further back. `reach` is
 /// [`query_reach`] of `dag`; `range_evaluations[q]` is query `q`'s (none
 /// when missing). Without range evaluations, each chain's window.
@@ -3036,7 +3055,7 @@ fn pane_retention_ms(
                     .enumerate()
                     .filter(|(_, reached)| reached.contains(&node.id))
                     .filter_map(|(q, _)| range_evaluations.get(q).copied().flatten())
-                    .map(|range| range.evaluated_span_ms())
+                    .map(|range| range.span_ms)
                     .max()
                     .unwrap_or(0);
                 Some((node.id, pane_width_ms * u64::from(*pane_count) + span_ms))
@@ -5922,6 +5941,33 @@ mod tests {
         }
         assert!(close(total(&two, &recurrences(2)), single));
         assert!(close(total(&two, &mixed), 1.5 * single));
+    }
+
+    /// Queries that refresh together at one interval and step evaluate at
+    /// the same instants: a node they share runs at the most steps among
+    /// them, not their sum. One over the last hour (61 steps) and one over
+    /// the last 10 min (11 steps), both every minute at 1-min steps, and a
+    /// third with no range (its one evaluation is the others' last step):
+    /// 61 evaluations a minute. A different step evaluates at other
+    /// instants and adds its own.
+    #[test]
+    fn readers_at_one_interval_and_step_share_their_steps() {
+        let every_minute = repeating(60_000);
+        let range = |span_ms: u64, step_ms: u64| Some(RangeEvaluation { step_ms, span_ms });
+        let rate = |queries: &[Option<RangeEvaluation>]| {
+            evaluation_rate(queries.iter().map(|r| (&every_minute, *r)), 3_600.0).unwrap()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(rate(&[range(3_600_000, 60_000)]), 61.0 / 60.0));
+        assert!(close(
+            rate(&[range(3_600_000, 60_000), range(600_000, 60_000), None]),
+            61.0 / 60.0
+        ));
+        assert!(close(rate(&[None, None]), 1.0 / 60.0));
+        assert!(close(
+            rate(&[range(3_600_000, 60_000), range(600_000, 30_000)]),
+            (61.0 + 21.0) / 60.0
+        ));
     }
 
     /// One-off and unknown recurrence are spread over the horizon:

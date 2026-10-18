@@ -389,7 +389,12 @@ fn check_panes_on_range_steps(
             continue;
         };
         for &query in &mat_candidate.readers {
-            let Some(range) = entries.get(query).and_then(|e| e.range_evaluation) else {
+            // A one-step range evaluates only at the request's end.
+            let Some(range) = entries
+                .get(query)
+                .and_then(|e| e.range_evaluation)
+                .filter(|range| range.evaluations_per_request() > 1)
+            else {
                 continue;
             };
             if range.step_ms % pane_width_ms.max(&1) != 0 {
@@ -1512,6 +1517,16 @@ mod tests {
         )
         .is_err());
         assert_eq!(implement_for(stepping(2 * MINUTE)).unwrap().len(), 2);
+        // A one-step range (span 0) is one evaluation per request, at the
+        // refresh: its step is not read.
+        let one_step = QueryWorkloadEntry {
+            range_evaluation: Some(RangeEvaluation {
+                step_ms: 30_000,
+                span_ms: 0,
+            }),
+            ..every_minute()
+        };
+        assert_eq!(implement_for(one_step).unwrap().len(), 2);
     }
 
     /// A build two queries read is also offered built once per evaluation

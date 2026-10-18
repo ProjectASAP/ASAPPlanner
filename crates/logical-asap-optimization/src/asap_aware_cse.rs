@@ -742,7 +742,10 @@ pub fn pane_candidates(
                 .collect();
             let mut width = window_ms;
             for &q in &readers {
-                width = gcd(width, evaluation_grid_ms.get(q).copied().flatten()?);
+                width = asap_types::workload::greatest_common_divisor(
+                    width,
+                    evaluation_grid_ms.get(q).copied().flatten()?,
+                );
             }
             let pane_count = u32::try_from(window_ms / width).ok()?;
             (!readers.is_empty() && pane_count >= 2).then_some(PaneCandidate {
@@ -783,14 +786,6 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
         below = child;
     }
     u64::try_from(range.as_millis()).ok().filter(|&ms| ms > 0)
-}
-
-fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
-    }
 }
 
 /// Every Pass 2 candidate of the window-composition rule for the candidate

@@ -215,10 +215,12 @@ impl QueryRecurrence {
 /// allows for `/api/v1/query_range` (it rejects a request with more).
 pub const MAX_RANGE_EVALUATION_STEPS: u64 = 11_000;
 
-/// How one request of a query is answered as a range request: it evaluates
-/// the query at every `step_ms` from `end − span_ms` to the request's `end`,
-/// both included, as a dashboard panel over the last hour at 1-minute steps
-/// does (`/api/v1/query_range?...&start=now-1h&end=now&step=60`).
+/// How one request of a query is answered as a range request, as
+/// Prometheus' `/api/v1/query_range` does: it evaluates the query at
+/// `start = end − span_ms` and every `step_ms` after, up to and including
+/// the request's `end`, e.g. a dashboard panel over the last hour at
+/// 1-minute steps (`...&start=now-1h&end=now&step=60`). `span_ms` must be a
+/// whole number of steps, so the last step is the request's end.
 /// [`QueryRecurrence`] still says how often a request runs.
 ///
 /// JSON: `{"step_ms": 60000, "span_ms": 3600000}`.
@@ -237,25 +239,26 @@ pub struct RangeEvaluation {
     /// Time between consecutive evaluation steps of one request, in
     /// milliseconds; must be positive.
     pub step_ms: u64,
-    /// How far before the request's end its first step may be, in
-    /// milliseconds; 0 for one step per request.
+    /// How far before the request's end its first step is, in
+    /// milliseconds: a multiple of `step_ms`, 0 for one step per request.
     pub span_ms: u64,
 }
 
 impl RangeEvaluation {
-    /// Steps one request evaluates, `span_ms / step_ms + 1` (rounded down):
-    /// 61 for a 1 h span at 1 min steps. Stage 3 prices each step as one
-    /// evaluation.
+    /// Steps one request evaluates, `span_ms / step_ms + 1`: 61 for a 1 h
+    /// span at 1 min steps. Stage 3 prices each step as one evaluation.
     pub fn evaluations_per_request(&self) -> u64 {
         self.span_ms / self.step_ms.max(1) + 1
     }
+}
 
-    /// Time from a request's first step to its last,
-    /// `(evaluations_per_request − 1) · step_ms`: `span_ms` rounded down to
-    /// whole steps. Its earliest step reads this much further back than
-    /// the latest, so kept panes are retained this much longer.
-    pub fn evaluated_span_ms(&self) -> u64 {
-        (self.evaluations_per_request() - 1) * self.step_ms
+/// The greatest common divisor of `a` and `b` (`a` when `b` is 0): the
+/// grid two cadences in milliseconds share.
+pub fn greatest_common_divisor(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        greatest_common_divisor(b, a % b)
     }
 }
 
@@ -369,23 +372,18 @@ pub struct QueryWorkloadEntry {
 impl QueryWorkloadEntry {
     /// The grid every evaluation of this query falls on, in milliseconds:
     /// its fixed interval ([`QueryRecurrence::fixed_interval_ms`]), or with
-    /// a range evaluation the greatest common divisor of the interval and
-    /// the step, since each run evaluates at every step back from its end.
-    /// `None` when it does not repeat at a positive fixed interval.
+    /// a range evaluation of more than one step the greatest common divisor
+    /// of the interval and the step, since each run evaluates at every step
+    /// up to its end. `None` when it does not repeat at a positive fixed
+    /// interval.
     pub fn evaluation_grid_ms(&self) -> Option<u64> {
         let interval_ms = self.recurrence.fixed_interval_ms()?;
         Some(match self.range_evaluation {
-            Some(range) if range.step_ms > 0 => gcd(interval_ms, range.step_ms),
+            Some(range) if range.step_ms > 0 && range.evaluations_per_request() > 1 => {
+                greatest_common_divisor(interval_ms, range.step_ms)
+            }
             _ => interval_ms,
         })
-    }
-}
-
-fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
     }
 }
 
@@ -709,6 +707,12 @@ fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
         if range.step_ms == 0 {
             return Err(WorkloadError::ZeroRangeEvaluationStep);
         }
+        if range.span_ms % range.step_ms != 0 {
+            return Err(WorkloadError::RangeEvaluationSpanNotMultipleOfStep {
+                span_ms: range.span_ms,
+                step_ms: range.step_ms,
+            });
+        }
         let steps = range.evaluations_per_request();
         if steps > MAX_RANGE_EVALUATION_STEPS {
             return Err(WorkloadError::TooManyRangeEvaluationSteps { steps });
@@ -752,6 +756,19 @@ pub enum WorkloadError {
     /// Bad input: a range evaluation whose `step_ms` is zero.
     #[error("a range evaluation's step_ms must be greater than zero")]
     ZeroRangeEvaluationStep,
+    /// Bad input: a range evaluation whose `span_ms` is not a whole number
+    /// of steps. Prometheus places steps forward from the start, so its
+    /// last step would not be the request's end and would fall off the
+    /// end's grid.
+    #[error(
+        "a range evaluation's span_ms ({span_ms}) must be a multiple of its step_ms ({step_ms})"
+    )]
+    RangeEvaluationSpanNotMultipleOfStep {
+        /// The declared span.
+        span_ms: u64,
+        /// The declared step.
+        step_ms: u64,
+    },
     /// Bad input: a range evaluation with more steps per request than
     /// [`MAX_RANGE_EVALUATION_STEPS`], which Prometheus would reject.
     #[error(
@@ -1003,7 +1020,6 @@ mod tests {
         };
         assert_eq!(hour.range_evaluation, Some(range));
         assert_eq!(range.evaluations_per_request(), 61);
-        assert_eq!(range.evaluated_span_ms(), 3_600_000);
         let entry = QueryWorkloadEntry::from(&hour);
         assert_eq!(entry.range_evaluation, Some(range));
         // Refreshes every 30 s and steps every 60 s: evaluations on a 30 s grid.
@@ -1012,15 +1028,20 @@ mod tests {
             QueryWorkloadEntry::from(&plain).evaluation_grid_ms(),
             Some(30_000)
         );
-        // A span that is not a whole number of steps is rounded down.
-        let ragged = RangeEvaluation {
-            step_ms: 60_000,
-            span_ms: 90_000,
+        // A one-step range (span 0) is one evaluation per request: its
+        // step does not narrow the grid (refreshing every 60 s at a 45 s
+        // step would otherwise give a 15 s grid for nothing).
+        let one_step = QueryWorkloadEntry {
+            range_evaluation: Some(RangeEvaluation {
+                step_ms: 45_000,
+                span_ms: 0,
+            }),
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                RepetitionInterval(60_000),
+            )),
+            ..entry.clone()
         };
-        assert_eq!(
-            (ragged.evaluations_per_request(), ragged.evaluated_span_ms()),
-            (2, 60_000)
-        );
+        assert_eq!(one_step.evaluation_grid_ms(), Some(60_000));
 
         let validate = |range: RangeEvaluation| {
             let mut workload = base_workload();
@@ -1051,6 +1072,20 @@ mod tests {
                 span_ms: 10_999_000
             }),
             Ok(())
+        );
+        // Prometheus places steps forward from the start, so a span that is
+        // not a whole number of steps would put the last step off the end's
+        // grid: refreshing every 60 s at 60 s steps over 90 s evaluates at
+        // E − 90 s and E − 30 s. It is rejected.
+        assert_eq!(
+            validate(RangeEvaluation {
+                step_ms: 60_000,
+                span_ms: 90_000
+            }),
+            Err(WorkloadError::RangeEvaluationSpanNotMultipleOfStep {
+                span_ms: 90_000,
+                step_ms: 60_000
+            })
         );
         let unknown = serde_json::json!({"step_ms": 1, "span_ms": 0, "start": 0});
         assert!(serde_json::from_value::<RangeEvaluation>(unknown).is_err());
