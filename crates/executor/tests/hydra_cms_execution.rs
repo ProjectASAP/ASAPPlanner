@@ -329,6 +329,32 @@ fn weighted_hydra_cms_sums_item_weights_per_group() {
     );
 }
 
+// A positive constant weight, `Constant(2.0)` with its `PositiveConstant`
+// proof, adds 2 per row: each job's point count is twice the unit count's.
+// A non-integer constant is refused at binding, since sketchlib's Hydra adds
+// integer weights.
+#[test]
+fn positive_constant_weight_adds_the_constant_per_row() {
+    let constant = |weight: f64| SummaryUpdate {
+        weight: SummaryInputExpr::Constant(weight),
+        weight_domain: WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::PositiveConstant,
+        },
+        ..unit_count()
+    };
+    let unit = run(unit_count(), None, vec![batch(&ROWS)]);
+    let doubled = run(constant(2.0), None, vec![batch(&ROWS)]);
+    for job in ["api", "batch", "db"] {
+        assert_eq!(doubled[job], 2.0 * unit[job], "{job}");
+    }
+    for weight in [0.0, -2.0, 2.5, f64::INFINITY] {
+        let error = compile_node(&summary_agg(constant(weight), None), &[input_schema()])
+            .err()
+            .unwrap_or_else(|| panic!("constant weight {weight} accepted"));
+        assert!(error.to_string().contains("HydraCms"), "{weight}: {error}");
+    }
+}
+
 // A weight column of unknown sign is rejected at binding: a Count-Min point
 // count only overestimates when no weight is negative.
 #[test]

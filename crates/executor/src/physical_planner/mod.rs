@@ -1013,16 +1013,22 @@ fn summary_build(
         let Some(SummaryInputExpr::Column(item)) = &update.item else {
             unreachable!("validated HydraCms item column")
         };
-        // Validated: the unit count, or a non-negative weight column.
-        let weight = match &update.weight {
-            SummaryInputExpr::Column(weight) => Some(named_column(input, weight)?),
-            _ => None,
+        // Validated: the unit count, a positive integer constant or a
+        // non-negative weight column.
+        let (weight, constant_weight) = match &update.weight {
+            SummaryInputExpr::Column(weight) => (Some(named_column(input, weight)?), 1),
+            SummaryInputExpr::Constant(weight) => (
+                None,
+                crate::capability::hydra_constant_weight(*weight).map_err(Error::Invalid)?,
+            ),
+            _ => (None, 1),
         };
         return Operator::shared_summary_build(
             input.clone(),
             family.clone(),
             named_column(input, item)?,
             weight,
+            constant_weight,
             groups(input, keys)?,
         );
     }

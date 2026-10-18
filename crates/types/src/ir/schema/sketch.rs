@@ -727,6 +727,9 @@ pub enum NonNegativeWeightProof {
     /// gives it on confirming a
     /// [`WeightDomain::SamplesOfMetric`] requirement.
     CounterSamples,
+    /// A constant weight greater than 0, such as `Constant(2.0)`: every row
+    /// adds the same positive amount, so no weight is negative.
+    PositiveConstant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
