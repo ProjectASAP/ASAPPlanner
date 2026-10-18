@@ -26,10 +26,9 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
+use crate::accuracy::{AccuracyModel, DefaultAccuracyModel};
 use crate::{PlanSelectionSettings, Selection, SelectionError};
-use asap_logical_asap_optimization::accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
-};
+use asap_logical_asap_optimization::accuracy::{AccuracyEvidenceProvider, NoAccuracyEvidence};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 

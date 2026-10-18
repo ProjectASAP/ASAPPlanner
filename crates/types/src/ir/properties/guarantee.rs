@@ -7,10 +7,11 @@
 //! could silently consume an approximate child. This module is the
 //! *vocabulary* that fixes that — the typed metric, the symbolic bound and
 //! failure-probability expressions, the provenance trail, and the typed
-//! rejection reasons. The *algebra* that composes these (the `AccuracyModel`
-//! trait, its default conservative rules, and budget allocation) lives one
-//! layer up in `asap_logical_asap_optimization::accuracy`: this crate defines the
-//! shapes, the planning crate decides.
+//! rejection reasons. The *algebra* that composes these (the built-in
+//! conservative rules and budget allocation) lives one layer up in
+//! `asap_logical_asap_optimization::accuracy`, and the deployment's
+//! pluggable `AccuracyModel` trait in `asap_plan_selection::accuracy`: this
+//! crate defines the shapes, the planning crates decide.
 //!
 //! ## What a guarantee says
 //!
@@ -268,7 +269,7 @@ impl ProbabilityExpr {
 }
 
 /// How a parent operator consumes its inputs' values — the shape an
-/// `AccuracyModel::propagate` rule is registered against. `#[non_exhaustive]`
+/// `propagate` rule is registered against. `#[non_exhaustive]`
 /// for the same reason [`AccuracyMetric`] is.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

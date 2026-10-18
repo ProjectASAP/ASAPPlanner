@@ -119,7 +119,7 @@ use crate::accuracy::composition::{
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
 use crate::accuracy::estimators::{hll, univmon};
-use crate::accuracy::{per_input_target, AccuracyModel, DefaultAccuracyModel, PropagationStats};
+use crate::accuracy::{local_guarantee, per_input_target, propagate, PropagationStats};
 use crate::deployment_capabilities::DeploymentCapabilities;
 use crate::function_rules::approximate_input_composition;
 use crate::realization::{accuracy_budget, default_size_params, sizing_target, summary_candidates};
@@ -1359,7 +1359,7 @@ fn with_guarantees(
 }
 
 /// The theoretical guarantee of a composed node, given its children's,
-/// composed with the built-in accuracy model ([`DefaultAccuracyModel`]);
+/// composed with the built-in analytical rules ([`propagate`]);
 /// Stage 1 reads no data statistics or deployment evidence. Exact over exact
 /// inputs; a summary estimate has its sized family's bound when
 /// [`estimate_has_bound`], composed with its input's when that is
@@ -1426,9 +1426,7 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
                     ExactKind::IRate => CompositionOperator::InstantCounterRate,
                     ExactKind::Increase => CompositionOperator::CounterIncrease,
                 };
-                DefaultAccuracyModel
-                    .propagate(&op, &[input], None, &stats)
-                    .ok()
+                propagate(&op, &[input], None, &stats).ok()
             }
             _ => None,
         },
@@ -1448,7 +1446,7 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
                 let local = match estimate_bound_over_samples(family, update, query) {
                     Some(gated) => gated,
                     None => source_distinct_guarantee(family, query, input)
-                        .or_else(|| DefaultAccuracyModel.local_guarantee(family, query))?,
+                        .or_else(|| local_guarantee(family, query))?,
                 };
                 if exact_inputs(summary_input) {
                     Some(local)
@@ -1496,14 +1494,13 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
             ..
         }) if filters.iter().all(Option::is_none) && !groups_by_estimate(reduction, child) => {
             match measures.as_slice() {
-                [intent] => DefaultAccuracyModel
-                    .propagate(
-                        &approximate_input_composition(intent)?,
-                        &[operand_guarantee(child)?],
-                        None,
-                        &fold_stats(reduction, child)?,
-                    )
-                    .ok(),
+                [intent] => propagate(
+                    &approximate_input_composition(intent)?,
+                    &[operand_guarantee(child)?],
+                    None,
+                    &fold_stats(reduction, child)?,
+                )
+                .ok(),
                 _ => None,
             }
         }
@@ -1763,9 +1760,7 @@ fn compose(
     inputs: Vec<AccuracyGuarantee>,
     local: Option<&AccuracyGuarantee>,
 ) -> Option<AccuracyGuarantee> {
-    DefaultAccuracyModel
-        .propagate(op, &inputs, local, &PropagationStats::default())
-        .ok()
+    propagate(op, &inputs, local, &PropagationStats::default()).ok()
 }
 
 /// A projection that computes over its child's sample value: the guarantee
@@ -2213,17 +2208,16 @@ fn lipschitz_guarantee(args: Vec<AccuracyGuarantee>) -> Option<AccuracyGuarantee
             "Lipschitz function of exact operands",
         ));
     }
-    DefaultAccuracyModel
-        .propagate(
-            &CompositionOperator::ExactExtremum,
-            &approximate,
-            None,
-            &PropagationStats {
-                input_row_count: Some(1),
-                ..PropagationStats::default()
-            },
-        )
-        .ok()
+    propagate(
+        &CompositionOperator::ExactExtremum,
+        &approximate,
+        None,
+        &PropagationStats {
+            input_row_count: Some(1),
+            ..PropagationStats::default()
+        },
+    )
+    .ok()
 }
 
 /// An arithmetic operand: its guarantee, and its value when it is a literal.
@@ -2496,7 +2490,7 @@ fn estimate_bound_over_samples(
     if !estimate_has_bound(family, &proven, query) {
         return None;
     }
-    let mut local = DefaultAccuracyModel.local_guarantee(family, query)?;
+    let mut local = local_guarantee(family, query)?;
     local.spec.error = asap_types::ir::properties::BoundExpr::Product {
         factors: vec![
             local.spec.error,
@@ -3052,7 +3046,7 @@ fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> Sketc
     let metric = statistic(intent)
         .ok()
         .and_then(|query| {
-            DefaultAccuracyModel.local_guarantee(
+            local_guarantee(
                 &FieldDataType::Sketch(whole.clone(), GroupingStrategy::default()),
                 &query,
             )
@@ -4526,9 +4520,7 @@ mod tests {
         };
         let gated = estimate_bound_over_samples(&family, &update, &query).expect("gated");
         assert_eq!(gated.spec.error.evaluate(), None);
-        let local = DefaultAccuracyModel
-            .local_guarantee(&family, &query)
-            .unwrap();
+        let local = local_guarantee(&family, &query).unwrap();
         let statistic = samples_sign_statistic("m");
         // Every other statistic (a stream norm) bound alike.
         let others = |s: &str| Some(if s == statistic { 1.0 } else { 1_000.0 });
