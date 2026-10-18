@@ -78,471 +78,468 @@ pub fn parse_source_norm_statistic(statistic: &str) -> Option<(&'static str, &st
         })
 }
 
-impl DefaultAccuracyModel {
-    fn additive(
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: &AccuracyGuarantee,
-        rule: &str,
-    ) -> AccuracyGuarantee {
-        let mut terms: Vec<BoundExpr> = inputs.iter().map(|g| g.spec.error.clone()).collect();
-        terms.push(local.spec.error.clone());
-        let mut deltas: Vec<ProbabilityExpr> = inputs
-            .iter()
-            .map(|g| g.spec.failure_probability.clone())
-            .collect();
-        deltas.push(local.spec.failure_probability.clone());
-        AccuracyGuarantee::new(
-            local.spec.accuracy_metric,
-            BoundExpr::Sum { terms },
-            ProbabilityExpr::UnionBound { terms: deltas },
-            composed_provenance(op, inputs, local, rule),
-        )
-    }
+fn additive(
+    op: &CompositionOperator,
+    inputs: &[AccuracyGuarantee],
+    local: &AccuracyGuarantee,
+    rule: &str,
+) -> AccuracyGuarantee {
+    let mut terms: Vec<BoundExpr> = inputs.iter().map(|g| g.spec.error.clone()).collect();
+    terms.push(local.spec.error.clone());
+    let mut deltas: Vec<ProbabilityExpr> = inputs
+        .iter()
+        .map(|g| g.spec.failure_probability.clone())
+        .collect();
+    deltas.push(local.spec.failure_probability.clone());
+    AccuracyGuarantee::new(
+        local.spec.accuracy_metric,
+        BoundExpr::Sum { terms },
+        ProbabilityExpr::UnionBound { terms: deltas },
+        composed_provenance(op, inputs, local, rule),
+    )
+}
 
-    /// `(1 + ε_total) = Π (1 + ε_i)` ⇒ for two factors
-    /// `ε_in + ε_out + ε_in·ε_out`; written out as the sum of all
-    /// cross-products so the expression DAG is exact for any input count.
-    fn multiplicative(
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: &AccuracyGuarantee,
-    ) -> AccuracyGuarantee {
-        let factors: Vec<&BoundExpr> = inputs
+/// `(1 + ε_total) = Π (1 + ε_i)` ⇒ for two factors
+/// `ε_in + ε_out + ε_in·ε_out`; written out as the sum of all
+/// cross-products so the expression DAG is exact for any input count.
+fn multiplicative(
+    op: &CompositionOperator,
+    inputs: &[AccuracyGuarantee],
+    local: &AccuracyGuarantee,
+) -> AccuracyGuarantee {
+    let factors: Vec<&BoundExpr> = inputs
+        .iter()
+        .map(|g| &g.spec.error)
+        .chain(std::iter::once(&local.spec.error))
+        .collect();
+    // Every non-empty subset's product: Π(1+ε_i) − 1 = Σ_{S≠∅} Π_{i∈S} ε_i.
+    let mut terms = Vec::new();
+    for mask in 1..(1u32 << factors.len()) {
+        let subset: Vec<BoundExpr> = factors
             .iter()
-            .map(|g| &g.spec.error)
-            .chain(std::iter::once(&local.spec.error))
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, b)| (*b).clone())
             .collect();
-        // Every non-empty subset's product: Π(1+ε_i) − 1 = Σ_{S≠∅} Π_{i∈S} ε_i.
-        let mut terms = Vec::new();
-        for mask in 1..(1u32 << factors.len()) {
-            let subset: Vec<BoundExpr> = factors
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| mask & (1 << i) != 0)
-                .map(|(_, b)| (*b).clone())
-                .collect();
-            terms.push(if subset.len() == 1 {
-                subset.into_iter().next().expect("one element")
-            } else {
-                BoundExpr::Product { factors: subset }
-            });
-        }
-        let mut deltas: Vec<ProbabilityExpr> = inputs
-            .iter()
-            .map(|g| g.spec.failure_probability.clone())
-            .collect();
-        deltas.push(local.spec.failure_probability.clone());
-        AccuracyGuarantee::new(
-            AccuracyMetric::Relative,
-            BoundExpr::Sum { terms },
-            ProbabilityExpr::UnionBound { terms: deltas },
-            composed_provenance(op, inputs, local, "relative_cross_term_union_bound"),
-        )
+        terms.push(if subset.len() == 1 {
+            subset.into_iter().next().expect("one element")
+        } else {
+            BoundExpr::Product { factors: subset }
+        });
     }
+    let mut deltas: Vec<ProbabilityExpr> = inputs
+        .iter()
+        .map(|g| g.spec.failure_probability.clone())
+        .collect();
+    deltas.push(local.spec.failure_probability.clone());
+    AccuracyGuarantee::new(
+        AccuracyMetric::Relative,
+        BoundExpr::Sum { terms },
+        ProbabilityExpr::UnionBound { terms: deltas },
+        composed_provenance(op, inputs, local, "relative_cross_term_union_bound"),
+    )
+}
 
-    fn lipschitz(
-        op: &CompositionOperator,
-        constant: f64,
-        inputs: &[AccuracyGuarantee],
-        local: Option<&AccuracyGuarantee>,
-    ) -> AccuracyGuarantee {
-        let input = &inputs[0];
-        let scaled = BoundExpr::Scaled {
-            factor: constant,
-            inner: Box::new(input.spec.error.clone()),
-        };
-        let (bound, delta) = match local {
-            Some(local) => (
-                BoundExpr::Sum {
-                    terms: vec![scaled, local.spec.error.clone()],
-                },
-                ProbabilityExpr::UnionBound {
-                    terms: vec![
-                        input.spec.failure_probability.clone(),
-                        local.spec.failure_probability.clone(),
-                    ],
-                },
-            ),
-            None => (scaled, input.spec.failure_probability.clone()),
-        };
-        let exact_local = AccuracyGuarantee::exact("deterministic Lipschitz transformation");
-        AccuracyGuarantee::new(
-            AccuracyMetric::ABSOLUTE,
-            bound,
-            delta,
-            composed_provenance(
-                op,
-                inputs,
-                local.unwrap_or(&exact_local),
-                "lipschitz_union_bound",
-            ),
-        )
+fn lipschitz(
+    op: &CompositionOperator,
+    constant: f64,
+    inputs: &[AccuracyGuarantee],
+    local: Option<&AccuracyGuarantee>,
+) -> AccuracyGuarantee {
+    let input = &inputs[0];
+    let scaled = BoundExpr::Scaled {
+        factor: constant,
+        inner: Box::new(input.spec.error.clone()),
+    };
+    let (bound, delta) = match local {
+        Some(local) => (
+            BoundExpr::Sum {
+                terms: vec![scaled, local.spec.error.clone()],
+            },
+            ProbabilityExpr::UnionBound {
+                terms: vec![
+                    input.spec.failure_probability.clone(),
+                    local.spec.failure_probability.clone(),
+                ],
+            },
+        ),
+        None => (scaled, input.spec.failure_probability.clone()),
+    };
+    let exact_local = AccuracyGuarantee::exact("deterministic Lipschitz transformation");
+    AccuracyGuarantee::new(
+        AccuracyMetric::ABSOLUTE,
+        bound,
+        delta,
+        composed_provenance(
+            op,
+            inputs,
+            local.unwrap_or(&exact_local),
+            "lipschitz_union_bound",
+        ),
+    )
+}
+
+/// Exact `sum` over approximate inputs: `B ≤ Σ B_i`, `δ ≤ Σ δ_i`. The
+/// planner composes one *per-value* child guarantee over an unknown
+/// number of input rows, so both the bound and the union bound scale by
+/// `stats.input_row_count` — an [`BoundExpr::Unknown`] leaf when it is
+/// not supplied. Each input's normalized bound is first converted to
+/// absolute units via the statistic its metric is normalized by (also
+/// unknown unless supplied); a `Rank` input has no such conversion.
+fn exact_sum(
+    op: &CompositionOperator,
+    inputs: &[AccuracyGuarantee],
+    stats: &PropagationStats,
+) -> Result<AccuracyGuarantee, AccuracyError> {
+    if all_relative(inputs) {
+        return relative_fold(op, inputs, stats, true, "exact_sum_relative");
     }
-
-    /// Exact `sum` over approximate inputs: `B ≤ Σ B_i`, `δ ≤ Σ δ_i`. The
-    /// planner composes one *per-value* child guarantee over an unknown
-    /// number of input rows, so both the bound and the union bound scale by
-    /// `stats.input_row_count` — an [`BoundExpr::Unknown`] leaf when it is
-    /// not supplied. Each input's normalized bound is first converted to
-    /// absolute units via the statistic its metric is normalized by (also
-    /// unknown unless supplied); a `Rank` input has no such conversion.
-    fn exact_sum(
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        if all_relative(inputs) {
-            return Self::relative_fold(op, inputs, stats, true, "exact_sum_relative");
-        }
-        let mut terms = Vec::with_capacity(inputs.len());
-        let mut deltas = Vec::with_capacity(inputs.len());
-        let mut provenance = Vec::new();
-        for (i, input) in inputs.iter().enumerate() {
-            let absolute =
-                absolute_bound(input).ok_or_else(|| AccuracyError::UnsupportedComposition {
-                    operator: op.clone(),
-                    input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
-                    local_metric: None,
-                    reason: format!(
-                        "input {i} carries a {:?} guarantee, which has no registered \
+    let mut terms = Vec::with_capacity(inputs.len());
+    let mut deltas = Vec::with_capacity(inputs.len());
+    let mut provenance = Vec::new();
+    for (i, input) in inputs.iter().enumerate() {
+        let absolute =
+            absolute_bound(input).ok_or_else(|| AccuracyError::UnsupportedComposition {
+                operator: op.clone(),
+                input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
+                local_metric: None,
+                reason: format!(
+                    "input {i} carries a {:?} guarantee, which has no registered \
                          conversion to an absolute value error",
-                        input.spec.accuracy_metric
-                    ),
-                })?;
-            if let BoundExpr::Product { factors } = &absolute {
-                for f in factors {
-                    if let BoundExpr::Unknown { statistic } = f {
-                        provenance.push(GuaranteeSource::UnavailableStatistic {
-                            statistic: statistic.clone(),
-                        });
-                    }
-                }
-            }
-            terms.push(absolute);
-            deltas.push(input.spec.failure_probability.clone());
-        }
-        let count = row_count(stats, &mut provenance);
-        let exact_local = AccuracyGuarantee::exact("ExactAggregate(Sum)");
-        provenance.extend(composed_provenance(
-            op,
-            inputs,
-            &exact_local,
-            "exact_sum_union_bound",
-        ));
-        Ok(AccuracyGuarantee::new(
-            AccuracyMetric::ABSOLUTE,
-            BoundExpr::Product {
-                factors: vec![count.clone(), BoundExpr::Sum { terms }],
-            },
-            ProbabilityExpr::Scaled {
-                count,
-                inner: Box::new(ProbabilityExpr::UnionBound { terms: deltas }),
-            },
-            provenance,
-        ))
-    }
-
-    /// Exact arithmetic mean over values with absolute-error guarantees.
-    /// Averaging cannot amplify the largest absolute input error. The event
-    /// that every row respects its bound is still protected conservatively
-    /// by a union bound over the input row count.
-    fn exact_average(
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        if all_relative(inputs) {
-            return Self::relative_fold(op, inputs, stats, true, "exact_average_relative");
-        }
-        if inputs
-            .iter()
-            .any(|input| input.spec.accuracy_metric != AccuracyMetric::ABSOLUTE)
-        {
-            return Err(AccuracyError::UnsupportedComposition {
-                operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
-                local_metric: None,
-                reason: "exact average requires absolute-error input guarantees".into(),
-            });
-        }
-        let mut provenance = Vec::new();
-        let count = row_count(stats, &mut provenance);
-        let exact_local = AccuracyGuarantee::exact("ExactAggregate(Average)");
-        provenance.extend(composed_provenance(
-            op,
-            inputs,
-            &exact_local,
-            "exact_average_union_bound",
-        ));
-        Ok(AccuracyGuarantee::new(
-            AccuracyMetric::ABSOLUTE,
-            BoundExpr::Max {
-                terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
-            },
-            ProbabilityExpr::Scaled {
-                count,
-                inner: Box::new(ProbabilityExpr::UnionBound {
-                    terms: inputs
-                        .iter()
-                        .map(|g| g.spec.failure_probability.clone())
-                        .collect(),
-                }),
-            },
-            provenance,
-        ))
-    }
-
-    /// Exact `max`/`min` over approximate inputs of one shared metric: the
-    /// returned value's error is at most the largest input bound (order
-    /// statistics are monotone under a uniform perturbation), with
-    /// probability by the union bound over every input row. This bounds the
-    /// returned *value*; it does not identify the true winning key.
-    fn exact_extremum(
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        if all_relative(inputs) {
-            return Self::relative_fold(op, inputs, stats, false, "exact_extremum_relative");
-        }
-        let metric = inputs[0].spec.accuracy_metric;
-        if inputs
-            .iter()
-            .any(|g| g.spec.accuracy_metric != AccuracyMetric::ABSOLUTE)
-        {
-            return Err(AccuracyError::UnsupportedComposition {
-                operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
-                local_metric: None,
-                reason: "exact max/min requires absolute-error input guarantees".into(),
-            });
-        }
-        let mut provenance = Vec::new();
-        let count = row_count(stats, &mut provenance);
-        let exact_local = AccuracyGuarantee::exact("ExactAggregate(Max)");
-        provenance.extend(composed_provenance(
-            op,
-            inputs,
-            &exact_local,
-            "exact_extremum_union_bound",
-        ));
-        Ok(AccuracyGuarantee::new(
-            metric,
-            BoundExpr::Max {
-                terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
-            },
-            ProbabilityExpr::Scaled {
-                count,
-                inner: Box::new(ProbabilityExpr::UnionBound {
-                    terms: inputs
-                        .iter()
-                        .map(|g| g.spec.failure_probability.clone())
-                        .collect(),
-                }),
-            },
-            provenance,
-        ))
-    }
-
-    /// An exact sum, mean, max or min of values each within relative `α_i`
-    /// is within relative `max α_i`. A max or min holds whatever the signs;
-    /// a sum or mean only over non-negative values (no cancellation), so
-    /// with `needs_sign` and the sign unknown the bound is the symbolic
-    /// [`VALUES_NON_NEGATIVE`]. The failure probability is the union bound
-    /// over every input row.
-    fn relative_fold(
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        stats: &PropagationStats,
-        needs_sign: bool,
-        rule: &str,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        if needs_sign && stats.values_non_negative == Some(false) {
-            return Err(AccuracyError::UnsupportedComposition {
-                operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
-                local_metric: None,
-                reason: "relative error of a sum over signed values is unbounded".into(),
-            });
-        }
-        let mut provenance = Vec::new();
-        let count = row_count(stats, &mut provenance);
-        let bound = if needs_sign && stats.values_non_negative.is_none() {
-            match &stats.sign_statistic {
-                // The sign of one metric's samples: the bound, gated on it.
-                Some(statistic) => {
+                    input.spec.accuracy_metric
+                ),
+            })?;
+        if let BoundExpr::Product { factors } = &absolute {
+            for f in factors {
+                if let BoundExpr::Unknown { statistic } = f {
                     provenance.push(GuaranteeSource::UnavailableStatistic {
                         statistic: statistic.clone(),
                     });
-                    BoundExpr::Product {
-                        factors: vec![
-                            BoundExpr::Max {
-                                terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
-                            },
-                            BoundExpr::Unknown {
-                                statistic: statistic.clone(),
-                            },
-                        ],
-                    }
-                }
-                None => {
-                    provenance.push(GuaranteeSource::UnavailableStatistic {
-                        statistic: VALUES_NON_NEGATIVE.into(),
-                    });
-                    BoundExpr::Unknown {
-                        statistic: VALUES_NON_NEGATIVE.into(),
-                    }
                 }
             }
-        } else {
-            BoundExpr::Max {
-                terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
-            }
-        };
-        provenance.extend(composed_provenance(
-            op,
-            inputs,
-            &AccuracyGuarantee::exact("exact aggregation"),
-            rule,
-        ));
-        Ok(AccuracyGuarantee::new(
-            AccuracyMetric::Relative,
-            bound,
-            ProbabilityExpr::Scaled {
-                count,
-                inner: Box::new(ProbabilityExpr::UnionBound {
-                    terms: inputs
-                        .iter()
-                        .map(|g| g.spec.failure_probability.clone())
-                        .collect(),
-                }),
-            },
-            provenance,
-        ))
+        }
+        terms.push(absolute);
+        deltas.push(input.spec.failure_probability.clone());
     }
+    let count = row_count(stats, &mut provenance);
+    let exact_local = AccuracyGuarantee::exact("ExactAggregate(Sum)");
+    provenance.extend(composed_provenance(
+        op,
+        inputs,
+        &exact_local,
+        "exact_sum_union_bound",
+    ));
+    Ok(AccuracyGuarantee::new(
+        AccuracyMetric::ABSOLUTE,
+        BoundExpr::Product {
+            factors: vec![count.clone(), BoundExpr::Sum { terms }],
+        },
+        ProbabilityExpr::Scaled {
+            count,
+            inner: Box::new(ProbabilityExpr::UnionBound { terms: deltas }),
+        },
+        provenance,
+    ))
+}
 
-    /// Exact division of two relative-value estimates. If the numerator is
-    /// within `a` and the denominator within `b`, their ratio is within
-    /// `(a + b) / (1 - b)`. DDSketch supplies those deterministic bounds.
-    fn exact_division(
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
+/// Exact arithmetic mean over values with absolute-error guarantees.
+/// Averaging cannot amplify the largest absolute input error. The event
+/// that every row respects its bound is still protected conservatively
+/// by a union bound over the input row count.
+fn exact_average(
+    op: &CompositionOperator,
+    inputs: &[AccuracyGuarantee],
+    stats: &PropagationStats,
+) -> Result<AccuracyGuarantee, AccuracyError> {
+    if all_relative(inputs) {
+        return relative_fold(op, inputs, stats, true, "exact_average_relative");
+    }
+    if inputs
+        .iter()
+        .any(|input| input.spec.accuracy_metric != AccuracyMetric::ABSOLUTE)
+    {
+        return Err(AccuracyError::UnsupportedComposition {
             operator: op.clone(),
             input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
             local_metric: None,
-            reason,
-        };
-        if inputs.len() != 2
-            || inputs.iter().any(|input| {
-                input.spec.accuracy_metric != AccuracyMetric::Relative && !input.is_exact()
-            })
-        {
-            return Err(unsupported(
-                "division needs two relative-value or exact guarantees".into(),
-            ));
-        }
-        let Some(numerator) = inputs[0].spec.error.evaluate() else {
-            return Err(unsupported(
-                "numerator relative bound is unavailable".into(),
-            ));
-        };
-        let Some(denominator) = inputs[1].spec.error.evaluate() else {
-            return Err(unsupported(
-                "denominator relative bound is unavailable".into(),
-            ));
-        };
-        if !(numerator.is_finite()
-            && denominator.is_finite()
-            && numerator >= 0.0
-            && (0.0..1.0).contains(&denominator))
-        {
-            return Err(unsupported(
-                "division needs finite non-negative bounds and a denominator bound below one"
-                    .into(),
-            ));
-        }
-        let Some(domains) = &stats.division_operand_domains else {
-            return Err(unsupported(
-                "division needs finite operand domains and a nonzero denominator proof".into(),
-            ));
-        };
-        for domain in domains {
-            if !domain.lower.is_finite()
-                || !domain.upper.is_finite()
-                || domain.lower > domain.upper
-                || domain.contract.trim().is_empty()
-            {
-                return Err(unsupported("invalid division operand domain".into()));
+            reason: "exact average requires absolute-error input guarantees".into(),
+        });
+    }
+    let mut provenance = Vec::new();
+    let count = row_count(stats, &mut provenance);
+    let exact_local = AccuracyGuarantee::exact("ExactAggregate(Average)");
+    provenance.extend(composed_provenance(
+        op,
+        inputs,
+        &exact_local,
+        "exact_average_union_bound",
+    ));
+    Ok(AccuracyGuarantee::new(
+        AccuracyMetric::ABSOLUTE,
+        BoundExpr::Max {
+            terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
+        },
+        ProbabilityExpr::Scaled {
+            count,
+            inner: Box::new(ProbabilityExpr::UnionBound {
+                terms: inputs
+                    .iter()
+                    .map(|g| g.spec.failure_probability.clone())
+                    .collect(),
+            }),
+        },
+        provenance,
+    ))
+}
+
+/// Exact `max`/`min` over approximate inputs of one shared metric: the
+/// returned value's error is at most the largest input bound (order
+/// statistics are monotone under a uniform perturbation), with
+/// probability by the union bound over every input row. This bounds the
+/// returned *value*; it does not identify the true winning key.
+fn exact_extremum(
+    op: &CompositionOperator,
+    inputs: &[AccuracyGuarantee],
+    stats: &PropagationStats,
+) -> Result<AccuracyGuarantee, AccuracyError> {
+    if all_relative(inputs) {
+        return relative_fold(op, inputs, stats, false, "exact_extremum_relative");
+    }
+    let metric = inputs[0].spec.accuracy_metric;
+    if inputs
+        .iter()
+        .any(|g| g.spec.accuracy_metric != AccuracyMetric::ABSOLUTE)
+    {
+        return Err(AccuracyError::UnsupportedComposition {
+            operator: op.clone(),
+            input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
+            local_metric: None,
+            reason: "exact max/min requires absolute-error input guarantees".into(),
+        });
+    }
+    let mut provenance = Vec::new();
+    let count = row_count(stats, &mut provenance);
+    let exact_local = AccuracyGuarantee::exact("ExactAggregate(Max)");
+    provenance.extend(composed_provenance(
+        op,
+        inputs,
+        &exact_local,
+        "exact_extremum_union_bound",
+    ));
+    Ok(AccuracyGuarantee::new(
+        metric,
+        BoundExpr::Max {
+            terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
+        },
+        ProbabilityExpr::Scaled {
+            count,
+            inner: Box::new(ProbabilityExpr::UnionBound {
+                terms: inputs
+                    .iter()
+                    .map(|g| g.spec.failure_probability.clone())
+                    .collect(),
+            }),
+        },
+        provenance,
+    ))
+}
+
+/// An exact sum, mean, max or min of values each within relative `α_i`
+/// is within relative `max α_i`. A max or min holds whatever the signs;
+/// a sum or mean only over non-negative values (no cancellation), so
+/// with `needs_sign` and the sign unknown the bound is the symbolic
+/// [`VALUES_NON_NEGATIVE`]. The failure probability is the union bound
+/// over every input row.
+fn relative_fold(
+    op: &CompositionOperator,
+    inputs: &[AccuracyGuarantee],
+    stats: &PropagationStats,
+    needs_sign: bool,
+    rule: &str,
+) -> Result<AccuracyGuarantee, AccuracyError> {
+    if needs_sign && stats.values_non_negative == Some(false) {
+        return Err(AccuracyError::UnsupportedComposition {
+            operator: op.clone(),
+            input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
+            local_metric: None,
+            reason: "relative error of a sum over signed values is unbounded".into(),
+        });
+    }
+    let mut provenance = Vec::new();
+    let count = row_count(stats, &mut provenance);
+    let bound = if needs_sign && stats.values_non_negative.is_none() {
+        match &stats.sign_statistic {
+            // The sign of one metric's samples: the bound, gated on it.
+            Some(statistic) => {
+                provenance.push(GuaranteeSource::UnavailableStatistic {
+                    statistic: statistic.clone(),
+                });
+                BoundExpr::Product {
+                    factors: vec![
+                        BoundExpr::Max {
+                            terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
+                        },
+                        BoundExpr::Unknown {
+                            statistic: statistic.clone(),
+                        },
+                    ],
+                }
+            }
+            None => {
+                provenance.push(GuaranteeSource::UnavailableStatistic {
+                    statistic: VALUES_NON_NEGATIVE.into(),
+                });
+                BoundExpr::Unknown {
+                    statistic: VALUES_NON_NEGATIVE.into(),
+                }
             }
         }
-        if domains[1].lower <= 0.0 && domains[1].upper >= 0.0 {
-            return Err(unsupported("denominator domain includes zero".into()));
+    } else {
+        BoundExpr::Max {
+            terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
         }
-        // Keep the true and perturbed quotients finite and out of the
-        // subnormal range, where Float64 division loses relative accuracy.
-        // A nonzero numerator interval touching zero cannot prove this.
-        let num = &domains[0];
-        if num.lower <= 0.0 && num.upper >= 0.0 && (num.lower != 0.0 || num.upper != 0.0) {
-            return Err(unsupported(
-                "numerator domain cannot exclude underflow near zero".into(),
-            ));
+    };
+    provenance.extend(composed_provenance(
+        op,
+        inputs,
+        &AccuracyGuarantee::exact("exact aggregation"),
+        rule,
+    ));
+    Ok(AccuracyGuarantee::new(
+        AccuracyMetric::Relative,
+        bound,
+        ProbabilityExpr::Scaled {
+            count,
+            inner: Box::new(ProbabilityExpr::UnionBound {
+                terms: inputs
+                    .iter()
+                    .map(|g| g.spec.failure_probability.clone())
+                    .collect(),
+            }),
+        },
+        provenance,
+    ))
+}
+
+/// Exact division of two relative-value estimates. If the numerator is
+/// within `a` and the denominator within `b`, their ratio is within
+/// `(a + b) / (1 - b)`. DDSketch supplies those deterministic bounds.
+fn exact_division(
+    op: &CompositionOperator,
+    inputs: &[AccuracyGuarantee],
+    stats: &PropagationStats,
+) -> Result<AccuracyGuarantee, AccuracyError> {
+    let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
+        operator: op.clone(),
+        input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
+        local_metric: None,
+        reason,
+    };
+    if inputs.len() != 2
+        || inputs.iter().any(|input| {
+            input.spec.accuracy_metric != AccuracyMetric::Relative && !input.is_exact()
+        })
+    {
+        return Err(unsupported(
+            "division needs two relative-value or exact guarantees".into(),
+        ));
+    }
+    let Some(numerator) = inputs[0].spec.error.evaluate() else {
+        return Err(unsupported(
+            "numerator relative bound is unavailable".into(),
+        ));
+    };
+    let Some(denominator) = inputs[1].spec.error.evaluate() else {
+        return Err(unsupported(
+            "denominator relative bound is unavailable".into(),
+        ));
+    };
+    if !(numerator.is_finite()
+        && denominator.is_finite()
+        && numerator >= 0.0
+        && (0.0..1.0).contains(&denominator))
+    {
+        return Err(unsupported(
+            "division needs finite non-negative bounds and a denominator bound below one".into(),
+        ));
+    }
+    let Some(domains) = &stats.division_operand_domains else {
+        return Err(unsupported(
+            "division needs finite operand domains and a nonzero denominator proof".into(),
+        ));
+    };
+    for domain in domains {
+        if !domain.lower.is_finite()
+            || !domain.upper.is_finite()
+            || domain.lower > domain.upper
+            || domain.contract.trim().is_empty()
+        {
+            return Err(unsupported("invalid division operand domain".into()));
         }
-        for n in [num.lower, num.upper] {
-            for d in [domains[1].lower, domains[1].upper] {
-                for nf in [1.0 - numerator, 1.0 + numerator] {
-                    for df in [1.0 - denominator, 1.0 + denominator] {
-                        let quotient = (n * nf) / (d * df);
-                        if !(n * nf).is_finite()
-                            || !(d * df).is_finite()
-                            || !quotient.is_finite()
-                            || (n != 0.0 && quotient.abs() < f64::MIN_POSITIVE)
-                        {
-                            return Err(unsupported(
-                                "division may overflow or underflow Float64".into(),
-                            ));
-                        }
+    }
+    if domains[1].lower <= 0.0 && domains[1].upper >= 0.0 {
+        return Err(unsupported("denominator domain includes zero".into()));
+    }
+    // Keep the true and perturbed quotients finite and out of the
+    // subnormal range, where Float64 division loses relative accuracy.
+    // A nonzero numerator interval touching zero cannot prove this.
+    let num = &domains[0];
+    if num.lower <= 0.0 && num.upper >= 0.0 && (num.lower != 0.0 || num.upper != 0.0) {
+        return Err(unsupported(
+            "numerator domain cannot exclude underflow near zero".into(),
+        ));
+    }
+    for n in [num.lower, num.upper] {
+        for d in [domains[1].lower, domains[1].upper] {
+            for nf in [1.0 - numerator, 1.0 + numerator] {
+                for df in [1.0 - denominator, 1.0 + denominator] {
+                    let quotient = (n * nf) / (d * df);
+                    if !(n * nf).is_finite()
+                        || !(d * df).is_finite()
+                        || !quotient.is_finite()
+                        || (n != 0.0 && quotient.abs() < f64::MIN_POSITIVE)
+                    {
+                        return Err(unsupported(
+                            "division may overflow or underflow Float64".into(),
+                        ));
                     }
                 }
             }
         }
-        Ok(AccuracyGuarantee::new(
-            AccuracyMetric::Relative,
-            BoundExpr::Constant {
-                value: (numerator + denominator) / (1.0 - denominator),
-            },
-            ProbabilityExpr::UnionBound {
-                terms: inputs
-                    .iter()
-                    .map(|input| input.spec.failure_probability.clone())
-                    .collect(),
-            },
-            inputs
-                .iter()
-                .enumerate()
-                .map(|(input_index, guarantee)| GuaranteeSource::ChildGuarantee {
-                    input_index,
-                    guarantee: Box::new(guarantee.clone()),
-                })
-                .chain(domains.iter().enumerate().map(|(input_index, domain)| {
-                    GuaranteeSource::InputValueDomain {
-                        input_index,
-                        lower: domain.lower,
-                        upper: domain.upper,
-                        max_samples: domain.max_samples,
-                        contract: domain.contract.clone(),
-                    }
-                }))
-                .chain(std::iter::once(GuaranteeSource::CompositionStep {
-                    operator: op.clone(),
-                    rule: "relative_division".into(),
-                }))
-                .collect(),
-        ))
     }
+    Ok(AccuracyGuarantee::new(
+        AccuracyMetric::Relative,
+        BoundExpr::Constant {
+            value: (numerator + denominator) / (1.0 - denominator),
+        },
+        ProbabilityExpr::UnionBound {
+            terms: inputs
+                .iter()
+                .map(|input| input.spec.failure_probability.clone())
+                .collect(),
+        },
+        inputs
+            .iter()
+            .enumerate()
+            .map(|(input_index, guarantee)| GuaranteeSource::ChildGuarantee {
+                input_index,
+                guarantee: Box::new(guarantee.clone()),
+            })
+            .chain(domains.iter().enumerate().map(|(input_index, domain)| {
+                GuaranteeSource::InputValueDomain {
+                    input_index,
+                    lower: domain.lower,
+                    upper: domain.upper,
+                    max_samples: domain.max_samples,
+                    contract: domain.contract.clone(),
+                }
+            }))
+            .chain(std::iter::once(GuaranteeSource::CompositionStep {
+                operator: op.clone(),
+                rule: "relative_division".into(),
+            }))
+            .collect(),
+    ))
 }
 
 /// Whether `guarantee` is a sketch's distinct-count estimate.
@@ -697,7 +694,7 @@ fn composed_provenance(
     provenance
 }
 
-pub(super) fn propagate(
+pub fn propagate(
     op: &CompositionOperator,
     inputs: &[AccuracyGuarantee],
     local: Option<&AccuracyGuarantee>,
@@ -806,12 +803,7 @@ pub(super) fn propagate(
                 ));
             }
             match local.spec.accuracy_metric {
-                AccuracyMetric::ABSOLUTE => Ok(DefaultAccuracyModel::additive(
-                    op,
-                    inputs,
-                    local,
-                    "additive_union_bound",
-                )),
+                AccuracyMetric::ABSOLUTE => Ok(additive(op, inputs, local, "additive_union_bound")),
                 AccuracyMetric::Relative => {
                     if stats.values_non_negative == Some(false) {
                         return Err(unsupported(
@@ -840,7 +832,7 @@ pub(super) fn propagate(
                             provenance,
                         ));
                     }
-                    Ok(DefaultAccuracyModel::multiplicative(op, inputs, local))
+                    Ok(multiplicative(op, inputs, local))
                 }
                 AccuracyMetric::Rank
                 | AccuracyMetric::ABSOLUTE_STREAM_L1
@@ -867,18 +859,12 @@ pub(super) fn propagate(
                     "Lipschitz rule needs an absolute-error local guarantee".into(),
                 ));
             }
-            Ok(DefaultAccuracyModel::lipschitz(
-                op, *constant, inputs, local,
-            ))
+            Ok(lipschitz(op, *constant, inputs, local))
         }
-        CompositionOperator::ExactSum => DefaultAccuracyModel::exact_sum(op, inputs, stats),
-        CompositionOperator::ExactAverage => DefaultAccuracyModel::exact_average(op, inputs, stats),
-        CompositionOperator::ExactExtremum => {
-            DefaultAccuracyModel::exact_extremum(op, inputs, stats)
-        }
-        CompositionOperator::ExactDivision => {
-            DefaultAccuracyModel::exact_division(op, inputs, stats)
-        }
+        CompositionOperator::ExactSum => exact_sum(op, inputs, stats),
+        CompositionOperator::ExactAverage => exact_average(op, inputs, stats),
+        CompositionOperator::ExactExtremum => exact_extremum(op, inputs, stats),
+        CompositionOperator::ExactDivision => exact_division(op, inputs, stats),
         CompositionOperator::CounterRate
         | CompositionOperator::InstantCounterRate
         | CompositionOperator::CounterIncrease => Err(unsupported(
@@ -1025,29 +1011,22 @@ mod tests {
     fn checked_division_propagates_value_bounds_and_rejects_rank_bounds() {
         let op = CompositionOperator::CheckedRelativeDivision;
         let inputs = [rel(0.01), rel(0.01)];
-        let g = DefaultAccuracyModel
-            .propagate(&op, &inputs, None, &Default::default())
-            .unwrap();
+        let g = propagate(&op, &inputs, None, &Default::default()).unwrap();
         assert!((g.spec.error.evaluate().unwrap() - 0.02 / 0.99).abs() < 1e-14);
         let mut rank = inputs[0].clone();
         rank.spec.accuracy_metric = AccuracyMetric::Rank;
-        assert!(DefaultAccuracyModel
-            .propagate(&op, &[rank.clone(), rank], None, &Default::default())
-            .is_err());
-        assert!(DefaultAccuracyModel
-            .propagate(&op, &[rel(0.01), rel(1.0)], None, &Default::default())
-            .is_err());
+        assert!(propagate(&op, &[rank.clone(), rank], None, &Default::default()).is_err());
+        assert!(propagate(&op, &[rel(0.01), rel(1.0)], None, &Default::default()).is_err());
     }
     #[test]
     fn relative_division_requires_operand_domains() {
-        assert!(DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ExactDivision,
-                &[rel(0.01), rel(0.01)],
-                None,
-                &PropagationStats::default()
-            )
-            .is_err());
+        assert!(propagate(
+            &CompositionOperator::ExactDivision,
+            &[rel(0.01), rel(0.01)],
+            None,
+            &PropagationStats::default()
+        )
+        .is_err());
     }
     #[test]
     fn relative_division_preserves_asymmetric_bound_and_domain_provenance() {
@@ -1056,14 +1035,13 @@ mod tests {
                 division_operand_domains: Some([domain(-20., -2.), denominator]),
                 ..Default::default()
             };
-            let got = DefaultAccuracyModel
-                .propagate(
-                    &CompositionOperator::ExactDivision,
-                    &[rel(0.02), rel(0.03)],
-                    None,
-                    &stats,
-                )
-                .unwrap();
+            let got = propagate(
+                &CompositionOperator::ExactDivision,
+                &[rel(0.02), rel(0.03)],
+                None,
+                &stats,
+            )
+            .unwrap();
             assert!((got.spec.error.evaluate().unwrap() - 0.05 / 0.97).abs() < 1e-14);
             assert_eq!(got.spec.failure_probability.evaluate(), Some(0.));
             assert_eq!(
@@ -1089,55 +1067,51 @@ mod tests {
                 division_operand_domains: Some(domains),
                 ..Default::default()
             };
-            assert!(DefaultAccuracyModel
-                .propagate(
-                    &CompositionOperator::ExactDivision,
-                    &[rel(0.01), rel(0.01)],
-                    None,
-                    &stats
-                )
-                .is_err());
+            assert!(propagate(
+                &CompositionOperator::ExactDivision,
+                &[rel(0.01), rel(0.01)],
+                None,
+                &stats
+            )
+            .is_err());
         }
         let stats = PropagationStats {
             division_operand_domains: Some([domain(1., 2.), domain(1., 2.)]),
             ..Default::default()
         };
         for bound in [1., f64::NAN, f64::INFINITY, -0.1] {
-            assert!(DefaultAccuracyModel
-                .propagate(
-                    &CompositionOperator::ExactDivision,
-                    &[rel(0.01), rel(bound)],
-                    None,
-                    &stats
-                )
-                .is_err());
+            assert!(propagate(
+                &CompositionOperator::ExactDivision,
+                &[rel(0.01), rel(bound)],
+                None,
+                &stats
+            )
+            .is_err());
         }
     }
     #[test]
     fn exact_child_contributes_zero_error() {
         let local = abs(0.05, 0.01);
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ApproximateAggregate,
-                &[AccuracyGuarantee::exact("sum")],
-                Some(&local),
-                &PropagationStats::default(),
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::ApproximateAggregate,
+            &[AccuracyGuarantee::exact("sum")],
+            Some(&local),
+            &PropagationStats::default(),
+        )
+        .unwrap();
         assert_eq!(out.spec.error.evaluate(), Some(0.05));
         assert_eq!(out.spec.failure_probability.evaluate(), Some(0.01));
         assert_eq!(out.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
     }
     #[test]
     fn additive_bounds_and_delta_union_bound_compose() {
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ApproximateAggregate,
-                &[abs(0.02, 0.01)],
-                Some(&abs(0.03, 0.02)),
-                &PropagationStats::default(),
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::ApproximateAggregate,
+            &[abs(0.02, 0.01)],
+            Some(&abs(0.03, 0.02)),
+            &PropagationStats::default(),
+        )
+        .unwrap();
         assert!((out.spec.error.evaluate().unwrap() - 0.05).abs() < 1e-12);
         // Union bound, not 1 − (1−0.01)(1−0.02) = 0.0298.
         assert!((out.spec.failure_probability.evaluate().unwrap() - 0.03).abs() < 1e-12);
@@ -1152,30 +1126,28 @@ mod tests {
             values_non_negative: Some(true),
             ..Default::default()
         };
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ApproximateAggregate,
-                &[rel(0.1)],
-                Some(&rel(0.2)),
-                &stats,
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::ApproximateAggregate,
+            &[rel(0.1)],
+            Some(&rel(0.2)),
+            &stats,
+        )
+        .unwrap();
         // 0.1 + 0.2 + 0.1·0.2 = 0.32, not 0.3.
         assert!((out.spec.error.evaluate().unwrap() - 0.32).abs() < 1e-12);
         assert_eq!(out.spec.accuracy_metric, AccuracyMetric::Relative);
     }
     #[test]
     fn relative_error_without_sign_knowledge_remains_symbolic() {
-        let unknown = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ApproximateAggregate,
-                &[rel(0.1)],
-                Some(&rel(0.2)),
-                &PropagationStats::default(),
-            )
-            .unwrap();
+        let unknown = propagate(
+            &CompositionOperator::ApproximateAggregate,
+            &[rel(0.1)],
+            Some(&rel(0.2)),
+            &PropagationStats::default(),
+        )
+        .unwrap();
         assert!(unknown.has_unknown());
-        let signed = DefaultAccuracyModel.propagate(
+        let signed = propagate(
             &CompositionOperator::ApproximateAggregate,
             &[rel(0.1)],
             Some(&rel(0.2)),
@@ -1189,14 +1161,13 @@ mod tests {
     #[test]
     fn incompatible_metrics_are_rejected_not_treated_as_exact() {
         // HLL cardinality error under a CMS frequency guarantee.
-        let err = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ApproximateAggregate,
-                &[with_metric(AccuracyMetric::Relative, 0.01)],
-                Some(&with_metric(AccuracyMetric::ABSOLUTE_STREAM_L1, 0.01)),
-                &PropagationStats::default(),
-            )
-            .unwrap_err();
+        let err = propagate(
+            &CompositionOperator::ApproximateAggregate,
+            &[with_metric(AccuracyMetric::Relative, 0.01)],
+            Some(&with_metric(AccuracyMetric::ABSOLUTE_STREAM_L1, 0.01)),
+            &PropagationStats::default(),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             AccuracyError::UnsupportedComposition {
@@ -1206,51 +1177,47 @@ mod tests {
             } if input_metrics == vec![AccuracyMetric::Relative]
         ));
         // Quantile rank error under value-additive logic.
-        let err = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ApproximateAggregate,
-                &[with_metric(AccuracyMetric::Rank, 0.01)],
-                Some(&abs(0.01, 0.0)),
-                &PropagationStats::default(),
-            )
-            .unwrap_err();
+        let err = propagate(
+            &CompositionOperator::ApproximateAggregate,
+            &[with_metric(AccuracyMetric::Rank, 0.01)],
+            Some(&abs(0.01, 0.0)),
+            &PropagationStats::default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, AccuracyError::UnsupportedComposition { .. }));
     }
     #[test]
     fn same_metric_rank_over_rank_has_no_registered_rule() {
-        let err = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ApproximateAggregate,
-                &[with_metric(AccuracyMetric::Rank, 0.01)],
-                Some(&with_metric(AccuracyMetric::Rank, 0.01)),
-                &PropagationStats::default(),
-            )
-            .unwrap_err();
+        let err = propagate(
+            &CompositionOperator::ApproximateAggregate,
+            &[with_metric(AccuracyMetric::Rank, 0.01)],
+            Some(&with_metric(AccuracyMetric::Rank, 0.01)),
+            &PropagationStats::default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, AccuracyError::UnsupportedComposition { .. }));
     }
     #[test]
     fn lipschitz_scales_the_input_bound() {
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::Lipschitz { constant: 3.0 },
-                &[abs(0.1, 0.01)],
-                Some(&abs(0.05, 0.02)),
-                &PropagationStats::default(),
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::Lipschitz { constant: 3.0 },
+            &[abs(0.1, 0.01)],
+            Some(&abs(0.05, 0.02)),
+            &PropagationStats::default(),
+        )
+        .unwrap();
         assert!((out.spec.error.evaluate().unwrap() - 0.35).abs() < 1e-12);
         assert!((out.spec.failure_probability.evaluate().unwrap() - 0.03).abs() < 1e-12);
     }
     #[test]
     fn exact_sum_over_approximate_sums_bounds_and_keeps_unknown_row_count_unknown() {
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ExactSum,
-                &[abs(0.1, 0.01)],
-                None,
-                &PropagationStats::default(),
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::ExactSum,
+            &[abs(0.1, 0.01)],
+            None,
+            &PropagationStats::default(),
+        )
+        .unwrap();
         assert_eq!(out.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
         assert_eq!(
             out.spec.error.evaluate(),
@@ -1261,20 +1228,19 @@ mod tests {
             s,
             GuaranteeSource::UnavailableStatistic { statistic } if statistic == "input_row_count"
         )));
-        assert!(!DefaultAccuracyModel.satisfies(&out, &AccuracyTarget::max_error(1.0)));
+        assert!(!satisfies(&out, &AccuracyTarget::max_error(1.0)));
 
         let known = PropagationStats {
             input_row_count: Some(4),
             ..Default::default()
         };
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ExactSum,
-                &[abs(0.1, 0.01)],
-                None,
-                &known,
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::ExactSum,
+            &[abs(0.1, 0.01)],
+            None,
+            &known,
+        )
+        .unwrap();
         assert!((out.spec.error.evaluate().unwrap() - 0.4).abs() < 1e-12);
         assert!((out.spec.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
     }
@@ -1284,14 +1250,13 @@ mod tests {
             input_row_count: Some(2),
             ..Default::default()
         };
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ExactExtremum,
-                &[abs(0.1, 0.01), abs(0.3, 0.01)],
-                None,
-                &known,
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::ExactExtremum,
+            &[abs(0.1, 0.01), abs(0.3, 0.01)],
+            None,
+            &known,
+        )
+        .unwrap();
         assert!((out.spec.error.evaluate().unwrap() - 0.3).abs() < 1e-12);
         assert!((out.spec.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
     }
@@ -1299,17 +1264,16 @@ mod tests {
     /// `max α_i` of the true extremum, whatever the signs.
     #[test]
     fn exact_extremum_keeps_a_relative_value_bound() {
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ExactExtremum,
-                &[rel(0.01), rel(0.02)],
-                None,
-                &PropagationStats {
-                    input_row_count: Some(3),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::ExactExtremum,
+            &[rel(0.01), rel(0.02)],
+            None,
+            &PropagationStats {
+                input_row_count: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(out.spec.accuracy_metric, AccuracyMetric::Relative);
         assert_eq!(out.spec.error.evaluate(), Some(0.02));
         assert_eq!(out.spec.failure_probability.evaluate(), Some(0.0));
@@ -1324,7 +1288,7 @@ mod tests {
             CompositionOperator::ExactAverage,
         ] {
             let with = |values_non_negative| {
-                DefaultAccuracyModel.propagate(
+                propagate(
                     &op,
                     &[rel(0.01)],
                     None,
@@ -1362,18 +1326,17 @@ mod tests {
             CompositionOperator::ExactSum,
             CompositionOperator::ExactAverage,
         ] {
-            let out = DefaultAccuracyModel
-                .propagate(
-                    &op,
-                    &[rel(0.01)],
-                    None,
-                    &PropagationStats {
-                        sign_statistic: Some(statistic.clone()),
-                        input_row_count: Some(3),
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
+            let out = propagate(
+                &op,
+                &[rel(0.01)],
+                None,
+                &PropagationStats {
+                    sign_statistic: Some(statistic.clone()),
+                    input_row_count: Some(3),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             assert_eq!(out.spec.error.evaluate(), None, "{op:?}");
             let proven = out.bind(&|s| (s == statistic).then_some(1.0));
             assert_eq!(proven.spec.error.evaluate(), Some(0.01), "{op:?}");
@@ -1384,51 +1347,48 @@ mod tests {
 
     #[test]
     fn exact_average_has_its_own_absolute_error_rule() {
-        let out = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::ExactAverage,
-                &[abs(0.25, 0.01)],
-                None,
-                &PropagationStats {
-                    input_row_count: Some(4),
-                    ..PropagationStats::default()
-                },
-            )
-            .unwrap();
+        let out = propagate(
+            &CompositionOperator::ExactAverage,
+            &[abs(0.25, 0.01)],
+            None,
+            &PropagationStats {
+                input_row_count: Some(4),
+                ..PropagationStats::default()
+            },
+        )
+        .unwrap();
         assert_eq!(out.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
         assert_eq!(out.spec.error.evaluate(), Some(0.25));
         assert_eq!(out.spec.failure_probability.evaluate(), Some(0.04));
     }
     #[test]
     fn topk_selection_requires_a_separated_margin_certificate() {
-        let unknown = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::TopKSelection,
-                &[abs(0.1, 0.01)],
-                None,
-                &PropagationStats::default(),
-            )
-            .unwrap();
+        let unknown = propagate(
+            &CompositionOperator::TopKSelection,
+            &[abs(0.1, 0.01)],
+            None,
+            &PropagationStats::default(),
+        )
+        .unwrap();
         assert!(unknown.has_unknown());
 
-        let certified = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::TopKSelection,
-                &[abs(0.1, 0.01)],
-                None,
-                &PropagationStats {
-                    topk_selected_lower_bound: Some(101.0),
-                    topk_excluded_upper_bound: Some(100.0),
-                    topk_interval_failure_probability: Some(0.005),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let certified = propagate(
+            &CompositionOperator::TopKSelection,
+            &[abs(0.1, 0.01)],
+            None,
+            &PropagationStats {
+                topk_selected_lower_bound: Some(101.0),
+                topk_excluded_upper_bound: Some(100.0),
+                topk_interval_failure_probability: Some(0.005),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(certified.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
         assert_eq!(certified.spec.error.evaluate(), Some(0.1));
         assert_eq!(certified.spec.failure_probability.evaluate(), Some(0.005));
 
-        let overlapping = DefaultAccuracyModel.propagate(
+        let overlapping = propagate(
             &CompositionOperator::TopKSelection,
             &[abs(0.1, 0.01)],
             None,
@@ -1441,22 +1401,21 @@ mod tests {
         );
         assert!(overlapping.is_err());
 
-        let partial = DefaultAccuracyModel
-            .propagate(
-                &CompositionOperator::TopKSelection,
-                &[abs(0.1, 0.01)],
-                None,
-                &PropagationStats {
-                    topk_selected_lower_bound: Some(101.0),
-                    topk_interval_failure_probability: Some(0.005),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let partial = propagate(
+            &CompositionOperator::TopKSelection,
+            &[abs(0.1, 0.01)],
+            None,
+            &PropagationStats {
+                topk_selected_lower_bound: Some(101.0),
+                topk_interval_failure_probability: Some(0.005),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(partial.has_unknown());
         assert_eq!(partial.spec.failure_probability.evaluate(), Some(0.005));
 
-        let invalid_partial = DefaultAccuracyModel.propagate(
+        let invalid_partial = propagate(
             &CompositionOperator::TopKSelection,
             &[abs(0.1, 0.01)],
             None,

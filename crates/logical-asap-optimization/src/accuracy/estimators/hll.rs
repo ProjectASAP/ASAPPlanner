@@ -476,22 +476,21 @@ mod tests {
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = default_cardinality();
         let params = default_size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);
-        let g = DefaultAccuracyModel
-            .local_guarantee(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::Hll, params),
-                    GroupingStrategy::default(),
-                ),
-                &SketchStatistic::Cardinality,
-            )
-            .unwrap();
+        let g = local_guarantee(
+            &FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::Hll, params),
+                GroupingStrategy::default(),
+            ),
+            &SketchStatistic::Cardinality,
+        )
+        .unwrap();
         assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative);
         assert_eq!(g.spec.failure_probability.evaluate(), None);
-        assert!(DefaultAccuracyModel.satisfies(
+        assert!(satisfies(
             &g,
             &AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative)
         ));
-        assert!(!DefaultAccuracyModel.satisfies(
+        assert!(!satisfies(
             &g,
             &AccuracyTarget::max_error(0.01)
                 .failure_probability(0.01)
