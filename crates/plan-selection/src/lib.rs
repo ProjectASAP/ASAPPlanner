@@ -1534,24 +1534,23 @@ fn accuracy_check(
                 {
                     format!(
                         "q{query}: the output's guarantee holds for each value, and the number \
-                     of values one evaluation returns is not bound (no declared series count \
-                     for a source a PromQL vector reads; no bound on a SQL result's groups \
-                     yet), \
-                     so it does not meet whole-result target {target:?}, and the deployment \
-                     has no evidence that it meets it"
+                         of values one evaluation returns is not bound (no declared series \
+                         count for a source a PromQL vector reads; no bound on a SQL result's \
+                         groups yet), so it does not meet whole-result target {target:?}, and \
+                         the deployment has no evidence that it meets it"
                     )
                 }
                 Some(g) => format!(
-                    "q{query}: the output guarantees a {:?} bound {:?}, failure probability {:?}, \
-                 which misses target {target:?}, and the deployment has no evidence that it \
-                 meets it",
+                    "q{query}: the output guarantees a {:?} bound {:?}, failure probability \
+                     {:?}, which misses target {target:?}, and the deployment has no evidence \
+                     that it meets it",
                     g.spec.accuracy_metric,
                     g.spec.error.evaluate(),
                     g.spec.failure_probability.evaluate(),
                 ),
                 None => format!(
-                    "q{query}: the output has no guarantee, and the deployment has no evidence \
-                 that it meets target {target:?}"
+                    "q{query}: the output has no guarantee, and the deployment has no \
+                     evidence that it meets target {target:?}"
                 ),
             },
         ));
@@ -4246,6 +4245,87 @@ mod tests {
         .unwrap();
         for id in &summaries {
             assert!(measured.costs.contains_key(*id), "{id} is valid");
+        }
+    }
+
+    /// Deployment evidence of a large absolute error (1.0) for every output.
+    struct EveryOutputMeasuredLoose;
+
+    impl AccuracyEvidenceProvider for EveryOutputMeasuredLoose {
+        fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
+            Some(AccuracyGuarantee::new(
+                AccuracyMetric::ABSOLUTE,
+                BoundExpr::Constant { value: 1.0 },
+                ProbabilityExpr::Constant { value: 1e-6 },
+                vec![],
+            ))
+        }
+    }
+
+    /// A model that accepts every output that has no guarantee.
+    struct AcceptsEveryOutputWithoutGuarantee;
+
+    impl AccuracyModel for AcceptsEveryOutputWithoutGuarantee {
+        fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+            BuiltinAccuracyModel.satisfies(guarantee, target)
+        }
+
+        fn accepts_output_without_guarantee(
+            &self,
+            _output: &QueryRoot,
+            _target: &AccuracyTarget,
+        ) -> bool {
+            true
+        }
+    }
+
+    /// The model's hook decides only when there is no guarantee at all: an
+    /// output with no theoretical guarantee whose evidence guarantee misses
+    /// the target is rejected as `AccuracyTargetMissed`, though the hook
+    /// would accept it. Without that evidence the hook accepts it.
+    #[test]
+    fn a_missed_evidence_guarantee_is_not_overridden_by_the_hook() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        let candidates = all_candidates(
+            "quantile_over_time(0.99, m[1m]) - quantile_over_time(0.5, m[1m])",
+            &target,
+        );
+        let summaries: Vec<_> = candidates
+            .iter()
+            .filter(|c| has_summary_estimate(c))
+            .map(|c| c.id.as_str())
+            .collect();
+        assert!(!summaries.is_empty());
+        let select = |evidence: &dyn AccuracyEvidenceProvider| {
+            select_plan(
+                &candidates,
+                &[entry_with(
+                    target.clone().accuracy_metric(AccuracyMetric::ABSOLUTE),
+                    repeating(10_000),
+                )],
+                &data(),
+                PlanningModels::builtin()
+                    .with_accuracy(&AcceptsEveryOutputWithoutGuarantee)
+                    .with_evidence(evidence),
+            )
+            .unwrap()
+        };
+        let loose = select(&EveryOutputMeasuredLoose);
+        for id in &summaries {
+            let rejection = loose.rejected.iter().find(|r| r.id == *id).unwrap();
+            assert_eq!(
+                rejection.cause,
+                RejectionCause::AccuracyTargetMissed,
+                "{}",
+                rejection.reason
+            );
+        }
+        let no_evidence = select(&NoAccuracyEvidence);
+        for id in &summaries {
+            assert!(
+                no_evidence.accepted[*id][0].accepted_without_guarantee,
+                "{id}"
+            );
         }
     }
 
