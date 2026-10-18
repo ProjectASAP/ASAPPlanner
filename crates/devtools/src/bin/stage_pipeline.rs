@@ -300,12 +300,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     let out = out.ok_or("--out is required")?;
     let cluster = (cluster_memory, cluster_disk, cluster_objective.as_deref());
+    // The settings every flag below leaves at its default; the Fargate
+    // preset converts its prices at their `resource_speed`.
+    let default_settings = PlanSelectionSettings::default();
     let cost_model = match (cost_model.as_deref(), cluster) {
         (None | Some("usage-over-time"), (None, None, None)) if cluster_cores.is_none() => {
             CostModel::UsageOverTime(ResourceUnitCost::illustrative())
         }
         (Some("aws-fargate-us-east-1"), (None, None, None)) if cluster_cores.is_none() => {
-            CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1())
+            CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
+                default_settings.resource_speed,
+            ))
         }
         (Some("provisioned-capacity"), (None, None, None)) if cluster_cores.is_none() => {
             CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative())
@@ -348,7 +353,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let plan_selection = PlanSelectionSettings {
         cost_model,
         measured_operation_costs,
-        ..PlanSelectionSettings::default()
+        ..default_settings
     };
     let mut document = match (example.as_deref(), queries.is_empty()) {
         (Some(example), true) => {

@@ -325,18 +325,21 @@ impl ResourceUnitCost {
     /// ephemeral storage beyond the 20 GB included). Prices change: re-check
     /// the page before relying on them.
     ///
-    /// Conversions, at [`ResourceSpeed::illustrative`], the speed Stage 3
-    /// uses for latency (1e-6 ms per CPU operation, i.e. 1e9 operations per
-    /// core-second; 1e-7 ms per scanned byte):
+    /// `speed` is the deployment's [`PlanSelectionSettings::resource_speed`],
+    /// the speed Stage 3 uses for latency, so the CPU prices charge the core
+    /// time latency counts. At [`ResourceSpeed::illustrative`] (1e-6 ms per
+    /// CPU operation, i.e. 1e9 operations per core-second; 1e-7 ms per
+    /// scanned byte):
     ///
-    /// * `cost_per_cpu_op` = $0.000011244 per vCPU-second × 1e-9 s per
-    ///   operation = $1.1244e-14.
-    /// * `cost_per_scanned_byte` = $0.000011244 per vCPU-second × 1e-10 s
-    ///   per byte = $1.1244e-15: Fargate has no scan price, but a scan
-    ///   occupies the vCPU-seconds it bills, for the time latency charges.
+    /// * `cost_per_cpu_op` = $0.000011244 per vCPU-second ×
+    ///   `ms_per_cpu_op` / 1,000 (1e-9 s per operation) = $1.1244e-14.
+    /// * `cost_per_scanned_byte` = $0.000011244 per vCPU-second ×
+    ///   `ms_per_scanned_byte` / 1,000 (1e-10 s per byte) = $1.1244e-15:
+    ///   Fargate has no scan price, but a scan occupies the vCPU-seconds it
+    ///   bills, for the time latency charges.
     /// * `cost_per_memory_byte_second` = $0.000001235 per GB-second ÷ 2^30
-    ///   bytes per GB ≈ $1.1502e-15. Fargate sizes memory in MiB
-    ///   (1 GB = 1,024 MiB), so its GB is 2^30 bytes.
+    ///   bytes per GB ≈ $1.1502e-15: the page says "on this page GB =
+    ///   1024^3 bytes".
     /// * `cost_per_disk_byte_second` = 0: Fargate bills only ephemeral
     ///   storage configured beyond the 20 GB every task gets, which a
     ///   per-byte price cannot express, and the disk bytes plan selection
@@ -347,17 +350,21 @@ impl ResourceUnitCost {
     ///   model 2, and Fargate's per-task billing is cost model 1. Under
     ///   [`CostModel::ProvisionedCapacity`] every price this preset gives
     ///   is 0, which [`PlanSelectionSettings::validate`] refuses.
-    pub fn aws_fargate_us_east_1() -> Self {
+    ///
+    /// Not expressed by these per-second prices: the 1-minute billing
+    /// minimum per task ("Pricing is calculated per second with a 1-minute
+    /// minimum"), and the fixed task sizes a task is billed for (from 0.25
+    /// vCPU with 0.5 GB up), which round usage up to the next size.
+    pub fn aws_fargate_us_east_1(speed: ResourceSpeed) -> Self {
         // US dollars per vCPU-second and per GB-second of memory, from the
         // page above.
         const DOLLARS_PER_VCPU_SECOND: f64 = 0.000_011_244;
         const DOLLARS_PER_MEMORY_GB_SECOND: f64 = 0.000_001_235;
-        const BYTES_PER_GB: f64 = (1u64 << 30) as f64;
-        let speed = ResourceSpeed::illustrative();
+        const BYTES_PER_GIB: f64 = (1u64 << 30) as f64;
         Self {
             cost_per_cpu_op: DOLLARS_PER_VCPU_SECOND * speed.ms_per_cpu_op / 1_000.0,
             cost_per_scanned_byte: DOLLARS_PER_VCPU_SECOND * speed.ms_per_scanned_byte / 1_000.0,
-            cost_per_memory_byte_second: DOLLARS_PER_MEMORY_GB_SECOND / BYTES_PER_GB,
+            cost_per_memory_byte_second: DOLLARS_PER_MEMORY_GB_SECOND / BYTES_PER_GIB,
             cost_per_provisioned_memory_byte_second: 0.0,
             cost_per_provisioned_cpu_core_second: 0.0,
             cost_per_disk_byte_second: 0.0,
@@ -3260,13 +3267,14 @@ mod tests {
     use asap_types::workload::{DataArrival, MetricType, SourceFacts};
 
     /// The AWS Fargate preset holds the page's prices converted as its doc
-    /// says: per vCPU-second × seconds per operation (1e-9) or per scanned
-    /// byte (1e-10), per GB-second ÷ 2^30; disk and the provisioned prices
-    /// 0. It validates under cost model 1 and is refused under cost model
-    /// 2, where every price it gives is 0.
+    /// says at the given speed: per vCPU-second × seconds per operation or
+    /// per scanned byte (1e-9 and 1e-10 at the illustrative speed; twice
+    /// that at half the speed), per GB-second ÷ 2^30; disk and the
+    /// provisioned prices 0. It validates under cost model 1 and is
+    /// refused under cost model 2, where every price it gives is 0.
     #[test]
     fn aws_fargate_us_east_1_converts_the_page_prices() {
-        let preset = ResourceUnitCost::aws_fargate_us_east_1();
+        let preset = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed::illustrative());
         let close = |actual: f64, expected: f64| {
             assert!(
                 ((actual - expected) / expected).abs() < 1e-12,
@@ -3282,6 +3290,17 @@ mod tests {
         assert_eq!(preset.cost_per_disk_byte_second, 0.0);
         assert_eq!(preset.cost_per_provisioned_memory_byte_second, 0.0);
         assert_eq!(preset.cost_per_provisioned_cpu_core_second, 0.0);
+        // A core twice as slow takes twice the vCPU-seconds per operation and per byte.
+        let slower = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed {
+            ms_per_cpu_op: 2e-6,
+            ms_per_scanned_byte: 2e-7,
+        });
+        close(slower.cost_per_cpu_op, 2.2488e-14);
+        close(slower.cost_per_scanned_byte, 2.2488e-15);
+        close(
+            slower.cost_per_memory_byte_second,
+            preset.cost_per_memory_byte_second,
+        );
         let settings = |cost_model| PlanSelectionSettings {
             cost_model,
             ..PlanSelectionSettings::default()
