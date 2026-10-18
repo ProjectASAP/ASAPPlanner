@@ -1475,9 +1475,12 @@ fn accuracy_check(
                     }
                     _ => String::new(),
                 };
-                // The executor cannot run Count-Min over weights not proven
-                // non-negative, so this rejects the plan whatever the
-                // deployment's accuracy model accepts.
+                // Count-Min (plain, CmsWithHeap or Hydra Count-Min) over
+                // weights not proven non-negative does not run: the executor
+                // refuses CmsWithHeap and HydraCms when it builds the plan,
+                // and plain Count-Min fails at the first negative weight. So
+                // this rejects the plan whatever the deployment's accuracy
+                // model accepts.
                 return Err((
                     RejectionCause::CountMinWeightsNotProvenNonNegative,
                     format!(
@@ -1940,6 +1943,10 @@ fn domain_bound(
 
 fn family_name(family: &FieldDataType) -> String {
     match family {
+        // A shared (Hydra) structure is named by its Hydra kind, e.g. `HydraCms`.
+        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
+            format!("{kind:?}")
+        }
         FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
         FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?} accumulator"),
         other => format!("{other:?}"),
@@ -4335,6 +4342,60 @@ mod tests {
             );
             assert!(p2.cause.failed_a_check());
         }
+    }
+
+    /// `node` with every CmsWithHeap summary build replaced by a Hydra
+    /// Count-Min over the same update.
+    fn with_hydra_count_min(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        use asap_types::ir::schema::{HydraKind, HydraParams, SketchParams};
+        let mut rebuilt = node.with_new_children(with_hydra_count_min).unwrap();
+        if let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &mut rebuilt.operator {
+            if let FieldDataType::Sketch(kind, _) = family {
+                if let SketchParams::CmsWithHeap { width, depth, .. } = kind.params() {
+                    let (width, depth) = (*width, *depth);
+                    *family = FieldDataType::Sketch(
+                        SketchKind::new(SketchAlgorithm::Cms, SketchParams::Cms { width, depth }),
+                        GroupingStrategy::SharedMultiSubpopulation {
+                            kind: HydraKind::HydraCms,
+                            params: HydraParams::HydraCms {
+                                width,
+                                depth,
+                                shared_rows: depth,
+                                shared_columns: width,
+                            },
+                        },
+                    );
+                }
+            }
+        }
+        Rc::new(rebuilt)
+    }
+
+    /// A Hydra Count-Min over unproven weights is rejected by its own name:
+    /// the reason says `HydraCms`, not `Cms`.
+    #[test]
+    fn unproven_hydra_count_min_weights_name_hydra_cms() {
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
+        let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        let mut p2 = candidates().into_iter().find(|c| c.id == "P2").unwrap();
+        p2.roots = p2
+            .roots
+            .iter()
+            .map(|root| match root {
+                QueryRoot::Operator(node) => QueryRoot::Operator(with_hydra_count_min(node)),
+                other => other.clone(),
+            })
+            .collect();
+        let (cause, reason) =
+            accuracy_check(&p2, &[target], &gauge, &PlanningModels::builtin()).unwrap_err();
+        assert_eq!(cause, RejectionCause::CountMinWeightsNotProvenNonNegative);
+        assert!(
+            reason.contains("HydraCms needs non-negative update weights"),
+            "{reason}"
+        );
+        assert!(reason.contains("not declared a counter"), "{reason}");
     }
 
     /// The model's hook has priority over every guarantee. The summary

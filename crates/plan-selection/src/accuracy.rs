@@ -28,8 +28,13 @@ pub trait AccuracyModel {
     /// parent's own `local` guarantee under `op`, given the statistics
     /// plan selection bound (`stats`). `Err` is the fail-closed answer: no
     /// registered rule, or a missing input guarantee. The default is the
-    /// built-in rules (`asap_logical_asap_optimization::accuracy::composition::propagate`);
-    /// a deployment overrides it only to add a rule.
+    /// built-in rules (`asap_logical_asap_optimization::accuracy::composition::propagate`).
+    /// Stage 3 calls it only for a ratio of relative estimates with enforced
+    /// operand domains (`CompositionOperator::ExactDivision`, in its private
+    /// `domain_bound` that binds a quotient's operand-domain bound); Stage 1
+    /// composes every other
+    /// guarantee with the built-in rules, so an override has no effect
+    /// elsewhere.
     fn propagate(
         &self,
         op: &CompositionOperator,
@@ -56,9 +61,11 @@ pub trait AccuracyModel {
     /// this for every query output before any guarantee check; when it
     /// returns `true`, no guarantee or evidence check runs for that output.
     /// It does not override the executability check before it: a plan that
-    /// reads Count-Min over update weights not proven non-negative is
-    /// rejected (`RejectionCause::CountMinWeightsNotProvenNonNegative`)
-    /// whatever this returns. The default accepts
+    /// reads Count-Min (plain, CmsWithHeap or Hydra Count-Min) over update
+    /// weights not proven non-negative is rejected
+    /// (`RejectionCause::CountMinWeightsNotProvenNonNegative`) whatever this
+    /// returns, because the executor refuses CmsWithHeap and HydraCms when it
+    /// builds the plan and plain Count-Min fails at the first negative weight. The default accepts
     /// none, so Stage 3 checks the Stage 1 guarantee, then the evidence
     /// ([`AccuracyEvidenceProvider::output_guarantee`]) with
     /// [`Self::satisfies`].
