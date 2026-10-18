@@ -24,7 +24,10 @@ use crate::ir::properties::execution_data_state::{
     ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::ir::properties::guarantee::AccuracyGuarantee;
-use crate::ir::properties::timing::{data_state, is_materialization_point};
+use crate::ir::properties::timing::{
+    apply_materialization_timings_to_roots, data_state, is_materialization_point,
+    MaterializationAssignment,
+};
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::physical::materialization::Materialization;
 
@@ -186,7 +189,85 @@ impl PhysicalASAPDAGDocument {
     }
 }
 
+/// Why [`PhysicalASAPDAG::with_every_node_at_query_time`] failed.
+#[derive(Debug, Error)]
+pub enum ReferencePlanError {
+    /// Bad input: the document is not a valid physical ASAP DAG.
+    #[error("invalid physical ASAP DAG: {0}")]
+    InvalidDag(#[from] PhysicalASAPDAGValidationError),
+    /// Bad input: the plan cannot run at query time (a data-state rule of
+    /// the timing pass fails).
+    #[error("the plan does not run at query time: {0}")]
+    Timing(#[from] ExecutionDataStateError),
+}
+
 impl PhysicalASAPDAG {
+    /// This DAG's plan with nothing materialized: the same operators,
+    /// summaries and summary parameters, with every sub-DAG
+    /// `NotMaterialized` and so every node at query time (the default
+    /// [`MaterializationAssignment`]). Node ids are renumbered, and `roots`
+    /// and `scalar_roots` keep their order.
+    ///
+    /// The correctness reference of a selected plan: a deployment runtime
+    /// compares the answers of the plan it installed with the executor
+    /// running this one over raw data, which needs the raw data the
+    /// installed plan may not keep.
+    pub fn with_every_node_at_query_time(&self) -> Result<PhysicalASAPDAG, ReferencePlanError> {
+        let roots = self.untimed_query_roots()?;
+        let timed =
+            apply_materialization_timings_to_roots(&roots, &MaterializationAssignment::default())?;
+        Ok(compile_physical_asap_workload(&timed)?)
+    }
+
+    /// The IR this DAG exports, one root per query in batch order, every
+    /// node untimed and `NotMaterialized`: the inverse of
+    /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
+    fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
+        self.validate()?;
+        let by_id: HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode> =
+            self.nodes.iter().map(|node| (node.id, node)).collect();
+        let mut rebuilt: HashMap<PhysicalASAPNodeId, Rc<OperatorNode>> = HashMap::new();
+        // Children first, without recursion: `validate` rejected cycles.
+        for node in &self.nodes {
+            let mut pending = vec![(node.id, false)];
+            while let Some((id, children_done)) = pending.pop() {
+                if rebuilt.contains_key(&id) {
+                    continue;
+                }
+                let node = by_id[&id];
+                if !children_done {
+                    pending.push((id, true));
+                    pending.extend(node.payload.children().into_iter().map(|c| (*c, false)));
+                    continue;
+                }
+                let operator = node
+                    .payload
+                    .map_children(|child| Rc::clone(&rebuilt[child]));
+                let restored = OperatorNode::with_schema(operator, node.output_schema.clone())
+                    .with_guarantee(node.guarantee.clone());
+                rebuilt.insert(id, Rc::new(restored));
+            }
+        }
+        let mut operator_roots = self.roots.iter();
+        let mut scalar_roots = self.scalar_roots.iter().peekable();
+        let mut roots = Vec::with_capacity(self.roots.len() + self.scalar_roots.len());
+        for position in 0..self.roots.len() + self.scalar_roots.len() {
+            match scalar_roots.peek() {
+                Some((at, expr)) if *at == position => {
+                    roots.push(QueryRoot::Scalar(
+                        expr.map_operator_refs(&mut |id| Rc::clone(&rebuilt[id])),
+                    ));
+                    scalar_roots.next();
+                }
+                _ => {
+                    let id = operator_roots.next().expect("validated root positions");
+                    roots.push(QueryRoot::Operator(Rc::clone(&rebuilt[id])));
+                }
+            }
+        }
+        Ok(roots)
+    }
+
     pub fn validate(&self) -> Result<(), PhysicalASAPDAGValidationError> {
         let mut nodes = HashMap::new();
         for node in &self.nodes {
