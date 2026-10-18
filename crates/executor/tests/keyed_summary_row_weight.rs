@@ -236,6 +236,47 @@ fn int64_weight_column_equals_float64_column() {
         ),
         counts(2.)
     );
+    // ±2^53 is the largest Int64 magnitude with an exact Float64, so it
+    // builds: 2^53 on the Count-Min heap (non-negative weights only), -2^53
+    // on the Count Sketch heap, which takes signed weights.
+    let limit = 1i64 << 53;
+    assert_eq!(
+        top_items(
+            keyed_build(&int64, RowWeight::Column(2)),
+            int64.clone(),
+            batch(&int64, Some(Value::Int64(limit))),
+        ),
+        counts(limit as f64)
+    );
+    let count_sketch = FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::CountSketchWithHeap,
+            SketchParams::CountSketchWithHeap {
+                width: 1024,
+                depth: 3,
+                heap_size: 8,
+            },
+        ),
+        GroupingStrategy::PerSubpopulationInstance,
+    );
+    let signed = Operator::per_group_keyed_summary_build(
+        int64.clone(),
+        count_sketch,
+        vec![1],
+        RowWeight::Column(2),
+        vec![0],
+    )
+    .unwrap();
+    assert_eq!(
+        top_items(
+            signed,
+            int64.clone(),
+            batch(&int64, Some(Value::Int64(-limit)))
+        )
+        .len(),
+        3,
+        "-2^53 builds and every item is read back"
+    );
     let build = keyed_build(&int64, RowWeight::Column(2));
     let evaluation = Operator::keyed_evaluation(
         build.schema(),

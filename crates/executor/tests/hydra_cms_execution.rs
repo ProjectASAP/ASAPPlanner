@@ -404,6 +404,32 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
     assert!(error.to_string().contains("i32::MAX"), "{error}");
 }
 
+// A constant weight above `i32::MAX` (asap_sketchlib's Hydra adds `i32`
+// weights) is refused by the kernel check, not only by the constructor.
+#[test]
+fn constant_weight_above_i32_is_refused_at_validation() {
+    let update = SummaryUpdate {
+        weight: SummaryInputExpr::Constant(2_147_483_648.0),
+        weight_domain: WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::PositiveConstant,
+        },
+        ..unit_count()
+    };
+    let error = asap_executor::capability::validate_summary_kernel(&family(), &update, &grouping())
+        .expect_err("validation accepted a constant above i32::MAX");
+    assert!(
+        error.contains("HydraCms") && error.contains("i32::MAX"),
+        "{error}"
+    );
+    let error = compile_node(&summary_agg(update, None), &[input_schema()])
+        .err()
+        .expect("constant above i32::MAX compiled");
+    assert!(
+        error.to_string().contains("HydraCms") && error.to_string().contains("i32::MAX"),
+        "{error}"
+    );
+}
+
 // A weight column of unknown sign is rejected at binding: a Count-Min point
 // count only overestimates when no weight is negative.
 #[test]
