@@ -712,6 +712,31 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
     assert!(cluster["costs"]["P3-m1"]["cost_per_second"].is_null());
 }
 
+/// `--cost-model aws-fargate-us-east-1` prices Example 4 under cost model 1
+/// at AWS Fargate's us-east-1 prices, in US dollars per second: the
+/// whole-window KLL (P2) is still selected, at $2.36124e-8/s (its 2.1
+/// CPU-ms/s at $1.1244e-8 per CPU-ms; it keeps no memory), and the panes
+/// maintained at ingestion time (P3-m1) cost about $1.2262e-4/s, almost all
+/// for their 106.6 GB kept in memory.
+#[test]
+fn aws_fargate_preset_prices_example_4_in_dollars() {
+    let document = generate_example(
+        "planner-layering-3b",
+        &["--cost-model", "aws-fargate-us-east-1"],
+    );
+    let selection = &document["stage3_plan_selection"];
+    assert_eq!(selection["selected"], "P2");
+    let cost = |id: &str| selection["costs"][id]["cost_per_second"].as_f64().unwrap();
+    let close = |actual: f64, expected: f64, tolerance: f64| {
+        assert!(
+            ((actual - expected) / expected).abs() < tolerance,
+            "{actual} != {expected}"
+        )
+    };
+    close(cost("P2"), 2.36124e-8, 1e-9);
+    close(cost("P3-m1"), 1.2262e-4, 1e-4);
+}
+
 /// `--deployment-capabilities` declares the executor's capabilities, which
 /// the document's `deployment_capabilities` shows (defaults filled in;
 /// without the flag, every summary supported, raw data retained, no

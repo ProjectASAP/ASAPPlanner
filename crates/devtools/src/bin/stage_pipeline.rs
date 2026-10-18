@@ -75,7 +75,10 @@
 // `cluster-capacity` (cost model 3: no prices; `--cluster-memory-bytes`,
 // `--cluster-disk-bytes` and the optional `--cluster-cpu-cores` are hard
 // limits, and `--cluster-objective` is `lowest-latency`, `least-memory` or
-// `pareto-front`). Cost models 1 and 2 use the illustrative unit costs.
+// `pareto-front`). Cost models 1 and 2 use the illustrative unit costs;
+// `aws-fargate-us-east-1` is cost model 1 at AWS Fargate's us-east-1
+// Linux/x86 prices (`ResourceUnitCost::aws_fargate_us_east_1`, in US dollars
+// per second).
 // Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
 // cost model 3, and `front` lists the Pareto front under `pareto-front`.
 // `--deployment-capabilities '<json>'` declares what the deployment's
@@ -141,7 +144,7 @@ use serde_json::{json, Value};
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
-[--cost-model usage-over-time|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
+[--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--deployment-capabilities <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
@@ -301,6 +304,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         (None | Some("usage-over-time"), (None, None, None)) if cluster_cores.is_none() => {
             CostModel::UsageOverTime(ResourceUnitCost::illustrative())
         }
+        (Some("aws-fargate-us-east-1"), (None, None, None)) if cluster_cores.is_none() => {
+            CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1())
+        }
         (Some("provisioned-capacity"), (None, None, None)) if cluster_cores.is_none() => {
             CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative())
         }
@@ -324,7 +330,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     .into(),
             )
         }
-        (None | Some("usage-over-time" | "provisioned-capacity"), _) => {
+        (None | Some("usage-over-time" | "aws-fargate-us-east-1" | "provisioned-capacity"), _) => {
             return Err("--cluster-* flags need --cost-model cluster-capacity".into())
         }
         (Some(other), _) => return Err(format!("unknown cost model {other}").into()),

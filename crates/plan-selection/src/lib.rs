@@ -316,6 +316,53 @@ impl ResourceUnitCost {
             cost_per_disk_byte_second: 0.0,
         }
     }
+
+    /// AWS Fargate on-demand prices, US East (N. Virginia), Linux/x86, for
+    /// cost model 1 ([`CostModel::UsageOverTime`]); one cost unit is one
+    /// US dollar. Source: <https://aws.amazon.com/fargate/pricing/>, checked
+    /// 2026-10-18 (Pricing Example 1 there: $0.000011244 per vCPU-second,
+    /// $0.000001235 per GB-second of memory, $0.0000000308 per GB-second of
+    /// ephemeral storage beyond the 20 GB included). Prices change: re-check
+    /// the page before relying on them.
+    ///
+    /// Conversions, at [`ResourceSpeed::illustrative`], the speed Stage 3
+    /// uses for latency (1e-6 ms per CPU operation, i.e. 1e9 operations per
+    /// core-second; 1e-7 ms per scanned byte):
+    ///
+    /// * `cost_per_cpu_op` = $0.000011244 per vCPU-second × 1e-9 s per
+    ///   operation = $1.1244e-14.
+    /// * `cost_per_scanned_byte` = $0.000011244 per vCPU-second × 1e-10 s
+    ///   per byte = $1.1244e-15: Fargate has no scan price, but a scan
+    ///   occupies the vCPU-seconds it bills, for the time latency charges.
+    /// * `cost_per_memory_byte_second` = $0.000001235 per GB-second ÷ 2^30
+    ///   bytes per GB ≈ $1.1502e-15. Fargate sizes memory in MiB
+    ///   (1 GB = 1,024 MiB), so its GB is 2^30 bytes.
+    /// * `cost_per_disk_byte_second` = 0: Fargate bills only ephemeral
+    ///   storage configured beyond the 20 GB every task gets, which a
+    ///   per-byte price cannot express, and the disk bytes plan selection
+    ///   counts (the raw data query-time scans read) are held by the data
+    ///   source, not by the task.
+    /// * `cost_per_provisioned_memory_byte_second` and
+    ///   `cost_per_provisioned_cpu_core_second` = 0: they belong to cost
+    ///   model 2, and Fargate's per-task billing is cost model 1. Under
+    ///   [`CostModel::ProvisionedCapacity`] every price this preset gives
+    ///   is 0, which [`PlanSelectionSettings::validate`] refuses.
+    pub fn aws_fargate_us_east_1() -> Self {
+        // US dollars per vCPU-second and per GB-second of memory, from the
+        // page above.
+        const DOLLARS_PER_VCPU_SECOND: f64 = 0.000_011_244;
+        const DOLLARS_PER_MEMORY_GB_SECOND: f64 = 0.000_001_235;
+        const BYTES_PER_GB: f64 = (1u64 << 30) as f64;
+        let speed = ResourceSpeed::illustrative();
+        Self {
+            cost_per_cpu_op: DOLLARS_PER_VCPU_SECOND * speed.ms_per_cpu_op / 1_000.0,
+            cost_per_scanned_byte: DOLLARS_PER_VCPU_SECOND * speed.ms_per_scanned_byte / 1_000.0,
+            cost_per_memory_byte_second: DOLLARS_PER_MEMORY_GB_SECOND / BYTES_PER_GB,
+            cost_per_provisioned_memory_byte_second: 0.0,
+            cost_per_provisioned_cpu_core_second: 0.0,
+            cost_per_disk_byte_second: 0.0,
+        }
+    }
 }
 
 /// How fast one core does work; the latency check reads it.
@@ -3199,6 +3246,43 @@ mod tests {
     use asap_types::ir::schema::{GroupingStrategy, SketchKind};
     use asap_types::ir::{ExprSemantics, ScalarExpr};
     use asap_types::workload::{DataArrival, MetricType, SourceFacts};
+
+    /// The AWS Fargate preset holds the page's prices converted as its doc
+    /// says: per vCPU-second × seconds per operation (1e-9) or per scanned
+    /// byte (1e-10), per GB-second ÷ 2^30; disk and the provisioned prices
+    /// 0. It validates under cost model 1 and is refused under cost model
+    /// 2, where every price it gives is 0.
+    #[test]
+    fn aws_fargate_us_east_1_converts_the_page_prices() {
+        let preset = ResourceUnitCost::aws_fargate_us_east_1();
+        let close = |actual: f64, expected: f64| {
+            assert!(
+                ((actual - expected) / expected).abs() < 1e-12,
+                "{actual} != {expected}"
+            )
+        };
+        close(preset.cost_per_cpu_op, 1.1244e-14);
+        close(preset.cost_per_scanned_byte, 1.1244e-15);
+        close(
+            preset.cost_per_memory_byte_second,
+            1.235e-6 / 1_073_741_824.0,
+        );
+        assert_eq!(preset.cost_per_disk_byte_second, 0.0);
+        assert_eq!(preset.cost_per_provisioned_memory_byte_second, 0.0);
+        assert_eq!(preset.cost_per_provisioned_cpu_core_second, 0.0);
+        let settings = |cost_model| PlanSelectionSettings {
+            cost_model,
+            ..PlanSelectionSettings::default()
+        };
+        assert_eq!(
+            settings(CostModel::UsageOverTime(preset.clone())).validate(),
+            Ok(())
+        );
+        assert_eq!(
+            settings(CostModel::ProvisionedCapacity(preset)).validate(),
+            Err(AnalyticalCostError::ZeroCalibration)
+        );
+    }
 
     /// `G` of `root` over `data` ([`values_per_result`]).
     fn values_of(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
