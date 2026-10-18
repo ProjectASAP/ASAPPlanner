@@ -464,3 +464,38 @@ fn physical_node_ids_serialize_in_deterministic_binding_order() {
         r#"{"2":"query-2","10":"materialization-10"}"#
     );
 }
+
+/// The plan with every node at query time is the same operators with
+/// nothing materialized: what the default materialization exports. The
+/// shared summary stays one node, and the scalar root that reads it keeps
+/// its batch position.
+#[test]
+fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
+    use asap_types::ir::scalar::ArithmeticOpKind;
+    use asap_types::ir::{ExprSemantics, ScalarExpr};
+    let workload = |root: Rc<OperatorNode>| {
+        let scalar = ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Add,
+            left: Box::new(ScalarExpr::PromqlScalarFromVector(Rc::clone(&root))),
+            right: Box::new(ScalarExpr::literal_f64(1.0)),
+            semantics: ExprSemantics::Promql,
+        };
+        compile_physical_asap_workload(&[
+            QueryRoot::Operator(Rc::clone(&root)),
+            QueryRoot::Scalar(scalar),
+            QueryRoot::Operator(root),
+        ])
+        .unwrap()
+    };
+    let materialized = workload(timed_at_ingestion());
+    let at_query_time = apply_materialization_timings(
+        &plan(),
+        &MaterializationAssignment::default(),
+        &mut TimingMemo::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        materialized.with_every_node_at_query_time().unwrap(),
+        workload(at_query_time)
+    );
+}
