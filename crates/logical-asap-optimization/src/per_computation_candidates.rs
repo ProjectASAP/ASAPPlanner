@@ -429,10 +429,12 @@ pub enum PerComputationCandidateError {
     /// A Pass 2 rule found more than `max` candidates of one kind, whose
     /// 2^n subsets it would enumerate: the workload is too large to plan
     /// this way, not bad input.
-    #[error("more than {max} {candidates} (2^n Pass 2 candidates)")]
+    #[error("found {found} {counted}, more than {max}")]
     TooManyCandidates {
         /// What was counted, e.g. "rollup candidates".
-        candidates: &'static str,
+        counted: &'static str,
+        /// How many were found, more than `max`.
+        found: usize,
         /// The cap that was exceeded.
         max: usize,
     },

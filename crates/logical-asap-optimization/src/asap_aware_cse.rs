@@ -513,12 +513,15 @@ pub fn summary_capability_pass2_candidates(
     // Every subset of a capability sharing candidate is a Pass 2
     // candidate: 2^n of them. Past MAX_CAPABILITY_SHARING_MEMBERS that is
     // no longer a list plan selection can price.
-    if candidates
+    let largest = candidates
         .iter()
-        .any(|candidate| candidate.members.len() > MAX_CAPABILITY_SHARING_MEMBERS)
-    {
+        .map(|candidate| candidate.members.len())
+        .max()
+        .unwrap_or(0);
+    if largest > MAX_CAPABILITY_SHARING_MEMBERS {
         return Err(PerComputationCandidateError::TooManyCandidates {
-            candidates: "summary builds in one capability sharing candidate",
+            counted: "summary builds in one capability sharing candidate",
+            found: largest,
             max: MAX_CAPABILITY_SHARING_MEMBERS,
         });
     }
@@ -789,7 +792,8 @@ pub fn window_composition_pass2_candidates(
 ) -> Result<Vec<WindowCompositionPass2Candidate>, PerComputationCandidateError> {
     if candidates.len() > MAX_PANE_CANDIDATES {
         return Err(PerComputationCandidateError::TooManyCandidates {
-            candidates: "summary builds that could be built in tumbling panes",
+            counted: "summary builds that could be built in tumbling panes",
+            found: candidates.len(),
             max: MAX_PANE_CANDIDATES,
         });
     }
@@ -1274,10 +1278,11 @@ fn subsets<T: Clone>(
     let n = candidates.len();
     if n > MAX_REUSE_CANDIDATES {
         return Err(PerComputationCandidateError::TooManyCandidates {
-            candidates: match rule {
+            counted: match rule {
                 "rollup" => "rollup candidates",
                 _ => "top-k reuse candidates",
             },
+            found: n,
             max: MAX_REUSE_CANDIDATES,
         });
     }
@@ -1955,10 +1960,15 @@ mod tests {
                 ..
             }
         ));
-        // The message names the cap from its constant, not a copy of it.
-        assert!(error
-            .to_string()
-            .contains(&format!("more than {MAX_CAPABILITY_SHARING_MEMBERS} ")));
+        // The message names the count found and the cap from its constant.
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "found {} summary builds in one capability sharing candidate, more than \
+                 {MAX_CAPABILITY_SHARING_MEMBERS}",
+                MAX_CAPABILITY_SHARING_MEMBERS + 1
+            )
+        );
     }
 
     /// Equal targets give identical builds, which are the
@@ -2074,6 +2084,38 @@ mod tests {
         assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)]);
         assert!(panes(&roots, &[Some(300_000)]).is_empty());
         assert!(panes(&roots, &[None]).is_empty());
+    }
+
+    /// Past their caps, the pane rule and the reuse subsets name how many
+    /// candidates they found.
+    #[test]
+    fn too_many_pane_or_reuse_candidates_name_the_count_found() {
+        let roots = chose(
+            &[("quantile_over_time(0.99, m[5m])", 0.01)],
+            SketchAlgorithm::Kll,
+        );
+        let panes: Vec<_> = pane_candidates(&roots, &[Some(60_000)])
+            .into_iter()
+            .cycle()
+            .take(MAX_PANE_CANDIDATES + 1)
+            .collect();
+        let error = window_composition_pass2_candidates(&roots, &panes).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "found {} summary builds that could be built in tumbling panes, more than \
+                 {MAX_PANE_CANDIDATES}",
+                MAX_PANE_CANDIDATES + 1
+            )
+        );
+        let error = subsets(&[0u8; MAX_REUSE_CANDIDATES + 1], "rollup").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "found {} rollup candidates, more than {MAX_REUSE_CANDIDATES}",
+                MAX_REUSE_CANDIDATES + 1
+            )
+        );
     }
 
     /// Exact accumulators whose states merge get panes; IRate, which reads
