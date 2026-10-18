@@ -57,8 +57,10 @@ fn plan(queries: &[&str], recurrence: QueryRecurrence) -> Stage1ToStage3Run<usiz
 /// The workload entry of an exact query evaluated as `recurrence` says.
 fn exact(recurrence: QueryRecurrence) -> QueryWorkloadEntry {
     QueryWorkloadEntry {
+        query: Default::default(),
+        requirements: Default::default(),
+        predictability: Default::default(),
         recurrence,
-        ..Default::default()
     }
 }
 

@@ -152,11 +152,13 @@ async fn corr_survives_exact_plan_compilation() {
     let run = asap_plan_selection::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
         &[asap_types::workload::QueryWorkloadEntry {
+            query: Default::default(),
             requirements: asap_types::workload::QueryRequirements {
                 accuracy: asap_types::ir::properties::AccuracyTarget::exact(),
                 max_latency_ms: None,
             },
-            ..Default::default()
+            predictability: Default::default(),
+            recurrence: Default::default(),
         }],
         &Default::default(),
         asap_plan_selection::PlanningModels::builtin(),

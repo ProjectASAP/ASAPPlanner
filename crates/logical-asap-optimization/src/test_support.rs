@@ -274,11 +274,12 @@ pub fn entry_with(
     recurrence: asap_types::workload::QueryRecurrence,
 ) -> asap_types::workload::QueryWorkloadEntry {
     asap_types::workload::QueryWorkloadEntry {
+        query: Default::default(),
         requirements: QueryRequirements {
             accuracy,
             max_latency_ms: None,
         },
+        predictability: Default::default(),
         recurrence,
-        ..Default::default()
     }
 }

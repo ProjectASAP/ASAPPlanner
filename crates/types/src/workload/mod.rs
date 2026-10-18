@@ -269,9 +269,7 @@ pub struct RepeatingEntry {
 /// as separate axes; the event time a query reads is in its text. Planning takes one per query, in
 /// root order: Stage 2 (physical ASAP-aware optimization) reads the
 /// recurrence and predictability, Stage 3 (plan selection) the accuracy
-/// target, the latency bound and the recurrence. The default is an empty
-/// query, exact, with no latency bound and unknown predictability and
-/// recurrence.
+/// target, the latency bound and the recurrence.
 ///
 /// # Example
 ///
@@ -287,7 +285,7 @@ pub struct RepeatingEntry {
 ///     ),
 /// };
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryWorkloadEntry {
     /// The query text in the workload's language.

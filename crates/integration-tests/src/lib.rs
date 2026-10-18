@@ -143,7 +143,7 @@ pub mod post_asap {
 pub mod planning {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};
-    use asap_types::workload::{DataWorkload, QueryRequirements, QueryWorkloadEntry};
+    use asap_types::workload::DataWorkload;
     use std::rc::Rc;
 
     /// Every planning stage's output for the single query `root`.
@@ -153,12 +153,14 @@ pub mod planning {
     ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
         asap_plan_selection::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
-            &[QueryWorkloadEntry {
-                requirements: QueryRequirements {
+            &[asap_types::workload::QueryWorkloadEntry {
+                query: Default::default(),
+                requirements: asap_types::workload::QueryRequirements {
                     accuracy,
                     max_latency_ms: None,
                 },
-                ..Default::default()
+                predictability: Default::default(),
+                recurrence: Default::default(),
             }],
             &DataWorkload::default(),
             asap_plan_selection::PlanningModels::builtin(),

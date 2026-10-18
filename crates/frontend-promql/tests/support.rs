@@ -116,11 +116,13 @@ pub fn run_stage1_to_stage3(
     asap_plan_selection::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(root))],
         &[asap_types::workload::QueryWorkloadEntry {
+            query: Default::default(),
             requirements: asap_types::workload::QueryRequirements {
                 accuracy,
                 max_latency_ms: None,
             },
-            ..Default::default()
+            predictability: Default::default(),
+            recurrence: Default::default(),
         }],
         &DataWorkload::default(),
         asap_plan_selection::PlanningModels::builtin(),
@@ -173,11 +175,13 @@ pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String>
     let run = asap_plan_selection::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(Rc::clone(root)))],
         &[asap_types::workload::QueryWorkloadEntry {
+            query: Default::default(),
             requirements: asap_types::workload::QueryRequirements {
                 accuracy: asap_types::ir::properties::AccuracyTarget::exact(),
                 max_latency_ms: None,
             },
-            ..Default::default()
+            predictability: Default::default(),
+            recurrence: Default::default(),
         }],
         &DataWorkload::default(),
         asap_plan_selection::PlanningModels::builtin(),
