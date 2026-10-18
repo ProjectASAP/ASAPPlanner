@@ -284,11 +284,13 @@ impl Pass2List {
         let candidates = rollup_candidates(roots);
         // Every rollup subset is combined with every top-k subset: cap the
         // product, not each factor.
-        if candidates.len() + topk_reuse_candidates(roots).len() > MAX_REUSE_CANDIDATES {
+        let found = candidates.len() + topk_reuse_candidates(roots).len();
+        if found > MAX_REUSE_CANDIDATES {
             self.out.push(Pass2::failed(
                 rules,
                 PerComputationCandidateError::TooManyCandidates {
-                    candidates: "rollup and top-k reuse candidates together",
+                    counted: "rollup and top-k reuse candidates together",
+                    found,
                     max: MAX_REUSE_CANDIDATES,
                 },
             ));
@@ -425,10 +427,7 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            format!(
-                "more than {MAX_REUSE_CANDIDATES} rollup and top-k reuse candidates together \
-                 (2^n Pass 2 candidates)"
-            )
+            format!("found 21 rollup and top-k reuse candidates together, more than {MAX_REUSE_CANDIDATES}")
         );
     }
 }

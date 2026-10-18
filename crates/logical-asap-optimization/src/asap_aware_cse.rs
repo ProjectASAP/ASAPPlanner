@@ -513,12 +513,15 @@ pub fn summary_capability_pass2_candidates(
     // Every subset of a capability sharing candidate is a Pass 2
     // candidate: 2^n of them. Past MAX_CAPABILITY_SHARING_MEMBERS that is
     // no longer a list plan selection can price.
-    if candidates
+    let largest = candidates
         .iter()
-        .any(|candidate| candidate.members.len() > MAX_CAPABILITY_SHARING_MEMBERS)
-    {
+        .map(|candidate| candidate.members.len())
+        .max()
+        .unwrap_or(0);
+    if largest > MAX_CAPABILITY_SHARING_MEMBERS {
         return Err(PerComputationCandidateError::TooManyCandidates {
-            candidates: "summary builds in one capability sharing candidate",
+            counted: "summary builds in one capability sharing candidate",
+            found: largest,
             max: MAX_CAPABILITY_SHARING_MEMBERS,
         });
     }
@@ -745,7 +748,8 @@ pub fn pane_candidates(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<
 
 /// The window `W` of a build the rule can split: a `SummaryAgg` whose
 /// family merges, over a range `TimeRange(W)` over an instant vector read
-/// at the query's time or a fixed offset from it.
+/// at the query's time or a fixed offset from it: no `@` anchor on any of
+/// the time shifts stacked below the range.
 fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
     let Some(ASAPOp::SummaryAgg { child, family, .. }) = build.asap() else {
         return None;
@@ -759,10 +763,16 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
     else {
         return None;
     };
-    if input.result_kind != OperatorResultKind::InstantVector
-        || matches!(input.non_asap(), Some(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_some())
-    {
+    if input.result_kind != OperatorResultKind::InstantVector {
         return None;
+    }
+    // Refuse an `@` anchor on any of the shifts stacked below the range.
+    let mut below = input;
+    while let Some(NonASAPOp::TimeShift { shift, child }) = below.non_asap() {
+        if shift.at.is_some() {
+            return None;
+        }
+        below = child;
     }
     u64::try_from(range.as_millis()).ok().filter(|&ms| ms > 0)
 }
@@ -789,7 +799,8 @@ pub fn window_composition_pass2_candidates(
 ) -> Result<Vec<WindowCompositionPass2Candidate>, PerComputationCandidateError> {
     if candidates.len() > MAX_PANE_CANDIDATES {
         return Err(PerComputationCandidateError::TooManyCandidates {
-            candidates: "summary builds that could be built in tumbling panes",
+            counted: "summary builds that could be built in tumbling panes",
+            found: candidates.len(),
             max: MAX_PANE_CANDIDATES,
         });
     }
@@ -1274,10 +1285,11 @@ fn subsets<T: Clone>(
     let n = candidates.len();
     if n > MAX_REUSE_CANDIDATES {
         return Err(PerComputationCandidateError::TooManyCandidates {
-            candidates: match rule {
+            counted: match rule {
                 "rollup" => "rollup candidates",
                 _ => "top-k reuse candidates",
             },
+            found: n,
             max: MAX_REUSE_CANDIDATES,
         });
     }
@@ -1955,10 +1967,15 @@ mod tests {
                 ..
             }
         ));
-        // The message names the cap from its constant, not a copy of it.
-        assert!(error
-            .to_string()
-            .contains(&format!("more than {MAX_CAPABILITY_SHARING_MEMBERS} ")));
+        // The message names the count found and the cap from its constant.
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "found {} summary builds in one capability sharing candidate, more than \
+                 {MAX_CAPABILITY_SHARING_MEMBERS}",
+                MAX_CAPABILITY_SHARING_MEMBERS + 1
+            )
+        );
     }
 
     /// Equal targets give identical builds, which are the
@@ -2074,6 +2091,82 @@ mod tests {
         assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)]);
         assert!(panes(&roots, &[Some(300_000)]).is_empty());
         assert!(panes(&roots, &[None]).is_empty());
+    }
+
+    /// Past their caps, the pane rule and the reuse subsets name how many
+    /// candidates they found.
+    #[test]
+    fn too_many_pane_or_reuse_candidates_name_the_count_found() {
+        let roots = chose(
+            &[("quantile_over_time(0.99, m[5m])", 0.01)],
+            SketchAlgorithm::Kll,
+        );
+        let panes: Vec<_> = pane_candidates(&roots, &[Some(60_000)])
+            .into_iter()
+            .cycle()
+            .take(MAX_PANE_CANDIDATES + 1)
+            .collect();
+        let error = window_composition_pass2_candidates(&roots, &panes).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "found {} summary builds that could be built in tumbling panes, more than \
+                 {MAX_PANE_CANDIDATES}",
+                MAX_PANE_CANDIDATES + 1
+            )
+        );
+        let error = subsets(&[0u8; MAX_REUSE_CANDIDATES + 1], "rollup").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "found {} rollup candidates, more than {MAX_REUSE_CANDIDATES}",
+                MAX_REUSE_CANDIDATES + 1
+            )
+        );
+    }
+
+    /// A range read at an `@` anchor has no panes, however many shifts
+    /// stack above the anchored one: `m[5m] @ 100` with an extra
+    /// `offset 1m` shift between the range and the anchor is still anchored.
+    #[test]
+    fn an_anchor_below_stacked_shifts_has_no_panes() {
+        use asap_types::ir::operator::TimeShift;
+        let roots = chose(
+            &[("quantile_over_time(0.99, m[5m] @ 100)", 0.01)],
+            SketchAlgorithm::Kll,
+        );
+        let QueryRoot::Operator(root) = &roots[0] else {
+            panic!("operator root")
+        };
+        let build = OperatorNode::reachable(root)
+            .into_iter()
+            .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+            .expect("a build");
+        assert_eq!(pane_window_ms(&build), None, "one anchored shift");
+        // Put an `offset 1m` shift between the range and its anchored shift.
+        let restacked = build
+            .with_new_children(|range| {
+                Rc::new(
+                    range
+                        .with_new_children(|anchored| {
+                            assert!(matches!(
+                                anchored.non_asap(),
+                                Some(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_some()
+                            ));
+                            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+                                shift: TimeShift {
+                                    offset_ms: 60_000,
+                                    at: None,
+                                },
+                                child: anchored.clone(),
+                            }))
+                            .unwrap()
+                        })
+                        .unwrap(),
+                )
+            })
+            .unwrap();
+        assert_eq!(pane_window_ms(&restacked), None, "anchor below an offset");
     }
 
     /// Exact accumulators whose states merge get panes; IRate, which reads

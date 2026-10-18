@@ -125,9 +125,10 @@ pub fn validate_summary_kernel(
 }
 
 /// The only shared grouping with a kernel: Hydra over Count-Min. Each update
-/// adds one item column's value to its group, with weight 1 (a row count) or
-/// a weight column proven non-negative (a Count-Min point count only
-/// overestimates when no weight is negative).
+/// adds one item column's value to its group, with weight 1 (a row count,
+/// `UnitCount`), a positive integer constant (`PositiveConstant`) or a weight
+/// column proven non-negative (a Count-Min point count only overestimates
+/// when no weight is negative).
 fn validate_hydra_cms(
     family: &SummaryFamilyType,
     input: &SummaryUpdate,
@@ -158,12 +159,12 @@ fn validate_hydra_cms(
     }
 }
 
-/// A HydraCms constant weight as the `i32` sketchlib's Hydra adds: a
-/// positive integer within `i32`; an error otherwise.
-pub(crate) fn hydra_constant_weight(weight: f64) -> Result<i32, String> {
+/// A HydraCms constant weight as a positive integer at most `i32::MAX`
+/// (asap_sketchlib's Hydra adds `i32` weights); an error otherwise.
+pub(crate) fn hydra_constant_weight(weight: f64) -> Result<std::num::NonZeroU32, String> {
     if weight.is_finite() && weight > 0.0 && weight.fract() == 0.0 && weight <= f64::from(i32::MAX)
     {
-        Ok(weight as i32)
+        Ok(std::num::NonZeroU32::new(weight as u32).expect("weight > 0"))
     } else {
         Err(format!(
             "HydraCms constant weight must be a positive integer within i32 (asap_sketchlib's \

@@ -128,7 +128,7 @@
       const selection = result.stage3_plan_selection;
       const cost = selection.costs[selection.selected];
       plannerStatus.textContent = selection.selected
-        ? `Stage 3 selected ${selection.selected} (cost ${cost.cost_per_second} ${cost.unit}) of ${result.stage1_logical_asap_optimization.combinations} candidates.`
+        ? `Stage 3 selected ${selection.selected} (cost ${cost.cost_per_second} ${cost.cost_unit}) of ${result.stage1_logical_asap_optimization.combinations} candidates.`
         : `Stage 3 selected no plan: ${selection.error || result.stage1_logical_asap_optimization.error || selection.rejected.map((r) => `${r.id}: ${r.reason}`).join('; ')}`;
     } catch (error) {
       // Without a response the page is not served by server.py.

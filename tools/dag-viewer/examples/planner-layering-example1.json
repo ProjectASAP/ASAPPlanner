@@ -103821,6 +103821,7 @@
     "costs": {
       "P1": {
         "cost_per_second": 7.94021,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 2.32,
@@ -103902,7 +103903,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 4100210.0,
@@ -103924,6 +103924,7 @@
       },
       "P2": {
         "cost_per_second": 7.9402099999999995,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 4.64,
@@ -103999,7 +104000,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 4100210.0,
@@ -104021,6 +104021,7 @@
       },
       "P3": {
         "cost_per_second": 7.940209999999999,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 4.64,
@@ -104090,7 +104091,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 4100210.0,
@@ -104112,6 +104112,7 @@
       },
       "P4": {
         "cost_per_second": 8.54021,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 2.32,
@@ -104193,7 +104194,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 4700210.0,
@@ -104215,6 +104215,7 @@
       },
       "P4-m1": {
         "cost_per_second": 12.940212599999999,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 0.3866686,
@@ -104296,7 +104297,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 56000000.0,
           "cpu_ops_per_second": 3700211.0,
@@ -104318,6 +104318,7 @@
       },
       "P5": {
         "cost_per_second": 8.540209999999998,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 4.64,
@@ -104393,7 +104394,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 4700210.0,
@@ -104415,6 +104415,7 @@
       },
       "P5-m1": {
         "cost_per_second": 12.940212599999999,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 0.3866686,
@@ -104496,7 +104497,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 56000000.0,
           "cpu_ops_per_second": 3700211.0,
@@ -104518,6 +104518,7 @@
       },
       "P6": {
         "cost_per_second": 8.54021,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 2.32,
@@ -104599,7 +104600,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 4700210.0,
@@ -104621,6 +104621,7 @@
       },
       "P6-m1": {
         "cost_per_second": 12.940212599999999,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 2.32,
@@ -104702,7 +104703,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 56000000.0,
           "cpu_ops_per_second": 3700211.0,
@@ -104724,6 +104724,7 @@
       },
       "P7": {
         "cost_per_second": 8.540209999999998,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 4.64,
@@ -104799,7 +104800,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 4700210.0,
@@ -104821,6 +104821,7 @@
       },
       "P7-m1": {
         "cost_per_second": 12.940212599999999,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 2.32,
@@ -104902,7 +104903,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 56000000.0,
           "cpu_ops_per_second": 3700211.0,
@@ -104924,6 +104924,7 @@
       },
       "P8": {
         "cost_per_second": 9.14021,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 2.32,
@@ -105005,7 +105006,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 5300210.0,
@@ -105027,6 +105027,7 @@
       },
       "P8-m1": {
         "cost_per_second": 13.540212599999998,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 2.32,
@@ -105108,7 +105109,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 56000000.0,
           "cpu_ops_per_second": 4300211.0,
@@ -105130,6 +105130,7 @@
       },
       "P8-m2": {
         "cost_per_second": 13.540212599999998,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 0.3866686,
@@ -105211,7 +105212,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 56000000.0,
           "cpu_ops_per_second": 4300211.0,
@@ -105233,6 +105233,7 @@
       },
       "P8-m3": {
         "cost_per_second": 17.940215199999997,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 0.3866686,
@@ -105314,7 +105315,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 112000000.0,
           "cpu_ops_per_second": 3300212.0,
@@ -105336,6 +105336,7 @@
       },
       "P9": {
         "cost_per_second": 9.140209999999998,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 4.64,
@@ -105411,7 +105412,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 0.0,
           "cpu_ops_per_second": 5300210.0,
@@ -105433,6 +105433,7 @@
       },
       "P9-m1": {
         "cost_per_second": 13.540212599999998,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 2.32,
@@ -105514,7 +105515,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 56000000.0,
           "cpu_ops_per_second": 4300211.0,
@@ -105536,6 +105536,7 @@
       },
       "P9-m2": {
         "cost_per_second": 13.540212599999998,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 0.3866686,
@@ -105617,7 +105618,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 56000000.0,
           "cpu_ops_per_second": 4300211.0,
@@ -105639,6 +105639,7 @@
       },
       "P9-m3": {
         "cost_per_second": 17.940215199999997,
+        "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
             "cost_per_second": 0.7733372,
@@ -105714,7 +105715,6 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "unit": "cost_per_second",
         "usage": {
           "average_memory_bytes": 112000000.0,
           "cpu_ops_per_second": 3300212.0,
