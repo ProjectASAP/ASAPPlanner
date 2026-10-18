@@ -148,9 +148,13 @@ fn validate_hydra_cms(
     match (&input.weight, proof) {
         (SummaryInputExpr::Constant(w), NonNegativeWeightProof::UnitCount) if *w == 1.0 => Ok(()),
         (SummaryInputExpr::Constant(w), NonNegativeWeightProof::PositiveConstant) => {
-            constant_row_weight(*w)
-                .map(|_| ())
-                .map_err(|error| format!("HydraCms {error}"))
+            let weight = constant_row_weight(*w).map_err(|error| format!("HydraCms {error}"))?;
+            i32::try_from(weight.get()).map(|_| ()).map_err(|_| {
+                format!(
+                    "HydraCms constant weight must be at most i32::MAX (asap_sketchlib's \
+                     Hydra adds i32 weights), got {weight}"
+                )
+            })
         }
         (SummaryInputExpr::Column(_), _) => Ok(()),
         _ => Err(
@@ -197,7 +201,7 @@ pub(crate) fn hydra_cms_shape(
         },
     ) = family
     else {
-        return Err("shared summary grouping has no registered kernel".into());
+        return Err("a shared-grouping (Hydra) family has no registered kernel".into());
     };
     if kind.algorithm() != &SketchAlgorithm::Cms
         || kind.params()
