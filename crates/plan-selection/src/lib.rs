@@ -521,6 +521,18 @@ impl PlanSelectionSettings {
     }
 }
 
+/// A cost per second for a rejection reason: three decimals, or three
+/// significant digits in scientific notation when it is nonzero and below
+/// 0.001 (e.g. "2.361e-8" under [`ResourceUnitCost::aws_fargate_us_east_1`]'s
+/// dollars), so small costs do not all read "0.000".
+fn display_cost(cost_per_second: f64) -> String {
+    if cost_per_second != 0.0 && cost_per_second.abs() < 1e-3 {
+        format!("{cost_per_second:.3e}")
+    } else {
+        format!("{cost_per_second:.3}")
+    }
+}
+
 /// One node's price per second of wall time, with how it was measured. A
 /// node is one operator node of the candidate's physical plan DAG
 /// (`PhysicalASAPDAG`), keyed by its [`PhysicalASAPNodeId`] in
@@ -1082,8 +1094,8 @@ impl Ranking {
         if !self.better(best, cost) {
             let tied = match self {
                 Ranking::Price => format!(
-                    "{:.3} {COST_UNIT}",
-                    cost.cost_per_second.unwrap_or_default()
+                    "{} {COST_UNIT}",
+                    display_cost(cost.cost_per_second.unwrap_or_default())
                 ),
                 _ => describe_usage(&cost.usage),
             };
@@ -1098,9 +1110,9 @@ impl Ranking {
             Ranking::Price => (
                 RejectionCause::Costlier,
                 format!(
-                    "costlier: {:.3} vs {:.3} {COST_UNIT}",
-                    cost.cost_per_second.unwrap_or_default(),
-                    best.cost_per_second.unwrap_or_default()
+                    "costlier: {} vs {} {COST_UNIT}",
+                    display_cost(cost.cost_per_second.unwrap_or_default()),
+                    display_cost(best.cost_per_second.unwrap_or_default())
                 ),
             ),
             Ranking::Latency => (

@@ -717,7 +717,8 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
 /// whole-window KLL (P2) is still selected, at $2.36124e-8/s (its 2.1
 /// CPU-ms/s at $1.1244e-8 per CPU-ms; it keeps no memory), and the panes
 /// maintained at ingestion time (P3-m1) cost about $1.2262e-4/s, almost all
-/// for their 106.6 GB kept in memory.
+/// for their 106.6 GB kept in memory. A costlier candidate's reason shows
+/// such small costs in scientific notation.
 #[test]
 fn aws_fargate_preset_prices_example_4_in_dollars() {
     let document = generate_example(
@@ -735,6 +736,17 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
     };
     close(cost("P2"), 2.36124e-8, 1e-9);
     close(cost("P3-m1"), 1.2262e-4, 1e-4);
+    // A dollar cost below 0.001 is shown in scientific notation, not as 0.000.
+    let p1 = selection["rejected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "P1")
+        .unwrap();
+    assert_eq!(
+        p1["reason"],
+        "costlier: 2.699e-8 vs 2.361e-8 cost_per_second"
+    );
 }
 
 /// `--deployment-capabilities` declares the executor's capabilities, which
