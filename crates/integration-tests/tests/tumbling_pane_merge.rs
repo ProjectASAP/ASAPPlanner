@@ -568,6 +568,31 @@ fn anchored_counter_window_ends_at_the_anchor() {
     }
 }
 
+/// Panes whose ranges read the scan through two stacked `TimeShift`s (the
+/// pane's shift over a zero shift) compile and answer as the single build:
+/// the per-entity build looks through every shift to its raw source.
+#[test]
+fn panes_over_stacked_time_shifts_match_single_build() {
+    let single = single_build("increase(m[5m])", AccuracyTarget::exact());
+    let (panes, _) = tumbling_panes(&single);
+    let agg = summary_agg(&single);
+    let Some(NonASAPOp::TimeRange { child: scan, .. }) = agg.children()[0].non_asap() else {
+        panic!("expected a raw time range under the summary");
+    };
+    let zero_shift = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+        shift: TimeShift {
+            offset_ms: 0,
+            at: None,
+        },
+        child: scan.clone(),
+    }))
+    .unwrap();
+    let stacked = replace(&panes, scan, &zero_shift);
+    let expected = render(&execute(&single, &samples(0)));
+    assert_eq!(expected.len(), 2, "{expected:?}");
+    assert_eq!(render(&execute(&stacked, &samples(0))), expected);
+}
+
 /// Exact counter Increase over 5 merged 1-minute panes equals one 5-minute
 /// build: the merge joins consecutive panes across their boundaries.
 #[test]
