@@ -168,8 +168,9 @@ function uniqueIds(list, where, errors) {
 // of a candidate that failed a check (`RejectionCause::failed_a_check`):
 // it is not priced.
 const FAILED_CHECK_CAUSES = [
-  'failure_probability_resize_failed', 'accuracy_target_missed', 'raw_data_not_retained',
-  'latency_bound_exceeded', 'over_cluster_capacity',
+  'failure_probability_resize_failed', 'accuracy_target_missed',
+  'count_min_weights_not_proven_non_negative', 'no_accuracy_guarantee',
+  'raw_data_not_retained', 'latency_bound_exceeded', 'over_cluster_capacity',
 ];
 // Every `stage3_plan_selection.rejected[].cause` Stage 3 writes: the failed
 // checks, then the losses under the cost model (priced, not selected).

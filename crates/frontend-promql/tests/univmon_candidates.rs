@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::accuracy::{AccuracyModel, DefaultAccuracyModel};
+use asap_logical_asap_optimization::accuracy::estimators::local_guarantee;
+use asap_logical_asap_optimization::accuracy::satisfies;
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::properties::AccuracyMetric;
@@ -88,9 +89,7 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
                     Some(true)
                 );
                 assert_eq!(guarantee.spec.failure_probability.evaluate(), None);
-                assert!(DefaultAccuracyModel
-                    .local_guarantee(family, query)
-                    .is_none());
+                assert!(local_guarantee(family, query).is_none());
             }
             1 => {
                 assert!(matches!(
@@ -102,7 +101,7 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
             2 => {
                 let guarantee = guarantee.expect("an L2 guarantee");
                 assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
-                assert!(DefaultAccuracyModel.satisfies(
+                assert!(satisfies(
                     guarantee,
                     &AccuracyTarget::max_error(0.02).accuracy_metric(AccuracyMetric::Relative)
                 ));
@@ -111,9 +110,7 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
             // Entropy has no certified bound, so composition certifies nothing.
             _ => {
                 assert!(guarantee.is_none());
-                assert!(DefaultAccuracyModel
-                    .local_guarantee(family, query)
-                    .is_none());
+                assert!(local_guarantee(family, query).is_none());
             }
         }
         post_asap_dag(root);

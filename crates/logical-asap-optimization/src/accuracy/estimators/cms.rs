@@ -45,17 +45,16 @@ mod tests {
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = asap_types::ir::operator::agg_intent::default_cardinality();
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
-        let g = DefaultAccuracyModel
-            .local_guarantee(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::Cms, params),
-                    GroupingStrategy::default(),
-                ),
-                &SketchStatistic::Cardinality,
-            )
-            .unwrap();
+        let g = local_guarantee(
+            &FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::Cms, params),
+                GroupingStrategy::default(),
+            ),
+            &SketchStatistic::Cardinality,
+        )
+        .unwrap();
         assert_eq!(g.spec.accuracy_metric, AccuracyMetric::ABSOLUTE_STREAM_L1);
-        assert!(DefaultAccuracyModel.satisfies(
+        assert!(satisfies(
             &g,
             &AccuracyTarget::max_error(0.01)
                 .failure_probability(0.001)
@@ -72,15 +71,14 @@ mod tests {
             depth: 5,
             heap_size: 10,
         };
-        let topk_frequency = DefaultAccuracyModel
-            .local_guarantee(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
-                    GroupingStrategy::default(),
-                ),
-                &SketchStatistic::TopK { k: 10 },
-            )
-            .expect("heap sketch still provides per-key frequency intervals");
+        let topk_frequency = local_guarantee(
+            &FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
+                GroupingStrategy::default(),
+            ),
+            &SketchStatistic::TopK { k: 10 },
+        )
+        .expect("heap sketch still provides per-key frequency intervals");
         assert_eq!(
             topk_frequency.spec.accuracy_metric,
             AccuracyMetric::ABSOLUTE_STREAM_L1

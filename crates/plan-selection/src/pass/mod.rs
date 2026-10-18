@@ -26,10 +26,10 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
-use crate::{PlanSelectionSettings, Selection, SelectionError};
-use asap_logical_asap_optimization::accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
+use crate::accuracy::{
+    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
 };
+use crate::{PlanSelectionSettings, Selection, SelectionError};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 
@@ -38,7 +38,7 @@ pub use stage1_to_stage3::{
     PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
-static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
+static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<PlanSelectionSettings> =
     std::sync::LazyLock::new(PlanSelectionSettings::default);
@@ -59,7 +59,8 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
     /// Decides whether a candidate's accuracy guarantee meets its query's
-    /// target; built-in [`DefaultAccuracyModel`] by default.
+    /// target, and whether the deployment accepts an output regardless of
+    /// its guarantee; [`BuiltinAccuracyModel`] by default.
     pub accuracy: &'a dyn AccuracyModel,
     /// Deployment facts the guarantees need (operand domains, observed
     /// guarantees); [`NoAccuracyEvidence`] by default.
@@ -93,7 +94,7 @@ impl<'a> PlanningModels<'a> {
     /// The built-in models.
     pub fn builtin() -> PlanningModels<'static> {
         PlanningModels {
-            accuracy: &DEFAULT_ACCURACY_MODEL,
+            accuracy: &BUILTIN_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
             plan_selection: &DEFAULT_PLAN_SELECTION,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
