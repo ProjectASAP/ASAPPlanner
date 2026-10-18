@@ -285,7 +285,8 @@ pub struct ResourceUsage {
 /// The price of one unit of each resource, per second of wall time. Cost
 /// model 1 reads the usage prices (CPU, scan, memory byte-seconds, disk);
 /// cost model 2 the provisioned prices (memory, CPU cores) and disk.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceUnitCost {
     /// Price of one CPU operation.
     pub cost_per_cpu_op: f64,
@@ -373,7 +374,8 @@ impl ResourceUnitCost {
 }
 
 /// How fast one core does work; the latency check reads it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceSpeed {
     /// Milliseconds one CPU operation takes on one core.
     pub ms_per_cpu_op: f64,
@@ -395,7 +397,10 @@ impl ResourceSpeed {
 
 /// How plan selection turns each valid candidate's [`ResourceUsage`] into a
 /// choice. Chosen by the deployment ([`PlanSelectionSettings::cost_model`]).
-#[derive(Debug, Clone, PartialEq)]
+/// In JSON, `{"usage_over_time": {...}}`, `{"provisioned_capacity": {...}}`
+/// or `{"cluster_capacity": {...}}`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CostModel {
     /// Cost model 1, pay-as-you-go: Σ unit cost × usage per second (CPU
     /// operations, scanned bytes, memory byte-seconds, disk byte-seconds);
@@ -411,7 +416,8 @@ pub enum CostModel {
 }
 
 /// A fixed cluster's capacity (cost model 3) and how to choose within it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClusterLimits {
     /// Memory available; a candidate whose peak memory is above it is invalid.
     pub memory_bytes: u64,
@@ -424,7 +430,8 @@ pub struct ClusterLimits {
 }
 
 /// What cost model 3 optimizes among the candidates that fit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ClusterObjective {
     /// The smallest worst-query latency; ties by peak memory, then disk.
     LowestLatency,
@@ -438,7 +445,10 @@ pub enum ClusterObjective {
 
 /// The deployment's choices for plan selection (Stage 3): the cost model,
 /// how fast a core works, and how long one-off queries are spread over.
-#[derive(Debug, Clone, PartialEq)]
+/// Loadable from JSON (`stage_pipeline --plan-selection-settings <file>`);
+/// an omitted field takes its default, an unknown one is refused.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct PlanSelectionSettings {
     /// How candidates are compared; default cost model 1 with
     /// [`ResourceUnitCost::illustrative`].
