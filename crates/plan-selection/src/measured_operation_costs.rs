@@ -5,11 +5,11 @@
 //! with given parameters costs (e.g. sketch-bench's `rqe_atomic_costs.json`,
 //! converted by `asap-devtools`' `convert_rqe_atomic_costs`) and puts the
 //! table in [`PlanSelectionSettings::measured_operation_costs`]. Stage 3
-//! prices a sketch node (an operator node of the physical plan DAG) from
-//! the entry for its sketch parameters and operation when there is one, and
-//! from its formulas otherwise, and reports which per node
-//! ([`NodeCost::price_source`]). The planner reads
-//! only this table, never a benchmark file.
+//! prices a sketch node's (an operator node of the physical plan DAG) CPU
+//! from the entry for its sketch parameters and operation when there is
+//! one, and from its formulas otherwise, and reports which per node
+//! ([`NodeCost::price_source`]). The planner reads only this table, never a
+//! benchmark file.
 //!
 //! A measured time enters [`ResourceUsage`] as CPU operations: `t` ns is
 //! `t · 10⁻⁶ / ms_per_cpu_op` operations of [`ResourceSpeed`], so latency
