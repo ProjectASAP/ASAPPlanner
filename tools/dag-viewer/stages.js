@@ -164,15 +164,19 @@ function uniqueIds(list, where, errors) {
   return ids;
 }
 
-// Every `stage3_plan_selection.rejected[].cause` Stage 3 writes
-// (`RejectionCause`): the first five are failed checks, the rest losses
-// under the cost model.
-const REJECTION_CAUSES = [
+// The `stage3_plan_selection.rejected[].cause` values (`RejectionCause`)
+// of a candidate that failed a check (`RejectionCause::failed_a_check`):
+// it is not priced.
+const FAILED_CHECK_CAUSES = [
   'failure_probability_resize_failed', 'accuracy_target_missed', 'raw_data_not_retained',
   'latency_bound_exceeded', 'over_cluster_capacity',
+];
+// Every `stage3_plan_selection.rejected[].cause` Stage 3 writes: the failed
+// checks, then the losses under the cost model (priced, not selected).
+const REJECTION_CAUSES = FAILED_CHECK_CAUSES.concat([
   'costlier', 'slower', 'more_memory', 'not_lowest_latency_on_pareto_front', 'dominated',
   'tied_lost_on_enumeration_order',
-];
+]);
 
 function validateSelection(selection, physicalById) {
   const errors = [];
@@ -299,9 +303,11 @@ function stageCandidateRows(doc) {
   const rows = (physical.candidates || []).map((candidate) => {
     const cost = costs[candidate.id];
     const rejection = rejected.get(candidate.id);
-    // A failed selection (`error`) judged no candidate.
+    // A rejection's cause says whether it failed a check or lost under
+    // the cost model; a failed selection (`error`) judged no candidate.
     const status = candidate.id === selection.selected ? 'selected'
-      : cost ? 'costlier' : rejection || !selection.error ? 'rejected' : 'not judged';
+      : rejection ? (FAILED_CHECK_CAUSES.includes(rejection.cause) ? 'rejected' : 'costlier')
+        : selection.error ? 'not judged' : 'rejected';
     return {
       id: candidate.id,
       logical: candidate.from_logical,

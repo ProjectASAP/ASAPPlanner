@@ -5,8 +5,8 @@ edition = "2021"
 
 # #509 Stage 1, logical ASAP-aware optimization: Pass 1 per-computation
 # candidates and Pass 2 ASAP-aware CSE over asap-types' operator DAG, with
-# the analytical accuracy model. Depends on no front end and on no later
-# stage.
+# the analytical accuracy model. Depends on no later stage, and on no
+# query-language frontend except through the `test-support` feature.
 [dependencies]
 asap_sketchlib = { workspace = true }
 asap-types = { path = "../types" }

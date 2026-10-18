@@ -197,6 +197,20 @@ pub enum QueryRecurrence {
     Unknown,
 }
 
+impl QueryRecurrence {
+    /// The fixed interval at which the query repeats, in milliseconds:
+    /// `Some` only for a fixed-interval repetition with a positive interval.
+    pub fn fixed_interval_ms(&self) -> Option<u64> {
+        match self {
+            QueryRecurrence::Repeated(
+                RepeatedDemand::FixedInterval(interval)
+                | RepeatedDemand::FixedIntervalAt { interval, .. },
+            ) => Some(u64::from(interval.0)).filter(|&ms| ms > 0),
+            _ => None,
+        }
+    }
+}
+
 /// One query submitted as part of a finite batch, including how many times it
 /// will run and, when known, its execution time.
 ///
@@ -665,6 +679,43 @@ pub enum WorkloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a fixed-interval repetition with a positive interval has a
+    /// fixed interval; a zero interval, a schedule, an estimated rate, a
+    /// one-time query and an unknown recurrence have none.
+    #[test]
+    fn fixed_interval_ms_is_set_only_for_a_positive_fixed_interval() {
+        let repeated = |demand| QueryRecurrence::Repeated(demand);
+        assert_eq!(
+            repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000))).fixed_interval_ms(),
+            Some(10_000)
+        );
+        assert_eq!(
+            repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(60_000),
+                evaluation_phase: TimestampMs(5_000),
+            })
+            .fixed_interval_ms(),
+            Some(60_000)
+        );
+        assert_eq!(
+            repeated(RepeatedDemand::FixedInterval(RepetitionInterval(0))).fixed_interval_ms(),
+            None
+        );
+        assert_eq!(
+            repeated(RepeatedDemand::Scheduled(vec![TimestampMs(1_000)])).fixed_interval_ms(),
+            None
+        );
+        assert_eq!(
+            QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            }
+            .fixed_interval_ms(),
+            None
+        );
+        assert_eq!(QueryRecurrence::Unknown.fixed_interval_ms(), None);
+    }
 
     /// Query requirements: an accuracy target (omitted: exact) and an
     /// optional latency bound in ms (omitted: none). The old tagged forms

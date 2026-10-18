@@ -9,6 +9,7 @@ use asap_devtools::planner_layering_examples::{
 use asap_devtools::planning_stages::{
     lower_promql_roots, run_planning_stages, PlanningStagesError,
 };
+use asap_plan_selection::RejectionCause;
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
 use asap_types::ir::QueryRoot;
@@ -135,14 +136,8 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         assert!(!rejection["reason"].as_str().unwrap().is_empty());
         // A candidate that failed a check is not priced; one that lost
         // under the cost model is.
-        let failed_a_check = [
-            "failure_probability_resize_failed",
-            "accuracy_target_missed",
-            "raw_data_not_retained",
-            "latency_bound_exceeded",
-            "over_cluster_capacity",
-        ]
-        .contains(&rejection["cause"].as_str().unwrap());
+        let cause: RejectionCause = serde_json::from_value(rejection["cause"].clone()).unwrap();
+        let failed_a_check = cause.failed_a_check();
         assert_eq!(failed_a_check, !costs.contains_key(id), "{rejection}");
     }
     assert!(costs.contains_key(selected));

@@ -2,7 +2,7 @@
 mod common;
 use asap_executor::physical_planner::precompute::{boundary_schema, raw_sample_schema};
 use common::compile_physical_asap_dag;
-use planner_types::ir::operator::Source;
+use planner_types::ir::operator::{Source, TimeShift};
 use planner_types::ir::schema::{DataType, Field, Schema};
 use planner_types::ir::{NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 use std::{collections::BTreeMap, rc::Rc, time::Duration};
@@ -52,4 +52,36 @@ fn only_a_time_series_range_reads_raw_samples() {
     }));
     // A table range is not raw samples: it must be a stored population.
     assert_ne!(table.ok(), Some(raw_sample_schema()));
+}
+
+/// A range over stacked time shifts of a time series scan still reads raw
+/// samples: the boundary looks through every shift, not only the first.
+#[test]
+fn a_range_over_stacked_shifts_reads_raw_samples() {
+    let range = time_range_over(Source::TimeSeries { metric: "m".into() });
+    let NonASAPOp::TimeRange {
+        range: window,
+        kind,
+        child: scan,
+    } = range.non_asap().unwrap().clone()
+    else {
+        unreachable!()
+    };
+    let shifted = |offset_ms, child| {
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: TimeShift {
+                offset_ms,
+                at: None,
+            },
+            child,
+        }))
+        .unwrap()
+    };
+    let stacked = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: window,
+        kind,
+        child: shifted(60_000, shifted(300_000, scan)),
+    }))
+    .unwrap();
+    assert_eq!(boundary(&stacked).unwrap(), raw_sample_schema());
 }

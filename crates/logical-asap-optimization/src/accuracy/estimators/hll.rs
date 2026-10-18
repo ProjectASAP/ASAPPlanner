@@ -47,14 +47,18 @@ pub fn classic_relative_error(precision: u8, relative_error: Option<f64>) -> f64
 /// `relative_error` over `source` is left as ([`classic_guarantee`]).
 /// `relative_error` is written in Rust's shortest round-trip form, so it
 /// parses back to the same value.
-pub fn classic_failure_statistic(precision: u8, relative_error: f64, source: &str) -> String {
+pub(crate) fn classic_failure_statistic(
+    precision: u8,
+    relative_error: f64,
+    source: &str,
+) -> String {
     format!(
         "{CLASSIC_FAILURE_PROBABILITY}[p={precision},eps={relative_error}]({MAX_DISTINCT}[{source}])"
     )
 }
 
-/// The precision, relative error and source a [`classic_failure_statistic`]
-/// names.
+/// The precision, relative error and source a classic HLL failure
+/// statistic (`classic_failure_statistic`) names.
 pub fn parse_classic_failure_statistic(statistic: &str) -> Option<(u8, f64, &str)> {
     let rest = statistic
         .strip_prefix(CLASSIC_FAILURE_PROBABILITY)?
@@ -112,7 +116,8 @@ pub(crate) fn classic_guarantee(
     ))
 }
 
-/// The failure probability a [`classic_failure_statistic`] names, given the
+/// The failure probability a classic HLL failure statistic
+/// (`classic_failure_statistic`) names, given the
 /// source's distinct bound: `1` (no certificate) when the bound is outside
 /// the contract's range for this precision and relative error.
 pub fn classic_failure_probability(precision: u8, relative_error: f64, max_distinct: u64) -> f64 {

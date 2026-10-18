@@ -11,6 +11,13 @@ use asap_types::workload::{
     QueryRequirements, QueryWorkload,
 };
 
+/// The statistic classic HLL's failure probability at `precision` and
+/// `relative_error` over `source` is left as, for Stage 3 tests that bind
+/// it. The estimator keeps the format crate-private.
+pub fn hll_classic_failure_statistic(precision: u8, relative_error: f64, source: &str) -> String {
+    crate::accuracy::estimators::hll::classic_failure_statistic(precision, relative_error, source)
+}
+
 pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {

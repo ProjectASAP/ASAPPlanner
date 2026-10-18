@@ -393,24 +393,24 @@ pub fn capability_sharing_candidates(roots: &[QueryRoot]) -> Vec<CapabilityShari
             readers.entry(Rc::as_ptr(child)).or_default().push(node);
         }
     }
-    let mut groups: Vec<CapabilitySharingCandidate> = Vec::new();
+    let mut candidates: Vec<CapabilitySharingCandidate> = Vec::new();
     for node in &nodes {
         let Some(family) = shareable_family(node, readers.get(&Rc::as_ptr(node))) else {
             continue;
         };
-        match groups
+        match candidates
             .iter_mut()
-            .find(|g| g.family == family && same_input_data(&g.members[0], node))
+            .find(|c| c.family == family && same_input_data(&c.members[0], node))
         {
-            Some(group) => group.members.push(Rc::clone(node)),
-            None => groups.push(CapabilitySharingCandidate {
+            Some(candidate) => candidate.members.push(Rc::clone(node)),
+            None => candidates.push(CapabilitySharingCandidate {
                 family,
                 members: vec![Rc::clone(node)],
             }),
         }
     }
-    groups.retain(|g| !all_equal(g.members.iter()));
-    groups
+    candidates.retain(|c| !all_equal(c.members.iter()));
+    candidates
 }
 
 fn collect_children_first(
@@ -510,25 +510,28 @@ pub fn summary_capability_pass2_candidates(
     roots: &[QueryRoot],
     candidates: &[CapabilitySharingCandidate],
 ) -> Result<Vec<SummaryCapabilityPass2Candidate>, PerComputationCandidateError> {
-    // Every subset of a group is a candidate: 2^n of them. Past
-    // MAX_CAPABILITY_SHARING_MEMBERS that is no longer a list plan selection can price.
+    // Every subset of a capability sharing candidate is a Pass 2
+    // candidate: 2^n of them. Past MAX_CAPABILITY_SHARING_MEMBERS that is
+    // no longer a list plan selection can price.
     if candidates
         .iter()
-        .any(|group| group.members.len() > MAX_CAPABILITY_SHARING_MEMBERS)
+        .any(|candidate| candidate.members.len() > MAX_CAPABILITY_SHARING_MEMBERS)
     {
         return Err(PerComputationCandidateError::Unsupported(
             "a capability sharing candidate of more than 20 summary builds (2^n sharing subsets)",
         ));
     }
-    // Each group's options: `None` (no sharing), then its subsets.
+    // Each capability sharing candidate's options: `None` (no sharing),
+    // then its subsets.
     let options: Vec<Vec<Option<Vec<usize>>>> = candidates
         .iter()
-        .map(|group| {
-            let n = group.members.len();
+        .map(|candidate| {
+            let n = candidate.members.len();
             let mut options = vec![None];
             for mask in 1u64..(1u64 << n) {
                 let members: Vec<usize> = (0..n).filter(|&m| mask >> m & 1 == 1).collect();
-                if members.len() >= 2 && !all_equal(members.iter().map(|&m| &group.members[m])) {
+                if members.len() >= 2 && !all_equal(members.iter().map(|&m| &candidate.members[m]))
+                {
                     options.push(Some(members));
                 }
             }
@@ -538,11 +541,11 @@ pub fn summary_capability_pass2_candidates(
     let mut choice = vec![0usize; candidates.len()];
     let mut pass2_candidates = Vec::new();
     loop {
-        // Mixed-radix increment, the last group varying fastest.
+        // Mixed-radix increment, the last candidate varying fastest.
         let mut carried = true;
-        for (digit, group_options) in choice.iter_mut().zip(&options).rev() {
+        for (digit, candidate_options) in choice.iter_mut().zip(&options).rev() {
             *digit += 1;
-            if *digit < group_options.len() {
+            if *digit < candidate_options.len() {
                 carried = false;
                 break;
             }
@@ -554,12 +557,12 @@ pub fn summary_capability_pass2_candidates(
         let shared_builds: Vec<Vec<Rc<OperatorNode>>> = choice
             .iter()
             .zip(candidates.iter().zip(&options))
-            .filter_map(|(&option, (group, group_options))| {
-                let members = group_options[option].as_ref()?;
+            .filter_map(|(&option, (candidate, candidate_options))| {
+                let members = candidate_options[option].as_ref()?;
                 Some(
                     members
                         .iter()
-                        .map(|&m| Rc::clone(&group.members[m]))
+                        .map(|&m| Rc::clone(&candidate.members[m]))
                         .collect(),
                 )
             })

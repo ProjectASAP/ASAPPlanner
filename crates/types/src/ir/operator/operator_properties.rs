@@ -178,7 +178,7 @@ pub enum DataModel {
 /// The leaf data source of a `Scan`. The schema itself rides on the
 /// `Scan.schema` field (SchemaResolver-built); `Source` carries only the leaf's
 /// identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Source {
     /// Time-series leaf — PromQL / DC lifecycle. Produces `(ts, value, *labels)`.
     TimeSeries { metric: String },

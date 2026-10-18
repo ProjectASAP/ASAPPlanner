@@ -571,7 +571,7 @@ pub struct Rejection {
 /// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
 /// rest mean it was valid and lost under the cost model. JSON: the
 /// snake_case variant name, e.g. `"costlier"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectionCause {
     /// Its summaries, resized for the queries' failure probabilities, do
@@ -2092,7 +2092,7 @@ fn price(
     let mut held: HashMap<PhysicalASAPNodeId, (u64, f64)> = HashMap::new();
     // The raw data query-time scans read, kept on disk: per source, the
     // largest scan's (bytes, node).
-    let mut raw_data: HashMap<String, (u64, PhysicalASAPNodeId)> = HashMap::new();
+    let mut raw_data: HashMap<&Source, (u64, PhysicalASAPNodeId)> = HashMap::new();
     // Each in-memory ingestion-time state's bytes per window (what it keeps
     // for one window, its output or an exact aggregate's values).
     let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
@@ -2554,9 +2554,7 @@ fn price(
         }
         if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
             if !ingestion {
-                let largest = raw_data
-                    .entry(format!("{source:?}"))
-                    .or_insert((out.bytes, node.id));
+                let largest = raw_data.entry(source).or_insert((out.bytes, node.id));
                 if out.bytes > largest.0 {
                     *largest = (out.bytes, node.id);
                 }
@@ -3186,7 +3184,9 @@ mod tests {
     /// unknown.
     #[test]
     fn classic_hll_failure_probability_binds_only_its_own_sources_bound() {
-        let statistic = hll::classic_failure_statistic(15, 0.05, "a");
+        let statistic = asap_logical_asap_optimization::test_support::hll_classic_failure_statistic(
+            15, 0.05, "a",
+        );
         let bounded = |source: &str| {
             let mut data = data();
             data.sources

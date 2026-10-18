@@ -82,8 +82,8 @@ pub fn raw_sample_row(
 }
 
 /// Input contract of a precompute boundary: raw sample rows for a raw time
-/// series scan (or a `TimeRange`, optionally over a `TimeShift`, of one),
-/// otherwise the stored population of its summary state.
+/// series scan (or a `TimeRange`, optionally over stacked `TimeShift`s, of
+/// one), otherwise the stored population of its summary state.
 pub fn boundary_schema(
     node: &PhysicalASAPDAGNode,
     nodes: &BTreeMap<u64, &PhysicalASAPDAGNode>,
@@ -93,7 +93,7 @@ pub fn boundary_schema(
         scan = nodes
             .get(&(*child as u64))
             .ok_or_else(|| invalid("missing precompute node"))?;
-        if let Payload::NonASAP(NonASAPOp::TimeShift { child, .. }) = &scan.payload {
+        while let Payload::NonASAP(NonASAPOp::TimeShift { child, .. }) = &scan.payload {
             scan = nodes
                 .get(&(*child as u64))
                 .ok_or_else(|| invalid("missing precompute node"))?;
