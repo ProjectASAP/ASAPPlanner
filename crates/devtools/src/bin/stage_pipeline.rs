@@ -31,9 +31,10 @@
 //   - stage3_plan_selection: the selected candidate, chosen among all candidates;
 //     the shown candidates' costs and accepted accuracy (per query: the
 //     target's metric or null when not set, the accepted guarantee's
-//     metric or null when exact or accepted without a guarantee, whether
-//     the deployment's accuracy model accepted it without a guarantee
-//     (`accepted_without_guarantee`), the sketches read and a one-line
+//     metric or null when exact or accepted regardless of guarantee,
+//     whether the deployment's accuracy model accepted it directly,
+//     whatever its guarantee says (`accepted_regardless_of_guarantee`),
+//     the sketches read and a one-line
 //     summary), and every other shown candidate under `rejected` with
 //     its `cause`: a failed check (`failure_probability_resize_failed`,
 //     `accuracy_target_missed`, `no_accuracy_guarantee`, `raw_data_not_retained`,
@@ -619,7 +620,7 @@ fn plan_selection_json(
                     json!({
                         "target_metric": accepted.target_metric,
                         "accepted_metric": accepted.accepted_metric,
-                        "accepted_without_guarantee": accepted.accepted_without_guarantee,
+                        "accepted_regardless_of_guarantee": accepted.accepted_regardless_of_guarantee,
                         "sketches": accepted.sketches,
                         "summary": accepted.to_string(),
                     })

@@ -54,7 +54,6 @@ pub mod realization;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use accuracy::PropagationStats;
 pub use deployment_capabilities::{
     DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
 };
