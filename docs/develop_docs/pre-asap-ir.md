@@ -23,7 +23,7 @@ Only operations that are semantically relevant to answering the query and select
 
 ## The node
 
-A plan is a DAG of `Rc<OperatorNode>` (`crates/types/src/ir/node.rs`). Nodes are immutable
+A plan is a DAG of `Rc<OperatorNode>` (`crates/types/src/ir/operator/node.rs`). Nodes are immutable
 and shared through `Rc`: a structurally identical sub-DAG referenced from several parents is
 one node, and that pointer identity is what CSE, target discovery and plan assembly key on.
 
@@ -63,7 +63,7 @@ derived one.
 
 ## Schema
 
-One `Schema` type (`crates/types/src/pre_asap/schema.rs`) describes every edge, whether it
+One `Schema` type (`crates/types/src/ir/schema/mod.rs`) describes every edge, whether it
 carries rows or summary state:
 
 ```rust
@@ -92,7 +92,7 @@ across consumers when its row identity is provable.
 
 ## Scalar expressions
 
-Value computation lives in `ScalarExpr` (`crates/types/src/ir/scalar.rs`), owned **by value**
+Value computation lives in `ScalarExpr` (`crates/types/src/ir/scalar/mod.rs`), owned **by value**
 by an operator field: `Scan.predicates`, `Filter.pred`, `Join.pred`, `Project.cols[i].expr`,
 `Aggregate.having`, `Sort.keys[i].expr`, `SQLWindowFunc.args`/`order_by`, `PromqlRelabel.value`,
 `Values.rows`, and `QueryRoot::Scalar` and `PromqlVectorFromScalar`. A scalar expression never

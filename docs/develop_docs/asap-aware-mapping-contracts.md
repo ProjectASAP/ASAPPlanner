@@ -5,7 +5,8 @@ the stage code relies on: what each stage's input and output may contain,
 and which component owns each decision. Read the
 [architecture](asap-aware-mapping-architecture.md) first; use the
 [extension guide](extend-asap-aware-mapping.md) when changing one. Field-level
-details are in the rustdoc (`cargo doc -p asap-aware-mapping -p asap-types
+details are in the rustdoc (`cargo doc -p asap-logical-asap-optimization -p
+asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 --no-deps`).
 
 ## 1. IR at each stage
@@ -116,4 +117,4 @@ details are in the rustdoc (`cargo doc -p asap-aware-mapping -p asap-types
 | When each build runs and whether it is kept | Stage 2 |
 | Which plan is valid and which is chosen | Stage 3 |
 | What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `PlanSelectionSettings`, `AccuracyModel`) |
-| Running the plan | the executor (`asap-physical-operators`), outside the planner |
+| Running the plan | the executor (`asap-executor`), outside the planner |

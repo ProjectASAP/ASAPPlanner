@@ -149,7 +149,7 @@ ASAPPlanner relies on the assumptions below.
 
 ### ASAPPlanner System Overview: Planning Stages
 
-ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L384) and the deployment's
+ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/mod.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/mod.rs#L384) and the deployment's
 inputs (TODO: define this data structure, issue [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how it is computed, and which plan is best. The deployment only supplies data and query inputs and
 executes the plan: it provides its empirical cost model, empirical accuracy
 model and capabilities, but never optimize queries.
@@ -920,7 +920,7 @@ To see examples in DAG Viewer, following the instructions [here](TODO: write an 
 
 Each example's workload is shown as tables. Field names in code font are the
 fields of
-[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs),
+[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/mod.rs),
 except `lookback` and `as_of`, which the query text states (its range and
 offset). Each query reads the event-time window [`as_of` − `lookback`, `as_of`].
 `as_of` is the window's end; `lookback` is its length. An

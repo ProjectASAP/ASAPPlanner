@@ -284,7 +284,7 @@ rule or a different estimator configuration would be needed in those cases.
 
 ## Organization and extension contract
 
-The `asap-aware-mapping::accuracy` module separates these responsibilities:
+The `asap_logical_asap_optimization::accuracy` module separates these responsibilities:
 
 ```text
 accuracy/
@@ -323,6 +323,6 @@ not require a new selection rule for every sketch. Deployment extensions to
 `AccuracyModel` remain possible, but carry the same obligation to justify
 metrics, assumptions and propagation.
 
-For implementation details, see the [accuracy module](../../../crates/asap-aware-mapping/src/accuracy/mod.rs),
-[guarantee representation](../../../crates/types/src/post_asap/guarantee.rs), and
+For implementation details, see the [accuracy module](../../../crates/logical-asap-optimization/src/accuracy/mod.rs),
+[guarantee representation](../../../crates/types/src/ir/properties/guarantee.rs), and
 [accuracy propagation companion](../../develop_docs/end-to-end-accuracy-guarantees.md).

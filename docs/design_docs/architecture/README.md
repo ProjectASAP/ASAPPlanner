@@ -44,9 +44,11 @@ target.
 | Shared IR | `asap-types` | The unified operator IR (`ir`: one `OperatorNode` before and after ASAP optimization), schemas, workloads, guarantees, and exported plan data |
 | Front-end common | `frontend-common` | Name-based `UnresolvedOp` tree shared by the front ends, and `resolve_root` into the operator IR |
 | Query frontends | `frontend-sql`, `frontend-promql`, `frontend-metricsql` | Stage 0: parse source languages and produce canonical Pre-ASAP queries |
-| ASAP-aware mapping | `asap-aware-mapping` | Stages 1–3: candidate generation, ASAP-aware CSE, materialization, accuracy checks, costing and selection |
+| Logical ASAP-aware optimization | `logical-asap-optimization` | Stage 1: per-computation candidates (Pass 1), ASAP-aware CSE (Pass 2), the analytical accuracy model |
+| Physical ASAP-aware optimization | `physical-asap-optimization` | Stage 2: materialization and physical operator implementation |
+| Plan selection | `plan-selection` | Stage 3: accuracy and latency checks, costing and selection; the planning models and the Stage 1 to Stage 3 driver |
 | Planner facade | `planner` | `e2e_plan`: Stage 0 followed by Stages 1–3 |
-| Executor | `asap-physical-operators` | Runs a `PhysicalASAPDAG` over `asap_sketchlib` summaries |
+| Executor | `executor` | Stage 4: runs a `PhysicalASAPDAG` over `asap_sketchlib` summaries; no stage crate depends on it |
 | Developer inspection | `devtools` | `stage_pipeline` and the Stage Viewer documents, corpus coverage tools |
 | End-to-end validation | `integration-tests` | Verify behavior across frontends, stages and execution |
 

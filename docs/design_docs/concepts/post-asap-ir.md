@@ -22,7 +22,7 @@ model or downstream runtime supports it.
 
 ## ASAP operators
 
-Every variant of [`ASAPOp`](../../../crates/types/src/ir/asap.rs) operates
+Every variant of [`ASAPOp`](../../../crates/types/src/ir/operator/asap.rs) operates
 over summary state rather than raw data. The summary family, kind/algorithm and
 parameters are committed in the node; the state itself is typed by the
 `FieldDataType` of the output field that carries it (`ExactAggregate`,
@@ -111,7 +111,7 @@ Materialization ([#509 §Materialization](../proposals/planner-layering.md#mater
 gives each sub-DAG one of three options: `NotMaterialized`,
 `MatAtIngestion(medium)` or `MatAtQuery(medium)`, with `Medium::Memory` or
 `Medium::Disk`. A
-[`MaterializationAssignment`](../../../crates/types/src/ir/timing.rs) records
+[`MaterializationAssignment`](../../../crates/types/src/ir/properties/timing.rs) records
 the option per sub-DAG, named by the node whose output would be stored. Any
 node may be named: a summary state, a population, or, as in #509 Example 4,
 the tumbling-window panes a query reads. `set(node, materialization)` assigns

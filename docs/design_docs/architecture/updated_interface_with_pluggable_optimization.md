@@ -235,20 +235,21 @@ pass no longer runs these steps; another pass need not run any of them.
 | Crate | What it holds |
 |---|---|
 | `asap-types` | `ParsedWorkload` |
-| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `Stage1ToStage3Pass`, `run_stage1_to_stage3` |
+| `asap-plan-selection` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `Stage1ToStage3Pass`, `run_stage1_to_stage3` |
 | `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch |
 
 ```text
 asap-planner ──┬──> asap-frontend-{sql, promql, metricsql}
-               └──> asap-aware-mapping ──> asap-types
-                          ▲
+               └──> asap-plan-selection ──> asap-physical-asap-optimization
+                          ▲                     ──> asap-logical-asap-optimization ──> asap-types
                      a pass depends only this far
 ```
 
 `asap-planner` is separate because it is the only crate depending on every
 frontend; before it, the sole facade re-exporting more than one was
 `asap-devtools`, a developer-tools crate. `PlanningModels` lives in
-`asap-aware-mapping` because both inputs use it, and `asap-planner` re-exports
+`asap-plan-selection` (Stage 3, the only stage that uses the deployment's
+models) because both inputs use it, and `asap-planner` re-exports
 it.
 
 ---

@@ -11,30 +11,32 @@ owns the decision.
 A new sketch that Pass 1 can offer for an intent.
 
 1. **Type.** Add the variant to `SketchAlgorithm` and its parameters to
-   `SketchParams` (`crates/types/src/post_asap/sketch.rs`).
+   `SketchParams` (`crates/types/src/ir/schema/sketch.rs`).
 2. **Capability.** Add its row to `FamilyCapability::of`
-   (`crates/types/src/post_asap/family_capability.rs`): which inputs it can
+   (`crates/types/src/ir/schema/family_capability.rs`): which inputs it can
    merge (`MergeInputRule`) and which statistics it answers (`StatisticKind`,
    with the merged error). Pass 2's sharing, pane and rollup rules read only
    this table.
 3. **Offer and size.** List it for its intents in
-   `realization::summary_candidates`, most preferred first, and size it in
+   `realization::summary_candidates` (`crates/logical-asap-optimization`),
+   most preferred first, and size it in
    `realization::default_size_params`.
-4. **Accuracy.** Add its error model under `accuracy/estimators/` and return
+4. **Accuracy.** Add its error model under
+   `crates/logical-asap-optimization/src/accuracy/estimators/` and return
    it from `DefaultAccuracyModel`'s `local_guarantee`, by inverting the same
    sizing formulas. Without a guarantee, every candidate that uses it is
    rejected.
 5. **Cost.** Give it a state size and per-operation CPU in
-   `stage3_plan_selection.rs` (and accept its parameters in
-   `stage3_plan_selection/measured_operation_costs.rs` if deployments measure
-   it).
+   `crates/plan-selection/src/lib.rs` (and accept its parameters in
+   `crates/plan-selection/src/measured_operation_costs.rs` if deployments
+   measure it).
 6. **Executor.** Wrap the `asap_sketchlib` implementation in
-   `crates/asap-physical-operators/src/summary_kernels/` and register it in
+   `crates/executor/src/summary_kernels/` and register it in
    `factory.rs` and `capability.rs`. Gaps in the library are fixed upstream,
    not with a local copy.
 7. **Labels.** Name it in `asap_devtools::candidate_labels`.
 
-Tests: a Pass 1 test in `crates/asap-aware-mapping/tests/per_computation_candidates.rs`
+Tests: a Pass 1 test in `crates/logical-asap-optimization/tests/per_computation_candidates.rs`
 that the intent gets the new candidate (and that a deployment without it
 prunes it with `UnsupportedByDeployment`); an estimator test beside the
 estimator; an execution test in `crates/integration-tests/tests/` such as
@@ -45,12 +47,13 @@ estimator; an execution test in `crates/integration-tests/tests/` such as
 A new way for computations of one Pass 1 candidate to share, split or reuse
 work.
 
-1. In `asap_aware_cse.rs`, add the part it can choose as a `*Candidate` type
+1. In `crates/logical-asap-optimization/src/asap_aware_cse.rs`, add the part it can choose as a `*Candidate` type
    with a finder (for example `rollup_candidates(roots)`), and the function
    that applies a set of them and returns `*Pass2Candidate`s (for example
    `rollup_pass2_candidates`). Read summary families only through
    `FamilyCapability`.
-2. In `pass/stage1_to_stage3.rs`, call it from Stage 1 enumeration after the
+2. In `crates/logical-asap-optimization/src/workload_candidates.rs`, call it
+   from Stage 1 enumeration after the
    existing rules and record what it applied in a new `Pass2Candidate` field.
 3. Rebuild its label from that field in `asap_devtools::candidate_labels`.
 4. Add its row to the Pass 2 rule table of the
@@ -67,13 +70,13 @@ contains the candidate and that Stage 3 prices it.
 ## 3. Add a Stage 2 materialization option
 
 1. Add the `Materialization` variant
-   (`crates/types/src/post_asap/execution_data_state.rs`) and its timing in
-   `crates/types/src/ir/timing.rs`, with its data-state edge rules.
-2. Offer it in `stage2_physical_asap_optimization.rs` (the
+   (`crates/types/src/physical/materialization.rs`) and its timing in
+   `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
+2. Offer it in `crates/physical-asap-optimization/src/lib.rs` (the
    `MaterializationCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.
-3. Price it in `stage3_plan_selection.rs`: what it keeps in memory or on
+3. Price it in `crates/plan-selection/src/lib.rs`: what it keeps in memory or on
    disk, and what each evaluation rebuilds.
 
 Tests: Stage 2 unit tests for when the option is offered;
