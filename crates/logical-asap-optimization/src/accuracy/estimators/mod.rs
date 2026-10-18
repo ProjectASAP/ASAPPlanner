@@ -54,7 +54,7 @@ fn bounded_guarantee(
     )
 }
 
-pub(super) fn local_guarantee(
+pub fn local_guarantee(
     family: &FieldDataType,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {

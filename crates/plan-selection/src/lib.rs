@@ -207,6 +207,8 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 };
 use asap_physical_asap_optimization::PhysicalCandidate;
 
+pub mod accuracy;
+pub use accuracy::{AccuracyModel, DefaultAccuracyModel};
 pub mod cost;
 /// Costed reuse of compatible physical pane producers.
 pub mod pane_sharing;
@@ -1393,7 +1395,7 @@ pub fn resize_for_failure_probability(
 /// the metric a counter ([`confirmed_weights`]), and unmet otherwise.
 ///
 /// A target that sets no metric accepts a guarantee in any metric that meets
-/// its ε, δ and scope ([`asap_logical_asap_optimization::accuracy::AccuracyModel::satisfies`]); one that sets a metric
+/// its ε, δ and scope ([`AccuracyModel::satisfies`]); one that sets a metric
 /// accepts only guarantees in it (or convertible to it).
 fn accuracy_check(
     candidate: &PhysicalCandidate,

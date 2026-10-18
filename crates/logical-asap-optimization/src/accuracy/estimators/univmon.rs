@@ -378,7 +378,7 @@ mod tests {
     }
 
     fn meets(guarantee: &AccuracyGuarantee, epsilon: f64, delta: f64) -> bool {
-        DefaultAccuracyModel.satisfies(
+        satisfies(
             guarantee,
             &crate::accuracy::native_target(
                 &AccuracyTarget::max_error(epsilon).failure_probability(delta),

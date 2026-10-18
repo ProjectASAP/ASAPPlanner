@@ -30,16 +30,17 @@
 //! - [`realization`] — the summary families that can serve an aggregate
 //!   intent, the intent's accuracy target and `(ε, δ)` budget, and default
 //!   sketch sizing, shared by Pass 1 and Pass 2.
-//! - [`accuracy`] — the analytical accuracy model: per-family estimators,
-//!   composition and budget allocation, and the
-//!   [`AccuracyModel`](accuracy::AccuracyModel) extension point (issue #172)
-//!   that derives a machine-readable
+//! - [`accuracy`] — the built-in analytical accuracy rules: per-family
+//!   estimators, composition and budget allocation. They derive a
+//!   machine-readable
 //!   [`AccuracyGuarantee`](asap_types::ir::properties::AccuracyGuarantee)
-//!   for every finalized value and propagates it through
+//!   for every finalized value and propagate it through
 //!   approximate-over-approximate compositions under conservative rules
-//!   (no independence assumptions, unknown statistics stay unknown). Plan
-//!   selection checks each candidate's guarantee against its query's
-//!   `AccuracyTarget` before pricing it.
+//!   (no independence assumptions, unknown statistics stay unknown). A
+//!   composition with no rule leaves the guarantee `None` and keeps the
+//!   candidate. Stage 1 has no pluggable accuracy model: plan selection
+//!   (Stage 3) checks each candidate's guarantee against its query's
+//!   `AccuracyTarget` with the deployment's `AccuracyModel` before pricing it.
 //! - [`deployment_capabilities`] — the deployment's supported summaries.
 //! - [`maintained_population`] — builds a maintained-population sub-DAG for
 //!   an instant top-k/quantile/sum query; Pass 1 does not offer it yet (#681).
@@ -53,10 +54,7 @@ pub mod realization;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
-    PropagationStats,
-};
+pub use accuracy::{AccuracyEvidenceProvider, NoAccuracyEvidence, PropagationStats};
 pub use deployment_capabilities::{
     DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
 };
