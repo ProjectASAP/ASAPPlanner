@@ -59,8 +59,8 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
     /// Decides whether a candidate's accuracy guarantee meets its query's
-    /// target, and whether an output with no guarantee is accepted;
-    /// [`BuiltinAccuracyModel`] by default.
+    /// target, and whether the deployment accepts an output regardless of
+    /// its guarantee; [`BuiltinAccuracyModel`] by default.
     pub accuracy: &'a dyn AccuracyModel,
     /// Deployment facts the guarantees need (operand domains, observed
     /// guarantees); [`NoAccuracyEvidence`] by default.
