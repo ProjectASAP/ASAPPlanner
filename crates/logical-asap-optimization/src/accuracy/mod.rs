@@ -1,9 +1,10 @@
-//! Planner accuracy interfaces and model dispatch.
+//! The planner's built-in analytical accuracy rules: estimators, composition, budget split and target check.
 //!
 //! Estimator models derive local guarantees, composition propagates them,
 //! the budget split sizes each approximate input of a composition for an
-//! equal share of its target, and evidence supplies scoped contracts.
-//! Unknown evidence may retain a candidate but does not authorize selection.
+//! equal share of its target, and `evidence` holds the scoped contracts and
+//! statistics the rules consult. The deployment's evidence provider and
+//! accuracy model live in plan selection (`asap_plan_selection::accuracy`).
 //! See `docs/design_docs/concepts/accuracy-models.md` for the design.
 
 pub mod budget;
@@ -12,7 +13,7 @@ pub mod estimators;
 pub mod evidence;
 
 pub use budget::per_input_target;
-pub use evidence::{AccuracyEvidenceProvider, NoAccuracyEvidence, OperandDomain, PropagationStats};
+pub use evidence::{OperandDomain, PropagationStats};
 
 use asap_types::ir::properties::{
     AccuracyError, AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator,
@@ -20,10 +21,6 @@ use asap_types::ir::properties::{
 };
 use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
-use asap_types::ir::OperatorNode;
-
-pub use composition::propagate;
-pub use estimators::local_guarantee;
 
 /// Small relative tolerance for comparing an evaluated bound against a
 /// target, so a parameter sized by `⌈·⌉` to *exactly* meet ε is not rejected
@@ -38,7 +35,7 @@ const SATISFACTION_TOLERANCE: f64 = 1e-9;
 /// another metric does not satisfy, however small. When it sets none, a
 /// bound in any metric does, each compared in its own metric. Unknown
 /// required dimensions fail. Plan selection's default accuracy model
-/// (`asap_plan_selection::DefaultAccuracyModel`) delegates to it.
+/// (`asap_plan_selection::BuiltinAccuracyModel`) delegates to it.
 pub fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
     let within = |value: Option<f64>, limit: f64| {
         value.is_some_and(|v| v <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON)

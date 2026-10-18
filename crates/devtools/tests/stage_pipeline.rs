@@ -138,6 +138,7 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         let failed_a_check = [
             "failure_probability_resize_failed",
             "accuracy_target_missed",
+            "no_accuracy_guarantee",
             "raw_data_not_retained",
             "latency_bound_exceeded",
             "over_cluster_capacity",

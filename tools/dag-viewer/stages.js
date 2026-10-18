@@ -165,10 +165,11 @@ function uniqueIds(list, where, errors) {
 }
 
 // Every `stage3_plan_selection.rejected[].cause` Stage 3 writes
-// (`RejectionCause`): the first five are failed checks, the rest losses
+// (`RejectionCause`): the first six are failed checks, the rest losses
 // under the cost model.
 const REJECTION_CAUSES = [
-  'failure_probability_resize_failed', 'accuracy_target_missed', 'raw_data_not_retained',
+  'failure_probability_resize_failed', 'accuracy_target_missed', 'no_accuracy_guarantee',
+  'raw_data_not_retained',
   'latency_bound_exceeded', 'over_cluster_capacity',
   'costlier', 'slower', 'more_memory', 'not_lowest_latency_on_pareto_front', 'dominated',
   'tied_lost_on_enumeration_order',

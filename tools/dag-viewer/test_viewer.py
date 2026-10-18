@@ -161,7 +161,7 @@ class CandidateRowTests(unittest.TestCase):
         costlier = [row for row in rows if row["status"] == "costlier"]
         self.assertEqual([r["total"] for r in costlier], sorted(r["total"] for r in costlier))
         self.assertEqual([r["rank"] for r in costlier], list(range(2, len(costlier) + 2)))
-        failed_a_check = {"failure_probability_resize_failed", "accuracy_target_missed", "raw_data_not_retained", "latency_bound_exceeded", "over_cluster_capacity"}
+        failed_a_check = {"failure_probability_resize_failed", "accuracy_target_missed", "no_accuracy_guarantee", "raw_data_not_retained", "latency_bound_exceeded", "over_cluster_capacity"}
         rejected = {r["id"]: r["reason"] for r in selection["rejected"] if r["cause"] in failed_a_check}
         self.assertTrue(rejected)
         for row in rows:

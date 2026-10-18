@@ -1,6 +1,5 @@
-//! Scoped source contracts and evidence required by accuracy rules.
+//! Scoped source contracts and statistics the accuracy rules consult.
 use super::*;
-use asap_types::ir::QueryRoot;
 
 /// An enforced domain for the true values of one operand of an exact
 /// arithmetic operation, in every evaluation: they are finite and lie in
@@ -59,31 +58,3 @@ pub struct PropagationStats {
     /// certificate.
     pub topk_interval_failure_probability: Option<f64>,
 }
-
-/// Supplies typed planning-time evidence required by propagation rules.
-pub trait AccuracyEvidenceProvider {
-    /// Enforced domain of `operand`'s true values ([`OperandDomain`]), scoped
-    /// to this complete expression, including its source, filters, grouping
-    /// and window: a quantile ratio's operands, or the operands of a
-    /// product or quotient of estimates. `None` means unknown, including
-    /// emptiness.
-    fn operand_domain(&self, _operand: &OperatorNode) -> Option<OperandDomain> {
-        None
-    }
-
-    /// The deployment's empirical accuracy for one candidate's whole query
-    /// output, as a guarantee. Plan selection (#509 Stage 3) accepts a
-    /// candidate whose output has no theoretical guarantee that meets the
-    /// target (e.g. a difference of two quantile estimates) only when this
-    /// shows the output meets it. Stage 1 composition never reads it: root
-    /// guarantees there come from the built-in theoretical model. `None`
-    /// means no evidence.
-    fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
-        None
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoAccuracyEvidence;
-
-impl AccuracyEvidenceProvider for NoAccuracyEvidence {}
