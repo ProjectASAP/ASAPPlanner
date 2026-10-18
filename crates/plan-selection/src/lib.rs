@@ -7,9 +7,9 @@
 //! from the data workload and the deployment's operand-domain contracts),
 //! or when the deployment's empirical evidence shows this
 //! candidate's output does (`AccuracyEvidenceProvider::output_guarantee`,
-//! read only here). An output with no guarantee from either source is
-//! accepted only when the deployment's accuracy model accepts it without one
-//! (`AccuracyModel::accepts_output_without_guarantee`). For a query with a target, Count-Min is admitted only
+//! read only here). Before either, the deployment's accuracy model may accept
+//! the output directly, whatever its guarantee says
+//! (`AccuracyModel::accepts_output_regardless_of_guarantee`). For a query with a target, Count-Min is admitted only
 //! over weights proven non-negative; a query without one constrains nothing.
 //! A miss rejects the candidate as invalid, with a reason; only this stage
 //! discards valid candidates.
@@ -590,8 +590,8 @@ pub enum RejectionCause {
     AccuracyTargetMissed,
     /// A query's output has no accuracy guarantee (Stage 1 has no
     /// analytical rule for it and the deployment's evidence supplies none),
-    /// and the deployment's accuracy model does not accept it without one
-    /// ([`AccuracyModel::accepts_output_without_guarantee`]).
+    /// and the deployment's accuracy model did not accept it directly
+    /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]).
     NoAccuracyGuarantee,
     /// It scans raw data at query time in a deployment that does not
     /// retain raw data.
@@ -646,14 +646,14 @@ pub struct AcceptedAccuracy {
     /// The target's metric; `None` when the user did not set one.
     pub target_metric: Option<AccuracyMetric>,
     /// The metric the accepted guarantee is stated in; `None` for an exact
-    /// output, which meets every metric, and for one accepted without a
-    /// guarantee.
+    /// output, which meets every metric, and for one the deployment's model
+    /// accepted regardless of its guarantee (no guarantee was checked).
     pub accepted_metric: Option<AccuracyMetric>,
-    /// Whether the output has no guarantee and the deployment's accuracy
-    /// model accepted it anyway
-    /// ([`AccuracyModel::accepts_output_without_guarantee`]); `false`
-    /// otherwise.
-    pub accepted_without_guarantee: bool,
+    /// Whether the deployment's accuracy model accepted the output directly,
+    /// whatever its guarantee says
+    /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]); `false`
+    /// when a guarantee met the target.
+    pub accepted_regardless_of_guarantee: bool,
     /// The sketch algorithms the query's output reads, in plan order
     /// (e.g. `["Kll"]`); empty for an exact plan.
     pub sketches: Vec<String>,
@@ -662,7 +662,7 @@ pub struct AcceptedAccuracy {
 impl std::fmt::Display for AcceptedAccuracy {
     /// E.g. `metric not set; accepted rank (Kll)`, or
     /// `metric relative; accepted relative (DDSketch)`, or
-    /// `metric rank; accepted without a guarantee (Kll)`.
+    /// `metric rank; accepted by the deployment's accuracy model regardless of guarantee (Kll)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = |metric: AccuracyMetric| {
             serde_json::to_value(metric)
@@ -675,7 +675,10 @@ impl std::fmt::Display for AcceptedAccuracy {
             Some(metric) => write!(f, "metric {}; ", name(metric))?,
         }
         match self.accepted_metric {
-            _ if self.accepted_without_guarantee => write!(f, "accepted without a guarantee")?,
+            _ if self.accepted_regardless_of_guarantee => write!(
+                f,
+                "accepted by the deployment's accuracy model regardless of guarantee"
+            )?,
             None => write!(f, "accepted exact")?,
             Some(metric) => write!(f, "accepted {}", name(metric))?,
         }
@@ -1417,12 +1420,13 @@ pub fn resize_for_failure_probability(
 /// its ε, δ and scope ([`AccuracyModel::satisfies`]); one that sets a metric
 /// accepts only guarantees in it (or convertible to it).
 ///
-/// An output with no guarantee from either source (Stage 1 had no rule,
-/// and the evidence has none) is accepted only when the deployment's
-/// accuracy model accepts it without one
-/// ([`AccuracyModel::accepts_output_without_guarantee`]); otherwise the
-/// candidate is rejected as [`RejectionCause::NoAccuracyGuarantee`]. Any
-/// other miss is [`RejectionCause::AccuracyTargetMissed`].
+/// The deployment's accuracy model is asked first
+/// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]): an output it
+/// accepts is accepted whatever its guarantee says, and none of the checks
+/// above runs for it. Otherwise, an output with no guarantee from either
+/// source (Stage 1 had no rule, and the evidence has none) is rejected as
+/// [`RejectionCause::NoAccuracyGuarantee`], and any other miss as
+/// [`RejectionCause::AccuracyTargetMissed`].
 fn accuracy_check(
     candidate: &PhysicalCandidate,
     targets: &[AccuracyTarget],
@@ -1433,6 +1437,9 @@ fn accuracy_check(
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
         let query = query + 1;
         let mut sketches: Vec<String> = Vec::new();
+        // The first Count-Min whose update weights are not proven
+        // non-negative, which its bound assumes, as a rejection reason.
+        let mut unproven_weights: Option<String> = None;
         for node in root_operators(root)
             .iter()
             .flat_map(|node| OperatorNode::reachable(node))
@@ -1462,15 +1469,31 @@ fn accuracy_check(
                     }
                     _ => String::new(),
                 };
-                return Err((
-                    RejectionCause::AccuracyTargetMissed,
+                unproven_weights.get_or_insert_with(|| {
                     format!(
                         "q{query}: {} needs non-negative update weights, and these are not \
                          proven non-negative{unconfirmed}",
                         family_name(family)
-                    ),
-                ));
+                    )
+                });
             }
+        }
+        // The deployment's model may accept the output directly, whatever
+        // its guarantee says; no guarantee or evidence check runs then.
+        if models
+            .accuracy
+            .accepts_output_regardless_of_guarantee(root, target)
+        {
+            accepted.push(AcceptedAccuracy {
+                target_metric: target.accuracy_metric,
+                accepted_metric: None,
+                accepted_regardless_of_guarantee: true,
+                sketches,
+            });
+            continue;
+        }
+        if let Some(reason) = unproven_weights {
+            return Err((RejectionCause::AccuracyTargetMissed, reason));
         }
         // A guarantee per value is stated over the whole result's `G`
         // values for a whole-result target.
@@ -1496,31 +1519,17 @@ fn accuracy_check(
             accepted.push(AcceptedAccuracy {
                 target_metric: target.accuracy_metric,
                 accepted_metric: (!met.is_exact()).then_some(met.spec.accuracy_metric),
-                accepted_without_guarantee: false,
+                accepted_regardless_of_guarantee: false,
                 sketches,
             });
             continue;
         }
-        // No guarantee from either source: the deployment's model decides.
         if guarantee.is_none() && evidence.is_none() {
-            if models
-                .accuracy
-                .accepts_output_without_guarantee(root, target)
-            {
-                accepted.push(AcceptedAccuracy {
-                    target_metric: target.accuracy_metric,
-                    accepted_metric: None,
-                    accepted_without_guarantee: true,
-                    sketches,
-                });
-                continue;
-            }
             return Err((
                 RejectionCause::NoAccuracyGuarantee,
                 format!(
-                    "q{query}: the output has no guarantee, the deployment has no evidence \
-                     for it, and its accuracy model does not accept it for target {target:?} \
-                     without one"
+                    "q{query}: the output has no guarantee, and the deployment has no evidence \
+                     for it, so it cannot meet target {target:?}"
                 ),
             ));
         }
@@ -1535,24 +1544,23 @@ fn accuracy_check(
                 {
                     format!(
                         "q{query}: the output's guarantee holds for each value, and the number \
-                     of values one evaluation returns is not bound (no declared series count \
-                     for a source a PromQL vector reads; no bound on a SQL result's groups \
-                     yet), \
-                     so it does not meet whole-result target {target:?}, and the deployment \
-                     has no evidence that it meets it"
+                         of values one evaluation returns is not bound (no declared series \
+                         count for a source a PromQL vector reads; no bound on a SQL result's \
+                         groups yet), so it does not meet whole-result target {target:?}, and \
+                         the deployment has no evidence that it meets it"
                     )
                 }
                 Some(g) => format!(
-                    "q{query}: the output guarantees a {:?} bound {:?}, failure probability {:?}, \
-                 which misses target {target:?}, and the deployment has no evidence that it \
-                 meets it",
+                    "q{query}: the output guarantees a {:?} bound {:?}, failure probability \
+                     {:?}, which misses target {target:?}, and the deployment has no evidence \
+                     that it meets it",
                     g.spec.accuracy_metric,
                     g.spec.error.evaluate(),
                     g.spec.failure_probability.evaluate(),
                 ),
                 None => format!(
-                    "q{query}: the output has no guarantee, and the deployment has no evidence \
-                 that it meets target {target:?}"
+                    "q{query}: the output has no guarantee, and the deployment has no \
+                     evidence that it meets target {target:?}"
                 ),
             },
         ));
@@ -4247,6 +4255,91 @@ mod tests {
         .unwrap();
         for id in &summaries {
             assert!(measured.costs.contains_key(*id), "{id} is valid");
+        }
+    }
+
+    /// Deployment evidence of a large absolute error (1.0) for every output.
+    struct EveryOutputMeasuredLoose;
+
+    impl AccuracyEvidenceProvider for EveryOutputMeasuredLoose {
+        fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
+            Some(AccuracyGuarantee::new(
+                AccuracyMetric::ABSOLUTE,
+                BoundExpr::Constant { value: 1.0 },
+                ProbabilityExpr::Constant { value: 1e-6 },
+                vec![],
+            ))
+        }
+    }
+
+    /// A model that accepts every output directly, whatever its guarantee.
+    struct AcceptsEveryOutput;
+
+    impl AccuracyModel for AcceptsEveryOutput {
+        fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+            BuiltinAccuracyModel.satisfies(guarantee, target)
+        }
+
+        fn accepts_output_regardless_of_guarantee(
+            &self,
+            _output: &QueryRoot,
+            _target: &AccuracyTarget,
+        ) -> bool {
+            true
+        }
+    }
+
+    /// The model's hook has priority over every guarantee. The summary
+    /// candidates of a difference of quantile estimates have no theoretical
+    /// guarantee: with evidence that misses the target the built-in model
+    /// rejects them as `AccuracyTargetMissed`, and with no evidence as
+    /// `NoAccuracyGuarantee`; a model that accepts every output accepts them
+    /// in both cases, regardless of guarantee.
+    #[test]
+    fn the_accuracy_model_accepts_an_output_whatever_its_guarantee() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        let candidates = all_candidates(
+            "quantile_over_time(0.99, m[1m]) - quantile_over_time(0.5, m[1m])",
+            &target,
+        );
+        let summaries: Vec<_> = candidates
+            .iter()
+            .filter(|c| has_summary_estimate(c))
+            .map(|c| c.id.as_str())
+            .collect();
+        assert!(!summaries.is_empty());
+        let select = |accuracy: &dyn AccuracyModel, evidence: &dyn AccuracyEvidenceProvider| {
+            select_plan(
+                &candidates,
+                &[entry_with(
+                    target.clone().accuracy_metric(AccuracyMetric::ABSOLUTE),
+                    repeating(10_000),
+                )],
+                &data(),
+                PlanningModels::builtin()
+                    .with_accuracy(accuracy)
+                    .with_evidence(evidence),
+            )
+            .unwrap()
+        };
+        for (evidence, builtin_cause) in [
+            (
+                &EveryOutputMeasuredLoose as &dyn AccuracyEvidenceProvider,
+                RejectionCause::AccuracyTargetMissed,
+            ),
+            (&NoAccuracyEvidence, RejectionCause::NoAccuracyGuarantee),
+        ] {
+            let builtin = select(&BuiltinAccuracyModel, evidence);
+            let accepting = select(&AcceptsEveryOutput, evidence);
+            for id in &summaries {
+                let rejection = builtin.rejected.iter().find(|r| r.id == *id).unwrap();
+                assert_eq!(rejection.cause, builtin_cause, "{}", rejection.reason);
+                assert!(accepting.costs.contains_key(*id), "{id} is valid");
+                assert!(
+                    accepting.accepted[*id][0].accepted_regardless_of_guarantee,
+                    "{id}"
+                );
+            }
         }
     }
 
