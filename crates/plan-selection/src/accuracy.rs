@@ -53,8 +53,12 @@ pub trait AccuracyModel {
     /// Whether the deployment accepts `output`, one query's output in a
     /// candidate, for `target` directly, whatever its guarantee says:
     /// missing (Stage 1 had no analytical rule), met or missed. Stage 3 asks
-    /// this first for every query output; when it returns `true`, no
-    /// guarantee or evidence check runs for that output. The default accepts
+    /// this for every query output before any guarantee check; when it
+    /// returns `true`, no guarantee or evidence check runs for that output.
+    /// It does not override the executability check before it: a plan that
+    /// reads Count-Min over update weights not proven non-negative is
+    /// rejected (`RejectionCause::CountMinWeightsNotProvenNonNegative`)
+    /// whatever this returns. The default accepts
     /// none, so Stage 3 checks the Stage 1 guarantee, then the evidence
     /// ([`AccuracyEvidenceProvider::output_guarantee`]) with
     /// [`Self::satisfies`].

@@ -307,4 +307,16 @@ async fn the_deployment_accuracy_model_accepts_outputs_whose_guarantee_misses() 
             "{id}"
         );
     }
+    // The hook also overrides guarantees that meet the target: every
+    // accepted output, including the exact P1 and the KLL P2, is accepted
+    // regardless of its guarantee.
+    for id in ["P1", "P2"] {
+        assert!(accepting_selection.accepted.contains_key(id), "{id}");
+    }
+    for (id, queries) in &accepting_selection.accepted {
+        assert!(
+            queries.iter().all(|q| q.accepted_regardless_of_guarantee),
+            "{id}"
+        );
+    }
 }
