@@ -375,7 +375,7 @@ async fn batch_planning_replaces_summary_operators() {
     }
     // The batch exports as one physical DAG: a root per query and the one
     // SUM state, with the materialization the selected plan assigned it.
-    let workload_dag = output.execution_timed_dag().unwrap();
+    let workload_dag = output.physical_asap_dag().unwrap();
     assert_eq!(workload_dag.roots.len(), 2);
     assert_ne!(workload_dag.roots[0], workload_dag.roots[1]);
     let states: Vec<_> = workload_dag

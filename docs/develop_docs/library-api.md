@@ -16,7 +16,7 @@ plan, and a serializable DAG is not evidence of runtime readiness.
 | Pre-ASAP IR | Frontend `lower_*` | [Lower a query](#lower-a-query-into-pre-asap-ir) |
 | Selected plan for a workload (Stages 0–3) | `asap_planner::e2e_plan` | [Plan a workload](#plan-a-workload-through-the-stages) |
 | Every stage's candidates for already lowered roots | `asap_aware_mapping::run_stage1_to_stage3` | [Plan a workload](#plan-a-workload-through-the-stages) |
-| Physical DAG for an executor | `PlanOutput::execution_timed_dag`, or timing and export functions | [Export](#export) |
+| Physical DAG for an executor | `PlanOutput::physical_asap_dag`, or timing and export functions | [Export](#export) |
 
 Each recipe ends at a different artifact. Use only the stages needed for that
 artifact, while preserving the checks required by its intended consumer.
@@ -89,7 +89,7 @@ own accuracy requirement, an `AccuracyTarget` with the fields `error` (ε),
 | `.accuracy_scope(s)` | Which output values one statement covers (`AccuracyScope`) | `.accuracy_scope(AccuracyScope::WholeResult)` |
 
 In JSON the target is a plain struct, for example
-`{"error": 0.01, "failure_probability": 0.001, "accuracy_metric": "rank"}`.
+`{"max_error": 0.01, "failure_probability": 0.001, "accuracy_metric": "rank"}`.
 
 Epsilon does not mean the same error quantity for every statistic. Inspect the
 candidate's guarantee and its error metric; a target is a requirement, not proof
@@ -182,7 +182,7 @@ asap_aware_mapping::run_stage1_to_stage3<Id>(
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory, ParetoFront}` chooses among the candidates that fit |
 | `PlanOutput.plans` | One `QueryPlan { entry_index, root }` per query, in `QueryWorkload::entries()` order |
 | `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected`, `costs` (each candidate's `CandidateCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted`, `rejected` (with reasons) and `front` |
-| `PlanOutput::execution_timed_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
+| `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
 
 Each candidate's `ResourceUsage` holds its usage without prices:
 `cpu_ops_per_second`, `scanned_bytes_per_second`, `average_memory_bytes`,
@@ -246,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for rejection in &selection.rejected {
         println!("{}: {}", rejection.id, rejection.reason);
     }
-    let dag = output.execution_timed_dag()?;
+    let dag = output.physical_asap_dag()?;
     println!("{} physical nodes", dag.nodes.len());
     Ok(())
 }
@@ -319,7 +319,7 @@ optional also does not guarantee every planning operation can succeed without it
 
 | Function/type | Purpose |
 | --- | --- |
-| `asap_types::ir::apply_materialization_timings(&root, &assignment, &mut TimingMemo::new())` | Write execution timing into every node from a `MaterializationAssignment` (default: all query time) and validate the data-state edges; `PlanOutput::execution_timed_dag()` applies the default to a planned workload |
+| `asap_types::ir::apply_materialization_timings(&root, &assignment, &mut TimingMemo::new())` | Write execution timing into every node from a `MaterializationAssignment` (default: all query time) and validate the data-state edges; `PlanOutput::physical_asap_dag()` applies the default to a planned workload |
 | `asap_types::ir::physical_export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as a `PhysicalASAPDAG` (`PHYSICAL_ASAP_DAG_WIRE_VERSION`); rejects an untimed node; `compile_physical_asap_workload(&roots)` exports a batch with one root per query |
 | `PhysicalASAPDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
 

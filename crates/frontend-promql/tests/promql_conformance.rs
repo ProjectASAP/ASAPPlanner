@@ -728,7 +728,7 @@ fn count_maps_to_count_and_inherits_accuracy() {
     assert!(
         has(&approx, |i| matches!(
             i,
-            AggIntent::Count { accuracy } if (accuracy.error - 0.01).abs() < 1e-9
+            AggIntent::Count { accuracy } if (accuracy.max_error - 0.01).abs() < 1e-9
                 && accuracy.accuracy_metric.is_none()
         )),
         "Count must carry the approximate target, got {:?}",

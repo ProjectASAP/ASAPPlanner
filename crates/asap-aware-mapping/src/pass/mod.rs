@@ -262,8 +262,9 @@ impl PlanOutput {
         nodes
     }
 
-    /// The workload as one physical ASAP DAG, with shared sub-DAGs exported
-    /// once: operator queries become its `roots` and standalone scalar
+    /// The workload as one physical ASAP DAG, every node computed at query
+    /// time (the default [`MaterializationAssignment`]), with shared
+    /// sub-DAGs exported once: operator queries become its `roots` and standalone scalar
     /// queries its `scalar_roots`, keyed by position in the batch. That
     /// position is the entry index, because `check_contract` requires dense
     /// entry indices.
@@ -272,7 +273,7 @@ impl PlanOutput {
     /// ([`PhysicalASAPDAGValidationError::NoRoots`](asap_types::ir::physical_export::PhysicalASAPDAGValidationError::NoRoots)).
     /// A workload of only literal scalars yields a DAG with no nodes: just
     /// its `scalar_roots`.
-    pub fn execution_timed_dag(
+    pub fn physical_asap_dag(
         &self,
     ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
         // One memo, so a node several roots share by `Rc` is timed and exported once.
@@ -617,18 +618,18 @@ mod tests {
     /// `InvalidPhysicalDAG`. A workload of only literal scalars exports a DAG
     /// with no nodes, just its `scalar_roots`.
     #[test]
-    fn execution_timed_dag_of_an_empty_and_a_literal_only_workload() {
+    fn physical_asap_dag_of_an_empty_and_a_literal_only_workload() {
         use asap_types::ir::physical_export::PhysicalASAPDAGValidationError;
         use asap_types::ir::ScalarExpr;
         assert_eq!(
-            PlanOutput::new(Vec::new()).execution_timed_dag().err(),
+            PlanOutput::new(Vec::new()).physical_asap_dag().err(),
             Some(ExecutionDataStateError::InvalidPhysicalDAG(
                 PhysicalASAPDAGValidationError::NoRoots
             ))
         );
         let mut literal = PlanOutput::new(Vec::new());
         literal.scalar_roots = vec![(0, ScalarExpr::literal_f64(1.0))];
-        let dag = literal.execution_timed_dag().unwrap();
+        let dag = literal.physical_asap_dag().unwrap();
         assert!(dag.nodes.is_empty() && dag.roots.is_empty());
         let [(0, ScalarExpr::Literal(_))] = dag.scalar_roots.as_slice() else {
             panic!("one literal scalar root: {:?}", dag.scalar_roots)

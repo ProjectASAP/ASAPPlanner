@@ -19,16 +19,16 @@ pub fn per_input_target(
     metric: AccuracyMetric,
     approximate_inputs: usize,
 ) -> Option<AccuracyTarget> {
-    if target.is_exact() || !(target.error.is_finite() && target.error > 0.0) {
+    if target.is_exact() || !(target.max_error.is_finite() && target.max_error > 0.0) {
         return None;
     }
     let fraction = 1.0 / approximate_inputs.max(1) as f64;
-    let error = match metric {
-        AccuracyMetric::Relative => (1.0 + target.error).powf(fraction) - 1.0,
-        _ => target.error * fraction,
+    let max_error = match metric {
+        AccuracyMetric::Relative => (1.0 + target.max_error).powf(fraction) - 1.0,
+        _ => target.max_error * fraction,
     };
     Some(AccuracyTarget {
-        error,
+        max_error,
         failure_probability: target.failure_probability.map(|delta| delta * fraction),
         ..target.clone()
     })
@@ -70,7 +70,7 @@ mod tests {
             2,
         )
         .unwrap();
-        assert!((share.error - 0.1).abs() < 1e-12);
+        assert!((share.max_error - 0.1).abs() < 1e-12);
     }
 
     /// No approximate input meets an exact target.

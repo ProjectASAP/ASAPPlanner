@@ -28,7 +28,7 @@ and [frontend dependencies](#frontend-specific-dependencies).
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected`, `plan`, `costs`, `accepted`, `rejected`, `front`), set by the default pass `Stage1ToStage3Pass`; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `execution_timed_dag()` exports it as one `PhysicalASAPDAG` |
+| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected`, `plan`, `costs`, `accepted`, `rejected`, `front`), set by the default pass `Stage1ToStage3Pass`; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `physical_asap_dag()` exports it as one `PhysicalASAPDAG` |
 | `Stage1ToStage3Run<Id>` (from `run_stage1_to_stage3`) | Every stage's candidates: Pass 1's per-computation candidates, the logical candidates, the physical candidates, Stage 2's pruned candidates, and the selection | For callers that inspect or display the alternatives |
 
 The selected plan is a planning artifact. ASAPPlanner does **not** deploy

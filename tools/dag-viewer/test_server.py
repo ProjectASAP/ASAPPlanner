@@ -24,26 +24,26 @@ import server
 
 
 class PlanArgsTests(unittest.TestCase):
-    def test_promql_queries_with_epsilon(self):
+    def test_promql_queries_with_max_error(self):
         args = server.plan_args(
-            {"queries": [{"language": "promql", "text": "sum(rate(m[1m]))"}], "epsilon": 0.01},
+            {"queries": [{"language": "promql", "text": "sum(rate(m[1m]))"}], "max_error": 0.01},
             "out.json",
         )
         self.assertEqual(
             args[1:],
-            ["--promql", "sum(rate(m[1m]))", "--name", "q1", "--epsilon", "0.01", "--sample-interval-ms", "15000", "--out", "out.json"],
+            ["--promql", "sum(rate(m[1m]))", "--name", "q1", "--max-error", "0.01", "--sample-interval-ms", "15000", "--out", "out.json"],
         )
 
     def test_metric_names_the_targets_error_metric(self):
         query = {"language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
         for metric in ("absolute", "relative", "rank"):
             with self.subTest(metric=metric):
-                args = server.plan_args({"queries": [query], "epsilon": 0.01, "metric": metric}, "out.json")
-                self.assertEqual(args[5:9], ["--epsilon", "0.01", "--metric", metric])
-        for empty in ({}, {"metric": ""}, {"metric": None}):
+                args = server.plan_args({"queries": [query], "max_error": 0.01, "accuracy_metric": metric}, "out.json")
+                self.assertEqual(args[5:9], ["--max-error", "0.01", "--accuracy-metric", metric])
+        for empty in ({}, {"accuracy_metric": ""}, {"accuracy_metric": None}):
             with self.subTest(empty=empty):
-                args = server.plan_args({"queries": [query], "epsilon": 0.01, **empty}, "out.json")
-                self.assertNotIn("--metric", args)
+                args = server.plan_args({"queries": [query], "max_error": 0.01, **empty}, "out.json")
+                self.assertNotIn("--accuracy-metric", args)
 
     def test_sql_queries_declare_their_tables(self):
         table = {"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}], "time_index": 0}
@@ -86,12 +86,12 @@ class PlanArgsTests(unittest.TestCase):
                 {"schemas": [table], "queries": [{"language": "sql", "text": "SELECT 1", "schemas": [["metrics"]]}]},
                 "query #1: selected schemas must be names of declared tables",
             ),
-            ({"queries": [{"language": "promql", "text": "m"}], "epsilon": True}, "epsilon must be a number"),
-            ({"queries": [{"language": "promql", "text": "m"}], "epsilon": "0.1"}, "epsilon must be a number"),
+            ({"queries": [{"language": "promql", "text": "m"}], "max_error": True}, "max_error must be a number"),
+            ({"queries": [{"language": "promql", "text": "m"}], "max_error": "0.1"}, "max_error must be a number"),
             ({"queries": [{"language": "promql", "text": "m"}], "interval_ms": True}, "interval_ms must be a positive integer"),
-            ({"queries": [{"language": "promql", "text": "m"}], "epsilon": 0.01, "metric": "rnak"}, "metric must be absolute, relative or rank"),
-            ({"queries": [{"language": "promql", "text": "m"}], "epsilon": 0.01, "metric": 3}, "metric must be absolute, relative or rank"),
-            ({"queries": [{"language": "promql", "text": "m"}], "metric": "rank"}, "metric needs epsilon"),
+            ({"queries": [{"language": "promql", "text": "m"}], "max_error": 0.01, "accuracy_metric": "rnak"}, "accuracy_metric must be absolute, relative or rank"),
+            ({"queries": [{"language": "promql", "text": "m"}], "max_error": 0.01, "accuracy_metric": 3}, "accuracy_metric must be absolute, relative or rank"),
+            ({"queries": [{"language": "promql", "text": "m"}], "accuracy_metric": "rank"}, "accuracy_metric needs max_error"),
             ({"schemas": [{"name": 3, "columns": [{}]}], "queries": [{"language": "sql", "text": "SELECT 1"}]}, "schema #1: name must be a non-empty string"),
         ]
         for payload, message in cases:
@@ -249,12 +249,12 @@ class PlanEndpointTests(unittest.TestCase):
         """A quantile target may set its metric or leave it unset: either
         way a plan is selected, and Stage 3 reports the metric it accepted."""
         query = {"name": "p99", "language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
-        named = post_plan({"queries": [query], "epsilon": 0.01, "metric": "rank"})
+        named = post_plan({"queries": [query], "max_error": 0.01, "accuracy_metric": "rank"})
         self.assertEqual(named["workload"]["queries"][0]["requirements"]["accuracy"]["accuracy_metric"], "rank")
         selected = named["stage3_plan_selection"]["selected"]
         self.assertIsNotNone(selected)
         self.assertTrue(named["stage3_plan_selection"]["accepted"][selected][0]["summary"].startswith("metric rank; accepted "))
-        unnamed = post_plan({"queries": [query], "epsilon": 0.01})
+        unnamed = post_plan({"queries": [query], "max_error": 0.01})
         self.assertNotIn("accuracy_metric", unnamed["workload"]["queries"][0]["requirements"]["accuracy"])
         selected = unnamed["stage3_plan_selection"]["selected"]
         self.assertIsNotNone(selected)

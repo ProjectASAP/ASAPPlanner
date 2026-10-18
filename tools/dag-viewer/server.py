@@ -120,22 +120,22 @@ def plan_args(payload: object, out: str) -> list[str]:
             raise ValueError(f"query #{index}: selected schemas must be names of declared tables")
         args.extend([f"--{language}", text, "--name", name])
 
-    epsilon = payload.get("epsilon")
-    if epsilon is not None:
-        if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)):
-            raise ValueError("epsilon must be a number")
-        if not 0 < epsilon < 1:
-            raise ValueError("epsilon must be between 0 and 1")
-        args.extend(["--epsilon", str(epsilon)])
+    max_error = payload.get("max_error")
+    if max_error is not None:
+        if isinstance(max_error, bool) or not isinstance(max_error, (int, float)):
+            raise ValueError("max_error must be a number")
+        if not 0 < max_error < 1:
+            raise ValueError("max_error must be between 0 and 1")
+        args.extend(["--max-error", str(max_error)])
     # The target's error metric; empty leaves it unset, and Stage 3 then
     # accepts a guarantee in any metric and reports the one it accepted.
-    metric = payload.get("metric")
-    if metric not in (None, ""):
-        if metric not in ("absolute", "relative", "rank"):
-            raise ValueError("metric must be absolute, relative or rank")
-        if epsilon is None:
-            raise ValueError("metric needs epsilon")
-        args.extend(["--metric", metric])
+    accuracy_metric = payload.get("accuracy_metric")
+    if accuracy_metric not in (None, ""):
+        if accuracy_metric not in ("absolute", "relative", "rank"):
+            raise ValueError("accuracy_metric must be absolute, relative or rank")
+        if max_error is None:
+            raise ValueError("accuracy_metric needs max_error")
+        args.extend(["--accuracy-metric", accuracy_metric])
     interval = payload.get("interval_ms", 15_000)
     if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
         raise ValueError("interval_ms must be a positive integer")

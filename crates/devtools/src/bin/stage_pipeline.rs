@@ -4,7 +4,7 @@
 // planner-layering-3a and planner-layering-3b: #509 Example 3, Patterns A
 // and B; 3a has 972 candidates, all priced, 64 shown by default)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
-//     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
+//     --promql "topk by (job) (10, rate(x[1m]))" --max-error 0.01 --failure-probability 0.001 --out run.json
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --table '{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"},
 //               {"name": "service", "type": "utf8"}], "time_index": 0}' \
@@ -32,8 +32,13 @@
 //     the shown candidates' costs and accepted accuracy (per query: the
 //     target's metric or null when not set, the accepted guarantee's
 //     metric or null when exact, the sketches read and a one-line
-//     summary), and every other shown candidate as
-//     rejected (`valid: false`) or costlier. Each node's `cost` is one
+//     summary), and every other shown candidate under `rejected` with
+//     its `cause`: a failed check (`failure_probability_resize_failed`,
+//     `accuracy_target_missed`, `raw_data_not_retained`,
+//     `latency_bound_exceeded`, `over_cluster_capacity`) or a loss under
+//     the cost model (`costlier`, `slower`, `more_memory`,
+//     `not_lowest_latency_on_pareto_front`, `dominated`,
+//     `tied_lost_on_enumeration_order`). Each node's `cost` is one
 //     computation's price times `multiplier`, the times it is computed:
 //     once if materialized, else once per query (or materialized node)
 //     that reads it, so a shared NotMaterialized node is charged once per
@@ -51,9 +56,9 @@
 // does (`--max-displayed`).
 //
 // `--promql` and `--sql` may repeat and mix, in workload order; `--name`
-// names the query before it (default `q<n>`). `--epsilon`/
-// `--delta` apply to every query; without them the queries are exact.
-// `--metric` (`absolute`, `absolute_stream_l1`, `absolute_stream_l2`,
+// names the query before it (default `q<n>`). `--max-error` (ε) and
+// `--failure-probability` (δ) apply to every query; without them the
+// queries are exact. `--accuracy-metric` (`absolute`, `absolute_stream_l1`, `absolute_stream_l2`,
 // `relative` or `rank`) sets the error metric of that target; without it,
 // a candidate is accepted in whatever metric its guarantee meets ε (and δ)
 // in, and `stage3_plan_selection.accepted` reports, per shown valid
@@ -131,7 +136,7 @@ use serde_json::{json, Value};
 
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
-[--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--sample-interval-ms <u64>])) \
+[--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--deployment-capabilities <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
@@ -214,8 +219,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // (language, text, name) in workload order.
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
-    let (mut epsilon, mut delta, mut sample_interval_ms) = (None, None, 15_000u64);
-    let mut metric: Option<AccuracyMetric> = None;
+    let (mut max_error, mut failure_probability, mut sample_interval_ms) = (None, None, 15_000u64);
+    let mut accuracy_metric: Option<AccuracyMetric> = None;
     let mut max_displayed = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
     let mut cost_model: Option<String> = None;
@@ -244,11 +249,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 }
             }
             "--table" => tables.push(value()?),
-            "--epsilon" => epsilon = Some(number(value()?)?),
-            "--delta" => delta = Some(number(value()?)?),
-            "--metric" => {
+            "--max-error" => max_error = Some(number(value()?)?),
+            "--failure-probability" => failure_probability = Some(number(value()?)?),
+            "--accuracy-metric" => {
                 let name = value()?;
-                metric = Some(
+                accuracy_metric = Some(
                     serde_json::from_value(Value::String(name.clone()))
                         .map_err(|_| format!("unknown metric {name}"))?,
                 )
@@ -369,16 +374,18 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             document_of(workload_queries(&workload), &roots, result, max_displayed)?
         }
         (None, false) => {
-            let accuracy = match (epsilon, delta) {
+            let accuracy = match (max_error, failure_probability) {
                 (None, None) => AccuracyTarget::exact(),
-                (Some(epsilon), None) => AccuracyTarget::max_error(epsilon),
-                (Some(epsilon), Some(delta)) => {
-                    AccuracyTarget::max_error(epsilon).failure_probability(delta)
+                (Some(max_error), None) => AccuracyTarget::max_error(max_error),
+                (Some(max_error), Some(failure_probability)) => {
+                    AccuracyTarget::max_error(max_error).failure_probability(failure_probability)
                 }
-                (None, Some(_)) => return Err("--delta needs --epsilon".into()),
+                (None, Some(_)) => return Err("--failure-probability needs --max-error".into()),
             };
-            let accuracy = match metric {
-                Some(_) if epsilon.is_none() => return Err("--metric needs --epsilon".into()),
+            let accuracy = match accuracy_metric {
+                Some(_) if max_error.is_none() => {
+                    return Err("--accuracy-metric needs --max-error".into())
+                }
                 Some(metric) => accuracy.accuracy_metric(metric),
                 None => accuracy,
             };
@@ -646,7 +653,7 @@ fn usage_json(usage: &ResourceUsage) -> Value {
 
 fn rejections_json<'a>(rejected: impl Iterator<Item = &'a Rejection>) -> Vec<Value> {
     rejected
-        .map(|r| json!({ "id": r.id, "valid": r.valid, "reason": r.reason }))
+        .map(|r| json!({ "id": r.id, "cause": r.cause, "reason": r.reason }))
         .collect()
 }
 
@@ -810,7 +817,7 @@ mod tests {
     fn failed_selection_lists_rejections_without_a_selection() {
         let rejected = vec![Rejection {
             id: "P1".into(),
-            valid: false,
+            cause: asap_aware_mapping::stage3_plan_selection::RejectionCause::AccuracyTargetMissed,
             reason: "q1: misses target".into(),
         }];
         let document =
@@ -820,7 +827,11 @@ mod tests {
             json!({
                 "costs": {},
                 "selected": null,
-                "rejected": [{ "id": "P1", "valid": false, "reason": "q1: misses target" }],
+                "rejected": [{
+                    "id": "P1",
+                    "cause": "accuracy_target_missed",
+                    "reason": "q1: misses target",
+                }],
             })
         );
     }

@@ -133,10 +133,17 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         let id = rejection["id"].as_str().unwrap();
         assert!(accounted.insert(id), "{id} accounted for once");
         assert!(!rejection["reason"].as_str().unwrap().is_empty());
-        assert_eq!(
-            rejection["valid"].as_bool().unwrap(),
-            costs.contains_key(id)
-        );
+        // A candidate that failed a check is not priced; one that lost
+        // under the cost model is.
+        let failed_a_check = [
+            "failure_probability_resize_failed",
+            "accuracy_target_missed",
+            "raw_data_not_retained",
+            "latency_bound_exceeded",
+            "over_cluster_capacity",
+        ]
+        .contains(&rejection["cause"].as_str().unwrap());
+        assert_eq!(failed_a_check, !costs.contains_key(id), "{rejection}");
     }
     assert!(costs.contains_key(selected));
     let all: HashSet<_> = physical.iter().map(|p| p["id"].as_str().unwrap()).collect();
@@ -172,9 +179,9 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
             "--promql",
             // Top-K partitioned by every label of its input has no item.
             "topk by (job) (3, sum by (job) (rate(m[5m])))",
-            "--epsilon",
+            "--max-error",
             "0.01",
-            "--delta",
+            "--failure-probability",
             "0.001",
             "--out",
         ])
@@ -309,7 +316,7 @@ fn mixed_sql_and_promql_queries_are_planned_with_their_names() {
             "count_by_service",
             "--promql",
             "topk(5, rate(http_requests_total[5m]))",
-            "--epsilon",
+            "--max-error",
             "0.01",
             "--out",
         ])
@@ -414,7 +421,7 @@ fn default_candidate_limit_is_ten_thousand() {
     for query in &queries {
         args.extend(["--promql", query.as_str()]);
     }
-    args.extend(["--epsilon", "0.01", "--delta", "0.001"]);
+    args.extend(["--max-error", "0.01", "--failure-probability", "0.001"]);
     let (status, stderr) = failure(&args);
     assert_eq!(status, Some(3));
     assert!(
@@ -521,9 +528,9 @@ fn pass1_failure_still_writes_stage0_and_the_error() {
     let document = document_of(&[
         "--promql",
         "topk(5, rate(m[5m]))",
-        "--epsilon",
+        "--max-error",
         "1.5",
-        "--delta",
+        "--failure-probability",
         "0.1",
     ]);
     validated_dag(&document["stage0_query_language_frontends"]["dag"], 1);
@@ -617,7 +624,7 @@ fn a_target_without_a_metric_shows_the_query_default() {
 /// A quantile query's target may leave its metric unset: then KLL (rank)
 /// and DDSketch (relative) candidates both meet it and compete on cost, and
 /// the document reports, per valid candidate, the metric each was accepted
-/// in and that the target's metric was not set. With `--metric rank` only
+/// in and that the target's metric was not set. With `--accuracy-metric rank` only
 /// rank guarantees (and exact plans) are accepted, and the report says so. The workload's
 /// accuracy is the target's own JSON form.
 #[test]
@@ -625,7 +632,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let query = [
         "--promql",
         "quantile_over_time(0.99, m[1m])",
-        "--epsilon",
+        "--max-error",
         "0.01",
     ];
     let accepted = |document: &Value| -> Vec<String> {
@@ -641,7 +648,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let unset = document_of(&query);
     assert_eq!(
         unset["workload"]["queries"][0]["requirements"]["accuracy"],
-        serde_json::json!({"error": 0.01, "accuracy_scope": "whole_result"})
+        serde_json::json!({"max_error": 0.01, "accuracy_scope": "whole_result"})
     );
     // A quantile has no single default metric to show.
     assert!(unset["workload"]["queries"][0]["requirements"]
@@ -663,7 +670,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let selected = unset["stage3_plan_selection"]["selected"].as_str().unwrap();
     assert!(unset["stage3_plan_selection"]["accepted"][selected][0]["accepted_metric"].is_string());
 
-    let rank = document_of(&[&query[..], &["--metric", "rank"]].concat());
+    let rank = document_of(&[&query[..], &["--accuracy-metric", "rank"]].concat());
     let summaries = accepted(&rank);
     assert!(
         summaries

@@ -83,7 +83,8 @@ tests in `planner_layering_example4.rs`.
 ## 4. Add a Stage 3 check or a deployment input
 
 - A new validity check goes in `select_plan` and rejects a candidate with a
-  `Rejection { valid: false, reason }`; it never fails the whole selection
+  `Rejection { cause, reason }` whose `cause` is a new failed-check
+  `RejectionCause` variant (listed in `RejectionCause::failed_a_check`); it never fails the whole selection
   unless the input itself is bad (a new `SelectionError` variant, documented
   as bad input).
 - A new pricing input goes in `PlanSelectionSettings` (validated in its

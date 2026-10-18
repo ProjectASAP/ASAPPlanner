@@ -100,7 +100,7 @@ pub struct QueryPlan {
 ```
 
 `Stage1ToStage3Pass` returns the selected physical candidate's roots, with every
-sub-DAG `NotMaterialized`; `PlanOutput::execution_timed_dag()` exports them
+sub-DAG `NotMaterialized`; `PlanOutput::physical_asap_dag()` exports them
 with that same assignment. Physical ASAP-aware optimization decides per
 sub-DAG whether to materialize, and whether at ingestion or query time, from
 #604 on.

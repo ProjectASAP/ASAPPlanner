@@ -1468,7 +1468,7 @@ async fn median_threads_the_accuracy_target() {
         matches!(
             measures.as_slice(),
             [AggIntent::Quantile { accuracy, .. }]
-                if (accuracy.error - 0.01).abs() < 1e-12
+                if (accuracy.max_error - 0.01).abs() < 1e-12
         ),
         "median must carry the workload's accuracy target, got {measures:?}"
     );

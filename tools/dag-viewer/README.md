@@ -63,7 +63,7 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
 {
   "format": "asap-stage-pipeline/v1",
   "workload": { "queries": [{ "id": "q1", "language": "promql", "text": "...",
-                "requirements": { "accuracy": { "error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result" },
+                "requirements": { "accuracy": { "max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result" },
                                   "repeat_interval_ms": 10000 } }] },
   "deployment_capabilities": { "supported_summaries": null, "raw_data_retained": true,
                                "query_time_results_retained": false },
@@ -91,7 +91,7 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
     "accepted": { "P1": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
                            "summary": "metric not set; accepted rank (Kll)" }] },
     "selected": "P1",
-    "rejected": [{ "id": "P2", "valid": true, "reason": "..." }],
+    "rejected": [{ "id": "P2", "cause": "costlier", "reason": "..." }],
     "front": []
   }
 }
@@ -126,6 +126,12 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
 - A node's `per_node` entry holds `cost_per_second`, `multiplier`,
   `detail` and `price_source` (`measured` when `--measured-operation-costs`
   priced it, else `analytical`).
+- Each `stage3_plan_selection.rejected` entry has a `cause`: a failed check
+  (`failure_probability_resize_failed`, `accuracy_target_missed`,
+  `raw_data_not_retained`, `latency_bound_exceeded`, `over_cluster_capacity`)
+  or a loss under the cost model (`costlier`, `slower`, `more_memory`,
+  `not_lowest_latency_on_pareto_front`, `dominated`,
+  `tied_lost_on_enumeration_order`).
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
 

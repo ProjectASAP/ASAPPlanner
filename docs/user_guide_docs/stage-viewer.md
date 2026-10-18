@@ -202,7 +202,7 @@ another cost model, use the command below.
 ```sh
 cargo run -p asap-devtools --bin stage_pipeline -- \
     --promql "topk by (job) (10, sum_over_time(http_requests_total[1m]))" \
-    --epsilon 0.01 --delta 0.001 --out plan.json
+    --max-error 0.01 --failure-probability 0.001 --out plan.json
 ```
 
 | Option | Meaning |
@@ -210,8 +210,8 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | `--promql <query>`, `--sql <query>` | A query; repeat and mix for several, in workload order |
 | `--name <name>` | Names the query before it (default `q1`, `q2`, …) |
 | `--table '<json>'` | A table the SQL queries read, for example `{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}, {"name": "service", "type": "utf8"}], "time_index": 0}`; repeat for several |
-| `--epsilon`, `--delta` | Accuracy for every query; without them the queries are exact |
-| `--metric <metric>` | The error metric of that accuracy: `absolute`, `absolute_stream_l1`, `absolute_stream_l2`, `relative` or `rank`. Without it, a plan is accepted in whatever metric meets ε (and δ). |
+| `--max-error`, `--failure-probability` | Accuracy (ε, δ) for every query; without them the queries are exact |
+| `--accuracy-metric <metric>` | The error metric of that accuracy: `absolute`, `absolute_stream_l1`, `absolute_stream_l2`, `relative` or `rank`. Without it, a plan is accepted in whatever metric meets ε (and δ). |
 | `--sample-interval-ms <ms>` | Sample interval of every metric the PromQL queries read (default 15000) |
 | `--example <name>` | A built-in example instead of queries: `planner-layering-1`, `-2`, `-3a` or `-3b` |
 | `--cost-model <model>` | How plan selection compares valid plans: `usage-over-time` (cost model 1, the default: CPU, scanned bytes and memory over time, priced per second), `provisioned-capacity` (cost model 2: peak memory, peak CPU cores and disk, priced) or `cluster-capacity` (cost model 3: no prices) |

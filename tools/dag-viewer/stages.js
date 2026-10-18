@@ -164,6 +164,16 @@ function uniqueIds(list, where, errors) {
   return ids;
 }
 
+// Every `stage3_plan_selection.rejected[].cause` Stage 3 writes
+// (`RejectionCause`): the first five are failed checks, the rest losses
+// under the cost model.
+const REJECTION_CAUSES = [
+  'failure_probability_resize_failed', 'accuracy_target_missed', 'raw_data_not_retained',
+  'latency_bound_exceeded', 'over_cluster_capacity',
+  'costlier', 'slower', 'more_memory', 'not_lowest_latency_on_pareto_front', 'dominated',
+  'tied_lost_on_enumeration_order',
+];
+
 function validateSelection(selection, physicalById) {
   const errors = [];
   if (!selection || typeof selection !== 'object') return ['stage3_plan_selection must be an object'];
@@ -177,7 +187,7 @@ function validateSelection(selection, physicalById) {
     const id = entry && entry.id;
     if (!physicalById.has(id)) errors.push(`${at}: ${JSON.stringify(id)} is not a Stage 2 candidate`);
     else if (accounted.has(id)) errors.push(`${at}: ${id} is already selected or rejected`);
-    if (!entry || typeof entry.valid !== 'boolean') errors.push(`${at}: valid must be true or false`);
+    if (!entry || !REJECTION_CAUSES.includes(entry.cause)) errors.push(`${at}: cause must be one of ${REJECTION_CAUSES.join(', ')}`);
     accounted.add(id);
   });
   if (selection.selected !== null) {
@@ -252,17 +262,17 @@ function validateStagePipeline(doc) {
 }
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
-// `error`, `failure_probability`, `accuracy_scope`) as one line, e.g. "ε=0.01, δ=0.001
+// `max_error`, `failure_probability`, `accuracy_scope`) as one line, e.g. "ε=0.01, δ=0.001
 // (rank)" or "ε=0.01 (metric not set; default relative)"; "exact" for
 // zero error with certainty; "" for a malformed target. `defaultMetric` is the
 // query's default metric the document shows for a target without one.
 function accuracyText(target, defaultMetric) {
   if (!target || typeof target !== 'object') return '';
-  if (target.error === 0 && target.failure_probability === 0) return 'exact';
+  if (target.max_error === 0 && target.failure_probability === 0) return 'exact';
   const delta = target.failure_probability !== undefined && target.failure_probability !== null
     ? `, δ=${target.failure_probability}` : '';
   const metric = target.accuracy_metric || `metric not set${defaultMetric ? `; default ${defaultMetric}` : ''}`;
-  return `ε=${target.error}${delta} (${metric})`;
+  return `ε=${target.max_error}${delta} (${metric})`;
 }
 
 // What Stage 3 accepted for a valid candidate's queries (`accepted[id]`:

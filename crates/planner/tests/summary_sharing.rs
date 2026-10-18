@@ -11,6 +11,7 @@ use asap_aware_mapping::pass::{
     run_stage1_to_stage3, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
 };
 use asap_aware_mapping::realization::{default_size_params, DEFAULT_DELTA};
+use asap_aware_mapping::stage3_plan_selection::RejectionCause;
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
@@ -408,7 +409,7 @@ async fn scalar_queries_read_planned_sub_dags() {
 
     // The export keys each scalar query by its entry and points the scalar
     // read at an exported node.
-    let dag = output.execution_timed_dag().unwrap();
+    let dag = output.physical_asap_dag().unwrap();
     let keys: Vec<_> = dag.scalar_roots.iter().map(|(i, _)| *i).collect();
     assert_eq!(keys, vec![0, 1]);
     assert_eq!(dag.roots.len(), 1);
@@ -444,7 +445,11 @@ fn combined_scalar_references_keep_summary_candidates() {
         .iter()
         .find(|r| r.id == both.id)
         .expect("not selected");
-    assert!(!rejection.valid, "{rejection:?}");
+    assert_eq!(
+        rejection.cause,
+        RejectionCause::AccuracyTargetMissed,
+        "{rejection:?}"
+    );
     assert!(
         rejection.reason.contains("no guarantee"),
         "{}",
@@ -533,7 +538,7 @@ async fn exact_state_roots_are_finalized() {
             matches!(root.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. })),
             "{query}: {root:#?}"
         );
-        let dag = output.execution_timed_dag().unwrap();
+        let dag = output.physical_asap_dag().unwrap();
         let root = dag
             .nodes
             .iter()

@@ -1110,7 +1110,7 @@ fn accuracy_target_flows_into_quantile_intent() {
     };
     assert!(matches!(
         &measures[0],
-        AggIntent::Quantile { accuracy, .. } if (accuracy.error - 0.01).abs() < 1e-12
+        AggIntent::Quantile { accuracy, .. } if (accuracy.max_error - 0.01).abs() < 1e-12
     ));
 }
 
