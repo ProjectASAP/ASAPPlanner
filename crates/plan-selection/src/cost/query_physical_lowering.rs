@@ -2897,6 +2897,7 @@ mod tests {
                     predictability: Predictability::Unknown,
                     invocations: 1,
                     execute_at: None,
+                    range_evaluation: None,
                 }]),
                 repeating_queries: None,
             },

@@ -163,8 +163,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
 ) -> Stage1ToStage3Run<Id> {
     let per_computation =
         per_computation.without_unsupported_summaries(models.deployment_capabilities);
-    let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
-    let stage1 = stage1_logical_asap_optimization(&per_computation, &recurrence).collect();
+    let stage1 = stage1_logical_asap_optimization(&per_computation, entries).collect();
     run_stage2_and_stage3(per_computation, stage1, entries, data, models)
 }
 

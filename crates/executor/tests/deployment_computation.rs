@@ -33,6 +33,7 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::Op
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
+                range_evaluation: None,
             }]),
             repeating_queries: None,
         },

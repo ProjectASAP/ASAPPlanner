@@ -716,6 +716,7 @@ fn ddsketch_ratio_selection(
             },
             predictability: Default::default(),
             recurrence: Default::default(),
+            range_evaluation: None,
         }],
         &DataWorkload::default(),
         PlanningModels::builtin().with_evidence(evidence),

@@ -44,6 +44,7 @@ fn rank_target_workload(query: &str) -> PlanningWorkload {
                     max_latency_ms: None,
                 },
                 predictability: Predictability::Unknown,
+                range_evaluation: None,
             }]),
         },
         data_workload: Some(DataWorkload {

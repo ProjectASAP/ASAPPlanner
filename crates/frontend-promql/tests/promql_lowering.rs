@@ -1173,6 +1173,7 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
                     predictability: Predictability::Unknown,
                     invocations: 1,
                     execute_at: None,
+                    range_evaluation: None,
                 },
                 BatchEntry {
                     query: Query("quantile_over_time(0.9, b[5m])".into()),
@@ -1183,6 +1184,7 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
                     predictability: Predictability::Unknown,
                     invocations: 1,
                     execute_at: None,
+                    range_evaluation: None,
                 },
             ]),
             repeating_queries: None,
@@ -1206,6 +1208,7 @@ fn batch_rejects_non_promql_language() {
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
+                range_evaluation: None,
             }]),
             repeating_queries: None,
         },

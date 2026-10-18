@@ -885,3 +885,67 @@ fn logical_candidate_labels_are_distinct() {
     assert_eq!(labels.len(), 9, "{labels:#?}");
     assert_eq!(distinct.len(), 9, "{labels:#?}");
 }
+
+/// `--workload` plans a `PlanningWorkload` JSON file. A dashboard panel
+/// (`max_over_time(m[5m])` every minute over 1M series) answered as the
+/// last hour at 1-minute steps (`range_evaluation`) is priced as 61
+/// evaluations per request: the kept panes (`P2-m2`, 70.51 cost/s) beat
+/// rebuilding the window at every step (`P1`, 127.08), and the document
+/// reports their retention, 1 h + 5 min. The workload section shows the
+/// range. An invalid range is refused.
+#[test]
+fn workload_file_with_a_range_evaluation_is_planned() {
+    let workload = serde_json::json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [{
+                "query": "max_over_time(m[5m])",
+                "demand": {"fixed_interval": 60000},
+                "requirements": {},
+                "predictability": {"predictable": {"known_at": null}},
+                "range_evaluation": {"step_ms": 60000, "span_ms": 3600000},
+            }],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 66666.67}},
+            "sources": {"m": {"series_count": 1000000, "sample_interval": 15000}},
+        },
+    });
+    let path = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_range_workload.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, workload.to_string()).unwrap();
+    let document = document_of(&[
+        "--workload",
+        path.to_str().unwrap(),
+        "--deployment-capabilities",
+        r#"{"query_time_results_retained": true}"#,
+    ]);
+    assert_eq!(
+        document["workload"]["queries"][0]["requirements"]["range_evaluation"],
+        serde_json::json!({"step_ms": 60000, "span_ms": 3600000})
+    );
+    let selection = &document["stage3_plan_selection"];
+    assert_eq!(selection["selected"], "P2-m2");
+    let cost = |id: &str| selection["costs"][id]["cost_per_second"].as_f64().unwrap();
+    assert!((cost("P2-m2") - 70.5133).abs() < 1e-3, "{}", cost("P2-m2"));
+    assert!((cost("P1") - 127.0833).abs() < 1e-3, "{}", cost("P1"));
+    assert_eq!(
+        selection["pane_retention_ms"],
+        serde_json::json!({"1": 3_900_000})
+    );
+
+    let mut invalid = workload.clone();
+    invalid["query_workload"]["repeating_queries"][0]["range_evaluation"]["step_ms"] =
+        serde_json::json!(0);
+    std::fs::write(&path, invalid.to_string()).unwrap();
+    let (status, stderr) = failure(&["--workload", path.to_str().unwrap()]);
+    assert_ne!(status, Some(0));
+    assert!(
+        stderr.contains("step_ms must be greater than zero"),
+        "{stderr}"
+    );
+    std::fs::remove_file(path).unwrap();
+}

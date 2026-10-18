@@ -137,6 +137,7 @@ async fn batch_lowering_recognizes_frequency_l2() {
             predictability: Predictability::Unknown,
             invocations: 1,
             execute_at: None,
+            range_evaluation: None,
         }]),
         repeating_queries: None,
     };

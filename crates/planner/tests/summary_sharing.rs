@@ -50,6 +50,7 @@ fn repeating(query: &str, epsilon: f64) -> RepeatingEntry {
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(600_000)),
         requirements: requirements(query, epsilon),
         predictability: Predictability::Unknown,
+        range_evaluation: None,
     }
 }
 

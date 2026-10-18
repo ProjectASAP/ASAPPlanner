@@ -47,8 +47,23 @@
 //!   not taken to be ordered;
 //! * it is a tumbling-pane chain, or a whole-window build whose readers
 //!   all run at one fixed interval with a known phase, over a window no
-//!   longer than that interval and not shifted;
+//!   longer than that interval and not shifted, and none is a range
+//!   evaluation of more than one step per request (one window per request
+//!   cannot serve every step);
 //! * everything below it can run at ingestion time.
+//!
+//! ## Range evaluations
+//!
+//! A query whose workload entry declares a
+//! [`RangeEvaluation`](asap_types::workload::RangeEvaluation) evaluates at
+//! every `step_ms` from `end − span_ms` forward to each request's end.
+//! Every step reads the
+//! panes of a tumbling-pane chain, so each pane width must divide the step
+//! of every range-evaluated reader. Stage 1 offers only such widths
+//! (`QueryWorkloadEntry::evaluation_grid_ms`); a candidate with a chain off
+//! a reader's step grid fails with
+//! [`PhysicalASAPOptimizationError::PaneWidthOffRangeStep`] and the caller
+//! prunes it with that reason.
 //!
 //! ## Physical operator implementation
 //!
@@ -131,6 +146,21 @@ pub enum PhysicalASAPOptimizationError {
     Timing(#[from] ExecutionDataStateError),
     #[error("exact top-k has no Sort + Limit implementation: {0}")]
     ExactTopK(String),
+    /// Bad candidate for the workload: a tumbling-pane chain whose pane
+    /// width does not divide the step of a query that reads it as a range
+    /// request, so some step would end inside a pane and could not read
+    /// the panes. Stage 1 offers only panes on every reader's step grid;
+    /// the candidate is pruned with this reason.
+    #[error(
+        "pane width {pane_width_ms} ms does not divide the {step_ms} ms step of \
+         a range evaluation that reads it"
+    )]
+    PaneWidthOffRangeStep {
+        /// The chain's pane width.
+        pane_width_ms: u64,
+        /// The reader's range-evaluation step.
+        step_ms: u64,
+    },
 }
 
 /// Why a summary build cannot be materialized at ingestion time (S4).
@@ -153,6 +183,9 @@ pub(crate) enum IngestionPruneReason {
     /// interval with a known phase, or whose window is longer than that
     /// interval, shifted, or not a range.
     WindowNotFixed,
+    /// A whole-window build read by a range evaluation of more than one
+    /// step per request: it keeps one window per request, not one per step.
+    RangeEvaluatedWholeWindow,
     /// Something below it can only run at query time.
     UpstreamAtQueryTime(String),
 }
@@ -275,6 +308,7 @@ pub fn optimize_physical_asap(
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
+    check_panes_on_range_steps(&mat_candidates, entries)?;
     let mut candidates = Vec::new();
     for assignment in materialization_assignments(&mat_candidates) {
         let materialized: Vec<_> = mat_candidates
@@ -339,7 +373,40 @@ pub fn physical_candidate_count(
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
+    check_panes_on_range_steps(&mat_candidates, entries)?;
     Ok(materialization_assignments(&mat_candidates).count())
+}
+
+/// `Err` for the first tumbling-pane chain whose pane width does not
+/// divide the step of a reader's range evaluation
+/// ([`PhysicalASAPOptimizationError::PaneWidthOffRangeStep`]): that step
+/// would end inside a pane.
+fn check_panes_on_range_steps(
+    mat_candidates: &[MaterializationCandidate],
+    entries: &[QueryWorkloadEntry],
+) -> Result<(), PhysicalASAPOptimizationError> {
+    for mat_candidate in mat_candidates {
+        let Some(ASAPOp::PaneChain { pane_width_ms, .. }) = mat_candidate.node.asap() else {
+            continue;
+        };
+        for &query in &mat_candidate.readers {
+            // A one-step range evaluates only at the request's end.
+            let Some(range) = entries
+                .get(query)
+                .and_then(|e| e.range_evaluation)
+                .filter(|range| range.evaluations_per_request() > 1)
+            else {
+                continue;
+            };
+            if range.step_ms % pane_width_ms.max(&1) != 0 {
+                return Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
+                    pane_width_ms: *pane_width_ms,
+                    step_ms: range.step_ms,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The operator nodes `root` reads.
@@ -478,6 +545,12 @@ fn ingestion_eligibility(
     }
     if chain {
         return Ok(());
+    }
+    if demands.iter().flatten().any(|d| {
+        d.range_evaluation
+            .is_some_and(|range| range.evaluations_per_request() > 1)
+    }) {
+        return Err(Why::RangeEvaluatedWholeWindow);
     }
     // A whole-window build: one window per evaluation, at one known phase,
     // that ends at the evaluation and fits in the interval.
@@ -1355,6 +1428,106 @@ mod tests {
             mat_candidates(&QueryRoot::Operator(filtered), at(MINUTE as u32)),
             Err(Why::Filtered)
         );
+    }
+
+    /// A whole-window build read by a range evaluation of several steps per
+    /// request is not maintained at ingestion time: it would hold one
+    /// window per request, not one per step. A one-step range (`span_ms`
+    /// 0) is one evaluation per request and stays eligible.
+    #[test]
+    fn a_range_evaluated_whole_window_build_stays_at_query_time() {
+        use asap_types::workload::RangeEvaluation;
+        let root = summary_root("quantile_over_time(0.99, m[1m])");
+        let at_minute = |span_ms: u64| QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(MINUTE as u32),
+                evaluation_phase: TimestampMs(0),
+            }),
+            range_evaluation: Some(RangeEvaluation {
+                step_ms: MINUTE,
+                span_ms,
+            }),
+            ..every_minute()
+        };
+        let at_ingestion = |entry: QueryWorkloadEntry| {
+            let mut memo = HashMap::new();
+            let implemented = map_roots(std::slice::from_ref(&root), &mut |n| {
+                implement(n, &mut memo)
+            })
+            .unwrap();
+            materialization_candidates(
+                &implemented,
+                &[entry],
+                &arriving(),
+                &DeploymentCapabilities::default(),
+            )
+            .remove(0)
+            .at_ingestion
+        };
+        assert_eq!(
+            at_ingestion(at_minute(60 * MINUTE)),
+            Err(IngestionPruneReason::RangeEvaluatedWholeWindow)
+        );
+        assert_eq!(at_ingestion(at_minute(0)), Ok(()));
+    }
+
+    /// A pane chain whose width does not divide a range-evaluated reader's
+    /// step is not offered: the candidate fails with the widths, and the
+    /// caller prunes it. 1-min panes serve 2-min steps.
+    #[test]
+    fn a_pane_chain_off_the_range_step_grid_is_rejected() {
+        use asap_types::workload::RangeEvaluation;
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let stepping = |step_ms: u64| QueryWorkloadEntry {
+            range_evaluation: Some(RangeEvaluation {
+                step_ms,
+                span_ms: 60 * MINUTE,
+            }),
+            ..every_minute()
+        };
+        let implement_for = |entry: QueryWorkloadEntry| {
+            optimize_physical_asap(
+                "L1",
+                std::slice::from_ref(&root),
+                &[entry],
+                &arriving(),
+                &DeploymentCapabilities::default(),
+            )
+        };
+        let error = implement_for(stepping(30_000)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
+                    pane_width_ms: MINUTE,
+                    step_ms: 30_000,
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "pane width 60000 ms does not divide the 30000 ms step of a range \
+             evaluation that reads it"
+        );
+        assert!(physical_candidate_count(
+            std::slice::from_ref(&root),
+            &[stepping(30_000)],
+            &arriving(),
+            &DeploymentCapabilities::default(),
+        )
+        .is_err());
+        assert_eq!(implement_for(stepping(2 * MINUTE)).unwrap().len(), 2);
+        // A one-step range (span 0) is one evaluation per request, at the
+        // refresh: its step is not read.
+        let one_step = QueryWorkloadEntry {
+            range_evaluation: Some(RangeEvaluation {
+                step_ms: 30_000,
+                span_ms: 0,
+            }),
+            ..every_minute()
+        };
+        assert_eq!(implement_for(one_step).unwrap().len(), 2);
     }
 
     /// A build two queries read is also offered built once per evaluation

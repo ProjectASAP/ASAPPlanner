@@ -291,6 +291,7 @@ async fn batch_planning_replaces_summary_operators() {
                         predictability: Predictability::Unknown,
                         invocations: 2,
                         execute_at: None,
+                        range_evaluation: None,
                     })
                     .collect(),
             ),

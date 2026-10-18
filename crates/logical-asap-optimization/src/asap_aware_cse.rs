@@ -679,7 +679,8 @@ fn sized_for_all(
 /// (the family-capability table: exact accumulators included, and families
 /// whose merged readouts are only approximate), read only by queries that
 /// repeat at a fixed interval. Its panes are `pane_count = W / w` back-to-back
-/// windows of `w = gcd(W, E)` over the queries' intervals `E`, at least two.
+/// windows of `w = gcd(W, E)` over the queries' intervals `E` (and, for a
+/// query with a range evaluation, its step), at least two.
 #[derive(Debug, Clone)]
 pub struct PaneCandidate {
     /// The `SummaryAgg` over `TimeRange(W)` built as panes.
@@ -707,9 +708,16 @@ pub struct WindowCompositionPass2Candidate {
 pub const MAX_PANE_CANDIDATES: usize = 20;
 
 /// The pane candidates of the candidate with query roots `roots`, children
-/// first. `interval_ms[q]` is how often query `q` repeats, `None` when it
-/// does not repeat at a fixed interval.
-pub fn pane_candidates(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<PaneCandidate> {
+/// first. `evaluation_grid_ms[q]` is the grid query `q`'s evaluations fall
+/// on: how often it repeats, or with a range evaluation the greatest common
+/// divisor of that and its step
+/// (`QueryWorkloadEntry::evaluation_grid_ms`); `None` when it does not
+/// repeat at a fixed interval. Each pane width divides every reader's grid,
+/// so every evaluation, every range step included, ends on a pane boundary.
+pub fn pane_candidates(
+    roots: &[QueryRoot],
+    evaluation_grid_ms: &[Option<u64>],
+) -> Vec<PaneCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for node in roots.iter().flat_map(root_operators) {
@@ -734,7 +742,10 @@ pub fn pane_candidates(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<
                 .collect();
             let mut width = window_ms;
             for &q in &readers {
-                width = gcd(width, interval_ms.get(q).copied().flatten()?);
+                width = asap_types::workload::greatest_common_divisor(
+                    width,
+                    evaluation_grid_ms.get(q).copied().flatten()?,
+                );
             }
             let pane_count = u32::try_from(window_ms / width).ok()?;
             (!readers.is_empty() && pane_count >= 2).then_some(PaneCandidate {
@@ -775,14 +786,6 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
         below = child;
     }
     u64::try_from(range.as_millis()).ok().filter(|&ms| ms > 0)
-}
-
-fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
-    }
 }
 
 /// Every Pass 2 candidate of the window-composition rule for the candidate

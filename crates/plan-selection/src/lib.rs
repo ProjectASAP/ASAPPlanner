@@ -72,6 +72,29 @@
 //! look-back, are kept every second (in memory, all `N` at the peak). When
 //! Stage 2 offers both query-time options for a chain, plan selection
 //! prices each and the cheaper wins.
+//!
+//! A query whose workload entry declares a range evaluation
+//! ([`RangeEvaluation`]: each request evaluates it at every `step_ms` over
+//! the last `span_ms`, as a dashboard's `query_range` does) is priced as
+//! `S = span_ms / step_ms + 1` evaluations per request (61 for a 1 h span
+//! at 1 min steps):
+//!
+//! * every query-time computation that is not kept across evaluations
+//!   (`NotMaterialized`, `MatAtQuery`) runs once per step, `S` times per
+//!   request; a `MatAtIngestion` state is maintained as before, and the
+//!   merge and estimate over it run once per step;
+//! * a chain kept across evaluations is built once per request: Stage 2
+//!   offers it only when the requests repeat at its pane width, so in the
+//!   steady state each request builds its newest pane and every other pane
+//!   any of its steps reads was built by an earlier request or step;
+//! * a pane chain kept beyond one evaluation (ingestion time or kept
+//!   across evaluations) retains its window plus the longest
+//!   `span_ms` among its readers ([`Selection::pane_retention_ms`]),
+//!   so the earliest step of the next request still finds its panes: that
+//!   many more panes are kept every second.
+//!
+//! Latency stays per evaluation (one step). Without a range evaluation
+//! `S = 1` and the retention is the window, so every price is as above.
 //! Memory a computation
 //! holds only while it runs is not charged under cost model 1: it counts in
 //! [`ResourceUsage::peak_memory_bytes`], which cost models 2 and 3 read. A
@@ -187,7 +210,7 @@ use asap_types::ir::{
 };
 use asap_types::physical::{Materialization, Medium};
 use asap_types::workload::{
-    DataWorkload, MetricType, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
+    DataWorkload, MetricType, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand,
 };
 use thiserror::Error;
 
@@ -778,6 +801,15 @@ pub struct Selection {
     /// other beats on peak memory, disk and worst-query latency at once, in
     /// candidate order; empty under every other objective and cost model.
     pub front: Vec<String>,
+    /// For each tumbling-pane chain of the selected candidate kept beyond
+    /// one evaluation (maintained at ingestion time, or built at query time
+    /// and kept across evaluations), by node id in its physical DAG: how
+    /// far back from the newest evaluation the runtime must keep its
+    /// completed panes, in milliseconds. It is the chain's window plus the
+    /// longest range-evaluation span of its readers, so the earliest step
+    /// of the next request still finds its panes; just the window without
+    /// range evaluations. Empty when the plan keeps no panes.
+    pub pane_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
 }
 
 #[derive(Debug, Error)]
@@ -835,9 +867,11 @@ pub fn select_plan(
     let mut accepted = BTreeMap::new();
     let mut rejected = Vec::new();
     // Valid candidates in candidate order: the index into `cands` and the
-    // roots sized for their failure probabilities.
-    let mut valid: Vec<(usize, Vec<QueryRoot>)> = Vec::new();
+    // candidate sized for its failure probabilities.
+    let mut valid: Vec<(usize, PhysicalCandidate)> = Vec::new();
     let recurrence: Vec<QueryRecurrence> = entries.iter().map(|e| e.recurrence.clone()).collect();
+    let range_evaluations: Vec<Option<RangeEvaluation>> =
+        entries.iter().map(|e| e.range_evaluation).collect();
     for (index, candidate) in cands.iter().enumerate() {
         if candidate.roots.len() != entries.len() {
             return Err(SelectionError::EntryCount {
@@ -886,6 +920,7 @@ pub fn select_plan(
             &nodes,
             &kept_chains,
             &recurrence,
+            &range_evaluations,
             data,
             settings,
         )
@@ -911,7 +946,7 @@ pub fn select_plan(
         }
         costs.insert(candidate.id.clone(), cost);
         accepted.insert(candidate.id.clone(), accepted_accuracy);
-        valid.push((index, candidate.roots));
+        valid.push((index, candidate));
     }
     let id = |index: usize| cands[index].id.as_str();
     let ranking = Ranking::of(&settings.cost_model);
@@ -935,7 +970,13 @@ pub fn select_plan(
             });
         }
     }
-    let plan = with_confirmed_weights(&valid.swap_remove(best).1, data);
+    let (_, chosen) = valid.swap_remove(best);
+    let plan = with_confirmed_weights(&chosen.roots, data);
+    let pane_retention_ms = pane_retention_ms(
+        &chosen.dag,
+        &query_reach(&chosen.dag, &node_map(&chosen.dag)),
+        &range_evaluations,
+    );
     Ok(Selection {
         selected,
         plan,
@@ -943,6 +984,7 @@ pub fn select_plan(
         accepted,
         rejected,
         front,
+        pane_retention_ms,
     })
 }
 
@@ -2041,19 +2083,29 @@ fn priced_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> u64 {
         .max(1)
 }
 
-/// Evaluations per second of a node computed once for `queries` together.
-/// Repeating queries with equal intervals are evaluated together, so each
-/// interval counts once; estimated rates add. One-off, scheduled and unknown
-/// queries run as one batch: the most invocations among them, spread over
+/// Evaluations per second of a node computed once for `queries` together,
+/// each a recurrence with its range evaluation: a request with a range
+/// evaluation is [`RangeEvaluation::evaluations_per_request`] evaluations,
+/// one without it one. Repeating queries with equal intervals are
+/// evaluated together, every request ending at the same instant: a node
+/// they share is computed once per distinct instant their steps fall on,
+/// `end − k · step_ms` for `k · step_ms ≤ span_ms`. A query evaluated once
+/// per request (no range, or one step) evaluates only at the end. Queries
+/// on different intervals add; estimated rates add. One-off, scheduled and unknown queries run as one
+/// batch: the most evaluations among them, spread over
 /// `non_repeating_query_horizon_seconds`.
 fn evaluation_rate<'r>(
-    queries: impl IntoIterator<Item = &'r QueryRecurrence>,
+    queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
-    let mut intervals = BTreeSet::new();
+    // Per interval in ms, each step in ms its readers use and the longest
+    // span in ms at that step; once per request is the interval with span 0.
+    let mut longest_span_ms_by_step_ms_by_interval_ms: BTreeMap<u32, BTreeMap<u64, u64>> =
+        BTreeMap::new();
     let mut estimated = 0.0;
     let mut invocations = 0u64;
-    for recurrence in queries {
+    for (recurrence, range_evaluation) in queries {
+        let steps = range_evaluation.map_or(1, |range| range.evaluations_per_request());
         match recurrence {
             QueryRecurrence::Repeated(
                 RepeatedDemand::FixedInterval(interval)
@@ -2062,26 +2114,58 @@ fn evaluation_rate<'r>(
                 if interval.0 == 0 {
                     return Err(AnalyticalCostError::InvalidRecurrence);
                 }
-                intervals.insert(interval.0);
+                let (step_ms, span_ms) = range_evaluation
+                    .filter(|_| steps > 1)
+                    .map_or((u64::from(interval.0), 0), |range| {
+                        (range.step_ms, range.span_ms)
+                    });
+                let longest_span_ms = longest_span_ms_by_step_ms_by_interval_ms
+                    .entry(interval.0)
+                    .or_default()
+                    .entry(step_ms)
+                    .or_default();
+                *longest_span_ms = (*longest_span_ms).max(span_ms);
             }
             QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
                 let rate = estimate.expected_rate.0;
                 if !rate.is_finite() || rate < 0.0 {
                     return Err(AnalyticalCostError::InvalidRecurrence);
                 }
-                estimated += rate;
+                estimated += rate * steps as f64;
             }
             QueryRecurrence::Repeated(RepeatedDemand::Scheduled(times)) => {
-                invocations = invocations.max(times.len() as u64);
+                invocations = invocations.max(times.len() as u64 * steps);
             }
             QueryRecurrence::OneTime {
                 invocations: count, ..
-            } => invocations = invocations.max(*count),
-            QueryRecurrence::Unknown => invocations = invocations.max(1),
+            } => invocations = invocations.max(*count * steps),
+            QueryRecurrence::Unknown => invocations = invocations.max(steps),
         }
     }
-    let repeated: f64 = intervals.into_iter().map(|ms| 1_000.0 / ms as f64).sum();
+    let repeated: f64 = longest_span_ms_by_step_ms_by_interval_ms
+        .into_iter()
+        .map(|(interval_ms, longest_span_ms_by_step_ms)| {
+            1_000.0 / f64::from(interval_ms)
+                * distinct_instants_per_request(&longest_span_ms_by_step_ms) as f64
+        })
+        .sum();
     Ok(repeated + estimated + invocations as f64 / non_repeating_query_horizon_seconds)
+}
+
+/// The distinct instants one request evaluates at, for steps in ms each with
+/// the longest span in ms at that step: the union of the offsets
+/// `k · step_ms ≤ span_ms` back from the request's end. One step needs no
+/// union: `span_ms / step_ms + 1`.
+fn distinct_instants_per_request(longest_span_ms_by_step_ms: &BTreeMap<u64, u64>) -> u64 {
+    if longest_span_ms_by_step_ms.len() == 1 {
+        let (&step_ms, &span_ms) = longest_span_ms_by_step_ms.iter().next().expect("one step");
+        return span_ms / step_ms.max(1) + 1;
+    }
+    let mut offsets_ms = BTreeSet::new();
+    for (&step_ms, &span_ms) in longest_span_ms_by_step_ms {
+        offsets_ms.extend((0..=span_ms / step_ms.max(1)).map(|k| k * step_ms));
+    }
+    offsets_ms.len() as u64
 }
 
 /// The nodes each query reads first, in query order: query `i` is the scalar
@@ -2104,9 +2188,12 @@ fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
 
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
 /// (module doc, "Cost model"). A materialized node is computed once for all
-/// its readers: once per second at ingestion time (`MatAtIngestion`), or at
+/// its readers: once per second at ingestion time (`MatAtIngestion`), at
 /// the combined rate of the queries reaching it (`MatAtQuery`,
-/// [`evaluation_rate`]). A `NotMaterialized` node is computed once per
+/// [`evaluation_rate`]), or once per request of those queries for a chain
+/// kept across evaluations, whose request builds only its newest pane
+/// however many range steps it evaluates. `range_evaluations[q]` is query
+/// `q`'s range evaluation (none when missing). A `NotMaterialized` node is computed once per
 /// consumer that reaches it, at that consumer's rate. A consumer is a query
 /// (operator or scalar root), at its own rate, or a materialized node, at
 /// that node's rate; a walk stops at the first materialized node it meets,
@@ -2115,8 +2202,10 @@ fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
 fn computations(
     dag: &PhysicalASAPDAG,
     recurrence: &[QueryRecurrence],
+    range_evaluations: &[Option<RangeEvaluation>],
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
+    let range_of = |query: usize| range_evaluations.get(query).copied().flatten();
     let materialized: HashMap<_, _> = dag
         .nodes
         .iter()
@@ -2145,14 +2234,18 @@ fn computations(
     }
     let mut rate_of_materialized = HashMap::new();
     for (&id, materialization) in &materialized {
+        // A chain kept across evaluations is built once per request.
+        let per_request = matches!(
+            materialization,
+            Materialization::MatAtQueryKeptAcrossEvaluations(_)
+        );
         let rate = match materialization {
             Materialization::MatAtIngestion(_) => 1.0,
             _ => evaluation_rate(
-                reached
-                    .get(&id)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|&q| recurrence.get(q)),
+                reached.get(&id).into_iter().flatten().filter_map(|&q| {
+                    let range = if per_request { None } else { range_of(q) };
+                    recurrence.get(q).map(|r| (r, range))
+                }),
                 non_repeating_query_horizon_seconds,
             )?,
         };
@@ -2161,7 +2254,10 @@ fn computations(
     // Each consumer's starting nodes and its rate.
     let mut consumers = Vec::new();
     for (query, start) in starts.into_iter().enumerate() {
-        let rate = evaluation_rate(recurrence.get(query), non_repeating_query_horizon_seconds)?;
+        let rate = evaluation_rate(
+            recurrence.get(query).map(|r| (r, range_of(query))),
+            non_repeating_query_horizon_seconds,
+        )?;
         consumers.push((start, rate));
     }
     for (&id, &rate) in &rate_of_materialized {
@@ -2201,13 +2297,17 @@ fn computations(
 /// time ranges keep, times how often it is computed per second
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's kept state is counted in byte-seconds per
-/// second. `nodes` and `kept_chains` are `dag`'s ([`node_map`],
-/// [`kept_pane_chains`]).
+/// second; a pane chain kept beyond one evaluation keeps the panes its
+/// retention covers ([`pane_retention_ms`]). `nodes` and `kept_chains` are
+/// `dag`'s ([`node_map`], [`kept_pane_chains`]); `recurrence[q]` and
+/// `range_evaluations[q]` say how often query `q` runs and how many steps
+/// each run evaluates (one when missing).
 fn price(
     dag: &PhysicalASAPDAG,
     nodes: &NodeMap<'_>,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
     recurrence: &[QueryRecurrence],
+    range_evaluations: &[Option<RangeEvaluation>],
     data: &DataWorkload,
     settings: &PlanSelectionSettings,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
@@ -2228,9 +2328,12 @@ fn price(
     let multipliers = computations(
         dag,
         recurrence,
+        range_evaluations,
         settings.non_repeating_query_horizon_seconds,
     )
     .map_err(|error| (first, error))?;
+    let reach = query_reach(dag, nodes);
+    let retention_ms = pane_retention_ms(dag, &reach, range_evaluations);
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
     // The candidate's usage, accumulated node by node; peak cores and
@@ -2656,16 +2759,21 @@ fn price(
                 peak_memory_bytes = estimate.peak_memory_bytes().saturating_mul(multiplier);
                 (0, Medium::Memory)
             }
-            // A pane chain kept across evaluations holds its N − 1 older
-            // panes between evaluations, for the next ones, and all N
-            // while one runs.
+            // A pane chain kept across evaluations holds the panes its
+            // retention covers ([`pane_retention_ms`]: N, plus one per pane
+            // width of the readers' range-evaluation span), all but the
+            // newest between evaluations and all while one runs.
             (Materialization::MatAtQueryKeptAcrossEvaluations(medium), _) => {
                 let panes = panes_of(node);
-                let between = state / panes * (panes - 1);
+                let retained = retained_panes(node, &retention_ms);
+                let between = state / panes * (retained - 1);
                 match medium {
                     Medium::Memory => {
                         average_memory_bytes = between as f64;
-                        peak_memory_bytes = state;
+                        peak_memory_bytes = match retained == panes {
+                            true => state,
+                            false => state / panes * retained,
+                        };
                     }
                     Medium::Disk => disk_bytes = between,
                 }
@@ -2682,12 +2790,13 @@ fn price(
                 }
                 (0, medium)
             }
-            (
-                Materialization::MatAtIngestion(medium),
-                Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }),
-            ) => {
-                let panes = u64::from(*pane_count).max(1);
-                (state / panes * (panes + 1), medium)
+            // The retained panes and the one being built.
+            (Materialization::MatAtIngestion(medium), Payload::ASAP(ASAPOp::PaneChain { .. })) => {
+                let panes = panes_of(node);
+                (
+                    state / panes * (retained_panes(node, &retention_ms) + 1),
+                    medium,
+                )
             }
             (Materialization::MatAtIngestion(medium), _) => (2 * state, medium),
         };
@@ -2772,7 +2881,6 @@ fn price(
     let latency = query_latencies(dag, nodes, &output, &work_ms, &merge_ms, &speed);
     // A MatAtQuery state is held for one evaluation: from its build until
     // the longest query reading it finishes, about that query's latency.
-    let reach = query_reach(dag, nodes);
     for (id, (state, per_second)) in held {
         let evaluation_ms = reach
             .iter()
@@ -2931,6 +3039,60 @@ fn ingest_workers(
         }
     }
     (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
+}
+
+/// For each tumbling-pane chain of `dag` kept beyond one evaluation (at
+/// ingestion time, or at query time across evaluations), how far back
+/// from the newest evaluation its completed panes must be kept, in
+/// milliseconds: its window `pane_count · pane_width_ms`, plus the longest
+/// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
+/// whose earliest step reads that much further back. `reach` is
+/// [`query_reach`] of `dag`; `range_evaluations[q]` is query `q`'s (none
+/// when missing). Without range evaluations, each chain's window.
+fn pane_retention_ms(
+    dag: &PhysicalASAPDAG,
+    reach: &[HashSet<PhysicalASAPNodeId>],
+    range_evaluations: &[Option<RangeEvaluation>],
+) -> BTreeMap<PhysicalASAPNodeId, u64> {
+    dag.nodes
+        .iter()
+        .filter_map(|node| match (&node.payload, node.materialization) {
+            (
+                Payload::ASAP(ASAPOp::PaneChain {
+                    pane_width_ms,
+                    pane_count,
+                    ..
+                }),
+                Materialization::MatAtIngestion(_)
+                | Materialization::MatAtQueryKeptAcrossEvaluations(_),
+            ) => {
+                let span_ms = reach
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, reached)| reached.contains(&node.id))
+                    .filter_map(|(q, _)| range_evaluations.get(q).copied().flatten())
+                    .map(|range| range.span_ms)
+                    .max()
+                    .unwrap_or(0);
+                Some((node.id, pane_width_ms * u64::from(*pane_count) + span_ms))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The panes a chain in `retention_ms` ([`pane_retention_ms`]) keeps
+/// completed: its retention over its pane width, at least its pane count.
+fn retained_panes(
+    node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
+    retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
+) -> u64 {
+    match (&node.payload, retention_ms.get(&node.id)) {
+        (Payload::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }), Some(&retention)) => {
+            (retention / pane_width_ms.max(&1)).max(panes_of(node))
+        }
+        _ => panes_of(node),
+    }
 }
 
 /// A node's panes: a pane chain's count, 1 for any other node.
@@ -3251,6 +3413,7 @@ mod tests {
             &node_map(dag),
             &kept_pane_chains(dag),
             recurrence,
+            &[],
             data,
             settings,
         )
@@ -5794,6 +5957,40 @@ mod tests {
         }
         assert!(close(total(&two, &recurrences(2)), single));
         assert!(close(total(&two, &mixed), 1.5 * single));
+    }
+
+    /// Queries that refresh together at one interval and step evaluate at
+    /// the same instants: a node they share runs at the most steps among
+    /// them, not their sum. One over the last hour (61 steps) and one over
+    /// the last 10 min (11 steps), both every minute at 1-min steps, and a
+    /// third with no range (its one evaluation is the others' last step):
+    /// 61 evaluations a minute. A different step adds only the instants
+    /// the others do not evaluate at.
+    #[test]
+    fn readers_at_one_interval_and_step_share_their_steps() {
+        let every_minute = repeating(60_000);
+        let range = |span_ms: u64, step_ms: u64| Some(RangeEvaluation { step_ms, span_ms });
+        let rate = |queries: &[Option<RangeEvaluation>]| {
+            evaluation_rate(queries.iter().map(|r| (&every_minute, *r)), 3_600.0).unwrap()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(rate(&[range(3_600_000, 60_000)]), 61.0 / 60.0));
+        assert!(close(
+            rate(&[range(3_600_000, 60_000), range(600_000, 60_000), None]),
+            61.0 / 60.0
+        ));
+        assert!(close(rate(&[None, None]), 1.0 / 60.0));
+        // A one-step range evaluates only at the request's end.
+        assert!(close(
+            rate(&[range(3_600_000, 60_000), range(0, 30_000)]),
+            61.0 / 60.0
+        ));
+        // A 30 s step over the last 10 min shares 11 of its 21 instants
+        // with the 1-min steps over the last hour: 71 distinct instants.
+        assert!(close(
+            rate(&[range(3_600_000, 60_000), range(600_000, 30_000)]),
+            71.0 / 60.0
+        ));
     }
 
     /// One-off and unknown recurrence are spread over the horizon:

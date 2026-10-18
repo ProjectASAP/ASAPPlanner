@@ -75,6 +75,7 @@ fn run_stage1_to_stage3(
             },
             predictability: Default::default(),
             recurrence: Default::default(),
+            range_evaluation: None,
         }],
         &data,
         asap_plan_selection::PlanningModels::builtin(),

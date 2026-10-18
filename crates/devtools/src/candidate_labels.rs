@@ -485,6 +485,7 @@ mod tests {
                 max_latency_ms: None,
             },
             predictability: Predictability::Predictable { known_at: None },
+            range_evaluation: None,
         };
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
@@ -551,6 +552,7 @@ mod tests {
                             max_latency_ms: None,
                         },
                         predictability: Predictability::Predictable { known_at: None },
+                        range_evaluation: None,
                     }]),
                 },
                 data_workload: Some(shared_data_workload(

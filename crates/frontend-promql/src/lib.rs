@@ -139,6 +139,7 @@ mod tests {
                     predictability: Default::default(),
                     invocations: 1,
                     execute_at: None,
+                    range_evaluation: None,
                 }]),
                 repeating_queries: None,
             },
