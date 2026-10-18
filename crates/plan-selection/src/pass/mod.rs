@@ -19,10 +19,10 @@ use std::rc::Rc;
 
 use asap_types::ir::physical_export::compile_physical_asap_workload;
 use asap_types::ir::properties::timing::{
-    apply_materialization_timings, MaterializationAssignment, TimingMemo,
+    apply_materialization_timings_to_roots, MaterializationAssignment,
 };
 use asap_types::ir::properties::ExecutionDataStateError;
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::OperatorNode;
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
@@ -279,14 +279,11 @@ impl PlanOutput {
     pub fn physical_asap_dag(
         &self,
     ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
-        // One memo, so a node several roots share by `Rc` is timed and exported once.
-        let mut memo = TimingMemo::new();
-        let assignment = MaterializationAssignment::default();
-        let timed = self
-            .roots()
-            .iter()
-            .map(|root| time_query_root(root, &assignment, &mut memo))
-            .collect::<Result<Vec<_>, _>>()?;
+        // A node several roots share by `Rc` is timed and exported once.
+        let timed = apply_materialization_timings_to_roots(
+            &self.roots(),
+            &MaterializationAssignment::default(),
+        )?;
         compile_physical_asap_workload(&timed)
     }
 
@@ -297,28 +294,6 @@ impl PlanOutput {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-}
-
-/// Time one query root: an operator root directly, a standalone scalar by
-/// timing each operator it references and rebuilding it over the timed nodes.
-fn time_query_root(
-    root: &QueryRoot,
-    assignment: &MaterializationAssignment,
-    memo: &mut TimingMemo,
-) -> Result<QueryRoot, ExecutionDataStateError> {
-    Ok(match root {
-        QueryRoot::Operator(node) => {
-            QueryRoot::Operator(apply_materialization_timings(node, assignment, memo)?)
-        }
-        QueryRoot::Scalar(expr) => {
-            for node in expr.operator_refs() {
-                apply_materialization_timings(node, assignment, memo)?;
-            }
-            QueryRoot::Scalar(expr.map_operator_refs(&mut |node| {
-                Rc::clone(memo.timed(node).expect("scalar reference was timed"))
-            }))
-        }
-    })
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -487,3 +487,21 @@ fn expanding_a_dag_without_pane_chains_keeps_it() {
     .unwrap();
     assert_eq!(dag.with_pane_chains_expanded().unwrap(), dag);
 }
+
+/// The plan with every node at query time is the same operators with
+/// nothing materialized: what the default materialization exports.
+#[test]
+fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
+    let materialized =
+        compile_physical_asap_workload(&[QueryRoot::Operator(timed_at_ingestion())]).unwrap();
+    let at_query_time = apply_materialization_timings(
+        &plan(),
+        &MaterializationAssignment::default(),
+        &mut TimingMemo::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        materialized.with_every_node_at_query_time().unwrap(),
+        compile_physical_asap_workload(&[QueryRoot::Operator(at_query_time)]).unwrap()
+    );
+}

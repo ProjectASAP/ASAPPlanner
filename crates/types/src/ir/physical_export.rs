@@ -25,7 +25,10 @@ use crate::ir::properties::execution_data_state::{
     ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::ir::properties::guarantee::AccuracyGuarantee;
-use crate::ir::properties::timing::{data_state, is_materialization_point};
+use crate::ir::properties::timing::{
+    apply_materialization_timings_to_roots, data_state, is_materialization_point,
+    MaterializationAssignment,
+};
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
 use crate::physical::materialization::Materialization;
@@ -188,6 +191,26 @@ impl PhysicalASAPDAGDocument {
     }
 }
 
+/// Whether [`PhysicalASAPDAG::query_roots`] keeps each node's timing and
+/// materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeepTiming {
+    Yes,
+    No,
+}
+
+/// Why [`PhysicalASAPDAG::with_every_node_at_query_time`] failed.
+#[derive(Debug, Error)]
+pub enum ReferencePlanError {
+    /// Bad input: the document is not a valid physical ASAP DAG.
+    #[error("invalid physical ASAP DAG: {0}")]
+    InvalidDag(#[from] PhysicalASAPDAGValidationError),
+    /// Bad input: the plan cannot run at query time (a data-state rule of
+    /// the timing pass fails).
+    #[error("the plan does not run at query time: {0}")]
+    Timing(#[from] ExecutionDataStateError),
+}
+
 /// Why [`PhysicalASAPDAG::with_pane_chains_expanded`] failed.
 #[derive(Debug, Error)]
 pub enum PaneChainExpansionError {
@@ -217,15 +240,36 @@ impl PhysicalASAPDAG {
     /// executor runs a chain as its panes, and the runtime binds each pane's
     /// raw input, so it expands before it compiles.
     pub fn with_pane_chains_expanded(&self) -> Result<PhysicalASAPDAG, PaneChainExpansionError> {
-        let roots = self.query_roots()?;
+        let roots = self.query_roots(KeepTiming::Yes)?;
         let expanded = expand_pane_chains_in_workload(&roots)?;
         Ok(compile_physical_asap_workload(&expanded)?)
     }
 
-    /// The timed IR this DAG exports, one root per query in batch order:
-    /// the inverse of [`compile_physical_asap_workload`], up to `Rc`
-    /// identity.
-    fn query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
+    /// This DAG's plan with nothing materialized: the same operators,
+    /// summaries and summary parameters, with every sub-DAG
+    /// `NotMaterialized` and so every node at query time (the default
+    /// [`MaterializationAssignment`]). Node ids are renumbered, and `roots`
+    /// and `scalar_roots` keep their order.
+    ///
+    /// The correctness reference of a selected plan: a deployment runtime
+    /// compares the answers of the plan it installed with the executor
+    /// running this one over raw data, which needs the raw data the
+    /// installed plan may not keep.
+    pub fn with_every_node_at_query_time(&self) -> Result<PhysicalASAPDAG, ReferencePlanError> {
+        let roots = self.query_roots(KeepTiming::No)?;
+        let timed =
+            apply_materialization_timings_to_roots(&roots, &MaterializationAssignment::default())?;
+        Ok(compile_physical_asap_workload(&timed)?)
+    }
+
+    /// The IR this DAG exports, one root per query in batch order: the
+    /// inverse of [`compile_physical_asap_workload`], up to `Rc` identity,
+    /// with each node's timing and materialization when `timing` keeps them
+    /// and untimed and `NotMaterialized` otherwise.
+    fn query_roots(
+        &self,
+        timing: KeepTiming,
+    ) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
         self.validate()?;
         let by_id: HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode> =
             self.nodes.iter().map(|node| (node.id, node)).collect();
@@ -247,9 +291,13 @@ impl PhysicalASAPDAG {
                     .payload
                     .map_children(|child| Rc::clone(&rebuilt[child]));
                 let restored = OperatorNode::with_schema(operator, node.output_schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(Some(node.output_state.timing))
-                    .with_materialization(node.materialization);
+                    .with_guarantee(node.guarantee.clone());
+                let restored = match timing {
+                    KeepTiming::Yes => restored
+                        .with_timing(Some(node.output_state.timing))
+                        .with_materialization(node.materialization),
+                    KeepTiming::No => restored,
+                };
                 rebuilt.insert(id, Rc::new(restored));
             }
         }

@@ -140,3 +140,38 @@ async fn pane_chains_expand_on_the_exported_document() {
     assert_eq!(materialized_count(&expanded), 6, "six ten-minute panes");
     compile(&expanded, raw_range_inputs(&expanded), &roots).expect("the executor compiles it");
 }
+
+/// Each summary build of `dag` (`SummaryAgg` or `PaneChain`) as its JSON
+/// payload, sorted: which families with which parameters it builds.
+fn summary_builds(dag: &PhysicalASAPDAG) -> Vec<String> {
+    let mut builds: Vec<String> = dag
+        .nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.payload,
+                Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+            )
+        })
+        .map(|n| serde_json::to_string(&n.payload).unwrap())
+        .collect();
+    builds.sort();
+    builds
+}
+
+/// The correctness reference of the selected plan, from the exported
+/// document alone: the same summaries with the same parameters, every node
+/// at query time and nothing stored.
+#[tokio::test]
+async fn reference_plan_runs_the_selected_plan_at_query_time() {
+    let output = plan(&example4b(), &without_raw_data()).await;
+    let selected = output.physical_asap_dag().expect("exports");
+    let reference = selected.with_every_node_at_query_time().expect("re-times");
+    assert_eq!(materialized_count(&reference), 0);
+    assert!(reference
+        .nodes
+        .iter()
+        .all(|n| n.output_state.timing == ExecutionTiming::QueryTime));
+    assert_eq!(summary_builds(&reference), summary_builds(&selected));
+    assert_eq!(reference.roots.len(), selected.roots.len());
+}

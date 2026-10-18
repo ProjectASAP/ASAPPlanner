@@ -59,6 +59,7 @@ use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::operator::operator_properties::BinaryOpKind;
+use crate::ir::operator::query::QueryRoot;
 use crate::ir::properties::execution_data_state::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
@@ -300,6 +301,35 @@ pub fn apply_materialization_timings(
     }
     validate(&timed, &mut HashMap::new())?;
     Ok(timed)
+}
+
+/// [`apply_materialization_timings`] over every root of one workload with
+/// one memo, so a node several roots share is timed once and stays one
+/// node. A standalone scalar root has each operator it reads timed, and is
+/// rebuilt over the timed nodes.
+pub fn apply_materialization_timings_to_roots(
+    roots: &[QueryRoot],
+    assignment: &MaterializationAssignment,
+) -> Result<Vec<QueryRoot>, ExecutionDataStateError> {
+    let mut memo = TimingMemo::new();
+    roots
+        .iter()
+        .map(|root| {
+            Ok(match root {
+                QueryRoot::Operator(node) => {
+                    QueryRoot::Operator(apply_materialization_timings(node, assignment, &mut memo)?)
+                }
+                QueryRoot::Scalar(expr) => {
+                    for node in expr.operator_refs() {
+                        apply_materialization_timings(node, assignment, &mut memo)?;
+                    }
+                    QueryRoot::Scalar(expr.map_operator_refs(&mut |node| {
+                        Rc::clone(memo.timed(node).expect("scalar reference was timed"))
+                    }))
+                }
+            })
+        })
+        .collect()
 }
 
 /// Validate the sub-DAG below `root` with every sub-DAG `MatAtIngestion`
