@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::workload::{QueryRecurrence, RepeatedDemand};
+use asap_types::workload::QueryRecurrence;
 
 use crate::asap_aware_cse::{
     capability_sharing_candidates, identical_expression_pass2_candidates, pane_candidates,
@@ -79,7 +79,10 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
     per_computation: &'a PerComputationCandidates<Id>,
     recurrence: &[QueryRecurrence],
 ) -> impl Iterator<Item = Stage1Candidate> + 'a {
-    let interval_ms: Vec<Option<u64>> = recurrence.iter().map(fixed_interval_ms).collect();
+    let interval_ms: Vec<Option<u64>> = recurrence
+        .iter()
+        .map(QueryRecurrence::fixed_interval_ms)
+        .collect();
     let mut choice = Some(vec![0; per_computation.targets.len()]);
     let mut queue = std::collections::VecDeque::new();
     let mut position = 0usize;
@@ -353,17 +356,6 @@ fn next_choice<Id>(inventory: &PerComputationCandidates<Id>, choice: &mut [usize
         *digit = 0;
     }
     false
-}
-
-/// The fixed interval at which a query repeats, in milliseconds.
-pub fn fixed_interval_ms(recurrence: &QueryRecurrence) -> Option<u64> {
-    match recurrence {
-        QueryRecurrence::Repeated(
-            RepeatedDemand::FixedInterval(interval)
-            | RepeatedDemand::FixedIntervalAt { interval, .. },
-        ) => Some(u64::from(interval.0)).filter(|&ms| ms > 0),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

@@ -93,7 +93,6 @@ use asap_types::workload::{
 use thiserror::Error;
 
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-use asap_logical_asap_optimization::workload_candidates::fixed_interval_ms;
 
 /// One CandidatePhysicalASAPDAG (Stage 2 output), derived from exactly one
 /// CandidateLogicalASAPDAG (Stage 1 output). It holds planning data only;
@@ -241,7 +240,7 @@ pub(crate) fn builds_one_pane_per_evaluation<'a>(
     let mut any_reader = false;
     for recurrence in readers {
         any_reader = true;
-        if fixed_interval_ms(recurrence) != Some(pane_width_ms) {
+        if recurrence.fixed_interval_ms() != Some(pane_width_ms) {
             return false;
         }
         if let QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
