@@ -56,7 +56,8 @@
 //!
 //! A query whose workload entry declares a
 //! [`RangeEvaluation`](asap_types::workload::RangeEvaluation) evaluates at
-//! every `step_ms` back from each request's end. Every step reads the
+//! every `step_ms` from `end − span_ms` forward to each request's end.
+//! Every step reads the
 //! panes of a tumbling-pane chain, so each pane width must divide the step
 //! of every range-evaluated reader. Stage 1 offers only such widths
 //! (`QueryWorkloadEntry::evaluation_grid_ms`); a candidate with a chain off

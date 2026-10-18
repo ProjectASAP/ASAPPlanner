@@ -2087,19 +2087,21 @@ fn priced_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> u64 {
 /// each a recurrence with its range evaluation: a request with a range
 /// evaluation is [`RangeEvaluation::evaluations_per_request`] evaluations,
 /// one without it one. Repeating queries with equal intervals are
-/// evaluated together: those with equal steps evaluate at the same
-/// instants, so each (interval, step) counts the most steps among its
-/// queries, and a query evaluated once per request (no range, or one step)
-/// adds nothing when a range on its interval already evaluates at the
-/// request's end; estimated rates add. One-off, scheduled and unknown queries run as one
+/// evaluated together, every request ending at the same instant: a node
+/// they share is computed once per distinct instant their steps fall on,
+/// `end − k · step_ms` for `k · step_ms ≤ span_ms`. A query evaluated once
+/// per request (no range, or one step) evaluates only at the end. Queries
+/// on different intervals add; estimated rates add. One-off, scheduled and unknown queries run as one
 /// batch: the most evaluations among them, spread over
 /// `non_repeating_query_horizon_seconds`.
 fn evaluation_rate<'r>(
     queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
-    // Per interval, per step (`None`: once per request), the most steps.
-    let mut intervals: BTreeMap<u32, BTreeMap<Option<u64>, u64>> = BTreeMap::new();
+    // Per interval in ms, each step in ms its readers use and the longest
+    // span in ms at that step; once per request is the interval with span 0.
+    let mut longest_span_ms_by_step_ms_by_interval_ms: BTreeMap<u32, BTreeMap<u64, u64>> =
+        BTreeMap::new();
     let mut estimated = 0.0;
     let mut invocations = 0u64;
     for (recurrence, range_evaluation) in queries {
@@ -2112,15 +2114,17 @@ fn evaluation_rate<'r>(
                 if interval.0 == 0 {
                     return Err(AnalyticalCostError::InvalidRecurrence);
                 }
-                let step_ms = range_evaluation
+                let (step_ms, span_ms) = range_evaluation
                     .filter(|_| steps > 1)
-                    .map(|range| range.step_ms);
-                let most = intervals
+                    .map_or((u64::from(interval.0), 0), |range| {
+                        (range.step_ms, range.span_ms)
+                    });
+                let longest_span_ms = longest_span_ms_by_step_ms_by_interval_ms
                     .entry(interval.0)
                     .or_default()
                     .entry(step_ms)
                     .or_default();
-                *most = (*most).max(steps);
+                *longest_span_ms = (*longest_span_ms).max(span_ms);
             }
             QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
                 let rate = estimate.expected_rate.0;
@@ -2138,18 +2142,30 @@ fn evaluation_rate<'r>(
             QueryRecurrence::Unknown => invocations = invocations.max(steps),
         }
     }
-    let repeated: f64 = intervals
+    let repeated: f64 = longest_span_ms_by_step_ms_by_interval_ms
         .into_iter()
-        .map(|(ms, mut steps_by_step)| {
-            // A range's last step is the request's end: one evaluation per
-            // request is already among its steps.
-            if steps_by_step.len() > 1 {
-                steps_by_step.remove(&None);
-            }
-            1_000.0 / f64::from(ms) * steps_by_step.into_values().sum::<u64>() as f64
+        .map(|(interval_ms, longest_span_ms_by_step_ms)| {
+            1_000.0 / f64::from(interval_ms)
+                * distinct_instants_per_request(&longest_span_ms_by_step_ms) as f64
         })
         .sum();
     Ok(repeated + estimated + invocations as f64 / non_repeating_query_horizon_seconds)
+}
+
+/// The distinct instants one request evaluates at, for steps in ms each with
+/// the longest span in ms at that step: the union of the offsets
+/// `k · step_ms ≤ span_ms` back from the request's end. One step needs no
+/// union: `span_ms / step_ms + 1`.
+fn distinct_instants_per_request(longest_span_ms_by_step_ms: &BTreeMap<u64, u64>) -> u64 {
+    if longest_span_ms_by_step_ms.len() == 1 {
+        let (&step_ms, &span_ms) = longest_span_ms_by_step_ms.iter().next().expect("one step");
+        return span_ms / step_ms.max(1) + 1;
+    }
+    let mut offsets_ms = BTreeSet::new();
+    for (&step_ms, &span_ms) in longest_span_ms_by_step_ms {
+        offsets_ms.extend((0..=span_ms / step_ms.max(1)).map(|k| k * step_ms));
+    }
+    offsets_ms.len() as u64
 }
 
 /// The nodes each query reads first, in query order: query `i` is the scalar
@@ -5948,8 +5964,8 @@ mod tests {
     /// them, not their sum. One over the last hour (61 steps) and one over
     /// the last 10 min (11 steps), both every minute at 1-min steps, and a
     /// third with no range (its one evaluation is the others' last step):
-    /// 61 evaluations a minute. A different step evaluates at other
-    /// instants and adds its own.
+    /// 61 evaluations a minute. A different step adds only the instants
+    /// the others do not evaluate at.
     #[test]
     fn readers_at_one_interval_and_step_share_their_steps() {
         let every_minute = repeating(60_000);
@@ -5964,9 +5980,16 @@ mod tests {
             61.0 / 60.0
         ));
         assert!(close(rate(&[None, None]), 1.0 / 60.0));
+        // A one-step range evaluates only at the request's end.
+        assert!(close(
+            rate(&[range(3_600_000, 60_000), range(0, 30_000)]),
+            61.0 / 60.0
+        ));
+        // A 30 s step over the last 10 min shares 11 of its 21 instants
+        // with the 1-min steps over the last hour: 71 distinct instants.
         assert!(close(
             rate(&[range(3_600_000, 60_000), range(600_000, 30_000)]),
-            (61.0 + 21.0) / 60.0
+            71.0 / 60.0
         ));
     }
 
