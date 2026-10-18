@@ -125,7 +125,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .map(|(index, values)| {
             let mut accumulator = create_planner_accumulator(family, update, grouping).unwrap();
             for (i, value) in values.into_iter().enumerate() {
-                accumulator.update_single(value, i as i64 * 1000);
+                accumulator.update_single(value, i as i64 * 1000).unwrap();
             }
             let state = accumulator.into_accumulator();
             expected_rate_sum += state
@@ -349,7 +349,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     assert_eq!(results[1], results[2]);
     let mut wrong_order = create_planner_accumulator(family, update, grouping).unwrap();
     for (i, value) in [200., 200., 100.].into_iter().enumerate() {
-        wrong_order.update_single(value, i as i64 * 1000);
+        wrong_order.update_single(value, i as i64 * 1000).unwrap();
     }
     let rate_of_sum = wrong_order
         .into_accumulator()
@@ -459,7 +459,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             .map(|instance| {
                 let mut accumulator = create_planner_accumulator(family, input, grouping).unwrap();
                 for (timestamp, value) in [(1_000, 1.), (31_000, 31.), (59_000, 59.)] {
-                    accumulator.update_single(value, timestamp);
+                    accumulator.update_single(value, timestamp).unwrap();
                 }
                 let summary = Value::Summary {
                     family: family.clone(),

@@ -85,11 +85,13 @@ impl AccumulatorUpdater for KmvAccumulator {
     fn memory_usage_bytes(&self) -> usize {
         self.approx_memory_bytes()
     }
-    fn update_single(&mut self, value: f64, _: i64) {
+    fn update_single(&mut self, value: f64, _: i64) -> Result<(), String> {
         self.insert_sample(value);
+        Ok(())
     }
-    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, _: i64) {
+    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, _: i64) -> Result<(), String> {
         self.insert_sample(value);
+        Ok(())
     }
     fn take_accumulator(&mut self) -> Box<dyn AggregateCore> {
         let result = Box::new(self.clone());
@@ -202,7 +204,7 @@ mod tests {
     fn negative_zero_is_zero_and_nan_is_not_an_item() {
         let mut kmv = KmvAccumulator::new(16);
         for v in [0.0, -0.0, f64::NAN, 1.0] {
-            kmv.update_single(v, 0);
+            kmv.update_single(v, 0).unwrap();
         }
         assert_eq!(cardinality(&kmv), 2.0);
         assert_eq!(cardinality(kmv.take_accumulator().as_ref()), 2.0);
