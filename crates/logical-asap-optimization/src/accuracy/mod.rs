@@ -22,99 +22,38 @@ use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::OperatorNode;
 
-/// The deployment-extensible accuracy algebra. This crate ships
-/// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
-/// default rejects (a registered cross-metric conversion, say) implements
-/// this trait and passes it to plan selection in
-/// `asap_plan_selection::PlanningModels::accuracy`.
-pub trait AccuracyModel {
-    /// The guarantee of reading `query` out of a summary of family `family`
-    /// built over an **exact** input — derived from the family's committed
-    /// parameters by inverting the same sizing formulas
-    /// [`crate::realization::default_size_params`] uses. `None` when this
-    /// model has no error model for the family (the default has none for
-    /// `Sample`/`Wavelet`/`StatModel`).
-    fn local_guarantee(
-        &self,
-        family: &FieldDataType,
-        query: &SketchStatistic,
-    ) -> Option<AccuracyGuarantee>;
-
-    /// Compose `inputs`' guarantees (in the parent's child order) with the
-    /// parent's own `local` guarantee under `op`. `Err` is the fail-closed
-    /// answer: no registered rule, or a missing input guarantee.
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: Option<&AccuracyGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError>;
-
-    /// Whether `guarantee` meets `target`: a bound within its ε, and within
-    /// its δ when it states one, over the values the target's scope covers
-    /// (a per-value δ does not meet a whole-result target). When the target
-    /// sets a metric, the bound must be in that metric (or one with a sound
-    /// direct comparison): a bound in another metric does not satisfy,
-    /// however small. When it sets none, a bound in any metric does, each
-    /// compared in its own metric. Unknown required dimensions fail;
-    /// selection separately excludes missing accuracy evidence.
-    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool;
-}
-
-/// The built-in estimator and composition models, with conservative target checks.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DefaultAccuracyModel;
+pub use composition::propagate;
+pub use estimators::local_guarantee;
 
 /// Small relative tolerance for comparing an evaluated bound against a
 /// target, so a parameter sized by `⌈·⌉` to *exactly* meet ε is not rejected
 /// by floating-point noise.
 const SATISFACTION_TOLERANCE: f64 = 1e-9;
 
-impl DefaultAccuracyModel {
-    /// Derive the guarantee for the committed estimator parameters and evaluation.
-    pub fn sketch_guarantee(
-        algorithm: &SketchAlgorithm,
-        params: &SketchParams,
-        query: &SketchStatistic,
-    ) -> Option<AccuracyGuarantee> {
-        estimators::sketch_guarantee(algorithm, params, query)
+/// The built-in conservative check of whether `guarantee` meets `target`:
+/// a bound within its ε, and within its δ when it states one, over the
+/// values the target's scope covers (a per-value δ does not meet a
+/// whole-result target). When the target sets a metric, the bound must be
+/// in that metric (or one with a sound direct comparison): a bound in
+/// another metric does not satisfy, however small. When it sets none, a
+/// bound in any metric does, each compared in its own metric. Unknown
+/// required dimensions fail. Plan selection's default accuracy model
+/// (`asap_plan_selection::DefaultAccuracyModel`) delegates to it.
+pub fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+    let within = |value: Option<f64>, limit: f64| {
+        value.is_some_and(|v| v <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON)
+    };
+    if target.is_exact() || guarantee.is_exact() {
+        return guarantee.is_exact();
     }
-}
-
-impl AccuracyModel for DefaultAccuracyModel {
-    fn local_guarantee(
-        &self,
-        family: &FieldDataType,
-        query: &SketchStatistic,
-    ) -> Option<AccuracyGuarantee> {
-        estimators::local_guarantee(family, query)
-    }
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: Option<&AccuracyGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError> {
-        composition::propagate(op, inputs, local, stats)
-    }
-    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
-        let within = |value: Option<f64>, limit: f64| {
-            value.is_some_and(|v| v <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON)
-        };
-        if target.is_exact() || guarantee.is_exact() {
-            return guarantee.is_exact();
-        }
-        target
-            .accuracy_metric
-            .is_none_or(|metric| metric_meets(guarantee.spec.accuracy_metric, metric))
-            && scope_meets(guarantee, target)
-            && within(guarantee.spec.error.evaluate(), target.max_error)
-            && target
-                .failure_probability
-                .is_none_or(|delta| within(guarantee.spec.failure_probability.evaluate(), delta))
-    }
+    target
+        .accuracy_metric
+        .is_none_or(|metric| metric_meets(guarantee.spec.accuracy_metric, metric))
+        && scope_meets(guarantee, target)
+        && within(guarantee.spec.error.evaluate(), target.max_error)
+        && target
+            .failure_probability
+            .is_none_or(|delta| within(guarantee.spec.failure_probability.evaluate(), delta))
 }
 
 /// Whether an error bound stated in `guarantee` bounds the error `target`
@@ -175,10 +114,12 @@ mod tests {
         unknown.spec.error = BoundExpr::Unknown {
             statistic: "x".into(),
         };
-        assert!(!DefaultAccuracyModel.satisfies(&unknown, &AccuracyTarget::max_error(1.0)));
-        assert!(!DefaultAccuracyModel.satisfies(&abs(0.0, 0.01), &AccuracyTarget::exact()));
-        assert!(DefaultAccuracyModel
-            .satisfies(&AccuracyGuarantee::exact("x"), &AccuracyTarget::exact()));
+        assert!(!satisfies(&unknown, &AccuracyTarget::max_error(1.0)));
+        assert!(!satisfies(&abs(0.0, 0.01), &AccuracyTarget::exact()));
+        assert!(satisfies(
+            &AccuracyGuarantee::exact("x"),
+            &AccuracyTarget::exact()
+        ));
     }
 
     fn guarantee(metric: AccuracyMetric, bound: f64, delta: f64) -> AccuracyGuarantee {
@@ -198,7 +139,6 @@ mod tests {
     /// meets every metric.
     #[test]
     fn satisfies_requires_the_targets_metric() {
-        let model = DefaultAccuracyModel;
         let target = |metric| {
             AccuracyTarget::max_error(0.5)
                 .failure_probability(0.5)
@@ -224,12 +164,12 @@ mod tests {
             (AccuracyMetric::Rank, AccuracyMetric::Rank, true),
         ] {
             assert_eq!(
-                model.satisfies(&guarantee(bound, 0.01, 0.01), &target(wanted)),
+                satisfies(&guarantee(bound, 0.01, 0.01), &target(wanted)),
                 meets,
                 "{bound:?} against {wanted:?}"
             );
         }
-        assert!(model.satisfies(
+        assert!(satisfies(
             &AccuracyGuarantee::exact("x"),
             &target(AccuracyMetric::Rank)
         ));
@@ -243,8 +183,8 @@ mod tests {
         g.spec.failure_probability = ProbabilityExpr::Unknown {
             statistic: "x".into(),
         };
-        assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::max_error(0.01)));
-        assert!(!DefaultAccuracyModel.satisfies(
+        assert!(satisfies(&g, &AccuracyTarget::max_error(0.01)));
+        assert!(!satisfies(
             &g,
             &AccuracyTarget::max_error(0.01).failure_probability(0.5)
         ));
@@ -257,14 +197,13 @@ mod tests {
     /// directly.
     #[test]
     fn per_value_guarantees_meet_whole_result_targets_over_g_values() {
-        let model = DefaultAccuracyModel;
         let g = guarantee(AccuracyMetric::ABSOLUTE, 0.01, 0.001);
         assert_eq!(g.spec.accuracy_scope, AccuracyScope::PerValue);
         let whole = AccuracyTarget::max_error(0.01).failure_probability(0.01);
         assert_eq!(whole.accuracy_scope, AccuracyScope::WholeResult);
-        assert!(!model.satisfies(&g, &whole));
+        assert!(!satisfies(&g, &whole));
         let per_value = whole.clone().accuracy_scope(AccuracyScope::PerValue);
-        assert!(model.satisfies(&g, &per_value));
+        assert!(satisfies(&g, &per_value));
         let over = |values| g.over_whole_result(values);
         assert_eq!(
             over(Some(10)).spec.accuracy_scope,
@@ -274,10 +213,10 @@ mod tests {
             over(Some(10)).spec.failure_probability.evaluate(),
             Some(0.01)
         );
-        assert!(model.satisfies(&over(Some(10)), &whole));
-        assert!(!model.satisfies(&over(Some(11)), &whole));
-        assert!(!model.satisfies(&over(None), &whole));
-        assert!(model.satisfies(&over(Some(10)), &per_value));
+        assert!(satisfies(&over(Some(10)), &whole));
+        assert!(!satisfies(&over(Some(11)), &whole));
+        assert!(!satisfies(&over(None), &whole));
+        assert!(satisfies(&over(Some(10)), &per_value));
     }
 
     /// The scope bounds only the failure probability: a target without a δ
@@ -285,9 +224,8 @@ mod tests {
     /// target whatever the number of values.
     #[test]
     fn scope_matters_only_with_a_failure_probability() {
-        let model = DefaultAccuracyModel;
         let g = guarantee(AccuracyMetric::ABSOLUTE, 0.01, 0.001);
-        assert!(model.satisfies(&g, &AccuracyTarget::max_error(0.01)));
+        assert!(satisfies(&g, &AccuracyTarget::max_error(0.01)));
         let never_fails = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Constant { value: 0.01 },
@@ -297,8 +235,8 @@ mod tests {
         let whole = AccuracyTarget::max_error(0.01)
             .failure_probability(0.01)
             .accuracy_metric(AccuracyMetric::Relative);
-        assert!(model.satisfies(&never_fails, &whole));
-        assert!(model.satisfies(&never_fails.over_whole_result(None), &whole));
+        assert!(satisfies(&never_fails, &whole));
+        assert!(satisfies(&never_fails.over_whole_result(None), &whole));
     }
 
     /// A target whose metric the user did not set accepts a guarantee in
@@ -307,7 +245,6 @@ mod tests {
     /// or failure probability still misses it.
     #[test]
     fn a_target_without_a_metric_accepts_any_metric() {
-        let model = DefaultAccuracyModel;
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.01)
             .accuracy_scope(AccuracyScope::PerValue);
@@ -320,15 +257,15 @@ mod tests {
             AccuracyMetric::Rank,
         ] {
             assert!(
-                model.satisfies(&guarantee(metric, 0.01, 0.01), &target),
+                satisfies(&guarantee(metric, 0.01, 0.01), &target),
                 "{metric:?}"
             );
             assert!(
-                !model.satisfies(&guarantee(metric, 0.02, 0.01), &target),
+                !satisfies(&guarantee(metric, 0.02, 0.01), &target),
                 "{metric:?}"
             );
             assert!(
-                !model.satisfies(&guarantee(metric, 0.01, 0.02), &target),
+                !satisfies(&guarantee(metric, 0.01, 0.02), &target),
                 "{metric:?}"
             );
         }
