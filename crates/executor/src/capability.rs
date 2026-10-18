@@ -148,7 +148,13 @@ fn validate_hydra_cms(
     match (&input.weight, proof) {
         (SummaryInputExpr::Constant(w), NonNegativeWeightProof::UnitCount) if *w == 1.0 => Ok(()),
         (SummaryInputExpr::Constant(w), NonNegativeWeightProof::PositiveConstant) => {
-            hydra_constant_weight(*w).map(|_| ())
+            let weight = constant_row_weight(*w).map_err(|error| format!("HydraCms {error}"))?;
+            i32::try_from(weight.get()).map(|_| ()).map_err(|_| {
+                format!(
+                    "HydraCms constant weight must be at most i32::MAX (asap_sketchlib's \
+                     Hydra adds i32 weights), got {weight}"
+                )
+            })
         }
         (SummaryInputExpr::Column(_), _) => Ok(()),
         _ => Err(
@@ -159,16 +165,17 @@ fn validate_hydra_cms(
     }
 }
 
-/// A HydraCms constant weight as a positive integer at most `i32::MAX`
-/// (asap_sketchlib's Hydra adds `i32` weights); an error otherwise.
-pub(crate) fn hydra_constant_weight(weight: f64) -> Result<std::num::NonZeroU32, String> {
-    if weight.is_finite() && weight > 0.0 && weight.fract() == 0.0 && weight <= f64::from(i32::MAX)
+/// A `SummaryUpdate` constant weight as the positive integer a
+/// [`RowWeight::Constant`](crate::operators::RowWeight::Constant) holds
+/// (at most `u32::MAX`); an error otherwise. The all-groups (HydraCms) build
+/// further bounds it by `i32::MAX`.
+pub(crate) fn constant_row_weight(weight: f64) -> Result<std::num::NonZeroU32, String> {
+    if weight.is_finite() && weight > 0.0 && weight.fract() == 0.0 && weight <= f64::from(u32::MAX)
     {
         Ok(std::num::NonZeroU32::new(weight as u32).expect("weight > 0"))
     } else {
         Err(format!(
-            "HydraCms constant weight must be a positive integer within i32 (asap_sketchlib's \
-             Hydra adds i32 weights), got {weight}"
+            "constant weight must be a positive integer within u32, got {weight}"
         ))
     }
 }
@@ -194,7 +201,7 @@ pub(crate) fn hydra_cms_shape(
         },
     ) = family
     else {
-        return Err("shared summary grouping has no registered kernel".into());
+        return Err("a shared-grouping (Hydra) family has no registered kernel".into());
     };
     if kind.algorithm() != &SketchAlgorithm::Cms
         || kind.params()
@@ -285,7 +292,7 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     if let SummaryFamilyType::Sketch(kind, grouping) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
         // its bare count, but the DAG does not build it from rows. HydraCms
-        // is built by the shared summary operator.
+        // is built by the all-groups summary build.
         if let (A::Cms, SketchParams::Cms { width, depth }) = (kind.algorithm(), kind.params()) {
             if grouping != &GroupingStrategy::PerSubpopulationInstance {
                 return hydra_cms_shape(family).map(|_| ()).map_err(Error::Invalid);

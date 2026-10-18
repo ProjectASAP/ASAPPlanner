@@ -171,7 +171,14 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
             },
         };
         let family = FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default());
-        let build = Operator::keyed_summary_build(schema(), family, 1, vec![3], vec![2]).unwrap();
+        let build = Operator::per_group_keyed_summary_build(
+            schema(),
+            family,
+            vec![3],
+            asap_executor::dag::operators::RowWeight::Column(1),
+            vec![2],
+        )
+        .unwrap();
         let output = Arc::new(planner_types::ir::schema::Schema {
             unique_keys: vec![],
             closed: false,

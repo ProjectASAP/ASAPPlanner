@@ -2,7 +2,7 @@
 //! planner and answers each group's item point counts from one shared grid.
 use asap_executor::{
     dag::{
-        operators::{HydraRowWeight, Operator},
+        operators::{Operator, RowWeight},
         values::{Batch, SchemaRef, Value},
         Limits, RunContext, Scope,
     },
@@ -375,18 +375,18 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
     ] {
         let build = compile_node(&summary_agg(update, None), &[input_schema()]).unwrap();
         let wire = serde_json::to_value(&build).unwrap();
-        let fields = &wire["kind"]["SharedSummaryBuild"];
+        let fields = &wire["kind"]["AllGroupsSummaryBuild"];
         assert_eq!(fields["row_weight"], expected, "{wire}");
         assert!(fields.get("weight").is_none() && fields.get("constant_weight").is_none());
         let restored: Operator = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(&restored).unwrap(), wire);
     }
     let build = |weight: u32| {
-        Operator::shared_summary_build(
+        Operator::all_groups_summary_build(
             input_schema(),
             family(),
             1,
-            HydraRowWeight::Constant(std::num::NonZeroU32::new(weight).unwrap()),
+            RowWeight::Constant(std::num::NonZeroU32::new(weight).unwrap()),
             vec![0],
         )
     };
@@ -396,12 +396,38 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
         .expect("constant above i32::MAX");
     assert!(error.to_string().contains("i32::MAX"), "{error}");
     let mut wire = serde_json::to_value(build(2).unwrap()).unwrap();
-    wire["kind"]["SharedSummaryBuild"]["row_weight"] =
+    wire["kind"]["AllGroupsSummaryBuild"]["row_weight"] =
         serde_json::json!({"Constant": i32::MAX as u32 + 1});
     let error = serde_json::from_value::<Operator>(wire)
         .err()
         .expect("deserialized constant above i32::MAX");
     assert!(error.to_string().contains("i32::MAX"), "{error}");
+}
+
+// A constant weight above `i32::MAX` (asap_sketchlib's Hydra adds `i32`
+// weights) is refused by the kernel check, not only by the constructor.
+#[test]
+fn constant_weight_above_i32_is_refused_at_validation() {
+    let update = SummaryUpdate {
+        weight: SummaryInputExpr::Constant(2_147_483_648.0),
+        weight_domain: WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::PositiveConstant,
+        },
+        ..unit_count()
+    };
+    let error = asap_executor::capability::validate_summary_kernel(&family(), &update, &grouping())
+        .expect_err("validation accepted a constant above i32::MAX");
+    assert!(
+        error.contains("HydraCms") && error.contains("i32::MAX"),
+        "{error}"
+    );
+    let error = compile_node(&summary_agg(update, None), &[input_schema()])
+        .err()
+        .expect("constant above i32::MAX compiled");
+    assert!(
+        error.to_string().contains("HydraCms") && error.to_string().contains("i32::MAX"),
+        "{error}"
+    );
 }
 
 // A weight column of unknown sign is rejected at binding: a Count-Min point

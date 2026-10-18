@@ -2,17 +2,18 @@ use super::*;
 use planner_types::ir::schema::{FamilyCapability, MergeInputRule};
 use std::num::NonZeroU32;
 
-/// What each row of a shared HydraCms build adds to its item's count.
-/// Produced by the physical planner from a validated `SummaryUpdate`
-/// weight and read once per row by the build.
+/// What each input row adds to its item's count in a keyed summary build
+/// ([`Operator::per_group_keyed_summary_build`] or
+/// [`Operator::all_groups_summary_build`]). Produced by the physical planner
+/// from a validated `SummaryUpdate.weight` and read once per row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum HydraRowWeight {
-    /// The value of this input column (Float64 or Int64, non-negative); a
-    /// row whose value is NULL adds nothing.
+pub enum RowWeight {
+    /// The value of this input column (Float64 or Int64); a row whose value
+    /// is NULL adds nothing.
     Column(usize),
-    /// This positive integer per row: 1 for a row count. At most `i32::MAX`,
-    /// since asap_sketchlib's Hydra adds `i32` weights;
-    /// [`Operator::shared_summary_build`] refuses a larger one.
+    /// This positive integer per row: 1 for a row count. The all-groups
+    /// (HydraCms) build refuses one above `i32::MAX`, since
+    /// asap_sketchlib's Hydra adds `i32` weights.
     Constant(NonZeroU32),
 }
 /// A summary evaluation: a sketch query, or an exact evaluation with typed parameters.
@@ -23,11 +24,15 @@ pub enum SummaryEvaluation {
 }
 
 impl Operator {
-    pub fn keyed_summary_build(
+    /// One keyed summary state per group (a CMS or Count Sketch with heap):
+    /// each row adds its `row_weight` to the tuple of its `items` values, in
+    /// its group's state. A weight column must be Float64 or Int64, the
+    /// types the kernel's `f64` weights hold; a NULL weight adds nothing.
+    pub fn per_group_keyed_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
-        value: usize,
         items: Vec<usize>,
+        row_weight: RowWeight,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
         use crate::summary_kernels::weighted_frequency::WeightedFrequency;
@@ -37,10 +42,16 @@ impl Operator {
         };
         WeightedFrequency::configuration(kind)?;
         validate_groups(&input, &groups)?;
-        if items.is_empty() || plain(&input, value)? != (&DataType::Float64, false) {
-            return Err(invalid(
-                "keyed summary requires identities and non-null Float64 weights",
-            ));
+        if items.is_empty() {
+            return Err(invalid("keyed summary requires item columns"));
+        }
+        if let RowWeight::Column(weight) = row_weight {
+            if !matches!(
+                plain(&input, weight)?.0,
+                DataType::Float64 | DataType::Int64
+            ) {
+                return Err(invalid("keyed summary weights must be Float64 or Int64"));
+            }
         }
         for &item in &items {
             if !matches!(
@@ -66,10 +77,10 @@ impl Operator {
             table: None,
         });
         Ok(Self {
-            kind: Kind::KeyedSummaryBuild {
+            kind: Kind::PerGroupKeyedSummaryBuild {
                 family,
-                value,
                 items,
+                row_weight,
                 groups,
                 filter: None,
             },
@@ -77,14 +88,16 @@ impl Operator {
             output: schema(fields),
         })
     }
-    /// One HydraCms state shared by every group, emitted as one row per group
-    /// that reads it. Each row adds its `row_weight` to its `item` value; a
-    /// row whose weight column is NULL adds nothing.
-    pub fn shared_summary_build(
+    /// One summary state shared by all groups (a HydraCms grid), emitted as
+    /// one row per group that reads its own part of it. Each row adds its
+    /// `row_weight` to its `item` value in its group; a NULL weight adds
+    /// nothing. A constant weight is at most `i32::MAX` (asap_sketchlib's
+    /// Hydra adds `i32` weights).
+    pub fn all_groups_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
         item: usize,
-        row_weight: HydraRowWeight,
+        row_weight: RowWeight,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
         crate::values::validate_family(&family)?;
@@ -99,7 +112,7 @@ impl Operator {
             ));
         }
         match row_weight {
-            HydraRowWeight::Column(weight) => {
+            RowWeight::Column(weight) => {
                 if !matches!(
                     plain(&input, weight)?.0,
                     DataType::Float64 | DataType::Int64
@@ -107,7 +120,7 @@ impl Operator {
                     return Err(invalid("HydraCms weights must be Float64 or Int64"));
                 }
             }
-            HydraRowWeight::Constant(weight) => {
+            RowWeight::Constant(weight) => {
                 if i32::try_from(weight.get()).is_err() {
                     return Err(Error::Invalid(format!(
                         "HydraCms constant weight must be at most i32::MAX (asap_sketchlib's \
@@ -127,7 +140,7 @@ impl Operator {
             table: None,
         });
         Ok(Self {
-            kind: Kind::SharedSummaryBuild {
+            kind: Kind::AllGroupsSummaryBuild {
                 family,
                 item,
                 row_weight,
@@ -146,9 +159,9 @@ impl Operator {
             return Err(invalid("summary filter must be boolean"));
         }
         match &mut self.kind {
-            Kind::SummaryBuild { filter: slot, .. }
-            | Kind::KeyedSummaryBuild { filter: slot, .. }
-            | Kind::SharedSummaryBuild { filter: slot, .. } => *slot = Some(Box::new(filter)),
+            Kind::PerGroupSummaryBuild { filter: slot, .. }
+            | Kind::PerGroupKeyedSummaryBuild { filter: slot, .. }
+            | Kind::AllGroupsSummaryBuild { filter: slot, .. } => *slot = Some(Box::new(filter)),
             _ => return Err(invalid("a row filter needs a summary build")),
         }
         Ok(self)
@@ -183,7 +196,11 @@ impl Operator {
             output,
         })
     }
-    pub fn summary_build(
+    /// One summary state per group, updated from the value of one input
+    /// column per row (`time` orders counter samples): an exact aggregate,
+    /// a quantile/distinct sketch, or an unkeyed frequency sketch (UnivMon)
+    /// over that column's values.
+    pub fn per_group_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
         value: usize,
@@ -235,7 +252,7 @@ impl Operator {
             table: None,
         });
         Ok(Self {
-            kind: Kind::SummaryBuild {
+            kind: Kind::PerGroupSummaryBuild {
                 family,
                 value,
                 time,
@@ -334,7 +351,7 @@ pub(super) fn execute<'a>(
     let output = operator.output.clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     match &operator.kind {
-        Kind::SummaryBuild {
+        Kind::PerGroupSummaryBuild {
             family,
             value,
             time,
@@ -343,25 +360,33 @@ pub(super) fn execute<'a>(
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_summary(input, family, *value, *time, groups, filter.as_deref(), !operator.inputs[0].has_promql_series_identity(), &context).await?,
+                build_per_group_summary(input, family, *value, *time, groups, filter.as_deref(), !operator.inputs[0].has_promql_series_identity(), &context).await?,
             )
         })
         .boxed_local()),
-        Kind::KeyedSummaryBuild {
+        Kind::PerGroupKeyedSummaryBuild {
             family,
-            value,
             items,
+            row_weight,
             groups,
             filter,
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_keyed_summary(input, family, *value, items, groups, filter.as_deref(), &context)
-                    .await?,
+                build_per_group_keyed_summary(
+                    input,
+                    family,
+                    items,
+                    *row_weight,
+                    groups,
+                    filter.as_deref(),
+                    &context,
+                )
+                .await?,
             )
         })
         .boxed_local()),
-        Kind::SharedSummaryBuild {
+        Kind::AllGroupsSummaryBuild {
             family,
             item,
             row_weight,
@@ -370,7 +395,7 @@ pub(super) fn execute<'a>(
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_shared_summary(
+                build_all_groups_summary(
                     input,
                     family,
                     *item,
@@ -507,7 +532,7 @@ pub(super) fn execute_merge<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn build_summary(
+async fn build_per_group_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
     value: usize,
@@ -739,11 +764,11 @@ async fn merge_summary(
         .collect())
 }
 
-async fn build_keyed_summary(
+async fn build_per_group_keyed_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
-    value: usize,
     items: &[usize],
+    row_weight: RowWeight,
     groups: &[usize],
     filter: Option<&Expression>,
     context: &RunContext,
@@ -785,10 +810,14 @@ async fn build_keyed_summary(
             if !selected(filter, row)? {
                 continue;
             }
-            let (_, summary, reservation, overhead) = states.get_mut(&key).unwrap();
-            let Value::Float64(weight) = row[value] else {
-                return Err(invalid("weighted frequency weight type"));
+            let weight = match row_weight {
+                RowWeight::Constant(weight) => f64::from(weight.get()),
+                RowWeight::Column(i) => match &row[i] {
+                    Value::Null => continue,
+                    value => keyed_weight(value)?,
+                },
             };
+            let (_, summary, reservation, overhead) = states.get_mut(&key).unwrap();
             summary.update(
                 &items
                     .iter()
@@ -814,11 +843,11 @@ async fn build_keyed_summary(
         .collect())
 }
 
-async fn build_shared_summary(
+async fn build_all_groups_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
     item: usize,
-    row_weight: HydraRowWeight,
+    row_weight: RowWeight,
     groups: &[usize],
     filter: Option<&Expression>,
     context: &RunContext,
@@ -853,10 +882,10 @@ async fn build_shared_summary(
                 continue;
             }
             let weight = match row_weight {
-                HydraRowWeight::Constant(weight) => {
+                RowWeight::Constant(weight) => {
                     i32::try_from(weight.get()).expect("validated HydraCms constant weight")
                 }
-                HydraRowWeight::Column(i) => match &row[i] {
+                RowWeight::Column(i) => match &row[i] {
                     Value::Null => continue,
                     value => hydra_weight(value)?,
                 },
@@ -885,6 +914,19 @@ async fn build_shared_summary(
             labels
         })
         .collect())
+}
+
+/// One row's weight-column value as the keyed kernel's `f64` weight. An
+/// Int64 weight beyond 2^53 has no exact `f64` and is refused, not rounded.
+fn keyed_weight(value: &Value) -> Result<f64, Error> {
+    match value {
+        Value::Float64(v) => Ok(*v),
+        Value::Int64(v) if v.unsigned_abs() <= 1 << 53 => Ok(*v as f64),
+        Value::Int64(v) => Err(Error::Operator(format!(
+            "keyed summary weight {v} has no exact Float64"
+        ))),
+        _ => Err(Error::Operator("keyed summary weight type".into())),
+    }
 }
 
 /// One row's HydraCms weight. sketchlib's Hydra adds `i32` weights, so a

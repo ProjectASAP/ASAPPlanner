@@ -493,6 +493,14 @@ fn fragment(
                     without: keys.is_without(),
                 },
             };
+            // A keyed build adds a constant weight (1 for a row count)
+            // without projecting it as a column.
+            let constant_weight = match &update.weight {
+                SummaryInputExpr::Constant(weight) if keyed => {
+                    Some(crate::capability::constant_row_weight(*weight).map_err(Error::Invalid)?)
+                }
+                _ => None,
+            };
             let weight = match &update.weight {
                 _ if unit_frequency => Expression::Column(2),
                 SummaryInputExpr::Constant(value) => Expression::Literal {
@@ -521,6 +529,11 @@ fn fragment(
             let mut fields = population_schema(SummaryFamilyType::Plain(DataType::Float64))
                 .fields
                 .clone();
+            if constant_weight.is_some() {
+                columns.pop();
+                fields.pop();
+            }
+            let first_item = fields.len();
             if keyed {
                 let mut items = Vec::new();
                 raw_items(
@@ -539,7 +552,7 @@ fn fragment(
                     columns.push((name, expression));
                 }
             }
-            let item_columns = (3..fields.len()).collect::<Vec<_>>();
+            let item_columns = (first_item..fields.len()).collect::<Vec<_>>();
             let project = Operator::project(input.clone(), columns)?.with_output_schema(
                 Arc::new(Schema {
                     fields,
@@ -551,9 +564,15 @@ fn fragment(
             let projected = project.schema();
             let project = add(vec![0], project)?;
             let build = if keyed {
-                Operator::keyed_summary_build(projected, family.clone(), 2, item_columns, vec![0])?
+                Operator::per_group_keyed_summary_build(
+                    projected,
+                    family.clone(),
+                    item_columns,
+                    constant_weight.map_or(RowWeight::Column(2), RowWeight::Constant),
+                    vec![0],
+                )?
             } else {
-                Operator::summary_build(projected, family.clone(), 2, Some(1), vec![0])?
+                Operator::per_group_summary_build(projected, family.clone(), 2, Some(1), vec![0])?
             };
             let built = build.schema();
             let build = add(vec![project], build)?;

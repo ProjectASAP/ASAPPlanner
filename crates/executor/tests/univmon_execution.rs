@@ -105,7 +105,7 @@ fn one_univmon_state_answers_distinct_l2_and_entropy() -> Result<(), Error> {
             .map(|value| vec![Value::Float64(value)])
             .collect(),
     )?;
-    let build = Operator::summary_build(input, family(), 0, None, vec![])?;
+    let build = Operator::per_group_summary_build(input, family(), 0, None, vec![])?;
     let [distinct, l2, entropy] = three_statistics(batch, build)?[..] else {
         unreachable!()
     };
@@ -148,7 +148,7 @@ fn typed_frequency_keys_preserve_identity() -> Result<(), Error> {
                 vec![Value::Null],
             ],
         )?;
-        let build = Operator::summary_build(input, family(), 0, None, vec![])?;
+        let build = Operator::per_group_summary_build(input, family(), 0, None, vec![])?;
         for (found, expected) in
             three_statistics(batch, build)?
                 .into_iter()
