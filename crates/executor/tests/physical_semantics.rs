@@ -583,11 +583,12 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
         dag.add(
             id + 3,
             vec![id],
-            Operator::summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap(),
+            Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![])
+                .unwrap(),
         )
         .unwrap();
     }
-    let state = Operator::summary_build(input, family, 0, None, vec![])
+    let state = Operator::per_group_summary_build(input, family, 0, None, vec![])
         .unwrap()
         .schema();
     dag.add(6, vec![3, 4], Operator::union(state.clone(), 2).unwrap())
@@ -668,7 +669,9 @@ fn compacted_kll_panes_merge_within_the_calibrated_rank_error() {
         ),
         Default::default(),
     );
-    let build = || Operator::summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap();
+    let build = || {
+        Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap()
+    };
     let state = build().schema();
     let mut dag = PhysicalDAG::default();
     for pane in 0..PANES {
@@ -741,8 +744,10 @@ fn counter_panes_merge_in_any_order() {
         ("t", DataType::Timestamp, false),
     ]);
     let family = FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase);
-    let build =
-        || Operator::summary_build(input.clone(), family.clone(), 0, Some(1), vec![]).unwrap();
+    let build = || {
+        Operator::per_group_summary_build(input.clone(), family.clone(), 0, Some(1), vec![])
+            .unwrap()
+    };
     let state = build().schema();
     let samples = |range: std::ops::Range<i64>| -> Vec<Vec<Value>> {
         range
@@ -829,7 +834,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         (ExactKind::Min, ExactParams::Min, Statistic::Min),
         (ExactKind::Max, ExactParams::Max, Statistic::Max),
     ] {
-        let build = Operator::summary_build(
+        let build = Operator::per_group_summary_build(
             input.clone(),
             FieldDataType::ExactAggregate(kind, params),
             0,

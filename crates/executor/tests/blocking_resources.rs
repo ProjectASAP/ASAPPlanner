@@ -234,7 +234,14 @@ fn weighted_summary_build_yields_within_a_batch() {
         ),
         Default::default(),
     );
-    let operator = Operator::keyed_summary_build(input, family, 1, vec![0], vec![]).unwrap();
+    let operator = Operator::per_group_keyed_summary_build(
+        input,
+        family,
+        vec![0],
+        asap_executor::dag::operators::RowWeight::Column(1),
+        vec![],
+    )
+    .unwrap();
     let run = context(16 * 1024 * 1024);
     let inputs = sources.execute(&[0], run.clone()).unwrap();
     let mut output = operator.start(inputs, run.clone()).unwrap();

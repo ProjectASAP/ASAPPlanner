@@ -34,7 +34,7 @@ pub(crate) mod vector_window;
 pub use aggregate::Reduction;
 pub use series_window::SubquerySteps;
 pub use sort::SortKey;
-pub use summary::{HydraRowWeight, SummaryEvaluation};
+pub use summary::{RowWeight, SummaryEvaluation};
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Kind {
     #[serde(skip)]
@@ -135,7 +135,9 @@ enum Kind {
         kind: planner_types::ir::operator::JoinKind,
         predicate: Box<crate::expressions::CompiledExpression>,
     },
-    SummaryBuild {
+    /// One summary state per group, updated from one value column per row
+    /// (built by [`Operator::per_group_summary_build`]).
+    PerGroupSummaryBuild {
         family: SummaryFamilyType,
         value: usize,
         time: Option<usize>,
@@ -144,21 +146,25 @@ enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<Box<Expression>>,
     },
-    KeyedSummaryBuild {
+    /// One keyed state per group whose items take a row weight, e.g. a CMS
+    /// with heap (built by [`Operator::per_group_keyed_summary_build`]).
+    PerGroupKeyedSummaryBuild {
         family: SummaryFamilyType,
-        value: usize,
         items: Vec<usize>,
+        /// What each row adds to its item's count.
+        row_weight: RowWeight,
         groups: Vec<usize>,
         /// Rows for which this is not true update no state; their group is kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<Box<Expression>>,
     },
-    /// One HydraCms state shared by all groups, adding each row's item weight.
-    SharedSummaryBuild {
+    /// One state shared by all groups and emitted per group, today a
+    /// HydraCms grid (built by [`Operator::all_groups_summary_build`]).
+    AllGroupsSummaryBuild {
         family: SummaryFamilyType,
         item: usize,
         /// What each row adds to its item's count.
-        row_weight: HydraRowWeight,
+        row_weight: RowWeight,
         groups: Vec<usize>,
         /// Rows for which this is not true update no state; their group is kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,9 +317,9 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
                 | Kind::Window { .. }
                 | Kind::Join { .. }
                 | Kind::SemiJoin { .. }
-                | Kind::SummaryBuild { .. }
-                | Kind::KeyedSummaryBuild { .. }
-                | Kind::SharedSummaryBuild { .. }
+                | Kind::PerGroupSummaryBuild { .. }
+                | Kind::PerGroupKeyedSummaryBuild { .. }
+                | Kind::AllGroupsSummaryBuild { .. }
                 | Kind::SummaryMerge { .. }
                 | Kind::VectorToScalar { .. }
         )
@@ -364,9 +370,9 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::Window { .. } => "WindowAggregate",
             Kind::SemiJoin { .. } => "SemiJoin",
             Kind::Join { .. } => "RelationalJoin",
-            Kind::SummaryBuild { .. }
-            | Kind::KeyedSummaryBuild { .. }
-            | Kind::SharedSummaryBuild { .. } => "SummaryAgg",
+            Kind::PerGroupSummaryBuild { .. }
+            | Kind::PerGroupKeyedSummaryBuild { .. }
+            | Kind::AllGroupsSummaryBuild { .. } => "SummaryAgg",
             Kind::KeyedEvaluation { .. } => "SummaryEstimate",
             Kind::SummaryMerge { .. } => "SummaryMerge",
             Kind::Evaluation { .. } => "SummaryEvaluation",
@@ -418,10 +424,10 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             }
             Kind::Join { .. } | Kind::SemiJoin { .. } => joins::execute(self, inputs, context),
             Kind::SummaryMerge { .. } => summary::execute_merge(self, inputs, context),
-            Kind::SummaryBuild { .. }
+            Kind::PerGroupSummaryBuild { .. }
             | Kind::Evaluation { .. }
-            | Kind::KeyedSummaryBuild { .. }
-            | Kind::SharedSummaryBuild { .. }
+            | Kind::PerGroupKeyedSummaryBuild { .. }
+            | Kind::AllGroupsSummaryBuild { .. }
             | Kind::KeyedEvaluation { .. } => summary::execute(self, inputs, context),
         }
     }
