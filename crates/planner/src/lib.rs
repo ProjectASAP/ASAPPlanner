@@ -10,20 +10,21 @@
 //! optimization), Stage 2 (physical ASAP-aware optimization) and Stage 3 (plan
 //! selection) in order ([`run_stage1_to_stage3`]).
 //!
-//! [`e2e_plan`] runs both steps. A caller who already holds pre-ASAP IR — a
+//! [`e2e_plan`] runs both steps. [`plan_installable`] runs them for a
+//! deployment runtime and returns the single selected DAG ready to install
+//! ([`InstallablePlan`]). A caller who already holds pre-ASAP IR — a
 //! new frontend, a deserialized plan, a test that does not want to build SQL
 //! and a catalog — skips this crate and calls
 //! [`asap_plan_selection::optimize`] directly.
 
 use asap_types::workload::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
-use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect, WorkloadError};
+use asap_types::workload::{QueryLanguage, SqlDialect, WorkloadError};
 
 use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
 use asap_frontend_promql::{
-    lower_promql_query_workload, lower_promql_query_workload_with_histograms, HistogramCatalog,
-    PromqlError,
+    lower_promql_query_workload, lower_promql_query_workload_with_histograms, PromqlError,
 };
-use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
+use asap_frontend_sql::{lower_sql_dialect, SqlError};
 
 // The optimization stage's vocabulary is this facade's vocabulary too: a caller
 // configures the same models and reads the same output whether it goes through
@@ -32,6 +33,27 @@ pub use asap_plan_selection::pass::{
     optimize, run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError,
     PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
+
+mod installable;
+pub use installable::{
+    plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery, SelectedPlanReport,
+    StoredOutput, StoredOutputBuild,
+};
+
+// What a deployment runtime needs to build a `UserInput` and read an
+// `InstallablePlan`, so it depends on this crate and `asap-executor` alone.
+pub use asap_frontend_promql::{HistogramCatalog, HistogramKind};
+pub use asap_frontend_sql::SqlCatalog;
+pub use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
+pub use asap_plan_selection::{
+    ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCost, PlanSelectionSettings,
+    ResourceSpeed, ResourceUnitCost, SummaryOperation,
+};
+pub use asap_types::ir::physical_export::{
+    PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPNodeId, RawSampleWindow,
+};
+pub use asap_types::ir::schema::{SketchAlgorithm, SketchParams, StatisticKind};
+pub use asap_types::workload::PlanningWorkload;
 
 // ── Input ────────────────────────────────────────────────────────────────
 
@@ -154,6 +176,11 @@ pub enum PlanError {
     Parsed(#[from] ParsedWorkloadError),
     #[error(transparent)]
     Optimize(OptimizeError),
+    /// The selected plan cannot be installed ([`plan_installable`]): an
+    /// unsupported raw-sample window or stored output (unsatisfiable
+    /// request), or an internal bug; see [`InstallablePlanError`].
+    #[error("installable plan: {0}")]
+    Installable(InstallablePlanError),
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────
