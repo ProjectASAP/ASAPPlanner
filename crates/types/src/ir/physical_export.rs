@@ -19,6 +19,7 @@ use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::operator::operator_properties::Reduction;
+use crate::ir::operator::pane_chain::expand_pane_chains_in_workload;
 use crate::ir::operator::query::QueryRoot;
 use crate::ir::properties::execution_data_state::{
     ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
@@ -26,6 +27,7 @@ use crate::ir::properties::execution_data_state::{
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::properties::timing::{data_state, is_materialization_point};
 use crate::ir::schema::{FieldDataType, Schema};
+use crate::ir::SchemaDerivationError;
 use crate::physical::materialization::Materialization;
 
 pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 10;
@@ -186,7 +188,91 @@ impl PhysicalASAPDAGDocument {
     }
 }
 
+/// Why [`PhysicalASAPDAG::with_pane_chains_expanded`] failed.
+#[derive(Debug, Error)]
+pub enum PaneChainExpansionError {
+    /// Bad input: the document is not a valid physical ASAP DAG.
+    #[error("invalid physical ASAP DAG: {0}")]
+    InvalidDag(#[from] PhysicalASAPDAGValidationError),
+    /// Bad input: a chain is read by something other than a `SummaryMerge`,
+    /// or its panes' offsets overflow.
+    #[error("pane chain expansion: {0}")]
+    Expansion(#[from] SchemaDerivationError),
+    /// Internal bug: the expanded panes do not export (a pane left untimed).
+    #[error("expanded DAG does not export: {0}")]
+    Export(#[from] ExecutionDataStateError),
+}
+
 impl PhysicalASAPDAG {
+    /// This DAG with every `PaneChain` expanded into the panes it stands for
+    /// ([`expand_pane_chains`](crate::ir::operator::pane_chain::expand_pane_chains)):
+    /// each `SummaryMerge` over a chain reads the
+    /// chain's panes, newest first, as plain `SummaryAgg` nodes, each with
+    /// the chain's timing and materialization. Every other node keeps its
+    /// operator, timing and materialization; node ids are renumbered, and
+    /// `roots` and `scalar_roots` keep their order. A DAG without a chain is
+    /// returned unchanged up to ids.
+    ///
+    /// For a deployment runtime that holds only the exported document: the
+    /// executor runs a chain as its panes, and the runtime binds each pane's
+    /// raw input, so it expands before it compiles.
+    pub fn with_pane_chains_expanded(&self) -> Result<PhysicalASAPDAG, PaneChainExpansionError> {
+        let roots = self.query_roots()?;
+        let expanded = expand_pane_chains_in_workload(&roots)?;
+        Ok(compile_physical_asap_workload(&expanded)?)
+    }
+
+    /// The timed IR this DAG exports, one root per query in batch order:
+    /// the inverse of [`compile_physical_asap_workload`], up to `Rc`
+    /// identity.
+    fn query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
+        self.validate()?;
+        let by_id: HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode> =
+            self.nodes.iter().map(|node| (node.id, node)).collect();
+        let mut rebuilt: HashMap<PhysicalASAPNodeId, Rc<OperatorNode>> = HashMap::new();
+        // Children first, without recursion: `validate` rejected cycles.
+        for node in &self.nodes {
+            let mut pending = vec![(node.id, false)];
+            while let Some((id, children_done)) = pending.pop() {
+                if rebuilt.contains_key(&id) {
+                    continue;
+                }
+                let node = by_id[&id];
+                if !children_done {
+                    pending.push((id, true));
+                    pending.extend(node.payload.children().into_iter().map(|c| (*c, false)));
+                    continue;
+                }
+                let operator = node
+                    .payload
+                    .map_children(|child| Rc::clone(&rebuilt[child]));
+                let restored = OperatorNode::with_schema(operator, node.output_schema.clone())
+                    .with_guarantee(node.guarantee.clone())
+                    .with_timing(Some(node.output_state.timing))
+                    .with_materialization(node.materialization);
+                rebuilt.insert(id, Rc::new(restored));
+            }
+        }
+        let mut operator_roots = self.roots.iter();
+        let mut scalar_roots = self.scalar_roots.iter().peekable();
+        let mut roots = Vec::with_capacity(self.roots.len() + self.scalar_roots.len());
+        for position in 0..self.roots.len() + self.scalar_roots.len() {
+            match scalar_roots.peek() {
+                Some((at, expr)) if *at == position => {
+                    roots.push(QueryRoot::Scalar(
+                        expr.map_operator_refs(&mut |id| Rc::clone(&rebuilt[id])),
+                    ));
+                    scalar_roots.next();
+                }
+                _ => {
+                    let id = operator_roots.next().expect("validated root positions");
+                    roots.push(QueryRoot::Operator(Rc::clone(&rebuilt[id])));
+                }
+            }
+        }
+        Ok(roots)
+    }
+
     pub fn validate(&self) -> Result<(), PhysicalASAPDAGValidationError> {
         let mut nodes = HashMap::new();
         for node in &self.nodes {

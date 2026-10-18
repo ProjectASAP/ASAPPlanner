@@ -464,3 +464,26 @@ fn physical_node_ids_serialize_in_deterministic_binding_order() {
         r#"{"2":"query-2","10":"materialization-10"}"#
     );
 }
+
+/// Expanding a DAG without a pane chain returns the same DAG: each node,
+/// its timing and materialization, the shared summary and the scalar root
+/// that reads it, in batch order.
+#[test]
+fn expanding_a_dag_without_pane_chains_keeps_it() {
+    use asap_types::ir::scalar::ArithmeticOpKind;
+    use asap_types::ir::{ExprSemantics, ScalarExpr};
+    let timed = timed_at_ingestion();
+    let scalar = ScalarExpr::Arithmetic {
+        op: ArithmeticOpKind::Add,
+        left: Box::new(ScalarExpr::PromqlScalarFromVector(Rc::clone(&timed))),
+        right: Box::new(ScalarExpr::literal_f64(1.0)),
+        semantics: ExprSemantics::Promql,
+    };
+    let dag = compile_physical_asap_workload(&[
+        QueryRoot::Operator(Rc::clone(&timed)),
+        QueryRoot::Scalar(scalar),
+        QueryRoot::Operator(Rc::clone(&timed)),
+    ])
+    .unwrap();
+    assert_eq!(dag.with_pane_chains_expanded().unwrap(), dag);
+}

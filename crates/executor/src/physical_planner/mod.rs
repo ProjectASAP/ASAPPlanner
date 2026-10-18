@@ -140,7 +140,7 @@ fn compile_internal(
     {
         return Err(invalid(format!(
             "node {}: a PaneChain runs as its panes; expand it with \
-             `asap_types::ir::operator::pane_chain::expand_pane_chains` before compiling",
+             `PhysicalASAPDAG::with_pane_chains_expanded` before compiling",
             node.id
         )));
     }

@@ -15,6 +15,7 @@ use super::asap::ASAPOp;
 use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 use super::operator_properties::TimeShift;
+use super::query::QueryRoot;
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::SchemaDerivationError;
 
@@ -162,6 +163,34 @@ pub fn expand_pane_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     expand(root, &mut HashMap::new())
+}
+
+/// [`expand_pane_chains`] over every root of one workload, with one memo, so
+/// a node several roots share stays one node. A standalone scalar root has
+/// the operators it reads expanded.
+pub(crate) fn expand_pane_chains_in_workload(
+    roots: &[QueryRoot],
+) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
+    let mut memo = HashMap::new();
+    roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => expand(node, &mut memo).map(QueryRoot::Operator),
+            QueryRoot::Scalar(expr) => {
+                let mut error = None;
+                let expr = expr.map_operator_refs(&mut |node| {
+                    expand(node, &mut memo).unwrap_or_else(|e| {
+                        error.get_or_insert(e);
+                        Rc::clone(node)
+                    })
+                });
+                match error {
+                    Some(e) => Err(e),
+                    None => Ok(QueryRoot::Scalar(expr)),
+                }
+            }
+        })
+        .collect()
 }
 
 /// The untimed `node` with `timing` written into it and into every untimed
