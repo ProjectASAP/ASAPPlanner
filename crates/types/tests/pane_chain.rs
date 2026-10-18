@@ -231,3 +231,27 @@ fn a_chain_reads_an_instant_vector() {
     .unwrap();
     assert!(empty.validate_structure().is_err());
 }
+
+/// Two merges over one chain (two queries reading the same panes) expand
+/// into one set of panes: the same five `SummaryAgg` nodes, not ten.
+#[test]
+fn merges_over_one_chain_share_its_panes() {
+    use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
+    use asap_types::ir::QueryRoot;
+    let shared = chain(scan());
+    let roots = [
+        QueryRoot::Operator(merge(vec![Rc::clone(&shared)])),
+        QueryRoot::Operator(merge(vec![shared])),
+    ];
+    let expansion = expand_pane_chains_in_workload(&roots).unwrap();
+    assert_eq!(expansion.chains.len(), 1);
+    assert_eq!(expansion.chains[0].panes.len(), 5);
+    let expanded = expansion.roots;
+    let panes = |root: &QueryRoot| match root {
+        QueryRoot::Operator(node) => node.children().into_iter().cloned().collect::<Vec<_>>(),
+        QueryRoot::Scalar(_) => unreachable!(),
+    };
+    let (first, second) = (panes(&expanded[0]), panes(&expanded[1]));
+    assert_eq!(first.len(), 5);
+    assert!(first.iter().zip(&second).all(|(a, b)| Rc::ptr_eq(a, b)));
+}
