@@ -160,7 +160,7 @@
     const row = rows.find((r) => rowKey(r) === `P:${id}`);
     const priced = rows.filter((r) => r.rank !== null).length;
     $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · ` +
-      (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}`
+      (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.cost_unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}`
         : cost ? 'no price (cost model 3)' : 'not priced') +
       ` · ${statusChip(row.status)}` +
       (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '');
@@ -203,7 +203,7 @@
       (selection.selected ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
     $('rank-meta').textContent = stageCandidateHeader(doc);
     const sel = selection.selected ? selection.costs[selection.selected] : null;
-    $('cost-unit').textContent = sel ? sel.unit.replace(/_/g, ' ') : '';
+    $('cost-unit').textContent = sel ? sel.cost_unit.replace(/_/g, ' ') : '';
 
     $('pick1').innerHTML = logical.candidates.map((c) => `<option value="${esc(c.id)}">${esc(c.id)} · ${esc(c.display_name)}</option>`).join('');
     $('pick2').innerHTML = rows.filter((r) => rowKey(r).startsWith('P'))

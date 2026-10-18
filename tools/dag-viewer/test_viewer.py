@@ -114,7 +114,7 @@ class ValidationTests(unittest.TestCase):
             "unknown rejection cause": lambda d: selection(d)["rejected"][0].update(cause="invalid"),
             "per_node": lambda d: selection(d)["costs"]["P1"]["per_node"].update({"99": {"cost_per_second": 1, "multiplier": 1}}),
             "cost per second": lambda d: selection(d)["costs"]["P1"].pop("cost_per_second"),
-            "cost for unknown candidate": lambda d: selection(d)["costs"].update({"P99": {"cost_per_second": 1, "unit": "u", "per_node": {}}}),
+            "cost for unknown candidate": lambda d: selection(d)["costs"].update({"P99": {"cost_per_second": 1, "cost_unit": "u", "per_node": {}}}),
             "missing stage": lambda d: d.pop("stage2_physical_asap_optimization"),
             "binary operand names no node": lambda d: stage0(d)["nodes"].append(
                 {"operator": {"NonASAP": {"BinaryOp": {"lhs": 0, "rhs": 42, "operator": {}, "return_bool": False}}}}),
@@ -198,8 +198,8 @@ class CandidateRowTests(unittest.TestCase):
         self.assertEqual(
             rows[-2:],
             [
-                {"id": "L2", "logical": "L2", "display_name": "Q1 exact", "total": None, "unit": None, "rank": None, "status": "pruned", "reason": "no implementation"},
-                {"id": "L99", "logical": "L99", "display_name": "Q1 exact", "total": None, "unit": None, "rank": None, "status": "composition error", "reason": "cannot substitute"},
+                {"id": "L2", "logical": "L2", "display_name": "Q1 exact", "total": None, "rank": None, "status": "pruned", "reason": "no implementation"},
+                {"id": "L99", "logical": "L99", "display_name": "Q1 exact", "total": None, "rank": None, "status": "composition error", "reason": "cannot substitute"},
             ],
         )
 

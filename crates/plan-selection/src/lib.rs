@@ -496,7 +496,8 @@ pub struct CandidateCost {
     /// Its price per second under cost model 1 or 2 (under cost model 1, the
     /// sum of its nodes'); `None` under cost model 3.
     pub cost_per_second: Option<f64>,
-    pub unit: &'static str,
+    /// The unit of `cost_per_second`: always [`COST_UNIT`].
+    pub cost_unit: &'static str,
     /// Where its prices came from, from its nodes' [`NodeCost::price_source`]:
     /// [`COST_SOURCE`] (all formulas), [`MEASURED_COST_SOURCE`] (all
     /// measured) or [`MIXED_COST_SOURCE`].
@@ -2658,7 +2659,7 @@ fn price(
     Ok(CandidateCost {
         usage,
         cost_per_second: cost,
-        unit: COST_UNIT,
+        cost_unit: COST_UNIT,
         source: cost_source(&per_node),
         per_node,
     })
@@ -6393,7 +6394,7 @@ mod tests {
                 ..ResourceUsage::default()
             },
             cost_per_second: None,
-            unit: COST_UNIT,
+            cost_unit: COST_UNIT,
             source: COST_SOURCE,
             per_node: BTreeMap::new(),
         }

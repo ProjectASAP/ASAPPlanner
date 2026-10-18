@@ -598,7 +598,7 @@ fn plan_selection_json(
                 id.clone(),
                 json!({
                     "cost_per_second": cost.cost_per_second,
-                    "unit": cost.unit,
+                    "cost_unit": cost.cost_unit,
                     "source": cost.source,
                     "usage": usage_json(&cost.usage),
                     "per_node": per_node,

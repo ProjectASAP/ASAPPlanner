@@ -204,7 +204,7 @@ function validateSelection(selection, physicalById) {
     if (!physicalById.has(id)) { errors.push(`${at}: not a Stage 2 candidate`); return; }
     // `cost_per_second` is null under cost model 3 (own cluster), which has no prices.
     if (!cost || (cost.cost_per_second !== null && (typeof cost.cost_per_second !== 'number' || !Number.isFinite(cost.cost_per_second)))) errors.push(`${at}: cost_per_second must be a number or null`);
-    if (!cost || typeof cost.unit !== 'string') errors.push(`${at}: unit must be a string`);
+    if (!cost || typeof cost.cost_unit !== 'string') errors.push(`${at}: cost_unit must be a string`);
     const nodeIds = new Set(physicalById.get(id).dag.nodes.map((node) => String(node.id)));
     Object.keys((cost && cost.per_node) || {}).forEach((key) => {
       if (!nodeIds.has(key)) errors.push(`${at}.per_node names missing node ${key}`);
@@ -313,7 +313,6 @@ function stageCandidateRows(doc) {
       logical: candidate.from_logical,
       display_name: candidate.display_name,
       total: cost ? cost.cost_per_second : null,
-      unit: cost ? cost.unit : null,
       rank: null,
       status,
       reason: status === 'rejected' && rejection ? rejection.reason : null,
@@ -321,10 +320,10 @@ function stageCandidateRows(doc) {
     };
   });
   (physical.pruned || []).forEach((p) => rows.push({
-    id: p.from_logical, logical: p.from_logical, display_name: p.display_name, total: null, unit: null, rank: null, status: 'pruned', reason: p.reason,
+    id: p.from_logical, logical: p.from_logical, display_name: p.display_name, total: null, rank: null, status: 'pruned', reason: p.reason,
   }));
   ((doc.stage1_logical_asap_optimization || {}).candidates || []).filter((c) => 'error' in c).forEach((c) => rows.push({
-    id: c.id, logical: c.id, display_name: c.display_name, total: null, unit: null, rank: null, status: 'composition error', reason: c.error,
+    id: c.id, logical: c.id, display_name: c.display_name, total: null, rank: null, status: 'composition error', reason: c.error,
   }));
   const order = { selected: 0, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4 };
   rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
