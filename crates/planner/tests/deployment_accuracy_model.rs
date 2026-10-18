@@ -166,16 +166,16 @@ async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
     assert!(!reads_sketch(&exact_only.plans[0].root));
 }
 
-/// A deployment whose own measurements cover every output that has no
-/// analytical guarantee: it accepts each such output for any target.
-struct AcceptsOutputsWithoutGuarantee;
+/// A deployment that has measured every output itself and accepts each one
+/// for any target, whatever its guarantee says.
+struct AcceptsEveryOutput;
 
-impl AccuracyModel for AcceptsOutputsWithoutGuarantee {
+impl AccuracyModel for AcceptsEveryOutput {
     fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
         BuiltinAccuracyModel.satisfies(guarantee, target)
     }
 
-    fn accepts_output_without_guarantee(
+    fn accepts_output_regardless_of_guarantee(
         &self,
         _output: &QueryRoot,
         _target: &AccuracyTarget,
@@ -184,28 +184,45 @@ impl AccuracyModel for AcceptsOutputsWithoutGuarantee {
     }
 }
 
-/// The candidates for which Stage 3 accepted some query's output that has
-/// no guarantee.
-fn accepted_without_guarantee(output: &PlanOutput) -> BTreeSet<String> {
+/// The candidates for which Stage 3 accepted some query's output because
+/// the deployment's model accepted it regardless of its guarantee.
+fn accepted_regardless_of_guarantee(output: &PlanOutput) -> BTreeSet<String> {
     let selection = output.selection.as_ref().expect("plan selection ran");
     selection
         .accepted
         .iter()
-        .filter(|(_, queries)| queries.iter().any(|q| q.accepted_without_guarantee))
+        .filter(|(_, queries)| queries.iter().any(|q| q.accepted_regardless_of_guarantee))
         .map(|(id, _)| id.clone())
         .collect()
 }
 
+/// The ids of the candidates `output`'s selection rejected with `cause`.
+fn rejected_with(output: &PlanOutput, cause: RejectionCause) -> BTreeSet<String> {
+    output
+        .selection
+        .as_ref()
+        .expect("plan selection ran")
+        .rejected
+        .iter()
+        .filter(|r| r.cause == cause)
+        .map(|r| r.id.clone())
+        .collect()
+}
+
+/// A deployment model that accepts an output directly also accepts one with
+/// no guarantee: the built-in model rejects the summary candidates of a
+/// difference of two quantile estimates as having none, and the accepting
+/// model makes them valid, and Stage 3 selects one.
 #[tokio::test]
-async fn the_deployment_accuracy_model_decides_outputs_without_a_guarantee() {
+async fn the_deployment_accuracy_model_accepts_outputs_without_a_guarantee() {
     // The user's workload: a difference of two quantile estimates, 1% rank
     // error. Stage 1 has no analytical rule for a difference of rank
     // estimates, so it keeps the summary candidates with no guarantee.
     let workload = rank_target_workload("quantile(0.99, rate(x[5m])) - quantile(0.5, rate(x[5m]))");
     let promql = || FrontendInput::Promql { histograms: None };
 
-    // The built-in model accepts no output without a guarantee: Stage 3
-    // rejects every summary candidate as having none and selects exact.
+    // The built-in model (default hook: accepts nothing directly) rejects
+    // every summary candidate as having no guarantee and selects exact.
     let builtin = e2e_plan(UserInput::new(
         &workload,
         promql(),
@@ -213,18 +230,14 @@ async fn the_deployment_accuracy_model_decides_outputs_without_a_guarantee() {
     ))
     .await
     .expect("plans with the built-in models");
-    let builtin_selection = builtin.selection.as_ref().unwrap();
-    let unguaranteed: BTreeSet<String> = builtin_selection
-        .rejected
-        .iter()
-        .filter(|r| r.cause == RejectionCause::NoAccuracyGuarantee)
-        .map(|r| r.id.clone())
-        .collect();
+    // The candidates rejected for having no guarantee: P6 … P47.
+    let unguaranteed = rejected_with(&builtin, RejectionCause::NoAccuracyGuarantee);
     assert!(!unguaranteed.is_empty());
+    assert!(accepted_regardless_of_guarantee(&builtin).is_empty());
     assert!(!reads_sketch(&builtin.plans[0].root));
 
-    // The deployment's model accepts those outputs through the hook.
-    let accepting_model = AcceptsOutputsWithoutGuarantee;
+    // The deployment's model accepts every output directly.
+    let accepting_model = AcceptsEveryOutput;
     let accepting = e2e_plan(UserInput::new(
         &workload,
         promql(),
@@ -242,29 +255,31 @@ async fn the_deployment_accuracy_model_decides_outputs_without_a_guarantee() {
         )
     );
     // Every candidate the built-in model rejected for having no guarantee
-    // is now valid and priced, accepted without a guarantee.
-    assert_eq!(accepted_without_guarantee(&accepting), unguaranteed);
+    // is now valid and priced, accepted regardless of its guarantee, and no
+    // candidate fails the accuracy check.
+    assert!(accepted_regardless_of_guarantee(&accepting).is_superset(&unguaranteed));
     for id in &unguaranteed {
         assert!(accepting_selection.costs.contains_key(id), "{id}");
     }
-    assert!(accepting_selection
-        .rejected
-        .iter()
-        .all(|r| r.cause != RejectionCause::NoAccuracyGuarantee));
+    assert!(accepting_selection.rejected.iter().all(|r| !matches!(
+        r.cause,
+        RejectionCause::NoAccuracyGuarantee | RejectionCause::AccuracyTargetMissed
+    )));
     // Stage 3 selects one of them, a plan that reads a sketch.
     assert!(unguaranteed.contains(&accepting_selection.selected));
     assert!(reads_sketch(&accepting.plans[0].root));
 }
 
-/// The hook decides only outputs with no guarantee: a candidate whose
+/// The hook has priority over a guarantee that misses: a candidate whose
 /// guarantee misses its target under the built-in models (a relative bound
-/// for a rank target) is still rejected for that under the accepting model.
+/// for a rank target) is accepted under the accepting model.
 #[tokio::test]
-async fn the_hook_does_not_override_a_guarantee_that_misses() {
+async fn the_deployment_accuracy_model_accepts_outputs_whose_guarantee_misses() {
     // The user's workload: one p99 query with a 1% rank-error target.
     let workload = rank_target_workload("quantile_over_time(0.99, lat[5m])");
     let promql = || FrontendInput::Promql { histograms: None };
-    // The candidates whose guarantee misses the target under the built-in models.
+    // Under the built-in models: the candidates whose guarantee misses the
+    // target (P3, a relative bound 0.01 for a rank target).
     let builtin = e2e_plan(UserInput::new(
         &workload,
         promql(),
@@ -272,18 +287,10 @@ async fn the_hook_does_not_override_a_guarantee_that_misses() {
     ))
     .await
     .expect("plans with the built-in models");
-    let missed: BTreeSet<String> = builtin
-        .selection
-        .as_ref()
-        .unwrap()
-        .rejected
-        .iter()
-        .filter(|r| r.cause == RejectionCause::AccuracyTargetMissed)
-        .map(|r| r.id.clone())
-        .collect();
+    let missed = rejected_with(&builtin, RejectionCause::AccuracyTargetMissed);
     assert!(!missed.is_empty());
-    // The same workload with the model that accepts every output without a guarantee.
-    let accepting_model = AcceptsOutputsWithoutGuarantee;
+    // The same workload with the model that accepts every output directly.
+    let accepting_model = AcceptsEveryOutput;
     let accepting = e2e_plan(UserInput::new(
         &workload,
         promql(),
@@ -291,13 +298,12 @@ async fn the_hook_does_not_override_a_guarantee_that_misses() {
     ))
     .await
     .expect("plans with the accepting model");
+    // Each of them is now valid, priced and accepted regardless of guarantee.
     let accepting_selection = accepting.selection.as_ref().unwrap();
     for id in &missed {
+        assert!(accepting_selection.costs.contains_key(id), "{id}");
         assert!(
-            accepting_selection
-                .rejected
-                .iter()
-                .any(|r| &r.id == id && r.cause == RejectionCause::AccuracyTargetMissed),
+            accepting_selection.accepted[id][0].accepted_regardless_of_guarantee,
             "{id}"
         );
     }
