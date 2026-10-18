@@ -54,6 +54,14 @@ fn bounded_guarantee(
     )
 }
 
+/// The built-in guarantee of reading `query` out of a summary of family
+/// `family` built over an **exact** input, derived from the family's
+/// committed parameters by inverting the same sizing formulas
+/// [`crate::realization::default_size_params`] uses. Exact for a plain value
+/// or an exact aggregate. `None` when the family has no error model
+/// (`Sample`, `Wavelet`, `StatModel`, and sketch evaluations without a
+/// certified bound): Pass 1 then leaves the guarantee `None` and keeps the
+/// candidate for plan selection to decide.
 pub fn local_guarantee(
     family: &FieldDataType,
     query: &SketchStatistic,

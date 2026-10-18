@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::accuracy::{local_guarantee, satisfies};
+use asap_logical_asap_optimization::accuracy::estimators::local_guarantee;
+use asap_logical_asap_optimization::accuracy::satisfies;
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::properties::AccuracyMetric;
