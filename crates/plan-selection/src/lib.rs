@@ -88,8 +88,8 @@
 //!   steady state each request builds its newest pane and every other pane
 //!   any of its steps reads was built by an earlier request or step;
 //! * a pane chain kept beyond one evaluation (ingestion time or kept
-//!   across evaluations) retains its window plus the longest
-//!   `span_ms` among its readers ([`Selection::pane_retention_ms`]),
+//!   across evaluations) retains its input's offset plus its window plus
+//!   the longest `span_ms` among its readers ([`Selection::pane_retention_ms`]),
 //!   so the earliest step of the next request still finds its panes: that
 //!   many more panes are kept every second.
 //!
@@ -815,10 +815,12 @@ pub struct Selection {
     /// one evaluation (maintained at ingestion time, or built at query time
     /// and kept across evaluations), by node id in its physical DAG: how
     /// far back from the newest evaluation the runtime must keep its
-    /// completed panes, in milliseconds. It is the chain's window plus the
-    /// longest range-evaluation span of its readers, so the earliest step
-    /// of the next request still finds its panes; just the window without
-    /// range evaluations. Empty when the plan keeps no panes.
+    /// completed panes, in milliseconds. It is how far its panes reach
+    /// back: the offset its newest pane ends before the evaluation (`[60m]
+    /// offset 10m`: 10 min), plus the chain's window, plus the longest
+    /// range-evaluation span of its readers, so the earliest step of the
+    /// next request still finds its panes; without an offset or range
+    /// evaluations, just the window. Empty when the plan keeps no panes.
     pub pane_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
 }
 
@@ -3054,7 +3056,9 @@ fn ingest_workers(
 /// For each tumbling-pane chain of `dag` kept beyond one evaluation (at
 /// ingestion time, or at query time across evaluations), how far back
 /// from the newest evaluation its completed panes must be kept, in
-/// milliseconds: its window `pane_count · pane_width_ms`, plus the longest
+/// milliseconds: how long before the evaluation its newest pane ends (the
+/// offset of its input, [`chain_input_offset_ms`]), plus its window
+/// `pane_count · pane_width_ms`, plus the longest
 /// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
 /// whose earliest step reads that much further back. `reach` is
 /// [`query_reach`] of `dag`; `range_evaluations[q]` is query `q`'s (none
@@ -3064,11 +3068,13 @@ fn pane_retention_ms(
     reach: &[HashSet<PhysicalASAPNodeId>],
     range_evaluations: &[Option<RangeEvaluation>],
 ) -> BTreeMap<PhysicalASAPNodeId, u64> {
+    let nodes = node_map(dag);
     dag.nodes
         .iter()
         .filter_map(|node| match (&node.payload, node.materialization) {
             (
                 Payload::ASAP(ASAPOp::PaneChain {
+                    child,
                     pane_width_ms,
                     pane_count,
                     ..
@@ -3084,11 +3090,36 @@ fn pane_retention_ms(
                     .map(|range| range.span_ms)
                     .max()
                     .unwrap_or(0);
-                Some((node.id, pane_width_ms * u64::from(*pane_count) + span_ms))
+                let end_offset_ms = chain_input_offset_ms(*child, &nodes);
+                Some((
+                    node.id,
+                    end_offset_ms + pane_width_ms * u64::from(*pane_count) + span_ms,
+                ))
             }
             _ => None,
         })
         .collect()
+}
+
+/// How long before the evaluation a chain's newest pane ends: the offsets
+/// of the `TimeShift`s (without an `@` anchor) directly below the chain,
+/// added up; 0 for a negative total.
+fn chain_input_offset_ms(
+    input: PhysicalASAPNodeId,
+    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
+) -> u64 {
+    let mut offset_ms: i64 = 0;
+    let mut current = input;
+    while let Some(Payload::NonASAP(NonASAPOp::TimeShift { shift, child })) =
+        nodes.get(&current).map(|node| &node.payload)
+    {
+        if shift.at.is_some() {
+            break;
+        }
+        offset_ms = offset_ms.saturating_add(shift.offset_ms);
+        current = *child;
+    }
+    u64::try_from(offset_ms).unwrap_or(0)
 }
 
 /// The panes a chain in `retention_ms` ([`pane_retention_ms`]) keeps
