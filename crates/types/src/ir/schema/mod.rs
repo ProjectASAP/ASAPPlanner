@@ -20,7 +20,9 @@ pub mod schema_support;
 pub mod sketch;
 
 pub use aggregate_schema::aggregate_output_schema;
-pub use family_capability::{FamilyCapability, MergeInputRule, MergedError, StatisticKind};
+pub use family_capability::{
+    FamilyCapability, MergeInputRule, MergedError, StatisticKind, SupportedSummary,
+};
 pub use sketch::{
     default_hydra_params, hydra_kind_for, EntityIdentity, ExactKind, ExactParams, GroupingStrategy,
     HydraKind, HydraParams, NonNegativeWeightProof, SamplingKind, SamplingParams, SketchAlgorithm,
