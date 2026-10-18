@@ -19,8 +19,11 @@ use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{
     DataType, FamilyCapability, FieldDataType, SketchStatistic, SummaryInputExpr,
 };
+// `promql_rows` reads `LogicalOperator` and `OperatorNode` through `super::*`
+// only in its test-support helpers.
+#[cfg_attr(not(any(test, feature = "test-support")), allow(unused_imports))]
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr};
-mod logical;
+pub(crate) mod logical;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -35,14 +38,22 @@ fn invalid(message: impl Into<String>) -> Error {
 pub type Source<'a> = Box<dyn PhysicalOperator<Batch, SchemaRef> + 'a>;
 
 pub mod precompute;
+// The executor's PromQL row encoding and the timing frontier are internals:
+// a deployment runtime feeds samples with `crate::RawSampleSelector`
+// and reads the stored outputs from the installable plan. The Planner's own
+// tests reach them with the `test-support` feature.
+#[cfg(feature = "test-support")]
 pub mod promql_rows;
+#[cfg(not(feature = "test-support"))]
+pub(crate) mod promql_rows;
 pub mod promql_values;
 
 mod candidates;
+#[cfg(feature = "test-support")]
+pub use candidates::frontier_from_timing;
 pub use candidates::{
-    compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-    frontier_from_timing, select_candidate, CandidateCost, CandidateSelection,
-    CompiledPhysicalPlan,
+    compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers, select_candidate,
+    CandidateCost, CandidateSelection, CompiledPhysicalPlan,
 };
 
 mod compiled;

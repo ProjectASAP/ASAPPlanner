@@ -3,7 +3,7 @@ use super::*;
 use planner_types::ir::{ASAPOp, Operator as LogicalOperator, OperatorNode};
 use std::rc::Rc;
 
-pub(super) fn restore(dag: &PhysicalASAPDAG) -> Result<BTreeMap<NodeId, Rc<OperatorNode>>, Error> {
+pub(crate) fn restore(dag: &PhysicalASAPDAG) -> Result<BTreeMap<NodeId, Rc<OperatorNode>>, Error> {
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let mut done: BTreeMap<NodeId, Rc<OperatorNode>> = BTreeMap::new();
     let mut remaining: Vec<_> = dag.nodes.iter().collect();

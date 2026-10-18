@@ -333,6 +333,7 @@ dependencies = [
 name = "asap-executor"
 version = "0.1.0"
 dependencies = [
+ "asap-executor",
  "asap-frontend-promql",
  "asap-logical-asap-optimization",
  "asap-plan-selection",

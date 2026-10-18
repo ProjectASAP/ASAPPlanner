@@ -96,6 +96,7 @@ pub fn cut_candidate(
 /// A query-time node feeding an ingestion-time node has no valid placement.
 /// Only ingestion timing is read: a `MatAtQuery` output is not stored by
 /// this frontier yet (choosing and storing it is Stage 2's job).
+#[cfg(any(test, feature = "test-support"))]
 pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error> {
     use planner_types::ir::properties::ExecutionTiming::IngestionTime;
     let timing = dag
