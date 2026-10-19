@@ -1,7 +1,7 @@
 //! A batch is a set of equal-length Arrow columns in one Planner schema,
 //! with summary states held beside them.
 use super::arrow_columns::{self, ColumnDepth};
-use super::{validate_schema, validate_state, SchemaRef, Value};
+use super::{validate_schema, validate_state, SchemaRef, StateColumn, Value};
 use crate::{AggregateCore, Error};
 use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
 use arrow::datatypes::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
@@ -12,56 +12,6 @@ use std::sync::{Arc, OnceLock};
 /// Each row is charged this many bytes on top of its column buffers, so a
 /// batch of zero-width rows still consumes memory budget.
 const ROW_SLOT_BYTES: usize = 8;
-
-/// The summary states of one batch column: one family and parameter set
-/// (from the plan) for every state, so operators dispatch once per column,
-/// not once per row. The batch column itself holds, per row, the index of
-/// that row's state here, so filtering, sorting and limiting rows never
-/// copy a sketch.
-pub struct StateColumn {
-    /// The family and parameters every state of the column has.
-    family: FieldDataType,
-    /// The states, addressed by the indices in the batch column.
-    states: Vec<Arc<dyn AggregateCore>>,
-    /// Memory the states hold: each state's own footprint, plus each state
-    /// shared by several states (one Hydra grid) once.
-    state_memory_bytes: usize,
-}
-
-impl StateColumn {
-    /// The column of `states`, all of `family`. Not checked here: callers
-    /// pass states their own kernel built for `family`, or states
-    /// [`Batch::try_new`] validated.
-    pub(crate) fn new(family: FieldDataType, states: Vec<Arc<dyn AggregateCore>>) -> Self {
-        let shared = states
-            .iter()
-            .filter_map(|state| state.shared_state())
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let state_memory_bytes = states
-            .iter()
-            .map(|state| state.approx_memory_bytes())
-            .sum::<usize>()
-            + shared.values().sum::<usize>();
-        Self {
-            family,
-            states,
-            state_memory_bytes,
-        }
-    }
-    /// The states, indexed by the batch column's state indices.
-    pub fn states(&self) -> &[Arc<dyn AggregateCore>] {
-        &self.states
-    }
-}
-
-impl std::fmt::Debug for StateColumn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StateColumn")
-            .field("family", &self.family)
-            .field("state_count", &self.states.len())
-            .finish()
-    }
-}
 
 /// The output of one operator: equal-length columns in one Planner schema.
 ///
@@ -174,7 +124,10 @@ impl Batch {
                         })
                         .collect::<UInt32Array>();
                     arrays.push(Arc::new(indices));
-                    state_columns.push(Some(Arc::new(StateColumn::new(family.clone(), states))));
+                    state_columns.push(Some(Arc::new(StateColumn::from_objects(
+                        family.clone(),
+                        states,
+                    ))));
                 }
             }
         }
@@ -227,6 +180,19 @@ impl Batch {
             state_columns: state_columns.into(),
             decoded_rows: Arc::new(OnceLock::new()),
         })
+    }
+
+    /// Rows `offset..offset + length`, sharing the column buffers.
+    pub(crate) fn slice(&self, offset: usize, length: usize) -> Self {
+        if offset == 0 && length == self.num_rows() {
+            return self.clone();
+        }
+        Self {
+            schema: self.schema.clone(),
+            record_batch: self.record_batch.slice(offset, length),
+            state_columns: self.state_columns.clone(),
+            decoded_rows: Arc::new(OnceLock::new()),
+        }
     }
 
     /// The rows where `keep` is true (not false or null), in order. Shares
@@ -294,8 +260,8 @@ impl Batch {
                             .values()
                             .iter()
                             .map(|&i| Value::Summary {
-                                family: states.family.clone(),
-                                state: states.states[i as usize].clone(),
+                                family: states.family().clone(),
+                                state: states.state(i as usize),
                             })
                             .collect()
                     }
@@ -321,7 +287,7 @@ impl Batch {
             .iter()
             .flatten()
             .filter(|column| seen.insert(Arc::as_ptr(column)))
-            .map(|column| column.state_memory_bytes)
+            .map(|column| column.state_memory_bytes())
             .sum::<usize>();
         let rows = self.decoded_rows.get().map_or(0, |rows| {
             rows.capacity() * std::mem::size_of::<Vec<Value>>()
@@ -553,7 +519,7 @@ mod tests {
         ];
         let batch = Batch::try_new(schema, rows).unwrap();
         let states = batch.state_column(1).unwrap();
-        assert_eq!(states.states().len(), 2);
+        assert_eq!(states.len(), 2);
         assert!(batch.state_column(0).is_none());
         let kept = batch
             .filter(&BooleanArray::from(vec![true, false, true]))

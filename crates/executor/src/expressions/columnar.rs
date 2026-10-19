@@ -21,6 +21,7 @@ use super::{arithmetic, Expression};
 use crate::values::arrow_columns::{self, ColumnDepth};
 use crate::values::{Batch, Value};
 use crate::Error;
+use ahash::AHashMap as HashMap;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Datum, DictionaryArray, Float64Array, Int64Array, Scalar,
     UInt32Array,
@@ -29,7 +30,7 @@ use arrow::datatypes::UInt32Type;
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use planner_types::ir::schema::{DataType, FieldDataType, Schema};
 use planner_types::ir::ScalarExpr;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 /// An expression lowered to the operations evaluated over whole columns.
 enum VectorExpr {
@@ -550,19 +551,24 @@ fn evaluate_per_input(
         .collect::<Option<Vec<_>>>();
     if let Some(dictionaries) = dictionaries {
         // Once per distinct combination of keys, in order of first appearance.
-        let texts = dictionaries
+        let mut texts = dictionaries
             .iter()
-            .map(arrow_columns::dictionary_texts)
+            .map(|dictionary| arrow_columns::DictionaryTexts::new(dictionary, rows))
             .collect::<Vec<_>>();
         let mut results: Vec<Value> = Vec::new();
         let mut indices = Vec::with_capacity(rows);
-        if let ([column], [dictionary], [texts]) =
-            (columns, dictionaries.as_slice(), texts.as_slice())
-        {
+        let dense = dictionaries.len() == 1
+            && arrow_columns::dense_dictionary(dictionaries[0].values().len(), rows);
+        if let ([column], [dictionary], [texts], true) = (
+            columns,
+            dictionaries.as_slice(),
+            texts.as_mut_slice(),
+            dense,
+        ) {
             // One column: a dense slot per dictionary key, the last for null.
             let keys = dictionary.keys();
-            let null_slot = texts.len();
-            let mut positions: Vec<Option<u32>> = vec![None; texts.len() + 1];
+            let null_slot = dictionary.values().len();
+            let mut positions: Vec<Option<u32>> = vec![None; null_slot + 1];
             for index in 0..rows {
                 let slot = if keys.is_null(index) {
                     null_slot
@@ -575,7 +581,7 @@ fn evaluate_per_input(
                         row[*column] = if slot == null_slot {
                             Value::Null
                         } else {
-                            Value::Utf8(texts[slot].clone())
+                            Value::Utf8(texts.get(slot as u32))
                         };
                         results.push(evaluate_row(&row)?);
                         let position = (results.len() - 1) as u32;
@@ -589,7 +595,7 @@ fn evaluate_per_input(
             (results, indices) = evaluate_per_key_combination(
                 rows,
                 &dictionaries,
-                &texts,
+                &mut texts,
                 columns,
                 &mut row,
                 &mut evaluate_row,
@@ -639,7 +645,7 @@ fn evaluate_per_input(
 fn evaluate_per_key_combination(
     rows: usize,
     dictionaries: &[DictionaryArray<UInt32Type>],
-    texts: &[Vec<Arc<str>>],
+    texts: &mut [arrow_columns::DictionaryTexts<'_>],
     columns: &[usize],
     row: &mut [Value],
     evaluate_row: &mut impl FnMut(&[Value]) -> Result<Value, Error>,
@@ -657,9 +663,9 @@ fn evaluate_per_key_combination(
         let position = match seen.get(&key) {
             Some(&position) => position,
             None => {
-                for ((&column, code), texts) in columns.iter().zip(&key).zip(texts) {
+                for ((&column, code), texts) in columns.iter().zip(&key).zip(texts.iter_mut()) {
                     row[column] = match code {
-                        Some(code) => Value::Utf8(texts[*code as usize].clone()),
+                        Some(code) => Value::Utf8(texts.get(*code)),
                         None => Value::Null,
                     };
                 }

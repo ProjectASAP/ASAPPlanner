@@ -142,5 +142,5 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         .position(|field| !field.is_plain())
         .unwrap();
     assert_eq!(pane.num_rows(), 2);
-    assert_eq!(pane.state_column(state_column).unwrap().states().len(), 2);
+    assert_eq!(pane.state_column(state_column).unwrap().len(), 2);
 }

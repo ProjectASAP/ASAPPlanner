@@ -1,4 +1,9 @@
+use super::group_table::GroupTable;
 use super::*;
+use crate::values::arrow_columns::ColumnDepth;
+use crate::values::StateColumn;
+use crate::StateColumnUpdater;
+use arrow::array::{Array, BooleanArray, Float64Array, TimestampMillisecondArray, UInt32Array};
 use planner_types::ir::schema::{FamilyCapability, MergeInputRule};
 use std::num::NonZeroU32;
 
@@ -349,6 +354,7 @@ pub(super) fn execute<'a>(
 ) -> Result<OutputStream<'a, Batch>, Error> {
     let range_ms = operator.evaluation_range(&context)?;
     let output = operator.output.clone();
+    let input_schema = operator.inputs[0].clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     match &operator.kind {
         Kind::PerGroupSummaryBuild {
@@ -358,10 +364,21 @@ pub(super) fn execute<'a>(
             groups,
             filter,
         } => Ok(futures::stream::once(async move {
-            Batch::try_new(
-                output,
-                build_per_group_summary(input, family, *value, *time, groups, filter.as_deref(), !operator.inputs[0].has_promql_series_identity(), &context).await?,
+            build_per_group_summary(
+                input,
+                PerGroupBuild {
+                    family,
+                    value: *value,
+                    time: *time,
+                    groups,
+                    filter: filter.as_deref(),
+                    emit_empty_global: !input_schema.has_promql_series_identity(),
+                },
+                &input_schema,
+                &output,
+                &context,
             )
+            .await
         })
         .boxed_local()),
         Kind::PerGroupKeyedSummaryBuild {
@@ -371,19 +388,20 @@ pub(super) fn execute<'a>(
             groups,
             filter,
         } => Ok(futures::stream::once(async move {
-            Batch::try_new(
-                output,
-                build_per_group_keyed_summary(
-                    input,
+            build_per_group_keyed_summary(
+                input,
+                KeyedBuild {
                     family,
                     items,
-                    *row_weight,
+                    row_weight: *row_weight,
                     groups,
-                    filter.as_deref(),
-                    &context,
-                )
-                .await?,
+                    filter: filter.as_deref(),
+                },
+                &input_schema,
+                &output,
+                &context,
             )
+            .await
         })
         .boxed_local()),
         Kind::AllGroupsSummaryBuild {
@@ -393,120 +411,27 @@ pub(super) fn execute<'a>(
             groups,
             filter,
         } => Ok(futures::stream::once(async move {
-            Batch::try_new(
-                output,
-                build_all_groups_summary(
-                    input,
+            build_all_groups_summary(
+                input,
+                AllGroupsBuild {
                     family,
-                    *item,
-                    *row_weight,
+                    item: *item,
+                    row_weight: *row_weight,
                     groups,
-                    filter.as_deref(),
-                    &context,
-                )
-                .await?,
+                    filter: filter.as_deref(),
+                },
+                &input_schema,
+                &output,
+                &context,
             )
+            .await
         })
         .boxed_local()),
         Kind::KeyedEvaluation { state, k } => Ok(input
-            .map(move |batch| {
-                let batch = batch?;
-                let mut rows = Vec::new();
-                for row in batch.rows() {
-                    let Value::Summary { state: summary, .. } = &row[*state] else {
-                        return Err(invalid("summary value required"));
-                    };
-                    let summary = summary
-                        .as_any()
-                        .downcast_ref::<crate::summary_kernels::weighted_frequency::WeightedFrequency>()
-                        .ok_or_else(|| invalid("weighted frequency typed state required"))?;
-                    for items in summary.rows(*k) {
-                        let mut values = row[..*state].to_vec();
-                        values.extend(items);
-                        // The typed output schema restores epoch-millisecond
-                        // timestamp keys from the kernel's Int64 representation.
-                        for (value, field) in values.iter_mut().zip(&output.fields) {
-                            if field.dtype == SummaryFamilyType::Plain(DataType::Timestamp) {
-                                if let Value::Int64(time) = value {
-                                    *value = Value::Timestamp(*time);
-                                }
-                            }
-                        }
-                        rows.push(values);
-                    }
-                }
-                Batch::try_new(output.clone(), rows)
-            })
+            .map(move |batch| keyed_evaluation(&*batch?, *state, *k, &output))
             .boxed_local()),
         Kind::Evaluation { state, query } => Ok(input
-            .map(move |batch| {
-                let batch = batch?;
-                let mut rows = batch.rows().to_vec();
-                if let SummaryEvaluation::Exact(evaluation) = query {
-                    rows.retain(|row| !matches!(&row[*state], Value::Summary { state: summary, .. }
-                        if crate::evaluation::insufficient_counter_samples(summary.as_ref(), evaluation.statistic)));
-                }
-                for row in &mut rows {
-                    let Value::Summary { state: summary, .. } = &row[*state] else {
-                        return Err(invalid("summary value required"));
-                    };
-                    row[*state] = match query {
-                        // A filtered or NULL-only group's quantile is SQL NULL.
-                        SummaryEvaluation::Sketch(_)
-                            if output.fields[*state].nullable && summary.is_empty() =>
-                        {
-                            Value::Null
-                        }
-                        SummaryEvaluation::Sketch(query) => {
-                            let value = summary
-                                .estimate(query)
-                                .map_err(|e| Error::Operator(e.to_string()))?;
-                            if output.fields[*state].dtype
-                                == SummaryFamilyType::Plain(DataType::Int64)
-                            {
-                                // Below 2^53 an f64 sum of unit updates is exact.
-                                if value.fract() != 0.0 || !(0.0..9.007_199_254_740_992e15).contains(&value) {
-                                    return Err(Error::Operator(
-                                        "Count-Min count is not an exact integer".into(),
-                                    ));
-                                }
-                                Value::Int64(value as i64)
-                            } else {
-                                Value::Float64(value)
-                            }
-                        }
-                        SummaryEvaluation::Exact(evaluation) => {
-                            let exact = summary
-                                .as_any()
-                                .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
-                                .ok_or_else(|| invalid("exact evaluation requires exact state"))?;
-                            if output.fields[*state].nullable && exact.is_empty_sum() { Value::Null }
-                            else if output.fields[*state].dtype == SummaryFamilyType::Plain(DataType::Int64) {
-                                let count = exact.count().ok_or_else(|| {
-                                    Error::Operator("exact count state lacks an integer count".into())
-                                })?;
-                                Value::Int64(i64::try_from(count).map_err(|_| {
-                                    Error::Operator("exact count exceeds Int64".into())
-                                })?)
-                            } else {
-                                match exact
-                                    .evaluation(evaluation.statistic, range_ms, None)
-                                    .map_err(|e| Error::Operator(e.to_string()))?
-                                {
-                                    Some(value) => Value::Float64(value),
-                                    None if output.fields[*state].nullable => Value::Null,
-                                    None => {
-                                        return Err(Error::Operator(
-                                            "empty exact population".into(),
-                                        ))
-                                    }
-                                }
-                            }
-                        }
-                    };
-                }
-                Batch::try_new(output.clone(), rows)
-            })
+            .map(move |batch| evaluate_states(&*batch?, *state, query, range_ms, &output))
             .boxed_local()),
         _ => unreachable!(),
     }
@@ -517,403 +442,756 @@ pub(super) fn execute_merge<'a>(
     context: RunContext,
 ) -> Result<OutputStream<'a, Batch>, Error> {
     let output = operator.output.clone();
+    let input_schema = operator.inputs[0].clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     Ok(futures::stream::once(async move {
-        let (rows, _memory) = collect_rows(input, &context).await?;
-        let result = match &operator.kind {
-            Kind::SummaryMerge { state, groups } => {
-                merge_summary(rows, *state, groups, &context).await?
-            }
-            _ => unreachable!(),
+        let Kind::SummaryMerge { state, groups } = &operator.kind else {
+            unreachable!()
         };
-        Batch::try_new(output, result)
+        merge_summary(input, *state, groups, &input_schema, &output, &context).await
     })
     .boxed_local())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn build_per_group_summary(
-    mut input: Input<'_, Batch>,
-    family: &SummaryFamilyType,
+/// The rows a summary build's filter keeps: only a true predicate does, as
+/// with SQL `FILTER (WHERE …)`. `None` keeps every row.
+fn filter_mask(filter: Option<&Expression>, batch: &Batch) -> Result<Option<BooleanArray>, Error> {
+    filter
+        .map(|filter| {
+            let mask = filter.evaluate_batch(batch, &DataType::Bool)?;
+            mask.as_any()
+                .downcast_ref::<BooleanArray>()
+                .cloned()
+                .ok_or_else(|| invalid("summary filter must be boolean"))
+        })
+        .transpose()
+}
+
+fn kept(mask: &Option<BooleanArray>, row: usize) -> bool {
+    mask.as_ref()
+        .is_none_or(|mask| mask.is_valid(row) && mask.value(row))
+}
+
+/// The output batch of a build or merge: the groups' labels in key order,
+/// then their states.
+fn grouped_states(
+    table: &GroupTable,
+    states: StateColumn,
+    input: &SchemaRef,
+    output: &SchemaRef,
+) -> Result<Batch, Error> {
+    let order = table.groups_in_key_order();
+    let mut arrays = table.label_arrays(input, &order)?;
+    let mut columns = vec![None; arrays.len()];
+    arrays.push(Arc::new(UInt32Array::from(order.clone())));
+    columns.push(Some(Arc::new(states)));
+    Batch::from_parts(output.clone(), arrays, columns, order.len())
+}
+
+/// A `PerGroupSummaryBuild`'s parameters.
+struct PerGroupBuild<'a> {
+    family: &'a SummaryFamilyType,
     value: usize,
     time: Option<usize>,
-    groups: &[usize],
-    filter: Option<&Expression>,
+    groups: &'a [usize],
+    filter: Option<&'a Expression>,
+    /// Whether an empty input still has the global group (SQL; not PromQL).
     emit_empty_global: bool,
+}
+
+/// One state per group, updated row by row through the family's
+/// [`StateColumnUpdater`]; a run-local [`GroupTable`] numbers the groups.
+async fn build_per_group_summary(
+    mut input: Input<'_, Batch>,
+    build: PerGroupBuild<'_>,
+    input_schema: &SchemaRef,
+    output: &SchemaRef,
     context: &RunContext,
-) -> Result<Vec<Vec<Value>>, Error> {
-    type State = (
-        Vec<Value>,
-        Box<dyn crate::factory::AccumulatorUpdater>,
-        Reservation,
-        usize,
-        Option<i64>,
-    );
-    let create = |labels: Vec<Value>, key_bytes: usize| -> Result<State, Error> {
-        let updater = crate::factory::create_planner_accumulator(
-            family,
-            &SummaryUpdate::column(ColumnRef::SampleValue),
-            &Default::default(),
-        )
-        .map_err(Error::Operator)?;
-        let overhead = labels.iter().map(Value::bytes).sum::<usize>() + key_bytes + 64;
-        let memory = context.reserve(updater.memory_usage_bytes() + overhead)?;
-        Ok((labels, updater, memory, overhead, None))
-    };
+) -> Result<Batch, Error> {
+    let mut table = GroupTable::new(build.groups.to_vec());
+    let mut updater = StateColumnUpdater::new(build.family)?;
     let mut work = Cooperative::new(context);
-    let mut states = BTreeMap::<Vec<Vec<u8>>, State>::new();
+    let mut workspace = Workspace::new(context)?;
     // PromQL aggregation of an empty vector produces no sample.
-    if groups.is_empty() && emit_empty_global {
-        states.insert(vec![], create(vec![], 0)?);
+    if build.groups.is_empty() && build.emit_empty_global {
+        table.add_empty_group()?;
+        updater.add_group()?;
+        workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
     }
-    let ordered_time = matches!(
-        family,
-        SummaryFamilyType::ExactAggregate(
-            planner_types::ir::schema::ExactKind::Rate
-                | planner_types::ir::schema::ExactKind::Increase,
-            _
-        )
-    );
-    while let Some(batch) = input.next().await {
-        let batch = batch?;
-        for row in batch.rows() {
-            work.checkpoint().await?;
-            let key = group_key(row, groups)?;
-            if !states.contains_key(&key) {
-                let labels = groups.iter().map(|&i| row[i].clone()).collect();
-                let state = create(
-                    labels,
-                    key.iter()
-                        .map(|v| v.len() + std::mem::size_of::<Vec<u8>>())
-                        .sum(),
-                )?;
-                states.insert(key.clone(), state);
-            }
-            if !selected(filter, row)? {
-                continue;
-            }
-            let (_, updater, memory, overhead, previous) =
-                states.get_mut(&key).expect("inserted group");
-            // SQL aggregates ignore NULL samples while retaining the group.
-            // A missing counter sample also contributes no observation.
-            let value = &row[value];
-            if matches!(value, Value::Null) {
-                continue;
-            }
-            let timestamp = if let Some(time) = time {
-                let Value::Timestamp(time) = row[time] else {
-                    return Err(invalid("summary time type"));
-                };
-                time
+    while let Some(whole) = input.next().await {
+        let whole = whole?;
+        // A bounded number of rows at a time: memory is checked after each
+        // chunk's new groups, so one large batch cannot overshoot the limit
+        // by more than a chunk's states.
+        for batch in row_chunks(&whole) {
+            let groups = table.group_ids(&batch)?;
+            updater.ensure_groups(table.len())?;
+            workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
+            let mask = filter_mask(build.filter, &batch)?;
+            let times = build.time.map(|time| {
+                batch
+                    .column(time)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("summary time columns are timestamps")
+                    .clone()
+            });
+            let time_at = |row: usize| times.as_ref().map_or(0, |times| times.value(row));
+            let values = batch.column(build.value);
+            if let Some(values) = values.as_any().downcast_ref::<Float64Array>() {
+                for (row, &group) in groups.iter().enumerate() {
+                    // SQL aggregates ignore NULL samples while retaining the group.
+                    if !kept(&mask, row) || values.is_null(row) {
+                        continue;
+                    }
+                    updater.update(group, values.value(row), time_at(row))?;
+                }
             } else {
-                0
-            };
-            if ordered_time && previous.is_some_and(|prior| timestamp <= prior) {
-                return Err(Error::Operator(
-                    "counter samples must have strictly increasing timestamps within each group"
-                        .into(),
-                ));
+                // A frequency sketch over item values (UnivMon).
+                let SummaryFamilyType::Plain(dtype) = &input_schema.fields[build.value].dtype
+                else {
+                    return Err(invalid("summary values are plain"));
+                };
+                let values = crate::values::arrow_columns::decode(
+                    values.as_ref(),
+                    dtype,
+                    ColumnDepth::BatchColumn,
+                );
+                for (row, &group) in groups.iter().enumerate() {
+                    if !kept(&mask, row) || matches!(values[row], Value::Null) {
+                        continue;
+                    }
+                    updater.update_value(group, &values[row], time_at(row))?;
+                }
             }
-            updater
-                .update_value(value, timestamp)
-                .map_err(Error::Operator)?;
-            *previous = Some(timestamp);
-            memory.resize(updater.memory_usage_bytes() + *overhead)?;
+            work.checkpoint_rows(batch.num_rows()).await?;
+            workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
         }
     }
-    Ok(states
-        .into_values()
-        .map(|(mut labels, updater, _memory, _, _)| {
-            labels.push(Value::Summary {
-                family: family.clone(),
-                state: Arc::from(updater.into_accumulator()),
-            });
-            labels
+    grouped_states(&table, updater.seal(), input_schema, output)
+}
+
+/// A `PerGroupKeyedSummaryBuild`'s parameters.
+struct KeyedBuild<'a> {
+    family: &'a SummaryFamilyType,
+    items: &'a [usize],
+    row_weight: RowWeight,
+    groups: &'a [usize],
+    filter: Option<&'a Expression>,
+}
+
+/// The weight each row adds in a keyed build.
+enum RowWeights {
+    /// The same weight for every row.
+    Constant(NonZeroU32),
+    /// Each row's weight column value; NULL adds nothing.
+    Column(Vec<Value>),
+}
+
+impl RowWeights {
+    fn of(batch: &Batch, row_weight: RowWeight) -> Self {
+        match row_weight {
+            RowWeight::Constant(weight) => Self::Constant(weight),
+            RowWeight::Column(column) => {
+                let SummaryFamilyType::Plain(dtype) = &batch.schema().fields[column].dtype else {
+                    unreachable!("validated weight column")
+                };
+                Self::Column(crate::values::arrow_columns::decode(
+                    batch.column(column).as_ref(),
+                    dtype,
+                    ColumnDepth::BatchColumn,
+                ))
+            }
+        }
+    }
+}
+
+/// The rows a build processes at once: memory is checked after each
+/// chunk's new groups.
+const ROWS_PER_CHUNK: usize = 1024;
+
+/// `batch` in slices of at most [`ROWS_PER_CHUNK`] rows (no copy).
+fn row_chunks(batch: &Batch) -> impl Iterator<Item = Batch> + '_ {
+    (0..batch.num_rows())
+        .step_by(ROWS_PER_CHUNK)
+        .map(move |offset| batch.slice(offset, ROWS_PER_CHUNK.min(batch.num_rows() - offset)))
+}
+
+/// The decoded values of `columns` of `batch`, column by column.
+fn decoded_columns(batch: &Batch, columns: &[usize]) -> Vec<Vec<Value>> {
+    columns
+        .iter()
+        .map(|&column| {
+            let SummaryFamilyType::Plain(dtype) = &batch.schema().fields[column].dtype else {
+                unreachable!("validated item column")
+            };
+            crate::values::arrow_columns::decode(
+                batch.column(column).as_ref(),
+                dtype,
+                ColumnDepth::BatchColumn,
+            )
         })
-        .collect())
+        .collect()
 }
-/// Whether a row passes a summary build's filter: only a true predicate
-/// does, as with SQL `FILTER (WHERE …)`.
-fn selected(filter: Option<&Expression>, row: &[Value]) -> Result<bool, Error> {
-    filter.map_or(Ok(true), |filter| {
-        Ok(matches!(filter.evaluate(row)?, Value::Bool(true)))
-    })
+
+/// One keyed state per group: each kept row adds its weight to the tuple of
+/// its item values in its group's state.
+async fn build_per_group_keyed_summary(
+    mut input: Input<'_, Batch>,
+    build: KeyedBuild<'_>,
+    input_schema: &SchemaRef,
+    output: &SchemaRef,
+    context: &RunContext,
+) -> Result<Batch, Error> {
+    let mut table = GroupTable::new(build.groups.to_vec());
+    let mut updater = StateColumnUpdater::new(build.family)?;
+    let mut work = Cooperative::new(context);
+    let mut workspace = Workspace::new(context)?;
+    let mut items = Vec::with_capacity(build.items.len());
+    while let Some(whole) = input.next().await {
+        let whole = whole?;
+        for batch in row_chunks(&whole) {
+            let groups = table.group_ids(&batch)?;
+            updater.ensure_groups(table.len())?;
+            workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
+            let mask = filter_mask(build.filter, &batch)?;
+            let weights = RowWeights::of(&batch, build.row_weight);
+            let columns = decoded_columns(&batch, build.items);
+            for (row, &group) in groups.iter().enumerate() {
+                if !kept(&mask, row) {
+                    continue;
+                }
+                let weight = match &weights {
+                    RowWeights::Constant(weight) => f64::from(weight.get()),
+                    RowWeights::Column(values) => match &values[row] {
+                        Value::Null => continue,
+                        weight => keyed_weight(weight)?,
+                    },
+                };
+                items.clear();
+                // The kernel keys epoch-millisecond timestamps as Int64.
+                items.extend(columns.iter().map(|column| match &column[row] {
+                    Value::Timestamp(time) => Value::Int64(*time),
+                    value => value.clone(),
+                }));
+                updater.update_item(group, &items, weight)?;
+            }
+            work.checkpoint_rows(batch.num_rows()).await?;
+            workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
+        }
+    }
+    grouped_states(&table, updater.seal(), input_schema, output)
 }
+
+/// An `AllGroupsSummaryBuild`'s parameters.
+struct AllGroupsBuild<'a> {
+    family: &'a SummaryFamilyType,
+    item: usize,
+    row_weight: RowWeight,
+    groups: &'a [usize],
+    filter: Option<&'a Expression>,
+}
+
+/// One HydraCms grid shared by all groups; each group's state reads its own
+/// part of it, named by an injective encoding of its typed key.
+async fn build_all_groups_summary(
+    mut input: Input<'_, Batch>,
+    build: AllGroupsBuild<'_>,
+    input_schema: &SchemaRef,
+    output: &SchemaRef,
+    context: &RunContext,
+) -> Result<Batch, Error> {
+    use crate::summary_kernels::HydraCmsGroup;
+    use crate::AggregateCore;
+    let mut grid = crate::factory::create_hydra_cms(build.family).map_err(Error::Invalid)?;
+    let grid_bytes = grid.approx_memory_bytes();
+    let mut workspace = Workspace::new(context)?;
+    workspace.set_bytes(grid_bytes)?;
+    let mut work = Cooperative::new(context);
+    let mut table = GroupTable::new(build.groups.to_vec());
+    // Each group's Hydra subpopulation name.
+    let mut names: Vec<String> = Vec::new();
+    let mut name_bytes = 0;
+    while let Some(whole) = input.next().await {
+        let whole = whole?;
+        for batch in row_chunks(&whole) {
+            let groups = table.group_ids(&batch)?;
+            for group in names.len()..table.len() {
+                let name = (0..build.groups.len())
+                    .map(|index| {
+                        let key = table.label(group as u32, index).key()?;
+                        Ok(key.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?
+                    .join(",");
+                name_bytes += name.len();
+                names.push(name);
+            }
+            workspace.set_bytes(grid_bytes + table.memory_bytes() + name_bytes)?;
+            let mask = filter_mask(build.filter, &batch)?;
+            let weights = RowWeights::of(&batch, build.row_weight);
+            let items = decoded_columns(&batch, &[build.item]).remove(0);
+            for (row, &group) in groups.iter().enumerate() {
+                if !kept(&mask, row) {
+                    continue;
+                }
+                let weight = match &weights {
+                    RowWeights::Constant(weight) => {
+                        i32::try_from(weight.get()).expect("validated HydraCms constant weight")
+                    }
+                    RowWeights::Column(values) => match &values[row] {
+                        Value::Null => continue,
+                        weight => hydra_weight(weight)?,
+                    },
+                };
+                let item = match &items[row] {
+                    Value::Utf8(v) => v.to_string(),
+                    Value::Int64(v) => v.to_string(),
+                    Value::Bool(v) => v.to_string(),
+                    _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
+                };
+                grid.count(&names[group as usize], &item, weight)
+                    .map_err(|e| Error::Operator(e.to_string()))?;
+            }
+            work.checkpoint_rows(batch.num_rows()).await?;
+        }
+    }
+    let grid = Arc::new(grid);
+    let states = names
+        .into_iter()
+        .map(|group| {
+            Arc::new(HydraCmsGroup {
+                grid: grid.clone(),
+                group,
+            }) as Arc<dyn AggregateCore>
+        })
+        .collect();
+    grouped_states(
+        &table,
+        StateColumn::from_objects(build.family.clone(), states),
+        input_schema,
+        output,
+    )
+}
+
+/// The state indices of a summary column: row `i`'s state is `indices[i]`.
+fn state_indices(batch: &Batch, state: usize) -> Result<(&StateColumn, &UInt32Array), Error> {
+    let states = batch
+        .state_column(state)
+        .ok_or_else(|| invalid("summary value required"))?;
+    let indices = batch
+        .column(state)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .expect("summary columns hold state indices");
+    Ok((states, indices))
+}
+
+/// Merge the states of each group across all input rows.
 async fn merge_summary(
-    mut rows: Vec<Vec<Value>>,
+    mut input: Input<'_, Batch>,
     state_column: usize,
     groups: &[usize],
+    input_schema: &SchemaRef,
+    output: &SchemaRef,
     context: &RunContext,
-) -> Result<Vec<Vec<Value>>, Error> {
-    use crate::summary_kernels::{HydraCms, HydraCmsGroup};
+) -> Result<Batch, Error> {
+    use crate::summary_kernels::exact::ScalarState;
+    use crate::values::StateStorage;
+    let family = &input_schema.fields[state_column].dtype;
+    let mut batches = Vec::new();
+    let mut reservations = Vec::new();
+    while let Some(batch) = input.next().await {
+        let batch = batch?;
+        reservations.push(context.reserve(batch.memory_bytes())?);
+        batches.push((*batch).clone());
+    }
+    let mut table = GroupTable::new(groups.to_vec());
+    let mut work = Cooperative::new(context);
+    // Every input row: its batch, its row, its group.
+    let mut entries = Vec::new();
+    for (index, batch) in batches.iter().enumerate() {
+        let ids = table.group_ids(batch)?;
+        entries.extend(
+            ids.into_iter()
+                .enumerate()
+                .map(|(row, group)| (index, row, group)),
+        );
+    }
+    let columns = batches
+        .iter()
+        .map(|batch| state_indices(batch, state_column))
+        .collect::<Result<Vec<_>, _>>()?;
+    let state_of = |(batch, row, _): (usize, usize, u32)| {
+        let (states, indices) = columns[batch];
+        (states, indices.value(row) as usize)
+    };
     // Counter states join consecutive windows pairwise, which is exact only
     // in time order: order the inputs by their window start.
-    if let Some(Value::Summary { family, .. }) = rows.first().map(|row| &row[state_column]) {
-        if FamilyCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
-            rows.sort_by_cached_key(|row| match &row[state_column] {
-                Value::Summary { state, .. } => state
+    if FamilyCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
+        entries.sort_by_cached_key(|&entry| {
+            let (states, index) = state_of(entry);
+            match states.storage() {
+                StateStorage::Exact(records) => records[index].earliest_sample_ms(),
+                StateStorage::Objects(objects) => objects[index]
                     .as_any()
                     .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
                     .and_then(|state| state.earliest_sample_ms()),
-                _ => None,
-            });
-        }
+            }
+        });
     }
-    type GroupState = (Vec<Value>, SummaryFamilyType, Arc<dyn crate::AggregateCore>);
-    let mut states: BTreeMap<Vec<Vec<u8>>, GroupState> = BTreeMap::new();
-    let mut work = Cooperative::new(context);
-    let mut memory = context.reserve(0)?;
-    let mut retained = 0usize;
+    let all_exact = columns
+        .iter()
+        .all(|(states, _)| matches!(states.storage(), StateStorage::Exact(_)));
+    if all_exact {
+        // Exact records merge in place, one fixed-size record per group.
+        let mut merged: Vec<Option<ScalarState>> = vec![None; table.len()];
+        let mut workspace = Workspace::new(context)?;
+        workspace.set_bytes(
+            merged.len() * std::mem::size_of::<Option<ScalarState>>() + table.memory_bytes(),
+        )?;
+        for chunk in entries.chunks(ROWS_PER_CHUNK) {
+            for &entry in chunk {
+                let (states, index) = state_of(entry);
+                let StateStorage::Exact(records) = states.storage() else {
+                    unreachable!("all exact")
+                };
+                let slot = &mut merged[entry.2 as usize];
+                *slot = Some(match slot.take() {
+                    None => records[index].clone(),
+                    Some(existing) => existing
+                        .merge(&records[index])
+                        .map_err(|e| Error::Operator(e.to_string()))?,
+                });
+            }
+            work.checkpoint_rows(chunk.len()).await?;
+        }
+        let records = merged
+            .into_iter()
+            .map(|record| record.expect("every group has a row"))
+            .collect();
+        return grouped_states(
+            &table,
+            StateColumn::from_exact(family.clone(), records),
+            input_schema,
+            output,
+        );
+    }
+    let merged = merge_objects(
+        &entries,
+        &state_of,
+        table.len(),
+        table.memory_bytes(),
+        context,
+        &mut work,
+    )
+    .await?;
+    grouped_states(
+        &table,
+        StateColumn::from_objects(family.clone(), merged),
+        input_schema,
+        output,
+    )
+}
+
+/// Merge kernel-object states per group, in `entries` order. Each distinct
+/// pair of Hydra grids merges once, and every group of the pair reads the
+/// one merged grid.
+async fn merge_objects<'b>(
+    entries: &[(usize, usize, u32)],
+    state_of: &dyn Fn((usize, usize, u32)) -> (&'b StateColumn, usize),
+    group_count: usize,
+    table_memory_bytes: usize,
+    context: &RunContext,
+    work: &mut Cooperative,
+) -> Result<Vec<Arc<dyn crate::AggregateCore>>, Error> {
+    use crate::summary_kernels::{HydraCms, HydraCmsGroup};
+    let mut merged: Vec<Option<Arc<dyn crate::AggregateCore>>> = vec![None; group_count];
+    // The group table is held while the states merge.
+    let mut memory = context.reserve(table_memory_bytes)?;
+    let mut retained = table_memory_bytes;
     // States shared by several groups (Hydra grids) are reserved once each.
     let mut shared = BTreeMap::<usize, usize>::new();
-    // Each distinct pair of Hydra grids merges once, and every group of the
-    // pair reads the one merged grid. The inputs are kept so their addresses
-    // stay unique while they key the memo.
+    // The inputs are kept so their addresses stay unique while they key the memo.
     type GridPair = (Arc<HydraCms>, Arc<HydraCms>, Arc<HydraCms>);
     let mut grids = BTreeMap::<(usize, usize), GridPair>::new();
-    for row in rows {
+    for &entry in entries {
         work.checkpoint().await?;
-        let Value::Summary { family, state } = &row[state_column] else {
-            return Err(invalid("summary state required"));
-        };
+        let (states, index) = state_of(entry);
+        let state = states.state(index);
         if let Some((id, bytes)) = state.shared_state() {
             if shared.insert(id, bytes).is_none() {
                 retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
                 memory.resize(retained)?;
             }
         }
-        let key = group_key(&row, groups)?;
-        if let Some((_, expected, existing)) = states.get_mut(&key) {
-            if expected != family {
-                return Err(invalid("incompatible summary family"));
+        let slot = &mut merged[entry.2 as usize];
+        let Some(existing) = slot else {
+            retained = retained
+                .checked_add(state.approx_memory_bytes() + 64)
+                .ok_or(Error::MemoryLimit)?;
+            memory.resize(retained)?;
+            *slot = Some(state);
+            continue;
+        };
+        if let (Some(left), Some(right)) = (
+            existing.as_any().downcast_ref::<HydraCmsGroup>(),
+            state.as_any().downcast_ref::<HydraCmsGroup>(),
+        ) {
+            if left.group != right.group {
+                return Err(invalid("HydraCms merge requires the same group"));
             }
-            if let (Some(left), Some(right)) = (
-                existing.as_any().downcast_ref::<HydraCmsGroup>(),
-                state.as_any().downcast_ref::<HydraCmsGroup>(),
-            ) {
-                if left.group != right.group {
-                    return Err(invalid("HydraCms merge requires the same group"));
+            let pair = (
+                Arc::as_ptr(&left.grid) as usize,
+                Arc::as_ptr(&right.grid) as usize,
+            );
+            let grid = match grids.entry(pair) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.get().2.clone(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let grid = Arc::new(
+                        left.grid
+                            .merge(&right.grid)
+                            .map_err(|e| Error::Operator(e.to_string()))?,
+                    );
+                    let bytes = grid.approx_memory_bytes();
+                    shared.insert(Arc::as_ptr(&grid) as usize, bytes);
+                    retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
+                    memory.resize(retained)?;
+                    entry
+                        .insert((left.grid.clone(), right.grid.clone(), grid))
+                        .2
+                        .clone()
                 }
-                let pair = (
-                    Arc::as_ptr(&left.grid) as usize,
-                    Arc::as_ptr(&right.grid) as usize,
-                );
-                let grid = match grids.entry(pair) {
-                    std::collections::btree_map::Entry::Occupied(entry) => entry.get().2.clone(),
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        let merged = Arc::new(
-                            left.grid
-                                .merge(&right.grid)
-                                .map_err(|e| Error::Operator(e.to_string()))?,
-                        );
-                        let bytes = merged.approx_memory_bytes();
-                        shared.insert(Arc::as_ptr(&merged) as usize, bytes);
-                        retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
-                        memory.resize(retained)?;
-                        entry
-                            .insert((left.grid.clone(), right.grid.clone(), merged))
-                            .2
-                            .clone()
-                    }
-                };
-                *existing = Arc::new(HydraCmsGroup {
-                    grid,
-                    group: left.group.clone(),
-                });
-                continue;
-            }
-            let old_bytes = existing.approx_memory_bytes();
-            // Reserve an estimate for the replacement while both input states remain live.
-            memory.resize(
-                retained
-                    .checked_add(old_bytes)
-                    .and_then(|n| n.checked_add(state.approx_memory_bytes()))
-                    .ok_or(Error::MemoryLimit)?,
-            )?;
-            *existing = Arc::from(
-                existing
-                    .merge_with(state.as_ref())
-                    .map_err(|e| Error::Operator(e.to_string()))?,
-            );
-            retained = retained
-                .checked_sub(old_bytes)
-                .and_then(|n| n.checked_add(existing.approx_memory_bytes()))
-                .ok_or(Error::MemoryLimit)?;
-            memory.resize(retained)?;
-        } else {
-            retained = retained
-                .checked_add(key_bytes(&key) + row_bytes(&row))
-                .ok_or(Error::MemoryLimit)?;
-            memory.resize(retained)?;
-            states.insert(
-                key,
-                (
-                    groups.iter().map(|&i| row[i].clone()).collect(),
-                    family.clone(),
-                    state.clone(),
-                ),
-            );
+            };
+            *existing = Arc::new(HydraCmsGroup {
+                grid,
+                group: left.group.clone(),
+            });
+            continue;
         }
+        let old_bytes = existing.approx_memory_bytes();
+        // Reserve an estimate for the replacement while both input states remain live.
+        memory.resize(
+            retained
+                .checked_add(old_bytes)
+                .and_then(|n| n.checked_add(state.approx_memory_bytes()))
+                .ok_or(Error::MemoryLimit)?,
+        )?;
+        *existing = Arc::from(
+            existing
+                .merge_with(state.as_ref())
+                .map_err(|e| Error::Operator(e.to_string()))?,
+        );
+        retained = retained
+            .checked_sub(old_bytes)
+            .and_then(|n| n.checked_add(existing.approx_memory_bytes()))
+            .ok_or(Error::MemoryLimit)?;
+        memory.resize(retained)?;
     }
-    Ok(states
-        .into_values()
-        .map(|(mut keys, family, state)| {
-            keys.push(Value::Summary { family, state });
-            keys
-        })
+    Ok(merged
+        .into_iter()
+        .map(|state| state.expect("every group has a row"))
         .collect())
 }
 
-async fn build_per_group_keyed_summary(
-    mut input: Input<'_, Batch>,
-    family: &SummaryFamilyType,
-    items: &[usize],
-    row_weight: RowWeight,
-    groups: &[usize],
-    filter: Option<&Expression>,
-    context: &RunContext,
-) -> Result<Vec<Vec<Value>>, Error> {
-    use crate::{summary_kernels::weighted_frequency::WeightedFrequency, AggregateCore};
-    let SummaryFamilyType::Sketch(kind, _) = family else {
-        unreachable!()
+/// `SummaryEstimate` / `FinalizeExactAccumulator`: each row's state read
+/// as one number, in place of the state column. A counter with fewer than
+/// two samples drops its row (PromQL omits the series).
+fn evaluate_states(
+    batch: &Batch,
+    state: usize,
+    query: &SummaryEvaluation,
+    range_ms: Option<(i64, i64)>,
+    output: &SchemaRef,
+) -> Result<Batch, Error> {
+    use crate::summary_kernels::exact::{statistic_of, ExactAccumulator, ScalarState};
+    use crate::values::StateStorage;
+    let (states, indices) = state_indices(batch, state)?;
+    let field = &output.fields[state];
+    let integral = field.dtype == SummaryFamilyType::Plain(DataType::Int64);
+    let nullable = field.nullable;
+    // An exact state's value, from its record.
+    let exact_value = |record: &ScalarState,
+                       evaluation: &crate::summary_kernels::exact::ExactEvaluation|
+     -> Result<Option<Value>, Error> {
+        if nullable && record.is_empty_sum() {
+            return Ok(None);
+        }
+        if integral {
+            let count = record.count().ok_or_else(|| {
+                Error::Operator("exact count state lacks an integer count".into())
+            })?;
+            return Ok(Some(Value::Int64(i64::try_from(count).map_err(|_| {
+                Error::Operator("exact count exceeds Int64".into())
+            })?)));
+        }
+        if evaluation.statistic != statistic_of(states.family()) {
+            return Err(Error::Operator(
+                "evaluation differs from Planner exact family".into(),
+            ));
+        }
+        match record
+            .evaluation(evaluation.statistic, range_ms)
+            .map_err(|e| Error::Operator(e.to_string()))?
+        {
+            Some(value) => Ok(Some(Value::Float64(value))),
+            None if nullable => Ok(None),
+            None => Err(Error::Operator("empty exact population".into())),
+        }
     };
-    let (algorithm, width, depth, capacity) = WeightedFrequency::configuration(kind)?;
-    let mut work = Cooperative::new(context);
-    let mut states =
-        BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, WeightedFrequency, Reservation, usize)>::new();
-    while let Some(batch) = input.next().await {
-        let batch = batch?;
-        for row in batch.rows() {
-            work.checkpoint().await?;
-            let key = group_key(row, groups)?;
-            if !states.contains_key(&key) {
-                let labels = groups.iter().map(|&i| row[i].clone()).collect::<Vec<_>>();
-                let overhead = labels.iter().map(Value::bytes).sum::<usize>()
-                    + key.iter().map(|v| v.len() + 24).sum::<usize>()
-                    + 128;
-                let bytes = width
-                    .checked_mul(depth)
-                    .and_then(|n| n.checked_mul(8))
-                    .and_then(|n| n.checked_add(overhead))
-                    .ok_or_else(|| invalid("weighted frequency memory size overflow"))?;
-                let reservation = context.reserve(bytes)?;
-                states.insert(
-                    key.clone(),
-                    (
-                        labels,
-                        WeightedFrequency::new(algorithm, width, depth, capacity)?,
-                        reservation,
-                        overhead,
-                    ),
-                );
-            }
-            if !selected(filter, row)? {
-                continue;
-            }
-            let weight = match row_weight {
-                RowWeight::Constant(weight) => f64::from(weight.get()),
-                RowWeight::Column(i) => match &row[i] {
-                    Value::Null => continue,
-                    value => keyed_weight(value)?,
-                },
-            };
-            let (_, summary, reservation, overhead) = states.get_mut(&key).unwrap();
-            summary.update(
-                &items
-                    .iter()
-                    .map(|&i| match &row[i] {
-                        Value::Timestamp(time) => Value::Int64(*time),
-                        value => value.clone(),
-                    })
-                    .collect::<Vec<_>>(),
-                weight,
-            )?;
-            reservation.resize(summary.approx_memory_bytes() + *overhead)?;
+    // A counter with too few samples drops its row.
+    let insufficient = |index: usize| -> bool {
+        let SummaryEvaluation::Exact(evaluation) = query else {
+            return false;
+        };
+        if !matches!(
+            evaluation.statistic,
+            crate::Statistic::Rate | crate::Statistic::Increase
+        ) {
+            return false;
         }
+        match states.storage() {
+            StateStorage::Exact(records) => {
+                evaluation.statistic == statistic_of(states.family())
+                    && records[index].insufficient_counter_samples()
+            }
+            StateStorage::Objects(objects) => crate::evaluation::insufficient_counter_samples(
+                objects[index].as_ref(),
+                evaluation.statistic,
+            ),
+        }
+    };
+    let mut keep = Vec::with_capacity(batch.num_rows());
+    let mut values: Vec<Option<Value>> = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        let index = indices.value(row) as usize;
+        if insufficient(index) {
+            keep.push(false);
+            continue;
+        }
+        keep.push(true);
+        values.push(match (query, states.storage()) {
+            (SummaryEvaluation::Exact(evaluation), StateStorage::Exact(records)) => {
+                exact_value(&records[index], evaluation)?
+            }
+            (SummaryEvaluation::Exact(evaluation), StateStorage::Objects(objects)) => {
+                let exact = objects[index]
+                    .as_any()
+                    .downcast_ref::<ExactAccumulator>()
+                    .ok_or_else(|| invalid("exact evaluation requires exact state"))?;
+                let record = exact
+                    .scalar()
+                    .ok_or_else(|| invalid("exact evaluation requires an unkeyed state"))?;
+                exact_value(record, evaluation)?
+            }
+            (SummaryEvaluation::Sketch(query), storage) => {
+                let summary = match storage {
+                    StateStorage::Objects(objects) => objects[index].clone(),
+                    StateStorage::Exact(_) => states.state(index),
+                };
+                // A filtered or NULL-only group's quantile is SQL NULL.
+                if nullable && summary.is_empty() {
+                    None
+                } else {
+                    let value = summary
+                        .estimate(query)
+                        .map_err(|e| Error::Operator(e.to_string()))?;
+                    if integral {
+                        // Below 2^53 an f64 sum of unit updates is exact.
+                        if value.fract() != 0.0 || !(0.0..9.007_199_254_740_992e15).contains(&value)
+                        {
+                            return Err(Error::Operator(
+                                "Count-Min count is not an exact integer".into(),
+                            ));
+                        }
+                        Some(Value::Int64(value as i64))
+                    } else {
+                        Some(Value::Float64(value))
+                    }
+                }
+            }
+        });
     }
-    Ok(states
-        .into_values()
-        .map(|(mut labels, summary, _, _)| {
-            labels.push(Value::Summary {
-                family: family.clone(),
-                state: Arc::new(summary),
-            });
-            labels
-        })
-        .collect())
+    let kept = if keep.iter().all(|&k| k) {
+        batch.clone()
+    } else {
+        batch.filter(&BooleanArray::from(keep))?
+    };
+    let mut arrays = kept.record_batch().columns().to_vec();
+    let mut columns = (0..arrays.len())
+        .map(|column| kept.state_column(column).cloned())
+        .collect::<Vec<_>>();
+    let SummaryFamilyType::Plain(dtype) = &field.dtype else {
+        unreachable!("an evaluation outputs a plain value")
+    };
+    let cells = values
+        .iter()
+        .map(|value| value.as_ref().unwrap_or(&Value::Null))
+        .collect::<Vec<_>>();
+    arrays[state] = crate::values::arrow_columns::encode(dtype, ColumnDepth::BatchColumn, &cells)?;
+    columns[state] = None;
+    Batch::from_parts(output.clone(), arrays, columns, kept.num_rows())
 }
 
-async fn build_all_groups_summary(
-    mut input: Input<'_, Batch>,
-    family: &SummaryFamilyType,
-    item: usize,
-    row_weight: RowWeight,
-    groups: &[usize],
-    filter: Option<&Expression>,
-    context: &RunContext,
-) -> Result<Vec<Vec<Value>>, Error> {
-    use crate::summary_kernels::HydraCmsGroup;
-    let mut grid = crate::factory::create_hydra_cms(family).map_err(Error::Invalid)?;
-    let grid_bytes = grid.approx_memory_bytes();
-    let mut memory = context.reserve(grid_bytes)?;
-    let mut retained = grid_bytes;
-    let mut work = Cooperative::new(context);
-    // Group labels and the group's Hydra subpopulation name, an injective
-    // encoding of its typed key.
-    let mut seen = BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, String)>::new();
-    while let Some(batch) = input.next().await {
-        let batch = batch?;
-        for row in batch.rows() {
-            work.checkpoint().await?;
-            let key = group_key(row, groups)?;
-            if !seen.contains_key(&key) {
-                let name = key
-                    .iter()
-                    .map(|part| part.iter().map(|b| format!("{b:02x}")).collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let labels = groups.iter().map(|&i| row[i].clone()).collect::<Vec<_>>();
-                retained +=
-                    key_bytes(&key) + labels.iter().map(Value::bytes).sum::<usize>() + name.len();
-                memory.resize(retained)?;
-                seen.insert(key.clone(), (labels, name));
+/// `SummaryEstimate` of a top-k: each input row's `k` heaviest items, one
+/// output row per item, after the row's own columns.
+fn keyed_evaluation(
+    batch: &Batch,
+    state: usize,
+    k: usize,
+    output: &SchemaRef,
+) -> Result<Batch, Error> {
+    let (states, indices) = state_indices(batch, state)?;
+    let mut source_rows = Vec::new();
+    let mut item_columns: Vec<Vec<Value>> = vec![Vec::new(); output.fields.len() - state];
+    for row in 0..batch.num_rows() {
+        let summary = states.state(indices.value(row) as usize);
+        let summary = summary
+            .as_any()
+            .downcast_ref::<crate::summary_kernels::weighted_frequency::WeightedFrequency>()
+            .ok_or_else(|| invalid("weighted frequency typed state required"))?;
+        for items in summary.rows(k) {
+            source_rows.push(row as u32);
+            for ((column, value), field) in item_columns
+                .iter_mut()
+                .zip(items)
+                .zip(&output.fields[state..])
+            {
+                // The typed output schema restores epoch-millisecond
+                // timestamp keys from the kernel's Int64 representation.
+                column.push(match value {
+                    Value::Int64(time)
+                        if field.dtype == SummaryFamilyType::Plain(DataType::Timestamp) =>
+                    {
+                        Value::Timestamp(time)
+                    }
+                    value => value,
+                });
             }
-            if !selected(filter, row)? {
-                continue;
-            }
-            let weight = match row_weight {
-                RowWeight::Constant(weight) => {
-                    i32::try_from(weight.get()).expect("validated HydraCms constant weight")
-                }
-                RowWeight::Column(i) => match &row[i] {
-                    Value::Null => continue,
-                    value => hydra_weight(value)?,
-                },
-            };
-            let item = match &row[item] {
-                Value::Utf8(v) => v.to_string(),
-                Value::Int64(v) => v.to_string(),
-                Value::Bool(v) => v.to_string(),
-                _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
-            };
-            grid.count(&seen[&key].1, &item, weight)
-                .map_err(|e| Error::Operator(e.to_string()))?;
         }
     }
-    let grid = Arc::new(grid);
-    Ok(seen
-        .into_values()
-        .map(|(mut labels, group)| {
-            labels.push(Value::Summary {
-                family: family.clone(),
-                state: Arc::new(HydraCmsGroup {
-                    grid: grid.clone(),
-                    group,
-                }),
-            });
-            labels
-        })
-        .collect())
+    let take = UInt32Array::from(source_rows);
+    let mut arrays = Vec::with_capacity(output.fields.len());
+    let mut columns = Vec::with_capacity(output.fields.len());
+    for column in 0..state {
+        arrays.push(
+            arrow::compute::take(batch.column(column).as_ref(), &take, None)
+                .map_err(|e| Error::Operator(e.to_string()))?,
+        );
+        columns.push(batch.state_column(column).cloned());
+    }
+    for (values, field) in item_columns.iter().zip(&output.fields[state..]) {
+        let SummaryFamilyType::Plain(dtype) = &field.dtype else {
+            return Err(invalid("top-k items are plain"));
+        };
+        arrays.push(crate::values::arrow_columns::encode(
+            dtype,
+            ColumnDepth::BatchColumn,
+            &values.iter().collect::<Vec<_>>(),
+        )?);
+        columns.push(None);
+    }
+    Batch::from_parts(output.clone(), arrays, columns, take.len())
 }
 
 /// One row's weight-column value as the keyed kernel's `f64` weight. An

@@ -117,8 +117,7 @@ pub(crate) fn series_batch(
         return Batch::try_new(output, vec![]);
     }
     // Series ids in order of first appearance.
-    let mut series_ids: std::collections::HashMap<&BTreeMap<String, String>, u32> =
-        std::collections::HashMap::new();
+    let mut series_ids: ahash::AHashMap<&BTreeMap<String, String>, u32> = ahash::AHashMap::new();
     let mut series_cells: Vec<Vec<Value>> = Vec::new();
     let mut sample_series = Vec::with_capacity(samples.len());
     for sample in samples {
@@ -163,8 +162,7 @@ pub(crate) fn series_batch(
             )),
             SeriesColumn::Identity | SeriesColumn::Label => {
                 // Distinct texts of this column, and each series' code.
-                let mut codes: std::collections::HashMap<&str, u32> =
-                    std::collections::HashMap::new();
+                let mut codes: ahash::AHashMap<&str, u32> = ahash::AHashMap::new();
                 let mut texts: Vec<&str> = Vec::new();
                 let series_codes = series_cells
                     .iter()
