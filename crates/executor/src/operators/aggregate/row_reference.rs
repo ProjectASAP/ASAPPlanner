@@ -335,7 +335,7 @@ mod tests {
             let mut output = dag.execute(&[1], context).unwrap().remove(0);
             let mut rows = Vec::new();
             while let Some(batch) = output.next().await {
-                rows.extend(batch?.rows().iter().cloned());
+                rows.extend(batch?.to_rows().iter().cloned());
             }
             Ok(rows)
         })
@@ -401,7 +401,7 @@ mod tests {
                         for (seed, input) in [(5, batches(&schema, 5)), (9, vec![])] {
                             let rows = input
                                 .iter()
-                                .flat_map(|batch| batch.rows().to_vec())
+                                .flat_map(|batch| batch.to_rows().to_vec())
                                 .collect::<Vec<_>>();
                             let context = RunContext::new(
                                 Scope::Query {

@@ -201,7 +201,7 @@ fn run(
     let mut rows = BTreeMap::new();
     for batch in execute(dag, samples, end)? {
         let job = batch.schema().fields.iter().position(|f| f.name == "job");
-        for row in batch.rows() {
+        for row in &batch.to_rows() {
             let key = match job.map(|i| &row[i]) {
                 Some(Value::Utf8(job)) => job.to_string(),
                 _ => String::new(),
@@ -401,7 +401,7 @@ fn run_series(dag: &PhysicalASAPDAG, samples: &[Sample], end: i64) -> Result<Str
         let schema = batch.schema();
         let column = |name: &str| schema.fields.iter().position(|f| f.name == name).unwrap();
         let (identity, value) = (column(promql_rows::SERIES_IDENTITY_COLUMN), column("value"));
-        for row in batch.rows() {
+        for row in &batch.to_rows() {
             let (Value::Utf8(identity), Value::Float64(value)) = (&row[identity], &row[value])
             else {
                 return Err(format!("unexpected row {row:?}"));
@@ -703,7 +703,7 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
             .remove(0);
         let mut values = Vec::new();
         while let Some(batch) = stream.next().await {
-            values.extend(batch.unwrap().rows().iter().map(|row| row[0].clone()));
+            values.extend(batch.unwrap().to_rows().iter().map(|row| row[0].clone()));
         }
         values
     });

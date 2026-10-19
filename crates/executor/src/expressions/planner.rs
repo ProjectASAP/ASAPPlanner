@@ -6,7 +6,36 @@ use crate::{
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use planner_types::ir::schema::DataType;
 
-use planner_types::ir::ScalarExpr;
+use planner_types::ir::ScalarExpr as PlannedExpr;
+
+/// A scalar expression the executor evaluates: a Planner expression with
+/// no operator reference, so it is `Send + Sync`.
+pub(crate) type ScalarExpr = PlannedExpr<()>;
+
+/// Planner typing for a reference-free expression: the Planner types a
+/// planned expression, which this one is with its (absent) references.
+trait LocalTyping {
+    fn scalar_type(
+        &self,
+        schema: &planner_types::ir::schema::Schema,
+    ) -> Result<(DataType, bool), planner_types::ir::SchemaDerivationError>;
+}
+
+impl LocalTyping for ScalarExpr {
+    fn scalar_type(
+        &self,
+        schema: &planner_types::ir::schema::Schema,
+    ) -> Result<(DataType, bool), planner_types::ir::SchemaDerivationError> {
+        planned(self).scalar_type(schema)
+    }
+}
+
+/// `expression` as a planned expression; it has no reference to map.
+fn planned(expression: &ScalarExpr) -> PlannedExpr {
+    expression.map_operator_refs(&mut |_| -> std::rc::Rc<planner_types::ir::OperatorNode> {
+        unreachable!("compiled expressions hold no operator reference")
+    })
+}
 use std::{cmp::Ordering, sync::Arc};
 
 pub(super) fn evaluate(
@@ -506,7 +535,20 @@ impl CompiledExpression {
         &self.expression
     }
 
-    pub fn compile(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
+    /// `expression` compiled over `input`. Bad input when it reads another
+    /// operator (a subquery or `scalar(v)`), summary state, or types the
+    /// executor does not evaluate.
+    pub fn compile(expression: &PlannedExpr, input: &SchemaRef) -> Result<Self, Error> {
+        if !expression.operator_refs().is_empty() {
+            return Err(Error::Invalid(
+                "a scalar expression that reads another operator has no native evaluation".into(),
+            ));
+        }
+        let expression: ScalarExpr = expression.map_operator_refs(&mut |_| ());
+        Self::compile_local(&expression, input)
+    }
+
+    fn compile_local(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
         if !input.is_all_plain() {
             return Err(Error::Invalid(
                 "scalar expression cannot consume summary state".into(),
@@ -527,7 +569,7 @@ impl CompiledExpression {
         self.output.clone()
     }
     pub(crate) fn validate_input(&self, input: &SchemaRef) -> Result<(), Error> {
-        let checked = Self::compile(&self.expression, input)?;
+        let checked = Self::compile_local(&self.expression, input)?;
         if checked.output != self.output {
             return Err(Error::Invalid(
                 "persisted expression type differs from its semantics".into(),

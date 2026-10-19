@@ -178,10 +178,10 @@ fn cooperative_sort_preserves_ties_across_chunks() {
     let expected = (0..3)
         .flat_map(|key| (0..1025).rev().filter(move |i| i % 3 == key))
         .collect::<Vec<_>>();
-    for (row, expected) in batch.rows().iter().zip(expected) {
+    for (row, expected) in batch.to_rows().iter().zip(expected) {
         assert!(matches!(row[1], Value::Int64(i) if i == expected));
     }
-    assert_eq!(batch.rows().len(), 1025);
+    assert_eq!(batch.to_rows().len(), 1025);
 }
 
 // The integrated weighted-summary path obeys the same cooperative cancellation contract.
@@ -283,9 +283,9 @@ fn frequency_dictionary_enforces_memory_budget() {
         (Reduction::FrequencyEntropy(0), false),
         (Reduction::Cardinality(vec![0]), false),
     ] {
-        // Count needs about 7.9 kB here (the input batch), the dictionaries
-        // at least 20.2 kB.
-        let run = context(14_000);
+        // Count needs about 1.2 kB here (the input batch), the dictionaries
+        // at least 13.6 kB.
+        let run = context(8_000);
         let inputs = sources.execute(&[0], run.clone()).unwrap();
         let operator =
             Operator::aggregate(input.clone(), vec![], vec![("result".into(), reduction)]).unwrap();

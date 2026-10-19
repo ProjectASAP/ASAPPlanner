@@ -252,7 +252,7 @@ fn batch_build(build: Operator) -> BTreeMap<String, String> {
         .downcast_ref::<arrow::array::UInt32Array>()
         .unwrap();
     output
-        .rows()
+        .to_rows()
         .iter()
         .enumerate()
         .map(|(row, cells)| {

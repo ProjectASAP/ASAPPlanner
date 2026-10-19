@@ -236,7 +236,7 @@ fn try_run(
     );
     let mut points = BTreeMap::new();
     for batch in batches {
-        for row in batch.map_err(|e| e.to_string())?.rows() {
+        for row in batch.map_err(|e| e.to_string())?.to_rows() {
             match (&row[0], &row[1]) {
                 (Value::Utf8(job), Value::Float64(point)) => {
                     points.insert(job.to_string(), *point);

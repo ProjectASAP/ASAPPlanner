@@ -44,7 +44,7 @@ let run = RunContext::new(
 )?;
 let mut output = plan.execute(&[1], run)?.remove(0);
 let batch = block_on(output.next()).unwrap()?;
-assert!(matches!(batch.rows()[0][0], Value::Int64(-7)));
+assert!(matches!(batch.to_rows()[0][0], Value::Int64(-7)));
 # Ok::<(), asap_executor::dag::Error>(())
 ```
 

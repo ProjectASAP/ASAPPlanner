@@ -173,7 +173,7 @@ fn raw_scan_to_sort_limit_at_both_phases() {
             let mut output = bound.execute(&[2], ctx.clone()).unwrap().remove(0);
             let mut rows = vec![];
             while let Some(batch) = output.next().await {
-                rows.extend(batch.unwrap().rows().iter().cloned());
+                rows.extend(batch.unwrap().to_rows().iter().cloned());
             }
             rows
         });
@@ -357,7 +357,7 @@ fn empty_sources_and_three_valued_predicates() {
             let mut s = physical_dag.execute(&[0], context()).unwrap().remove(0);
             let mut count = 0;
             while let Some(b) = s.next().await {
-                count += b.unwrap().rows().len();
+                count += b.unwrap().to_rows().len();
             }
             assert_eq!(count, expected);
         });
@@ -392,7 +392,7 @@ fn compile_without_readers_and_rebind_inputs() {
         assert_eq!(
             result
                 .iter()
-                .map(|b| b.as_ref().unwrap().rows().len())
+                .map(|b| b.as_ref().unwrap().to_rows().len())
                 .sum::<usize>(),
             2
         );

@@ -44,7 +44,7 @@ pub(super) async fn collect_rows(
     while let Some(batch) = input.next().await {
         let batch = batch?;
         reservations.push(context.reserve(batch.memory_bytes())?);
-        for row in batch.rows() {
+        for row in &batch.to_rows() {
             work.checkpoint().await?;
             rows.push(row.clone());
         }

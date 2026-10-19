@@ -524,7 +524,7 @@ mod tests {
             let mut row_number = 0;
             for batch in &batches {
                 ids.extend(table.group_ids(batch).unwrap());
-                for row in batch.rows() {
+                for row in &batch.to_rows() {
                     let key = columns.iter().map(|&c| row[c].key().unwrap()).collect();
                     reference.entry(key).or_default().push(row_number);
                     row_number += 1;

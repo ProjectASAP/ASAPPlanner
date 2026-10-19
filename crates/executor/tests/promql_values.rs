@@ -58,7 +58,7 @@ fn run_inputs(
         let mut stream = bound.execute(dag.roots(), context).unwrap().remove(0);
         let mut rows = Vec::new();
         while let Some(batch) = stream.next().await {
-            rows.extend(batch?.rows().iter().cloned());
+            rows.extend(batch?.to_rows().iter().cloned());
         }
         Ok(rows)
     })
@@ -298,16 +298,15 @@ fn composed_ensemble_shares_a_producer_across_roots() {
             },
         )
         .unwrap();
-        let results =
-            block_on(futures::future::join_all(
-                bound
-                    .execute(dag.roots(), context)
-                    .unwrap()
-                    .into_iter()
-                    .map(|mut stream| async move {
-                        stream.next().await.unwrap().unwrap().rows().to_vec()
-                    }),
-            ));
+        let results = block_on(futures::future::join_all(
+            bound
+                .execute(dag.roots(), context)
+                .unwrap()
+                .into_iter()
+                .map(|mut stream| async move {
+                    stream.next().await.unwrap().unwrap().to_rows().to_vec()
+                }),
+        ));
         equal_rows(results[0].clone(), vec![row(&[("job", "api")], 6.)]);
         equal_rows(results[1].clone(), vec![row(&[("job", "api")], -3.)]);
     }

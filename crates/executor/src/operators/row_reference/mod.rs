@@ -101,7 +101,7 @@ pub(crate) mod harness {
                 .remove(0);
             let mut rows = Vec::new();
             while let Some(batch) = output.next().await {
-                rows.extend(batch.map_err(|e| e.to_string())?.rows().iter().cloned());
+                rows.extend(batch.map_err(|e| e.to_string())?.to_rows().iter().cloned());
             }
             Ok(rows)
         })
@@ -658,7 +658,7 @@ mod tests {
         let left = g.batches(&schema, 2, 12);
         let right = g.batches(&schema, 1, 15);
         // Huge integers on the right make `left.int + right.int` overflow.
-        let mut huge_rows = right[0].rows().to_vec();
+        let mut huge_rows = right[0].to_rows().to_vec();
         huge_rows[4][1] = Value::Int64(i64::MAX);
         let huge = vec![Batch::try_new(schema.clone(), huge_rows).unwrap()];
         let compare = |op, l: ScalarExpr, r: ScalarExpr| {

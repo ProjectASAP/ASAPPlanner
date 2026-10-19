@@ -277,7 +277,7 @@ mod tests {
     /// Each row's timestamp and value.
     fn points(batch: &Batch) -> Vec<(i64, f64)> {
         batch
-            .rows()
+            .to_rows()
             .iter()
             .map(|row| match (&row[1], &row[2]) {
                 (Value::Timestamp(ts), Value::Float64(v)) => (*ts, *v),
@@ -364,7 +364,7 @@ mod tests {
             .filter(|s| s.labels["instance"] == "a")
             .map(|s| series_row(&selector.scan_schema, &s.labels, s.timestamp_ms, s.value).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(format!("{:?}", batch.rows()), format!("{expected:?}"));
+        assert_eq!(format!("{:?}", batch.to_rows()), format!("{expected:?}"));
         for column in [0, 3] {
             let dictionary = batch
                 .column(column)

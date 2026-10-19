@@ -235,10 +235,10 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 assert!(stream.next().await.is_none());
                 batch
             });
-            assert_eq!(output.rows().len(), 1);
-            assert!(matches!(&output.rows()[0][0], Value::Map(labels) if labels.is_empty()));
-            assert!(matches!(&output.rows()[0][1], Value::Timestamp(2000)));
-            let Value::Summary { state, .. } = &output.rows()[0][2] else {
+            assert_eq!(output.to_rows().len(), 1);
+            assert!(matches!(&output.to_rows()[0][0], Value::Map(labels) if labels.is_empty()));
+            assert!(matches!(&output.to_rows()[0][1], Value::Timestamp(2000)));
+            let Value::Summary { state, .. } = &output.to_rows()[0][2] else {
                 panic!("state expected")
             };
             assert_eq!(
@@ -382,7 +382,7 @@ fn native_run(
         let mut rows = Vec::new();
         let mut stream = physical_dag.execute(program.roots(), context)?.remove(0);
         while let Some(batch) = stream.next().await {
-            rows.extend(batch?.rows().iter().cloned());
+            rows.extend(batch?.to_rows().iter().cloned());
         }
         Ok(rows)
     })

@@ -121,7 +121,7 @@ fn latest_snapshot_replaces_decreases_expires_and_retains_full_identity() {
     .unwrap();
     let values = batches
         .iter()
-        .flat_map(|batch| batch.rows())
+        .flat_map(|batch| batch.to_rows())
         .map(|row| {
             let Value::Utf8(identity) = &row[3] else {
                 panic!()
@@ -143,7 +143,7 @@ fn latest_snapshot_replaces_decreases_expires_and_retains_full_identity() {
     assert!(run(&plan, input(&[("steady", 40_000, 20.)]), 100_000)
         .unwrap()
         .iter()
-        .all(|batch| batch.rows().is_empty()));
+        .all(|batch| batch.to_rows().is_empty()));
     assert!(run(
         &plan,
         input(&[("conflict", 50_000, 1.), ("conflict", 50_000, 2.)]),
@@ -223,7 +223,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
             let batches = run(&plan, input(&samples), end).unwrap();
             let rows = batches
                 .iter()
-                .flat_map(|batch| batch.rows())
+                .flat_map(|batch| batch.to_rows())
                 .collect::<Vec<_>>();
             assert_eq!(rows.len(), 1);
             let Value::Utf8(encoded) = &rows[0][1] else {
@@ -398,7 +398,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     let batches = run(&physical, Batch::try_new(raw_schema, rows).unwrap(), 60_000).unwrap();
     let rows = batches
         .iter()
-        .flat_map(|batch| batch.rows())
+        .flat_map(|batch| batch.to_rows())
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0][1], Value::Float64(20.)));

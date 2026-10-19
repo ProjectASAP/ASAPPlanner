@@ -124,7 +124,7 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
             rows.extend(
                 batch
                     .unwrap()
-                    .rows()
+                    .to_rows()
                     .iter()
                     .map(|row| row.iter().map(show).collect::<Vec<_>>().join(" ")),
             );

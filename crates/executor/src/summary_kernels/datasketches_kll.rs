@@ -24,6 +24,14 @@ impl DatasketchesKLLAccumulator {
     }
 }
 
+/// The memory one KLL sketch of parameter `k` holds: asap_sketchlib
+/// allocates its compactor buffers up front, about 4.5 KiB plus 32 bytes
+/// per unit of `k` (10 KiB at k = 200, 36 KiB at k = 1024), and they do
+/// not grow with updates.
+pub(crate) fn kll_memory_bytes(k: u16) -> usize {
+    4_608 + 32 * usize::from(k)
+}
+
 impl std::fmt::Debug for DatasketchesKLLAccumulator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DatasketchesKLLAccumulator")
@@ -71,8 +79,7 @@ impl AggregateCore for DatasketchesKLLAccumulator {
     }
 
     fn approx_memory_bytes(&self) -> usize {
-        // KLL with default k=200 holds ~2*k items (~3 KiB); round up for overhead.
-        4 * 1024
+        kll_memory_bytes(self.inner.k())
     }
 }
 

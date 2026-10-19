@@ -383,7 +383,7 @@ fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<Stri
             rows.extend(
                 batch
                     .unwrap()
-                    .rows()
+                    .to_rows()
                     .iter()
                     .map(|row| row.iter().map(show).collect()),
             );

@@ -128,7 +128,7 @@ fn evaluate_with(
         let mut stream = bound.execute(&[2], ctx)?.remove(0);
         let mut rows = Vec::new();
         while let Some(batch) = stream.next().await {
-            rows.extend(batch?.rows().iter().cloned());
+            rows.extend(batch?.to_rows().iter().cloned());
         }
         Ok(rows)
     })
@@ -233,11 +233,11 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
                 .unwrap()
                 .unwrap()
         });
-        assert_eq!(result.rows().len(), if return_bool { 2 } else { 1 });
+        assert_eq!(result.to_rows().len(), if return_bool { 2 } else { 1 });
         assert!(
-            matches!(result.rows()[0].last(), Some(Value::Float64(v)) if *v == if return_bool { 1. } else { 4. })
+            matches!(result.to_rows()[0].last(), Some(Value::Float64(v)) if *v == if return_bool { 1. } else { 4. })
         );
-        let Value::Map(labels) = &result.rows()[0][0] else {
+        let Value::Map(labels) = &result.to_rows()[0][0] else {
             panic!("missing labels")
         };
         assert_eq!(
@@ -489,7 +489,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                 let mut stream = bound.execute(&[4], context).unwrap().remove(0);
                 let mut rows = vec![];
                 while let Some(batch) = stream.next().await {
-                    rows.extend(batch.unwrap().rows().iter().cloned());
+                    rows.extend(batch.unwrap().to_rows().iter().cloned());
                 }
                 rows
             });

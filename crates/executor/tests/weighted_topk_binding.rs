@@ -135,7 +135,7 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
                 .unwrap()
                 .remove(0);
             while let Some(batch) = stream.next().await {
-                output.extend(batch.unwrap().rows().iter().cloned());
+                output.extend(batch.unwrap().to_rows().iter().cloned());
             }
             output
         });
@@ -384,7 +384,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                         .remove(0);
                     while let Some(batch) = stream.next().await {
                         let batch = batch.unwrap();
-                        for row in batch.rows() {
+                        for row in &batch.to_rows() {
                             let column = batch
                                 .schema()
                                 .fields
@@ -482,7 +482,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                         .remove(0);
                     while let Some(batch) = stream.next().await {
                         let batch = batch.unwrap();
-                        for row in batch.rows() {
+                        for row in &batch.to_rows() {
                             assert!(row.iter().any(
                                 |value| matches!(value, Value::Timestamp(actual) if *actual == time)
                             ));
@@ -728,12 +728,12 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
                 .iter()
                 .position(|f| f.name == "$promql_series_identity")
                 .unwrap();
-            let Value::Utf8(encoded) = &result.rows()[0][identity] else {
+            let Value::Utf8(encoded) = &result.to_rows()[0][identity] else {
                 panic!()
             };
             let labels: BTreeMap<String, String> = serde_json::from_str(encoded).unwrap();
             assert_eq!(labels["instance"], leader);
-            assert_eq!(result.rows().len(), 2);
+            assert_eq!(result.to_rows().len(), 2);
         }
         let precompute =
             String::from_utf8(serde_json::to_vec(&physical.precompute.unwrap()).unwrap()).unwrap();

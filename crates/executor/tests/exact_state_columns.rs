@@ -114,7 +114,7 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
         };
         let panes = [0, 1_000].map(|start| run(build(), vec![pane_input(start)]).remove(0));
         let as_objects =
-            |pane: &Batch| Batch::try_new(pane.schema().clone(), pane.rows().to_vec()).unwrap();
+            |pane: &Batch| Batch::try_new(pane.schema().clone(), pane.to_rows().to_vec()).unwrap();
         let state_schema = panes[0].schema().clone();
         let answer = |inputs: Vec<Batch>| {
             let merged = run(
@@ -131,7 +131,7 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
                 }),
             )
             .unwrap();
-            let rows = run(evaluation, merged)[0].rows().to_vec();
+            let rows = run(evaluation, merged)[0].to_rows().to_vec();
             assert_eq!(rows.len(), 3, "{kind:?}: one row per series");
             format!("{rows:?}")
         };

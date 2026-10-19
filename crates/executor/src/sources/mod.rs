@@ -141,12 +141,8 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 if self.predicates.is_empty() {
                     return Ok(batch);
                 }
-                let _workspace = context.reserve(
-                    batch
-                        .memory_bytes()
-                        .checked_mul(2)
-                        .ok_or(Error::MemoryLimit)?,
-                )?;
+                // The kept cells are copied once, at most the batch again.
+                let _workspace = context.reserve(batch.memory_bytes())?;
                 // Each predicate is one column over the rows the earlier ones
                 // kept; over dictionary-encoded labels it is evaluated once
                 // per distinct label value, not once per row.

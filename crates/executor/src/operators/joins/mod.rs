@@ -226,10 +226,10 @@ async fn relational_join(
                 // A failing pair fails only if the row join reaches it:
                 // replay this left row pair by pair, as the row join did.
                 Err(_) => {
-                    let rows = pairs.rows();
+                    let rows = pairs.to_rows();
                     let mut matches = Vec::with_capacity(rows.len());
                     for row in rows {
-                        let matched = matches!(predicate.evaluate(row)?, Value::Bool(true));
+                        let matched = matches!(predicate.evaluate(&row)?, Value::Bool(true));
                         matches.push(matched);
                         if matched && matches!(kind, JoinKind::Semi | JoinKind::Anti) {
                             break;
