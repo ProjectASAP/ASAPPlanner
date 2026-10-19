@@ -969,9 +969,34 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            Batch::try_from_columns(schema, vec![BatchColumn::Plain(Arc::new(jobs))]),
+            Batch::try_from_columns(schema, vec![BatchColumn::Plain(Arc::new(jobs.clone()))]),
             Err(Error::Invalid(_))
         ));
+        // A nullable field refuses it too: a NULL is a NULL key, so every
+        // dictionary read finds a text. A NULL key there reads NULL, in rows
+        // and in the column's logical nulls.
+        let nullable = Arc::new(Schema {
+            fields: vec![field("job", DataType::Utf8, true)],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        assert!(matches!(
+            Batch::try_from_columns(nullable.clone(), vec![BatchColumn::Plain(Arc::new(jobs))]),
+            Err(Error::Invalid(_))
+        ));
+        let null_key = DictionaryArray::<arrow::datatypes::UInt32Type>::try_new(
+            UInt32Array::from(vec![Some(0), None]),
+            Arc::new(StringArray::from(vec!["a"])),
+        )
+        .unwrap();
+        let batch = Batch::try_from_columns(nullable, vec![BatchColumn::Plain(Arc::new(null_key))])
+            .unwrap();
+        let rows = batch.rows();
+        assert!(matches!(&rows[0][0], Value::Utf8(job) if job.as_ref() == "a"));
+        assert!(matches!(rows[1][0], Value::Null));
+        let nulls = batch.column(0).logical_nulls().unwrap();
+        assert!(nulls.is_valid(0) && nulls.is_null(1));
     }
 
     // A filter that keeps few rows keeps only their states: a pane filtered

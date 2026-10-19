@@ -2,7 +2,8 @@
 //! group: the code the `SummaryAgg` build runs row by row, exposed so a
 //! runtime that ingests sample by sample builds the same states.
 use super::exact::ScalarState;
-use super::factory::{create_planner_accumulator, AccumulatorUpdater};
+use super::factory::{create_hydra_cms, create_planner_accumulator, AccumulatorUpdater};
+use super::hydra_cms::{hydra_group_name, hydra_item, hydra_weight, HydraCms, HydraCmsGroup};
 use super::weighted_frequency::WeightedFrequency;
 use crate::values::{StateColumn, Value};
 use crate::{AggregateCore, Error};
@@ -14,8 +15,9 @@ use std::sync::Arc;
 /// at a time; sealed into an immutable [`StateColumn`].
 ///
 /// Built from the plan's family and parameters with [`Self::new`]. Groups are
-/// numbered `0..group_count()` in the order [`Self::add_group`] adds them;
-/// the caller keeps its own map from a group's labels to its number.
+/// numbered `0..group_count()` in the order [`Self::add_group`] (or
+/// [`Self::add_group_with_key`]) adds them; the caller keeps its own map from
+/// a group's labels to its number.
 pub struct StateColumnUpdater {
     /// The family and parameters of every state.
     family: FieldDataType,
@@ -47,6 +49,13 @@ enum GroupStates {
         /// The states, by group.
         states: Vec<WeightedFrequency>,
     },
+    /// One HydraCms grid shared by every group (a Hydra family).
+    Hydra {
+        /// The grid all groups count into.
+        grid: HydraCms,
+        /// Each group's subpopulation name in the grid, by group.
+        names: Vec<String>,
+    },
 }
 
 fn operator_error(message: impl ToString) -> Error {
@@ -56,12 +65,20 @@ fn operator_error(message: impl ToString) -> Error {
 impl StateColumnUpdater {
     /// An updater with no group for `family`, the family and parameters of a
     /// `SummaryAgg` the plan builds one state per group of: an exact
-    /// accumulator, a value sketch (KLL, DDSketch, HLL, KMV, UnivMon), or a
-    /// keyed frequency sketch with a heap. Bad input for any other family,
-    /// including a HydraCms family, whose groups share one state.
+    /// accumulator, a value sketch (KLL, DDSketch, HLL, KMV, UnivMon), a
+    /// keyed frequency sketch with a heap, or a HydraCms grid shared by all
+    /// groups. Bad input for any other family.
     pub fn new(family: &FieldDataType) -> Result<Self, Error> {
         crate::values::validate_family(family)?;
+        let hydra = matches!(
+            family,
+            FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. })
+        );
         let states = match family {
+            FieldDataType::Sketch(..) if hydra => GroupStates::Hydra {
+                grid: create_hydra_cms(family).map_err(Error::Invalid)?,
+                names: Vec::new(),
+            },
             FieldDataType::ExactAggregate(..) => GroupStates::Exact {
                 empty: ScalarState::empty(family).map_err(Error::Invalid)?,
                 states: Vec::new(),
@@ -87,11 +104,16 @@ impl StateColumnUpdater {
             family,
             FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _)
         );
+        // A Hydra grid is allocated up front, shared by all groups.
+        let memory_bytes = match &states {
+            GroupStates::Hydra { grid, .. } => grid.approx_memory_bytes(),
+            _ => 0,
+        };
         Ok(Self {
             family: family.clone(),
             states,
             latest_sample_ms: counter.then(Vec::new),
-            memory_bytes: 0,
+            memory_bytes,
         })
     }
 
@@ -110,6 +132,7 @@ impl StateColumnUpdater {
             GroupStates::Exact { states, .. } => states.len(),
             GroupStates::Sketches(states) => states.len(),
             GroupStates::Keyed { states, .. } => states.len(),
+            GroupStates::Hydra { names, .. } => names.len(),
         }
     }
 
@@ -121,7 +144,26 @@ impl StateColumnUpdater {
         Ok(())
     }
 
-    /// Add a group with an empty state; returns its number.
+    /// Add the group whose key (its grouping columns' values, in the plan's
+    /// order) is `key`, with an empty state; returns its number. A HydraCms
+    /// group needs its key: it names the group's subpopulation in the shared
+    /// grid, as the batch build names it. Other families ignore the key, so a
+    /// runtime can add every group this way.
+    pub fn add_group_with_key(&mut self, key: &[Value]) -> Result<u32, Error> {
+        let GroupStates::Hydra { names, .. } = &mut self.states else {
+            return self.add_group();
+        };
+        let group = u32::try_from(names.len())
+            .map_err(|_| Error::Invalid("more than u32::MAX groups".into()))?;
+        let name = hydra_group_name(key)?;
+        self.memory_bytes += name.len();
+        names.push(name);
+        Ok(group)
+    }
+
+    /// Add a group with an empty state; returns its number. Bad input for a
+    /// HydraCms family, whose groups are added with
+    /// [`Self::add_group_with_key`].
     pub fn add_group(&mut self) -> Result<u32, Error> {
         let group = u32::try_from(self.group_count())
             .map_err(|_| Error::Invalid("more than u32::MAX groups".into()))?;
@@ -141,6 +183,11 @@ impl StateColumnUpdater {
             GroupStates::Keyed { empty, states } => {
                 states.push(empty.clone());
                 empty.approx_memory_bytes()
+            }
+            GroupStates::Hydra { .. } => {
+                return Err(Error::Invalid(
+                    "a HydraCms group is added with its key (add_group_with_key)".into(),
+                ))
             }
         };
         if let Some(latest) = &mut self.latest_sample_ms {
@@ -204,7 +251,7 @@ impl StateColumnUpdater {
                     .map_err(operator_error)?;
                 self.memory_bytes = self.memory_bytes - before + state.memory_usage_bytes();
             }
-            GroupStates::Keyed { .. } => {
+            GroupStates::Keyed { .. } | GroupStates::Hydra { .. } => {
                 return Err(operator_error(
                     "a keyed summary is updated with an item and a weight",
                 ))
@@ -217,11 +264,22 @@ impl StateColumnUpdater {
     }
 
     /// Add `weight` to the item tuple `items` in `group`'s keyed state (a
-    /// Count-Min or Count Sketch with a heap). Bad input for a group never
-    /// added; an operator error when the family is not keyed or the kernel
-    /// refuses the weight.
+    /// Count-Min or Count Sketch with a heap), or to the one item `items` in
+    /// `group`'s part of a HydraCms grid (a non-negative integer weight within
+    /// `i32`). Bad input for a group never added; an operator error when the
+    /// family is not keyed or the kernel refuses the item or weight.
     pub fn update_item(&mut self, group: u32, items: &[Value], weight: f64) -> Result<(), Error> {
         let index = self.index(group)?;
+        if let GroupStates::Hydra { grid, names } = &mut self.states {
+            let [item] = items else {
+                return Err(operator_error("a HydraCms update takes one item"));
+            };
+            let item = hydra_item(item)?;
+            let weight = hydra_weight(&Value::Float64(weight))?;
+            return grid
+                .count(&names[index], &item, weight)
+                .map_err(operator_error);
+        }
         let GroupStates::Keyed { states, .. } = &mut self.states else {
             return Err(operator_error("only a keyed summary takes items"));
         };
@@ -247,6 +305,32 @@ impl StateColumnUpdater {
             return Err(Error::Invalid(
                 "cannot merge different summary families".into(),
             ));
+        }
+        if let (
+            GroupStates::Hydra { grid, names },
+            GroupStates::Hydra {
+                grid: theirs,
+                names: their_names,
+            },
+        ) = (&mut self.states, &other.states)
+        {
+            // Group `g` must be the same subpopulation in both shards.
+            if names
+                .iter()
+                .zip(their_names)
+                .any(|(ours, theirs)| ours != theirs)
+            {
+                return Err(Error::Invalid(
+                    "HydraCms shards name a group differently: they must number groups alike"
+                        .into(),
+                ));
+            }
+            *grid = grid.merge(theirs).map_err(operator_error)?;
+            for name in &their_names[names.len().min(their_names.len())..] {
+                self.memory_bytes += name.len();
+                names.push(name.clone());
+            }
+            return Ok(());
         }
         self.ensure_groups(other.group_count())?;
         match (&mut self.states, other.states) {
@@ -318,6 +402,21 @@ impl StateColumnUpdater {
                     .map(|state| Arc::new(state) as Arc<dyn AggregateCore>)
                     .collect(),
             ),
+            GroupStates::Hydra { grid, names } => {
+                let grid = Arc::new(grid);
+                StateColumn::from_objects(
+                    self.family,
+                    names
+                        .into_iter()
+                        .map(|group| {
+                            Arc::new(HydraCmsGroup {
+                                grid: grid.clone(),
+                                group,
+                            }) as Arc<dyn AggregateCore>
+                        })
+                        .collect(),
+                )
+            }
         }
     }
 }

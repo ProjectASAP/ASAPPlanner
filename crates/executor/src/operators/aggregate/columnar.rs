@@ -172,14 +172,17 @@ fn logically_null(nulls: &Option<arrow::buffer::NullBuffer>, row: usize) -> bool
 }
 
 /// Update `states` with the rows of `batch` whose group is `groups[row]`
-/// and that `selected` keeps; returns the workspace bytes it added.
+/// and that `selected` keeps, keeping `workspace_bytes` (the bytes the
+/// states hold) up to date: what they add, less what a replaced value
+/// releases.
 fn update_measure(
     states: &mut MeasureStates,
     measure: &Reduction,
     batch: &Batch,
     groups: &[u32],
     selected: impl Fn(usize) -> bool,
-) -> Result<usize, Error> {
+    workspace_bytes: &mut usize,
+) -> Result<(), Error> {
     let floats = |column: usize| -> Result<Float64Array, Error> {
         batch
             .column(column)
@@ -188,7 +191,6 @@ fn update_measure(
             .cloned()
             .ok_or_else(|| invalid("floating aggregate value required"))
     };
-    let mut added = 0usize;
     match (states, measure) {
         (MeasureStates::Count(counts), _) => {
             for (row, &group) in groups.iter().enumerate() {
@@ -280,7 +282,9 @@ fn update_measure(
                     }
                 };
                 if better {
-                    added += value.bytes();
+                    // The replaced value's bytes are released.
+                    let released = slot.as_ref().map_or(0, Value::bytes);
+                    *workspace_bytes = *workspace_bytes - released + value.bytes();
                     *slot = Some(value.clone());
                 }
             }
@@ -295,7 +299,7 @@ fn update_measure(
         ) => {
             let before = tuples.memory_bytes();
             let ids = tuples.group_ids(batch)?;
-            added += tuples.memory_bytes() - before;
+            *workspace_bytes += tuples.memory_bytes() - before;
             let nulls = columns
                 .iter()
                 .map(|&c| batch.column(c).logical_nulls())
@@ -306,7 +310,7 @@ fn update_measure(
                 }
                 if seen.insert((group, ids[row])) {
                     distinct[group as usize] += 1;
-                    added += ENTRY_BYTES;
+                    *workspace_bytes += ENTRY_BYTES;
                 }
             }
         }
@@ -320,7 +324,7 @@ fn update_measure(
         ) => {
             let before = identities.memory_bytes();
             let ids = identities.group_ids(batch)?;
-            added += identities.memory_bytes() - before;
+            *workspace_bytes += identities.memory_bytes() - before;
             let array = batch.column(*column);
             let nulls = array.logical_nulls();
             let floats = array.as_any().downcast_ref::<Float64Array>();
@@ -334,7 +338,7 @@ fn update_measure(
                     ));
                 }
                 let count = counts.entry((group, ids[row])).or_insert_with(|| {
-                    added += ENTRY_BYTES;
+                    *workspace_bytes += ENTRY_BYTES;
                     0
                 });
                 *count += 1;
@@ -346,13 +350,13 @@ fn update_measure(
             for (row, &group) in groups.iter().enumerate() {
                 if selected(row) && floats.is_valid(row) {
                     values[group as usize].push(floats.value(row));
-                    added += std::mem::size_of::<f64>();
+                    *workspace_bytes += std::mem::size_of::<f64>();
                 }
             }
         }
         _ => unreachable!("a measure's states match its reduction"),
     }
-    Ok(added)
+    Ok(())
 }
 
 /// Each group's value of one measure, in `order`.
@@ -522,10 +526,17 @@ pub(super) async fn aggregate(
                     }
                     None => None,
                 };
-                workspace_bytes += update_measure(state, measure, &batch, &ids, |row| {
-                    mask.as_ref()
-                        .is_none_or(|mask| mask.is_valid(row) && mask.value(row))
-                })?;
+                update_measure(
+                    state,
+                    measure,
+                    &batch,
+                    &ids,
+                    |row| {
+                        mask.as_ref()
+                            .is_none_or(|mask| mask.is_valid(row) && mask.value(row))
+                    },
+                    &mut workspace_bytes,
+                )?;
                 work.checkpoint_rows(batch.num_rows()).await?;
             }
             workspace.set_bytes(workspace_bytes + table.memory_bytes())?;

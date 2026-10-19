@@ -706,13 +706,10 @@ async fn build_all_groups_summary(
         for batch in row_chunks(&whole) {
             let groups = table.group_ids(&batch)?;
             for group in names.len()..table.len() {
-                let name = (0..build.groups.len())
-                    .map(|index| {
-                        let key = table.label(group as u32, index).key()?;
-                        Ok(key.iter().map(|b| format!("{b:02x}")).collect::<String>())
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?
-                    .join(",");
+                let key = (0..build.groups.len())
+                    .map(|index| table.label(group as u32, index).clone())
+                    .collect::<Vec<_>>();
+                let name = crate::summary_kernels::hydra_cms::hydra_group_name(&key)?;
                 name_bytes += name.len();
                 names.push(name);
             }
@@ -730,15 +727,10 @@ async fn build_all_groups_summary(
                     }
                     RowWeights::Column(values) => match &values[row] {
                         Value::Null => continue,
-                        weight => hydra_weight(weight)?,
+                        weight => crate::summary_kernels::hydra_cms::hydra_weight(weight)?,
                     },
                 };
-                let item = match &items[row] {
-                    Value::Utf8(v) => v.to_string(),
-                    Value::Int64(v) => v.to_string(),
-                    Value::Bool(v) => v.to_string(),
-                    _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
-                };
+                let item = crate::summary_kernels::hydra_cms::hydra_item(&items[row])?;
                 grid.count(&names[group as usize], &item, weight)
                     .map_err(|e| Error::Operator(e.to_string()))?;
             }
@@ -1194,25 +1186,4 @@ fn keyed_weight(value: &Value) -> Result<f64, Error> {
         ))),
         _ => Err(Error::Operator("keyed summary weight type".into())),
     }
-}
-
-/// One row's HydraCms weight. sketchlib's Hydra adds `i32` weights, so a
-/// weight must be a non-negative integer within `i32`.
-fn hydra_weight(value: &Value) -> Result<i32, Error> {
-    let weight = match value {
-        Value::Int64(v) => *v as f64,
-        Value::Float64(v) => *v,
-        _ => return Err(Error::Operator("HydraCms weight type".into())),
-    };
-    if weight < 0.0 {
-        return Err(Error::Operator(format!(
-            "HydraCms weights must be non-negative, got {weight}"
-        )));
-    }
-    if !(weight.is_finite() && weight.fract() == 0.0 && weight <= f64::from(i32::MAX)) {
-        return Err(Error::Operator(format!(
-            "HydraCms weights must be integers within i32 (asap_sketchlib's Hydra adds i32 weights), got {weight}"
-        )));
-    }
-    Ok(weight as i32)
 }

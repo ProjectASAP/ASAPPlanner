@@ -6,8 +6,8 @@ use asap_executor::operators::{Operator, RowWeight};
 use asap_executor::plan::PhysicalDAG;
 use asap_executor::planner::ir::scalar::ColumnRef;
 use asap_executor::planner::ir::schema::{
-    DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SketchAlgorithm, SketchKind,
-    SketchParams, SummaryUpdate,
+    DataType, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, HydraKind,
+    HydraParams, Schema, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
 };
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::weighted_frequency::WeightedFrequency;
@@ -214,6 +214,19 @@ fn fingerprint(state: &dyn AggregateCore) -> String {
     }
     if let Some(s) = any.downcast_ref::<WeightedFrequency>() {
         return serde_json::to_string(s).unwrap();
+    }
+    if let Some(s) = any.downcast_ref::<asap_executor::summary_kernels::HydraCmsGroup>() {
+        // The group's name and its count of every item the samples use.
+        let counts = (0..13)
+            .map(|item| {
+                let query = SketchStatistic::PointCount {
+                    key: ColumnRef::Named("item".into()),
+                    value: Some(format!("i{item}")),
+                };
+                s.estimate(&query).unwrap().to_string()
+            })
+            .collect::<Vec<_>>();
+        return format!("{} {}", s.group, counts.join(","));
     }
     panic!("no fingerprint for this state")
 }
@@ -571,4 +584,155 @@ fn an_unknown_group_is_bad_input() {
     sum.ensure_groups(3).unwrap();
     assert_eq!(sum.group_count(), 3);
     sum.update(2, 1.0, 0).unwrap();
+}
+
+/// A HydraCms family: one shared grid for all groups.
+fn hydra_family() -> FieldDataType {
+    FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::Cms,
+            SketchParams::Cms {
+                width: 64,
+                depth: 3,
+            },
+        ),
+        GroupingStrategy::SharedMultiSubpopulation {
+            kind: HydraKind::HydraCms,
+            params: HydraParams::HydraCms {
+                width: 64,
+                depth: 3,
+                shared_rows: 3,
+                shared_columns: 16,
+            },
+        },
+    )
+}
+
+/// The per-sample HydraCms build: groups added with their key as series
+/// appear, one count per sample; with `sharded`, two halves merged.
+fn hydra_per_sample_build(sharded: bool) -> BTreeMap<String, String> {
+    let family = hydra_family();
+    let samples = samples();
+    let shard = |part: &[TestSample]| {
+        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        let mut groups = BTreeMap::<String, u32>::new();
+        for sample in part {
+            let group = match groups.get(&sample.0) {
+                Some(&group) => group,
+                None => {
+                    let key = [Value::Utf8(sample.0.as_str().into())];
+                    let group = updater.add_group_with_key(&key).unwrap();
+                    groups.insert(sample.0.clone(), group);
+                    group
+                }
+            };
+            updater
+                .update_item(group, &[Value::Utf8(sample.3.as_str().into())], 1.0)
+                .unwrap();
+        }
+        (updater, groups)
+    };
+    let (first, second) = samples.split_at(if sharded { 300 } else { 600 });
+    let (mut updater, mut groups) = shard(first);
+    if sharded {
+        // The second shard numbers groups as the first does: the runtime's
+        // shared map from labels to group numbers.
+        let mut other = StateColumnUpdater::new(&family).unwrap();
+        let mut by_number = groups
+            .iter()
+            .map(|(series, &group)| (group, series.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for sample in second {
+            if !groups.contains_key(&sample.0) {
+                let group = groups.len() as u32;
+                groups.insert(sample.0.clone(), group);
+                by_number.insert(group, sample.0.clone());
+            }
+        }
+        for series in by_number.values() {
+            other
+                .add_group_with_key(&[Value::Utf8(series.as_str().into())])
+                .unwrap();
+        }
+        for sample in second {
+            other
+                .update_item(
+                    groups[&sample.0],
+                    &[Value::Utf8(sample.3.as_str().into())],
+                    1.0,
+                )
+                .unwrap();
+        }
+        updater.merge(other).unwrap();
+    }
+    assert_eq!(updater.group_count(), groups.len());
+    let states = updater.seal();
+    groups
+        .into_iter()
+        .map(|(series, group)| (series, fingerprint(states.state(group as usize).as_ref())))
+        .collect()
+}
+
+// HydraCms: the per-sample updater builds the batch build's shared grid,
+// group for group (same subpopulation names, same item counts), and two
+// shards merged build it too.
+#[test]
+fn per_sample_updates_build_the_batch_hydra_grid() {
+    let batch = batch_build(
+        Operator::all_groups_summary_build(
+            input_schema(),
+            hydra_family(),
+            3,
+            RowWeight::Constant(NonZeroU32::new(1).unwrap()),
+            vec![0],
+        )
+        .unwrap(),
+    );
+    assert_eq!(batch.len(), 7);
+    assert_eq!(
+        hydra_per_sample_build(false),
+        batch,
+        "updater vs batch build"
+    );
+    assert_eq!(
+        hydra_per_sample_build(true),
+        batch,
+        "merged shards vs batch build"
+    );
+}
+
+// A HydraCms group needs its key (its subpopulation name), takes items and
+// integer weights only, and shards that name a group differently are bad
+// input.
+#[test]
+fn hydra_updates_keep_the_kernel_input_contract() {
+    let family = hydra_family();
+    let mut updater = StateColumnUpdater::new(&family).unwrap();
+    assert!(matches!(
+        updater.add_group(),
+        Err(asap_executor::Error::Invalid(_))
+    ));
+    let group = updater
+        .add_group_with_key(&[Value::Utf8("api".into())])
+        .unwrap();
+    assert!(updater.update(group, 1.0, 0).is_err());
+    assert!(updater
+        .update_item(group, &[Value::Utf8("a".into())], 1.5)
+        .is_err());
+    assert!(updater
+        .update_item(group, &[Value::Utf8("a".into())], -1.0)
+        .is_err());
+    updater
+        .update_item(group, &[Value::Utf8("a".into())], 2.0)
+        .unwrap();
+    let before = updater.memory_bytes();
+    assert!(before > 0);
+    let mut other = StateColumnUpdater::new(&family).unwrap();
+    other
+        .add_group_with_key(&[Value::Utf8("web".into())])
+        .unwrap();
+    assert!(matches!(
+        updater.merge(other),
+        Err(asap_executor::Error::Invalid(_))
+    ));
 }
