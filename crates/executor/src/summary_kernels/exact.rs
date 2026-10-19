@@ -8,8 +8,10 @@ use std::collections::HashMap;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// One population's exact state: a fixed-size numeric record with no heap
+/// allocation, so a column of them is one contiguous buffer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum ScalarState {
+pub(crate) enum ScalarState {
     Sum {
         sum: f64,
         compensation: f64,
@@ -100,17 +102,7 @@ impl ExactAccumulator {
             (None, None) => &self.scalar,
             _ => return Err("evaluation population differs from installed layout".into()),
         };
-        match state {
-            ScalarState::Sum {
-                sum, compensation, ..
-            } => Ok(Some(sum + compensation)),
-            ScalarState::Count(count) => Ok(Some(*count as f64)),
-            ScalarState::Min(value) | ScalarState::Max(value) => Ok(*value),
-            ScalarState::Counter(Some(counter)) => counter
-                .extrapolated_value(range_ms, statistic == Statistic::Rate)
-                .map(Some),
-            ScalarState::Counter(None) => Err("empty counter population".into()),
-        }
+        state.evaluation(statistic, range_ms)
     }
 
     /// The earliest sample time of a counter (Rate/Increase) state, over
@@ -120,16 +112,8 @@ impl ExactAccumulator {
     pub fn earliest_sample_ms(&self) -> Option<i64> {
         std::iter::once(&self.scalar)
             .chain(self.keyed.iter().flat_map(HashMap::values))
-            .filter_map(|state| match state {
-                ScalarState::Counter(Some(counter)) => Some(counter.starting_timestamp),
-                _ => None,
-            })
+            .filter_map(ScalarState::earliest_sample_ms)
             .min()
-    }
-
-    /// SQL SUM distinguishes an empty/all-NULL input from an observed zero.
-    pub(crate) fn is_empty_sum(&self) -> bool {
-        self.keyed.is_none() && matches!(self.scalar, ScalarState::Sum { seen: false, .. })
     }
 
     /// Exact integer count of an unkeyed Count state.
@@ -201,14 +185,7 @@ impl ExactAccumulator {
             (None, None) => Some(&self.scalar),
             _ => None,
         };
-        match state {
-            Some(ScalarState::Counter(None)) => true,
-            Some(ScalarState::Counter(Some(counter))) => {
-                counter.sample_count < 2
-                    || counter.last_seen_timestamp == counter.starting_timestamp
-            }
-            _ => false,
-        }
+        state.is_some_and(ScalarState::insufficient_counter_samples)
     }
     pub fn is_keyed(&self) -> bool {
         self.keyed.is_some()
@@ -222,7 +199,51 @@ impl ExactAccumulator {
             (None, None) => &mut self.scalar,
             _ => panic!("exact update population layout differs from installed DAG"),
         };
-        match state {
+        state.update(value, timestamp);
+    }
+
+    /// The unkeyed state of `family` holding `scalar`, read back from a state
+    /// column.
+    pub(crate) fn from_scalar(family: SummaryFamilyType, scalar: ScalarState) -> Self {
+        Self {
+            family,
+            scalar,
+            keyed: None,
+        }
+    }
+
+    /// The unkeyed population's state; `None` for a keyed state.
+    pub(crate) fn scalar(&self) -> Option<&ScalarState> {
+        self.keyed.is_none().then_some(&self.scalar)
+    }
+
+    fn statistic(&self) -> Statistic {
+        statistic_of(&self.family)
+    }
+}
+
+/// The statistic an exact `family` answers.
+pub(crate) fn statistic_of(family: &SummaryFamilyType) -> Statistic {
+    match family {
+        SummaryFamilyType::ExactAggregate(ExactKind::Sum, _) => Statistic::Sum,
+        SummaryFamilyType::ExactAggregate(ExactKind::Count, _) => Statistic::Count,
+        SummaryFamilyType::ExactAggregate(ExactKind::Min, _) => Statistic::Min,
+        SummaryFamilyType::ExactAggregate(ExactKind::Max, _) => Statistic::Max,
+        SummaryFamilyType::ExactAggregate(ExactKind::Rate, _) => Statistic::Rate,
+        SummaryFamilyType::ExactAggregate(ExactKind::Increase, _) => Statistic::Increase,
+        _ => unreachable!("validated exact family"),
+    }
+}
+
+impl ScalarState {
+    /// The empty state of an exact `family`.
+    pub(crate) fn empty(family: &SummaryFamilyType) -> Result<Self, String> {
+        Ok(ExactAccumulator::new(family.clone(), false)?.scalar)
+    }
+
+    /// Add one sample: `value` observed at `timestamp`.
+    pub(crate) fn update(&mut self, value: f64, timestamp: i64) {
+        match self {
             ScalarState::Sum {
                 sum,
                 compensation,
@@ -254,16 +275,62 @@ impl ExactAccumulator {
         }
     }
 
-    fn statistic(&self) -> Statistic {
-        match self.family {
-            SummaryFamilyType::ExactAggregate(ExactKind::Sum, _) => Statistic::Sum,
-            SummaryFamilyType::ExactAggregate(ExactKind::Count, _) => Statistic::Count,
-            SummaryFamilyType::ExactAggregate(ExactKind::Min, _) => Statistic::Min,
-            SummaryFamilyType::ExactAggregate(ExactKind::Max, _) => Statistic::Max,
-            SummaryFamilyType::ExactAggregate(ExactKind::Rate, _) => Statistic::Rate,
-            SummaryFamilyType::ExactAggregate(ExactKind::Increase, _) => Statistic::Increase,
-            _ => unreachable!("validated exact family"),
+    /// The population's value for `statistic`; `range_ms` extrapolates a
+    /// counter. An empty MIN/MAX reads as `None`.
+    pub(crate) fn evaluation(
+        &self,
+        statistic: Statistic,
+        range_ms: Option<(i64, i64)>,
+    ) -> Result<Option<f64>, Error> {
+        match self {
+            ScalarState::Sum {
+                sum, compensation, ..
+            } => Ok(Some(sum + compensation)),
+            ScalarState::Count(count) => Ok(Some(*count as f64)),
+            ScalarState::Min(value) | ScalarState::Max(value) => Ok(*value),
+            ScalarState::Counter(Some(counter)) => counter
+                .extrapolated_value(range_ms, statistic == Statistic::Rate)
+                .map(Some),
+            ScalarState::Counter(None) => Err("empty counter population".into()),
         }
+    }
+
+    /// Whether a counter has fewer than two ordered samples (PromQL omits it).
+    pub(crate) fn insufficient_counter_samples(&self) -> bool {
+        match self {
+            ScalarState::Counter(None) => true,
+            ScalarState::Counter(Some(counter)) => {
+                counter.sample_count < 2
+                    || counter.last_seen_timestamp == counter.starting_timestamp
+            }
+            _ => false,
+        }
+    }
+
+    /// The earliest sample time of a counter; `None` otherwise.
+    pub(crate) fn earliest_sample_ms(&self) -> Option<i64> {
+        match self {
+            ScalarState::Counter(Some(counter)) => Some(counter.starting_timestamp),
+            _ => None,
+        }
+    }
+
+    /// Whether a SUM saw no value (SQL reads it as NULL).
+    pub(crate) fn is_empty_sum(&self) -> bool {
+        matches!(self, ScalarState::Sum { seen: false, .. })
+    }
+
+    /// The exact count of a COUNT state.
+    pub(crate) fn count(&self) -> Option<u64> {
+        match self {
+            ScalarState::Count(count) => Some(*count),
+            _ => None,
+        }
+    }
+
+    /// The merge of two states of one family.
+    pub(crate) fn merge(&self, other: &Self) -> Result<Self, Error> {
+        merge_scalar(self, other)
     }
 }
 

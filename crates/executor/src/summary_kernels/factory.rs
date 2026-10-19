@@ -30,6 +30,19 @@ macro_rules! impl_clone_accumulator_methods {
             let this = *self;
             Box::new(this.$acc_field)
         }
+
+        fn merge_accumulator(&mut self, other: &dyn AggregateCore) -> Result<(), String> {
+            let merged = self
+                .$acc_field
+                .merge_with(other)
+                .map_err(|error| error.to_string())?;
+            self.$acc_field = merged
+                .as_any()
+                .downcast_ref()
+                .cloned()
+                .ok_or("a merge changed the state's type")?;
+            Ok(())
+        }
     };
 }
 
@@ -91,6 +104,11 @@ pub trait AccumulatorUpdater: Send {
     fn into_accumulator(self: Box<Self>) -> Box<dyn AggregateCore> {
         self.snapshot_accumulator()
     }
+
+    /// Merge `other`, a state of the same family and shape, into this
+    /// updater's state; updates may continue afterwards. An error when the
+    /// state types or shapes differ, and the state is then unchanged.
+    fn merge_accumulator(&mut self, other: &dyn AggregateCore) -> Result<(), String>;
 
     /// Reset internal state for reuse (avoids re-allocation).
     fn reset(&mut self);
