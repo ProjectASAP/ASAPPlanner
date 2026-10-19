@@ -256,7 +256,7 @@ fn text_max_charges_only_the_current_value() {
     let result = result.unwrap();
     assert_eq!(result.num_rows(), 1);
     assert_eq!(
-        format!("{:?}", result.rows()[0][1]),
+        format!("{:?}", result.to_rows()[0][1]),
         format!(
             "{:?}",
             asap_executor::values::Value::Utf8(texts[ROWS - 1].as_str().into())

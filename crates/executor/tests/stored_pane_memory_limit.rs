@@ -224,3 +224,44 @@ fn sorting_then_limiting_stored_panes_does_not_charge_their_sketches() {
     });
     assert_eq!(rows.unwrap(), 980);
 }
+
+// A merge over one stored pane of 2,000 KLLs (about 21 MB of states), one
+// state per series: every state passes through unchanged, shared by
+// pointer, so the merge fits in 8 MiB.
+#[test]
+fn a_merge_passing_stored_states_through_does_not_charge_them() {
+    let (schema, pane) = pane_of(2_000);
+    let mut dag = PhysicalDAG::default();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(schema.clone(), vec![pane]).unwrap(),
+    )
+    .unwrap();
+    dag.add(
+        1,
+        vec![0],
+        Operator::summary_merge(schema, 1, vec![0]).unwrap(),
+    )
+    .unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+            revision: 1,
+        },
+        Limits {
+            max_bytes: 8 << 20,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let rows = block_on(async {
+        let mut output = dag.execute(&[1], context).unwrap().remove(0);
+        let mut rows = 0;
+        while let Some(batch) = output.next().await {
+            rows += batch?.num_rows();
+        }
+        Ok::<_, Error>(rows)
+    });
+    assert_eq!(rows.unwrap(), 2_000);
+}

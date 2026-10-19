@@ -992,7 +992,7 @@ mod tests {
         .unwrap();
         let batch = Batch::try_from_columns(nullable, vec![BatchColumn::Plain(Arc::new(null_key))])
             .unwrap();
-        let rows = batch.rows();
+        let rows = batch.to_rows();
         assert!(matches!(&rows[0][0], Value::Utf8(job) if job.as_ref() == "a"));
         assert!(matches!(rows[1][0], Value::Null));
         let nulls = batch.column(0).logical_nulls().unwrap();
@@ -1277,5 +1277,20 @@ mod tests {
         assert_eq!(joined.state_column(0).unwrap().len(), 25);
         let charged = charged_states(&joined);
         assert!(charged >= 5 * one_built && charged <= 5 * one_built + 25 * (slot + 1));
+    }
+
+    // An index past a derived column reads "not held outside the run", so a
+    // wrong index charges the state in full rather than undercharging.
+    #[test]
+    fn an_index_past_a_derived_column_is_not_held_outside_the_run() {
+        let stored = state_batch(4, false);
+        stored.mark_states_held_outside_run();
+        let kept = stored
+            .filter(&BooleanArray::from(vec![true, false, false, false]))
+            .unwrap();
+        let column = kept.state_column(0).unwrap();
+        assert_eq!(column.len(), 1);
+        assert!(column.state_held_outside_run(0));
+        assert!(!column.state_held_outside_run(1));
     }
 }

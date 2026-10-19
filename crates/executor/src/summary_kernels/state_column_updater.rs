@@ -51,8 +51,9 @@ enum GroupStates {
     },
     /// One HydraCms grid shared by every group (a Hydra family).
     Hydra {
-        /// The grid all groups count into.
-        grid: HydraCms,
+        /// The grid all groups count into (boxed: much larger than the other
+        /// kinds' fields).
+        grid: Box<HydraCms>,
         /// Each group's subpopulation name in the grid, by group.
         names: Vec<String>,
     },
@@ -76,7 +77,7 @@ impl StateColumnUpdater {
         );
         let states = match family {
             FieldDataType::Sketch(..) if hydra => GroupStates::Hydra {
-                grid: create_hydra_cms(family).map_err(Error::Invalid)?,
+                grid: Box::new(create_hydra_cms(family).map_err(Error::Invalid)?),
                 names: Vec::new(),
             },
             FieldDataType::ExactAggregate(..) => GroupStates::Exact {
@@ -325,7 +326,7 @@ impl StateColumnUpdater {
                         .into(),
                 ));
             }
-            *grid = grid.merge(theirs).map_err(operator_error)?;
+            **grid = grid.merge(theirs).map_err(operator_error)?;
             for name in &their_names[names.len().min(their_names.len())..] {
                 self.memory_bytes += name.len();
                 names.push(name.clone());
@@ -403,7 +404,7 @@ impl StateColumnUpdater {
                     .collect(),
             ),
             GroupStates::Hydra { grid, names } => {
-                let grid = Arc::new(grid);
+                let grid = Arc::new(*grid);
                 StateColumn::from_objects(
                     self.family,
                     names
