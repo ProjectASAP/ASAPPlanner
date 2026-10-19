@@ -28,6 +28,10 @@ pub struct StateColumnUpdater {
     latest_sample_ms: Option<Vec<Option<i64>>>,
     /// Memory the open states hold, kept up to date on every change.
     memory_bytes: usize,
+    /// The shape of the keys [`Self::add_group_with_key`] has taken, from
+    /// the first: per position, the value type seen (`None` while only NULL
+    /// has been). `None` before the first key.
+    key_types: Option<Vec<Option<std::mem::Discriminant<Value>>>>,
 }
 
 /// The open states of a [`StateColumnUpdater`], by kind of family.
@@ -115,6 +119,7 @@ impl StateColumnUpdater {
             states,
             latest_sample_ms: counter.then(Vec::new),
             memory_bytes,
+            key_types: None,
         })
     }
 
@@ -146,11 +151,18 @@ impl StateColumnUpdater {
     }
 
     /// Add the group whose key (its grouping columns' values, in the plan's
-    /// order) is `key`, with an empty state; returns its number. A HydraCms
-    /// group needs its key: it names the group's subpopulation in the shared
-    /// grid, as the batch build names it. Other families ignore the key, so a
-    /// runtime can add every group this way.
+    /// order and of the plan's group column types) is `key`, with an empty
+    /// state; returns its number. A HydraCms group needs its key: it names
+    /// the group's subpopulation in the shared grid, as the batch build names
+    /// it. Other families ignore the key, so a runtime can add every group
+    /// this way.
+    ///
+    /// The updater does not know the plan's group columns, so it checks what
+    /// it can: bad input for an empty key or a summary value, a key whose
+    /// arity differs from the first key's, or a value whose type differs
+    /// from the type earlier keys had at that position (NULL fits any).
     pub fn add_group_with_key(&mut self, key: &[Value]) -> Result<u32, Error> {
+        self.check_key(key)?;
         let GroupStates::Hydra { names, .. } = &mut self.states else {
             return self.add_group();
         };
@@ -160,6 +172,45 @@ impl StateColumnUpdater {
         self.memory_bytes += name.len();
         names.push(name);
         Ok(group)
+    }
+
+    /// `key` fits the keys added before (see [`Self::add_group_with_key`]);
+    /// records its types.
+    fn check_key(&mut self, key: &[Value]) -> Result<(), Error> {
+        if key.is_empty() {
+            return Err(Error::Invalid("a group key has at least one value".into()));
+        }
+        if key
+            .iter()
+            .any(|value| matches!(value, Value::Summary { .. }))
+        {
+            return Err(Error::Invalid("a summary value is not a group key".into()));
+        }
+        let types = self.key_types.get_or_insert_with(|| vec![None; key.len()]);
+        if types.len() != key.len() {
+            return Err(Error::Invalid(format!(
+                "group key has {} values; earlier keys have {}",
+                key.len(),
+                types.len()
+            )));
+        }
+        let mut updated = types.clone();
+        for (position, (value, seen)) in key.iter().zip(updated.iter_mut()).enumerate() {
+            if matches!(value, Value::Null) {
+                continue;
+            }
+            let kind = std::mem::discriminant(value);
+            match seen {
+                Some(seen) if *seen != kind => {
+                    return Err(Error::Invalid(format!(
+                        "group key value {position} has another type than earlier keys"
+                    )))
+                }
+                _ => *seen = Some(kind),
+            }
+        }
+        *types = updated;
+        Ok(())
     }
 
     /// Add a group with an empty state; returns its number. Bad input for a

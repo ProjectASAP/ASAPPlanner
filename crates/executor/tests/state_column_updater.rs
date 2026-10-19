@@ -727,6 +727,23 @@ fn hydra_updates_keep_the_kernel_input_contract() {
         .unwrap();
     let before = updater.memory_bytes();
     assert!(before > 0);
+    // Every key has the first key's arity and, per position, one value
+    // type (NULL allowed anywhere).
+    let bad_key = |updater: &mut StateColumnUpdater, key: &[Value]| {
+        matches!(
+            updater.add_group_with_key(key),
+            Err(asap_executor::Error::Invalid(_))
+        )
+    };
+    assert!(bad_key(&mut updater, &[]));
+    assert!(bad_key(
+        &mut updater,
+        &[Value::Utf8("web".into()), Value::Int64(1)]
+    ));
+    assert!(bad_key(&mut updater, &[Value::Int64(1)]));
+    assert_eq!(updater.group_count(), 1);
+    updater.add_group_with_key(&[Value::Null]).unwrap();
+    assert_eq!(updater.group_count(), 2);
     let mut other = StateColumnUpdater::new(&family).unwrap();
     other
         .add_group_with_key(&[Value::Utf8("web".into())])
