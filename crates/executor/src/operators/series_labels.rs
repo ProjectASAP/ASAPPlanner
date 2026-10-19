@@ -702,7 +702,10 @@ async fn rewrite_label_sets(
     let layout = layout(&operator.inputs[0])?;
     let mut work = Cooperative::new(&context);
     let mut workspace = Workspace::new(&context)?;
-    let mut seen = ahash::AHashSet::<(Option<i64>, String)>::new();
+    // Each distinct label set seen, numbered, and each (time, label set)
+    // a row of the vector has had.
+    let mut label_set_ids = ahash::AHashMap::<String, u32>::new();
+    let mut seen = ahash::AHashSet::<(Option<i64>, u32)>::new();
     let mut batches = Vec::new();
     while let Some(batch) = input.next().await {
         let batch = batch?;
@@ -807,9 +810,13 @@ async fn rewrite_label_sets(
         // Matching and grouping sides may repeat a label set; their
         // consumers decide whether that is an error.
         if unique {
-            let keys = sets
+            let ids = sets
                 .iter()
-                .map(|set| serde_json::to_string(set).map_err(|e| invalid(&e.to_string())))
+                .map(|set| {
+                    let key = serde_json::to_string(set).map_err(|e| invalid(&e.to_string()))?;
+                    let next = label_set_ids.len() as u32;
+                    Ok(*label_set_ids.entry(key).or_insert(next))
+                })
                 .collect::<Result<Vec<_>, Error>>()?;
             let times = output.time_index.map(|index| {
                 rewritten
@@ -822,7 +829,7 @@ async fn rewrite_label_sets(
             for (row, &source) in source_of_row.iter().enumerate() {
                 let time = times.as_ref().map(|times| times.value(row));
                 workspace.grow(label_bytes(&sets[source as usize]))?;
-                if !seen.insert((time, keys[source as usize].clone())) {
+                if !seen.insert((time, ids[source as usize])) {
                     return Err(invalid(
                         "vector cannot contain metrics with the same labelset",
                     ));
@@ -832,10 +839,13 @@ async fn rewrite_label_sets(
         }
         batches.push(rewritten);
     }
-    match batches.len() {
-        1 => Ok(batches.remove(0)),
-        _ => concat(&output, batches),
+    if batches.len() == 1 {
+        return Ok(batches.remove(0));
     }
+    // The one output batch is a copy of the rewritten batches.
+    let joined = concat(&output, batches)?;
+    workspace.grow(joined.memory_bytes())?;
+    Ok(joined)
 }
 
 /// One batch of `batches` (all of `schema`, plain columns only), for an

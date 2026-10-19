@@ -81,3 +81,14 @@ pub(super) fn key_bytes(key: &[Vec<u8>]) -> usize {
         .map(|part| std::mem::size_of::<Vec<u8>>() + part.len())
         .sum::<usize>()
 }
+
+/// The rows a grouped operator processes at once: memory is checked after
+/// each chunk's new groups.
+pub(crate) const ROWS_PER_CHUNK: usize = 1024;
+
+/// `batch` in slices of at most [`ROWS_PER_CHUNK`] rows (no copy).
+pub(crate) fn row_chunks(batch: &Batch) -> impl Iterator<Item = Batch> + '_ {
+    (0..batch.num_rows())
+        .step_by(ROWS_PER_CHUNK)
+        .map(move |offset| batch.slice(offset, ROWS_PER_CHUNK.min(batch.num_rows() - offset)))
+}

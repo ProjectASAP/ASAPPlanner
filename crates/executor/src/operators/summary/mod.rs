@@ -606,17 +606,6 @@ impl RowWeights {
     }
 }
 
-/// The rows a build processes at once: memory is checked after each
-/// chunk's new groups.
-const ROWS_PER_CHUNK: usize = 1024;
-
-/// `batch` in slices of at most [`ROWS_PER_CHUNK`] rows (no copy).
-fn row_chunks(batch: &Batch) -> impl Iterator<Item = Batch> + '_ {
-    (0..batch.num_rows())
-        .step_by(ROWS_PER_CHUNK)
-        .map(move |offset| batch.slice(offset, ROWS_PER_CHUNK.min(batch.num_rows() - offset)))
-}
-
 /// The decoded values of `columns` of `batch`, column by column.
 fn decoded_columns(batch: &Batch, columns: &[usize]) -> Vec<Vec<Value>> {
     columns

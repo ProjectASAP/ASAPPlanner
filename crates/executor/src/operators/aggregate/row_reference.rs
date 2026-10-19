@@ -249,7 +249,7 @@ mod tests {
     }
 
     /// Columns: 0 text?, 1 int?, 2 float?, 3 bool?, 4 time, 5 float (no
-    /// nulls); with `promql`, 6 the series identity.
+    /// nulls), 6 always NULL; with `promql`, 7 the series identity.
     fn input(promql: bool) -> SchemaRef {
         let mut fields = vec![
             field("text", DataType::Utf8, true),
@@ -258,6 +258,7 @@ mod tests {
             field("flag", DataType::Bool, true),
             field("time", DataType::Timestamp, false),
             field("value", DataType::Float64, false),
+            field("nothing", DataType::Null, true),
         ];
         if promql {
             fields.push(field(PROMQL_SERIES_IDENTITY, DataType::Utf8, false));
@@ -303,8 +304,9 @@ mod tests {
                             maybe(next(), Value::Bool(next().is_multiple_of(2))),
                             Value::Timestamp((next() % 7) as i64),
                             Value::Float64(floats[next() % 10]),
+                            Value::Null,
                         ];
-                        if schema.fields.len() == 7 {
+                        if schema.fields.len() == 8 {
                             row.push(Value::Utf8(format!("{{\"s\":\"{}\"}}", next() % 3).into()));
                         }
                         row
@@ -370,6 +372,9 @@ mod tests {
                 ("text_min".to_string(), Reduction::Min(0)),
                 ("time_max".to_string(), Reduction::Max(4)),
                 ("q".to_string(), Reduction::Quantile { column: 5, q: 0.75 }),
+                // A NULL-typed column has no value to count.
+                ("no_distinct".to_string(), Reduction::Cardinality(vec![6])),
+                ("no_pair".to_string(), Reduction::Cardinality(vec![0, 6])),
             ]
         };
         for promql in [false, true] {

@@ -354,7 +354,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
             .enumerate()
             .map(|(index, field)| {
                 if Some(index) == schema.time_index {
-                    BatchColumn::Values(Arc::new(TimestampMillisecondArray::from(vec![
+                    BatchColumn::Plain(Arc::new(TimestampMillisecondArray::from(vec![
                         end_ms;
                         groups
                     ])))
@@ -364,7 +364,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
                         states: states.clone(),
                     }
                 } else {
-                    BatchColumn::Values(Arc::new(
+                    BatchColumn::Plain(Arc::new(
                         identities
                             .iter()
                             .map(String::as_str)

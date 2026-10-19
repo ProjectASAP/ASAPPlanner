@@ -48,7 +48,7 @@ pub enum BatchColumn {
     /// A plain column: an Arrow array in its Planner type's layout (see
     /// [`super::arrow_columns`]: text is `DictionaryArray<UInt32Type>` over
     /// `Utf8`, a timestamp `TimestampMillisecondArray`, …).
-    Values(ArrayRef),
+    Plain(ArrayRef),
     /// A summary column: row `i`'s state is `states.state(indices[i])`.
     States {
         /// Each row's state index; never NULL.
@@ -157,8 +157,14 @@ impl Batch {
     /// the DAG: how a runtime installs states it built sample by sample
     /// (a sealed [`crate::StateColumnUpdater`]) as a stored pane. Bad input
     /// when a column's count, layout, length or nullability differs from
-    /// the schema, a summary field's states are of another family, or a
-    /// state index is NULL or past its states.
+    /// the schema, a dictionary holds a NULL value (a NULL is a NULL key),
+    /// a summary field's states are of another family, or a state index is
+    /// NULL or past its states.
+    ///
+    /// A stored pane has one row per group: the caller must not repeat a
+    /// group's labels (two rows of one series would be merged as two
+    /// panes of it). This is not checked, as it would cost a pass grouping
+    /// every row.
     pub fn try_from_columns(schema: SchemaRef, columns: Vec<BatchColumn>) -> Result<Self, Error> {
         validate_schema(&schema)?;
         if columns.len() != schema.fields.len() {
@@ -167,14 +173,26 @@ impl Batch {
             ));
         }
         let row_count = columns.first().map_or(0, |column| match column {
-            BatchColumn::Values(array) => array.len(),
+            BatchColumn::Plain(array) => array.len(),
             BatchColumn::States { indices, .. } => indices.len(),
         });
         let mut arrays = Vec::with_capacity(columns.len());
         let mut state_columns = Vec::with_capacity(columns.len());
         for (column, field) in columns.into_iter().zip(&schema.fields) {
             match (column, &field.dtype) {
-                (BatchColumn::Values(array), FieldDataType::Plain(dtype)) => {
+                (BatchColumn::Plain(array), FieldDataType::Plain(dtype)) => {
+                    // A NULL is a NULL key, never a NULL dictionary value,
+                    // so every dictionary read finds a text.
+                    if array
+                        .as_any()
+                        .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::UInt32Type>>()
+                        .is_some_and(|dictionary| dictionary.values().null_count() > 0)
+                    {
+                        return Err(Error::Invalid(format!(
+                            "column {} has a NULL dictionary value; a NULL is a NULL key",
+                            field.name
+                        )));
+                    }
                     if array.data_type()
                         != &arrow_columns::arrow_type(dtype, ColumnDepth::BatchColumn)
                     {
@@ -243,7 +261,10 @@ impl Batch {
                     field.name
                 )));
             }
-            if !field.nullable && array.null_count() > 0 {
+            if !field.nullable
+                && field.dtype != FieldDataType::Plain(planner_types::ir::schema::DataType::Null)
+                && array.logical_null_count() > 0
+            {
                 return Err(Error::Invalid(format!(
                     "value differs from type of {}",
                     field.name
@@ -679,7 +700,7 @@ mod tests {
         let batch = Batch::try_from_columns(
             schema.clone(),
             vec![
-                BatchColumn::Values(jobs.clone()),
+                BatchColumn::Plain(jobs.clone()),
                 BatchColumn::States {
                     indices: UInt32Array::from(vec![1, 0]),
                     states: states.clone(),
@@ -721,22 +742,44 @@ mod tests {
             .seal(),
         );
         for columns in [
-            vec![BatchColumn::Values(plain_text), indices(vec![0, 1])],
-            vec![BatchColumn::Values(jobs.clone()), indices(vec![0, 2])],
+            vec![BatchColumn::Plain(plain_text), indices(vec![0, 1])],
+            vec![BatchColumn::Plain(jobs.clone()), indices(vec![0, 2])],
             vec![
-                BatchColumn::Values(jobs.clone()),
+                BatchColumn::Plain(jobs.clone()),
                 BatchColumn::States {
                     indices: UInt32Array::from(vec![0, 0]),
                     states: other_family,
                 },
             ],
-            vec![BatchColumn::Values(jobs.clone()), indices(vec![0])],
-            vec![indices(vec![0, 1]), BatchColumn::Values(jobs.clone())],
+            vec![BatchColumn::Plain(jobs.clone()), indices(vec![0])],
+            vec![indices(vec![0, 1]), BatchColumn::Plain(jobs.clone())],
         ] {
             assert!(matches!(
                 Batch::try_from_columns(schema.clone(), columns),
                 Err(Error::Invalid(_))
             ));
         }
+    }
+
+    // A NULL among a dictionary's values is a NULL in the column: refused
+    // in a non-nullable field, not read back as "".
+    #[test]
+    fn a_null_dictionary_value_is_a_null() {
+        use arrow::array::{DictionaryArray, StringArray};
+        let schema = Arc::new(Schema {
+            fields: vec![field("job", DataType::Utf8, false)],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        let jobs = DictionaryArray::<arrow::datatypes::UInt32Type>::try_new(
+            UInt32Array::from(vec![0, 1]),
+            Arc::new(StringArray::from(vec![Some("a"), None])),
+        )
+        .unwrap();
+        assert!(matches!(
+            Batch::try_from_columns(schema, vec![BatchColumn::Plain(Arc::new(jobs))]),
+            Err(Error::Invalid(_))
+        ));
     }
 }
