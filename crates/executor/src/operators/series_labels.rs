@@ -533,47 +533,23 @@ pub(super) fn execute<'a>(
         _ => None,
     };
     let left = inputs.pop().ok_or_else(|| invalid("missing left input"))?;
+    if let Kind::SeriesLabels {
+        kind,
+        labels,
+        unique,
+    } = &operator.kind
+    {
+        return Ok(futures::stream::once(rewrite_label_sets(
+            left, operator, kind, labels, *unique, context,
+        ))
+        .boxed_local());
+    }
     Ok(futures::stream::once(async move {
         let mut work = Cooperative::new(&context);
         let mut workspace = Workspace::new(&context)?;
         let (rows, _memory) = collect_rows(left, &context).await?;
         let mut result = Vec::new();
         match (&operator.kind, right) {
-            (
-                Kind::SeriesLabels {
-                    kind,
-                    labels,
-                    unique,
-                },
-                None,
-            ) => {
-                let left_layout = layout(&operator.inputs[0])?;
-                let mut seen = std::collections::BTreeSet::new();
-                for mut row in rows {
-                    work.checkpoint().await?;
-                    let set = signature(kind, labels, left_layout.read(&output, &row)?);
-                    left_layout.write(&output, &mut row, &set)?;
-                    workspace.grow(row_bytes(&row))?;
-                    // Matching and grouping sides may repeat a label set;
-                    // their consumers decide whether that is an error.
-                    if *unique {
-                        workspace.grow(label_bytes(&set))?;
-                        let time = output
-                            .time_index
-                            .map(|index| match row[index] {
-                                Value::Timestamp(time) => Ok(time),
-                                _ => Err(invalid("series timestamp must be Timestamp")),
-                            })
-                            .transpose()?;
-                        if !seen.insert((time, set)) {
-                            return Err(invalid(
-                                "vector cannot contain metrics with the same labelset",
-                            ));
-                        }
-                    }
-                    result.push(row);
-                }
-            }
             (
                 Kind::SeriesBinary {
                     operator: binary,
@@ -703,4 +679,369 @@ fn parse_bound(text: &str) -> Option<f64> {
         .iter()
         .any(|word| unsigned.eq_ignore_ascii_case(word));
     (bound.is_finite() || bound.is_nan() || infinite).then_some(bound)
+}
+
+/// `SeriesLabels` over column batches: each distinct label set (a series
+/// identity, or a tuple of label columns) is rewritten once per batch, and
+/// its new identity and label values are dictionary entries shared by its
+/// rows. Other columns are shared, not copied.
+async fn rewrite_label_sets(
+    mut input: Input<'_, Batch>,
+    operator: &Operator,
+    kind: &VectorMatchKind,
+    names: &[String],
+    unique: bool,
+    context: RunContext,
+) -> Result<Batch, Error> {
+    use super::group_table::GroupTable;
+    use arrow::array::{
+        Array, DictionaryArray, StringArray, TimestampMillisecondArray, UInt32Array,
+    };
+    use arrow::datatypes::UInt32Type;
+    let output = operator.output.clone();
+    let layout = layout(&operator.inputs[0])?;
+    let mut work = Cooperative::new(&context);
+    let mut workspace = Workspace::new(&context)?;
+    let mut seen = ahash::AHashSet::<(Option<i64>, String)>::new();
+    let mut batches = Vec::new();
+    while let Some(batch) = input.next().await {
+        let batch = batch?;
+        let rows = batch.num_rows();
+        // Each row's distinct label source, and each distinct source's
+        // rewritten label set.
+        let (source_of_row, sets): (Vec<u32>, Vec<Labels>) = match layout.identity {
+            Some(identity) => {
+                let dictionary = batch
+                    .column(identity)
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<UInt32Type>>()
+                    .expect("batch text columns are dictionaries");
+                let texts = dictionary
+                    .values()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("dictionaries over strings");
+                let keys = dictionary.keys();
+                let mut source_of_entry = ahash::AHashMap::<u32, u32>::new();
+                let mut sets = Vec::new();
+                let mut source_of_row = Vec::with_capacity(rows);
+                for row in 0..rows {
+                    let entry = keys.value(row);
+                    let source = match source_of_entry.get(&entry) {
+                        Some(&source) => source,
+                        None => {
+                            let mut labels: Labels =
+                                serde_json::from_str(texts.value(entry as usize))
+                                    .map_err(|e| invalid(&e.to_string()))?;
+                            // PromQL treats an empty label value as an absent label.
+                            labels.retain(|_, v| !v.is_empty());
+                            sets.push(signature(kind, names, labels));
+                            let source = (sets.len() - 1) as u32;
+                            source_of_entry.insert(entry, source);
+                            source
+                        }
+                    };
+                    source_of_row.push(source);
+                }
+                (source_of_row, sets)
+            }
+            None => {
+                let mut table = GroupTable::new(layout.labels.clone());
+                let source_of_row = table.group_ids(&batch)?;
+                let sets = (0..table.len() as u32)
+                    .map(|group| {
+                        let mut labels = Labels::new();
+                        for (index, &column) in layout.labels.iter().enumerate() {
+                            match table.label(group, index) {
+                                Value::Utf8(v) if !v.is_empty() => {
+                                    labels
+                                        .insert(output.fields[column].name.clone(), v.to_string());
+                                }
+                                Value::Utf8(_) | Value::Null => {}
+                                _ => return Err(invalid("label must be Utf8")),
+                            }
+                        }
+                        Ok(signature(kind, names, labels))
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                (source_of_row, sets)
+            }
+        };
+        work.checkpoint_rows(rows).await?;
+        // A text column whose row `i` reads `text(source_of_row[i])`.
+        let text_column = |text: &dyn Fn(&Labels) -> Result<String, Error>| -> Result<arrow::array::ArrayRef, Error> {
+            let mut codes = ahash::AHashMap::<String, u32>::new();
+            let mut values: Vec<String> = Vec::new();
+            let code_of_source = sets
+                .iter()
+                .map(|set| {
+                    let text = text(set)?;
+                    let next = values.len() as u32;
+                    Ok(*codes.entry(text.clone()).or_insert_with(|| {
+                        values.push(text);
+                        next
+                    }))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            let keys = UInt32Array::from_iter_values(source_of_row.iter().map(|&s| code_of_source[s as usize]));
+            Ok(Arc::new(
+                DictionaryArray::<UInt32Type>::try_new(keys, Arc::new(StringArray::from(values)))
+                    .map_err(|e| invalid(&e.to_string()))?,
+            ))
+        };
+        let mut arrays = batch.record_batch().columns().to_vec();
+        if let Some(identity) = layout.identity {
+            arrays[identity] = text_column(&|set| {
+                serde_json::to_string(set).map_err(|e| invalid(&e.to_string()))
+            })?;
+        }
+        for &column in &layout.labels {
+            let name = &output.fields[column].name;
+            arrays[column] = text_column(&|set| Ok(set.get(name).cloned().unwrap_or_default()))?;
+        }
+        let states = (0..arrays.len())
+            .map(|column| batch.state_column(column).cloned())
+            .collect();
+        let rewritten = Batch::from_parts(output.clone(), arrays, states, rows)?;
+        workspace.grow(rewritten.memory_bytes())?;
+        // Matching and grouping sides may repeat a label set; their
+        // consumers decide whether that is an error.
+        if unique {
+            let keys = sets
+                .iter()
+                .map(|set| serde_json::to_string(set).map_err(|e| invalid(&e.to_string())))
+                .collect::<Result<Vec<_>, Error>>()?;
+            let times = output.time_index.map(|index| {
+                rewritten
+                    .column(index)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("series timestamps are timestamps")
+                    .clone()
+            });
+            for (row, &source) in source_of_row.iter().enumerate() {
+                let time = times.as_ref().map(|times| times.value(row));
+                workspace.grow(label_bytes(&sets[source as usize]))?;
+                if !seen.insert((time, keys[source as usize].clone())) {
+                    return Err(invalid(
+                        "vector cannot contain metrics with the same labelset",
+                    ));
+                }
+            }
+            work.checkpoint_rows(rows).await?;
+        }
+        batches.push(rewritten);
+    }
+    match batches.len() {
+        1 => Ok(batches.remove(0)),
+        _ => concat(&output, batches),
+    }
+}
+
+/// One batch of `batches` (all of `schema`, plain columns only), for an
+/// operator that emits one batch.
+fn concat(schema: &SchemaRef, batches: Vec<Batch>) -> Result<Batch, Error> {
+    if batches.is_empty() {
+        return Batch::try_new(schema.clone(), vec![]);
+    }
+    let rows = batches.iter().map(Batch::num_rows).sum();
+    let columns = (0..schema.fields.len())
+        .map(|column| {
+            let arrays = batches
+                .iter()
+                .map(|batch| batch.column(column).as_ref())
+                .collect::<Vec<_>>();
+            arrow::compute::concat(&arrays).map_err(|e| invalid(&e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Batch::from_parts(
+        schema.clone(),
+        columns,
+        vec![None; schema.fields.len()],
+        rows,
+    )
+}
+
+#[cfg(test)]
+mod columnar_tests {
+    use super::*;
+    use crate::plan::PhysicalDAG;
+    use crate::runtime::{Limits, Scope};
+    use planner_types::ir::schema::Field;
+
+    /// The row-at-a-time rewrite this operator ran before (the reference).
+    fn reference(
+        input: &SchemaRef,
+        kind: &VectorMatchKind,
+        names: &[String],
+        unique: bool,
+        rows: Vec<Vec<Value>>,
+    ) -> Result<Vec<Vec<Value>>, Error> {
+        let layout = layout(input)?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut result = Vec::new();
+        for mut row in rows {
+            let set = signature(kind, names, layout.read(input, &row)?);
+            layout.write(input, &mut row, &set)?;
+            if unique {
+                let time = input.time_index.map(|index| match row[index] {
+                    Value::Timestamp(time) => time,
+                    _ => unreachable!(),
+                });
+                if !seen.insert((time, set)) {
+                    return Err(invalid(
+                        "vector cannot contain metrics with the same labelset",
+                    ));
+                }
+            }
+            result.push(row);
+        }
+        Ok(result)
+    }
+
+    fn field(name: &str, dtype: DataType, nullable: bool) -> Field {
+        Field {
+            name: name.into(),
+            dtype: SummaryFamilyType::Plain(dtype),
+            nullable,
+            table: None,
+        }
+    }
+
+    // Rewriting label sets column by column equals the row rewrite, for
+    // series identities and for label columns, `on` and `ignoring`, over
+    // several batches; a repeated label set in a vector is the same error.
+    #[test]
+    fn label_sets_rewrite_as_rows_did() {
+        let text = |s: &str| Value::Utf8(s.into());
+        let identity = |name: &str, job: &str, instance: &str| {
+            let labels = Labels::from([
+                ("__name__".to_string(), name.to_string()),
+                ("job".to_string(), job.to_string()),
+                ("instance".to_string(), instance.to_string()),
+            ]);
+            text(&serde_json::to_string(&labels).unwrap())
+        };
+        let with_identity = Arc::new(Schema {
+            fields: vec![
+                field("ts", DataType::Timestamp, false),
+                field("value", DataType::Float64, false),
+                field(PROMQL_SERIES_IDENTITY, DataType::Utf8, false),
+                field("job", DataType::Utf8, true),
+            ],
+            time_index: Some(0),
+            unique_keys: vec![],
+            closed: false,
+        });
+        let identity_rows = |metric: &str| {
+            (0..12)
+                .map(|i| {
+                    vec![
+                        Value::Timestamp(i / 4),
+                        Value::Float64(i as f64),
+                        identity(
+                            metric,
+                            ["api", "web", ""][i as usize % 3],
+                            &format!("h{}", i % 2),
+                        ),
+                        if i % 5 == 0 { Value::Null } else { text("x") },
+                    ]
+                })
+                .collect::<Vec<_>>()
+        };
+        let labels_only = Arc::new(Schema {
+            fields: vec![
+                field("value", DataType::Float64, false),
+                field("job", DataType::Utf8, true),
+                field("__name__", DataType::Utf8, false),
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        let label_rows = (0..9)
+            .map(|i| {
+                vec![
+                    Value::Float64(i as f64),
+                    if i % 4 == 0 {
+                        Value::Null
+                    } else {
+                        text(["api", "", "web"][i % 3])
+                    },
+                    text(["m", "n"][i % 2]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        // Two metrics of the same series: equal once the name is dropped.
+        let two_metrics = [identity_rows("up"), identity_rows("down")].concat();
+        let mut errors = 0;
+        for (schema, rows) in [
+            (with_identity.clone(), identity_rows("up")),
+            (with_identity.clone(), two_metrics),
+            (labels_only.clone(), label_rows),
+        ] {
+            for (kind, names, unique) in [
+                (VectorMatchKind::Ignoring, vec![], true),
+                (
+                    VectorMatchKind::Ignoring,
+                    vec!["instance".to_string()],
+                    false,
+                ),
+                (VectorMatchKind::On, vec!["job".to_string()], false),
+                (VectorMatchKind::On, vec!["job".to_string()], true),
+            ] {
+                let mut operator =
+                    Operator::series_labels(schema.clone(), kind.clone(), names.clone()).unwrap();
+                if let Kind::SeriesLabels { unique: slot, .. } = &mut operator.kind {
+                    *slot = unique;
+                }
+                let expected = reference(&schema, &kind, &names, unique, rows.clone());
+                let (first, second) = rows.split_at(rows.len() / 2);
+                let mut dag = PhysicalDAG::default();
+                dag.add(
+                    0,
+                    vec![],
+                    Operator::source(
+                        schema.clone(),
+                        vec![
+                            Batch::try_new(schema.clone(), first.to_vec()).unwrap(),
+                            Batch::try_new(schema.clone(), second.to_vec()).unwrap(),
+                        ],
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                dag.add(1, vec![0], operator).unwrap();
+                let context = RunContext::new(
+                    Scope::Query {
+                        evaluation_time_ms: 0,
+                        revision: 1,
+                    },
+                    Limits::default(),
+                )
+                .unwrap();
+                let actual = futures::executor::block_on(async {
+                    let mut output = dag.execute(&[1], context).unwrap().remove(0);
+                    let mut rows = Vec::new();
+                    while let Some(batch) = output.next().await {
+                        rows.extend(batch?.rows().iter().cloned());
+                    }
+                    Ok::<_, Error>(rows)
+                });
+                let case = format!(
+                    "{:?} {kind:?} {names:?} unique {unique}",
+                    schema.fields.len()
+                );
+                match (expected, actual) {
+                    (Ok(e), Ok(a)) => assert_eq!(format!("{e:?}"), format!("{a:?}"), "{case}"),
+                    (Err(_), Err(a)) => {
+                        errors += 1;
+                        assert!(a.to_string().contains("same labelset"), "{case}: {a}")
+                    }
+                    (e, a) => panic!("{case}: reference {e:?}, columnar {a:?}"),
+                }
+            }
+        }
+        assert!(errors > 0, "the repeated-label-set error is exercised");
+    }
 }
