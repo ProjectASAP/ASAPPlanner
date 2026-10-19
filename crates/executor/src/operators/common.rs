@@ -62,6 +62,11 @@ impl Workspace {
             bytes: 0,
         })
     }
+    /// Reserve exactly `bytes` in total.
+    pub(super) fn set(&mut self, bytes: usize) -> Result<(), Error> {
+        self.bytes = bytes;
+        self.reservation.resize(bytes)
+    }
     pub(super) fn grow(&mut self, bytes: usize) -> Result<(), Error> {
         self.bytes = self.bytes.checked_add(bytes).ok_or(Error::MemoryLimit)?;
         self.reservation.resize(self.bytes)

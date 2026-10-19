@@ -21,6 +21,7 @@ use super::{arithmetic, Expression};
 use crate::values::arrow_columns::{self, ColumnDepth};
 use crate::values::{Batch, Value};
 use crate::Error;
+use ahash::AHashMap as HashMap;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Datum, DictionaryArray, Float64Array, Int64Array, Scalar,
     UInt32Array,
@@ -29,7 +30,7 @@ use arrow::datatypes::UInt32Type;
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use planner_types::ir::schema::{DataType, FieldDataType, Schema};
 use planner_types::ir::ScalarExpr;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 /// An expression lowered to the operations evaluated over whole columns.
 enum VectorExpr {

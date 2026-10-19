@@ -19,6 +19,7 @@ use common::*;
 mod aggregate;
 mod current_series;
 mod filter;
+pub(crate) mod group_table;
 mod joins;
 mod limit;
 mod projection;

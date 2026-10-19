@@ -67,25 +67,31 @@ pub(super) fn execute<'a>(
             evaluation_time_ms, ..
         } => evaluation_time_ms,
     };
+    // Columns are shared, not copied; only the timestamp column is new.
     Ok(input
         .map(move |batch| {
             if context.is_cancelled() {
                 return Err(Error::Cancelled);
             }
             let batch = batch?;
-            let rows = batch
-                .rows()
-                .iter()
-                .map(|row| {
-                    columns
-                        .iter()
-                        .map(|column| {
-                            column.map_or(Value::Timestamp(timestamp), |column| row[column].clone())
-                        })
-                        .collect()
-                })
-                .collect();
-            Batch::try_new(output.clone(), rows)
+            let rows = batch.num_rows();
+            let mut arrays = Vec::with_capacity(columns.len());
+            let mut states = Vec::with_capacity(columns.len());
+            for column in columns {
+                match column {
+                    Some(column) => {
+                        arrays.push(batch.column(*column).clone());
+                        states.push(batch.state_column(*column).cloned());
+                    }
+                    None => {
+                        arrays.push(std::sync::Arc::new(
+                            arrow::array::TimestampMillisecondArray::from(vec![timestamp; rows]),
+                        ) as arrow::array::ArrayRef);
+                        states.push(None);
+                    }
+                }
+            }
+            Batch::from_parts(output.clone(), arrays, states, rows)
         })
         .boxed_local())
 }
