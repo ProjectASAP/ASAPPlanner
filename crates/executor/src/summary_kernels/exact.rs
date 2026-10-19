@@ -241,8 +241,8 @@ impl ScalarState {
         Ok(ExactAccumulator::new(family.clone(), false)?.scalar)
     }
 
-    /// Add one sample: `value` observed at `timestamp`.
-    pub(crate) fn update(&mut self, value: f64, timestamp: i64) {
+    /// Add one sample: `value` observed at `timestamp_ms`.
+    pub(crate) fn update(&mut self, value: f64, timestamp_ms: i64) {
         match self {
             ScalarState::Sum {
                 sum,
@@ -262,13 +262,13 @@ impl ScalarState {
                 *current = Some(current.map_or(value, |old| old.max(value)))
             }
             ScalarState::Counter(current) => match current {
-                Some(counter) => counter.update(Measurement::new(value), timestamp),
+                Some(counter) => counter.update(Measurement::new(value), timestamp_ms),
                 None => {
                     *current = Some(IncreaseAccumulator::new(
                         Measurement::new(value),
-                        timestamp,
+                        timestamp_ms,
                         Measurement::new(value),
-                        timestamp,
+                        timestamp_ms,
                     ))
                 }
             },
@@ -312,6 +312,19 @@ impl ScalarState {
         match self {
             ScalarState::Counter(Some(counter)) => Some(counter.starting_timestamp),
             _ => None,
+        }
+    }
+
+    /// Whether two counter states' sample intervals overlap (share any time
+    /// from first to last sample, ends included); false for other states
+    /// and for an empty counter.
+    pub(crate) fn overlaps_in_time(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ScalarState::Counter(Some(a)), ScalarState::Counter(Some(b))) => {
+                a.starting_timestamp <= b.last_seen_timestamp
+                    && b.starting_timestamp <= a.last_seen_timestamp
+            }
+            _ => false,
         }
     }
 

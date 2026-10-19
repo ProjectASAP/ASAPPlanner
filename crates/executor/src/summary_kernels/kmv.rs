@@ -105,12 +105,14 @@ impl AccumulatorUpdater for KmvAccumulator {
         self
     }
     fn merge_accumulator(&mut self, other: &dyn AggregateCore) -> Result<(), String> {
-        let merged = self.merge_with(other).map_err(|error| error.to_string())?;
-        *self = merged
-            .as_any()
-            .downcast_ref::<Self>()
-            .cloned()
-            .ok_or("a merge changed the state's type")?;
+        let mut merged = self.merge_with(other).map_err(|error| error.to_string())?;
+        std::mem::swap(
+            self,
+            merged
+                .as_any_mut()
+                .downcast_mut::<Self>()
+                .ok_or("a merge changed the state's type")?,
+        );
         Ok(())
     }
     fn reset(&mut self) {

@@ -182,6 +182,19 @@ impl Batch {
         })
     }
 
+    /// Rows `offset..offset + length`, sharing the column buffers.
+    pub(crate) fn slice(&self, offset: usize, length: usize) -> Self {
+        if offset == 0 && length == self.num_rows() {
+            return self.clone();
+        }
+        Self {
+            schema: self.schema.clone(),
+            record_batch: self.record_batch.slice(offset, length),
+            state_columns: self.state_columns.clone(),
+            decoded_rows: Arc::new(OnceLock::new()),
+        }
+    }
+
     /// The rows where `keep` is true (not false or null), in order. Shares
     /// the state columns; copies only the kept cells of plain columns.
     pub(crate) fn filter(&self, keep: &BooleanArray) -> Result<Self, Error> {

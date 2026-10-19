@@ -24,6 +24,8 @@ pub struct StateColumnUpdater {
     /// For a counter (rate, increase), each group's latest sample time:
     /// samples must arrive in strictly increasing time within a group.
     latest_sample_ms: Option<Vec<Option<i64>>>,
+    /// Memory the open states hold, kept up to date on every change.
+    memory_bytes: usize,
 }
 
 /// The open states of a [`StateColumnUpdater`], by kind of family.
@@ -89,6 +91,7 @@ impl StateColumnUpdater {
             family: family.clone(),
             states,
             latest_sample_ms: counter.then(Vec::new),
+            memory_bytes: 0,
         })
     }
 
@@ -101,11 +104,6 @@ impl StateColumnUpdater {
         .map_err(Error::Invalid)
     }
 
-    /// The family and parameters of every state.
-    pub fn family(&self) -> &FieldDataType {
-        &self.family
-    }
-
     /// The number of groups.
     pub fn group_count(&self) -> usize {
         match &self.states {
@@ -115,26 +113,58 @@ impl StateColumnUpdater {
         }
     }
 
+    /// Add groups with empty states until there are `group_count`.
+    pub fn ensure_groups(&mut self, group_count: usize) -> Result<(), Error> {
+        while self.group_count() < group_count {
+            self.add_group()?;
+        }
+        Ok(())
+    }
+
     /// Add a group with an empty state; returns its number.
     pub fn add_group(&mut self) -> Result<u32, Error> {
         let group = u32::try_from(self.group_count())
             .map_err(|_| Error::Invalid("more than u32::MAX groups".into()))?;
-        match &mut self.states {
-            GroupStates::Exact { empty, states } => states.push(empty.clone()),
-            GroupStates::Sketches(states) => states.push(Self::sketch_updater(&self.family)?),
-            GroupStates::Keyed { empty, states } => states.push(empty.clone()),
-        }
+        self.memory_bytes += match &mut self.states {
+            GroupStates::Exact { empty, states } => {
+                states.push(empty.clone());
+                std::mem::size_of::<ScalarState>()
+            }
+            GroupStates::Sketches(states) => {
+                let state = Self::sketch_updater(&self.family)?;
+                let bytes = state.memory_usage_bytes();
+                states.push(state);
+                bytes
+            }
+            GroupStates::Keyed { empty, states } => {
+                states.push(empty.clone());
+                empty.approx_memory_bytes()
+            }
+        };
         if let Some(latest) = &mut self.latest_sample_ms {
             latest.push(None);
         }
         Ok(group)
     }
 
+    /// `group` as an index, or bad input when the updater has no such group.
+    fn index(&self, group: u32) -> Result<usize, Error> {
+        let index = group as usize;
+        if index >= self.group_count() {
+            return Err(Error::Invalid(format!(
+                "group {group} was not added (the updater has {})",
+                self.group_count()
+            )));
+        }
+        Ok(index)
+    }
+
     /// Add one sample to `group`'s state: `value` observed at
-    /// `timestamp_ms` (read only by counters). An operator error when the
-    /// state cannot take the value (not finite, outside a DDSketch's domain,
-    /// a counter sample not after the group's previous one) or the family is
-    /// keyed; the state is then unchanged.
+    /// `timestamp_ms` (read only by counters). Bad input for a group never
+    /// added; an operator error when the state cannot take the value (not
+    /// finite, outside a DDSketch's domain, a counter sample not after the
+    /// group's previous one) or the family is keyed. The state is then
+    /// unchanged.
     pub fn update(&mut self, group: u32, value: f64, timestamp_ms: i64) -> Result<(), Error> {
         self.update_value(group, &Value::Float64(value), timestamp_ms)
     }
@@ -147,7 +177,7 @@ impl StateColumnUpdater {
         value: &Value,
         timestamp_ms: i64,
     ) -> Result<(), Error> {
-        let index = group as usize;
+        let index = self.index(group)?;
         if let Some(latest) = &mut self.latest_sample_ms {
             if latest[index].is_some_and(|prior| timestamp_ms <= prior) {
                 return Err(operator_error(
@@ -161,14 +191,17 @@ impl StateColumnUpdater {
                 let Value::Float64(value) = value else {
                     return Err(operator_error("summary update requires Float64"));
                 };
-                if !value.is_finite() {
-                    return Err(operator_error("accumulator input must be finite"));
-                }
+                super::factory::finite_input(*value).map_err(operator_error)?;
                 states[index].update(*value, timestamp_ms);
             }
-            GroupStates::Sketches(states) => states[index]
-                .update_value(value, timestamp_ms)
-                .map_err(operator_error)?,
+            GroupStates::Sketches(states) => {
+                let state = &mut states[index];
+                let before = state.memory_usage_bytes();
+                state
+                    .update_value(value, timestamp_ms)
+                    .map_err(operator_error)?;
+                self.memory_bytes = self.memory_bytes - before + state.memory_usage_bytes();
+            }
             GroupStates::Keyed { .. } => {
                 return Err(operator_error(
                     "a keyed summary is updated with an item and a weight",
@@ -182,55 +215,79 @@ impl StateColumnUpdater {
     }
 
     /// Add `weight` to the item tuple `items` in `group`'s keyed state (a
-    /// Count-Min or Count Sketch with a heap). An operator error when the
-    /// family is not keyed or the kernel refuses the weight.
+    /// Count-Min or Count Sketch with a heap). Bad input for a group never
+    /// added; an operator error when the family is not keyed or the kernel
+    /// refuses the weight.
     pub fn update_item(&mut self, group: u32, items: &[Value], weight: f64) -> Result<(), Error> {
+        let index = self.index(group)?;
         let GroupStates::Keyed { states, .. } = &mut self.states else {
             return Err(operator_error("only a keyed summary takes items"));
         };
-        states[group as usize].update(items, weight)
+        let state = &mut states[index];
+        let before = state.approx_memory_bytes();
+        state.update(items, weight)?;
+        self.memory_bytes = self.memory_bytes - before + state.approx_memory_bytes();
+        Ok(())
     }
 
     /// Merge `other`, an updater of the same family whose groups have the
     /// same numbers (another shard of one pane), into this one, group by
-    /// group; a group only `other` has is added. An operator error when the
-    /// families differ or a kernel refuses the merge.
-    pub fn merge(&mut self, other: &Self) -> Result<(), Error> {
+    /// group; a group only `other` has is added.
+    ///
+    /// For a counter (rate, increase), each group's samples in the two
+    /// shards must be disjoint in time: one shard's last sample before the
+    /// other's first. Overlapping shards would count the increase of their
+    /// overlap twice, so they are refused as bad input, as are different
+    /// families. An operator error when a kernel refuses the merge. On an
+    /// error this updater may hold some groups already merged.
+    pub fn merge(&mut self, other: Self) -> Result<(), Error> {
         if self.family != other.family {
-            return Err(operator_error("cannot merge different summary families"));
+            return Err(Error::Invalid(
+                "cannot merge different summary families".into(),
+            ));
         }
-        while self.group_count() < other.group_count() {
-            self.add_group()?;
-        }
-        match (&mut self.states, &other.states) {
+        self.ensure_groups(other.group_count())?;
+        match (&mut self.states, other.states) {
             (GroupStates::Exact { states, .. }, GroupStates::Exact { states: theirs, .. }) => {
-                for (state, theirs) in states.iter_mut().zip(theirs) {
+                for (state, theirs) in states.iter_mut().zip(&theirs) {
+                    if state.overlaps_in_time(theirs) {
+                        return Err(Error::Invalid(
+                            "counter shards overlap in time: a group's samples in one shard \
+                             must all precede its samples in the other"
+                                .into(),
+                        ));
+                    }
                     *state = state.merge(theirs).map_err(operator_error)?;
                 }
             }
             (GroupStates::Sketches(states), GroupStates::Sketches(theirs)) => {
                 for (state, theirs) in states.iter_mut().zip(theirs) {
+                    let before = state.memory_usage_bytes();
                     state
-                        .merge_accumulator(theirs.snapshot_accumulator().as_ref())
+                        .merge_accumulator(theirs.into_accumulator().as_ref())
                         .map_err(operator_error)?;
+                    self.memory_bytes = self.memory_bytes - before + state.memory_usage_bytes();
                 }
             }
             (GroupStates::Keyed { states, .. }, GroupStates::Keyed { states: theirs, .. }) => {
-                for (state, theirs) in states.iter_mut().zip(theirs) {
-                    let merged = state.merge_with(theirs).map_err(operator_error)?;
-                    *state = merged
-                        .as_any()
-                        .downcast_ref::<WeightedFrequency>()
-                        .cloned()
-                        .ok_or_else(|| operator_error("a merge changed the state's type"))?;
+                for (state, theirs) in states.iter_mut().zip(&theirs) {
+                    let before = state.approx_memory_bytes();
+                    let mut merged = state.merge_with(theirs).map_err(operator_error)?;
+                    std::mem::swap(
+                        state,
+                        merged
+                            .as_any_mut()
+                            .downcast_mut::<WeightedFrequency>()
+                            .ok_or_else(|| operator_error("a merge changed the state's type"))?,
+                    );
+                    self.memory_bytes = self.memory_bytes - before + state.approx_memory_bytes();
                 }
             }
             _ => unreachable!("one family has one kind of states"),
         }
-        if let (Some(latest), Some(theirs)) = (&mut self.latest_sample_ms, &other.latest_sample_ms)
-        {
+        if let (Some(latest), Some(theirs)) = (&mut self.latest_sample_ms, other.latest_sample_ms) {
             for (latest, theirs) in latest.iter_mut().zip(theirs) {
-                *latest = (*latest).max(*theirs);
+                *latest = (*latest).max(theirs);
             }
         }
         Ok(())
@@ -238,17 +295,7 @@ impl StateColumnUpdater {
 
     /// Memory the open states hold, in bytes.
     pub fn memory_bytes(&self) -> usize {
-        match &self.states {
-            GroupStates::Exact { states, .. } => {
-                states.capacity() * std::mem::size_of::<ScalarState>()
-            }
-            GroupStates::Sketches(states) => {
-                states.iter().map(|state| state.memory_usage_bytes()).sum()
-            }
-            GroupStates::Keyed { states, .. } => {
-                states.iter().map(|state| state.approx_memory_bytes()).sum()
-            }
-        }
+        self.memory_bytes
     }
 
     /// The states as an immutable column, state `g` being group `g`'s.

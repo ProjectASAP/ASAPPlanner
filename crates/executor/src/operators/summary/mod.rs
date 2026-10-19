@@ -480,7 +480,7 @@ fn grouped_states(
     input: &SchemaRef,
     output: &SchemaRef,
 ) -> Result<Batch, Error> {
-    let order = table.groups_in_key_order()?;
+    let order = table.groups_in_key_order();
     let mut arrays = table.label_arrays(input, &order)?;
     let mut columns = vec![None; arrays.len()];
     arrays.push(Arc::new(UInt32Array::from(order.clone())));
@@ -514,55 +514,59 @@ async fn build_per_group_summary(
     let mut workspace = Workspace::new(context)?;
     // PromQL aggregation of an empty vector produces no sample.
     if build.groups.is_empty() && build.emit_empty_global {
-        table.add_empty_group();
+        table.add_empty_group()?;
         updater.add_group()?;
-        workspace.set(updater.memory_bytes() + table.memory_bytes())?;
+        workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
     }
-    while let Some(batch) = input.next().await {
-        let batch = batch?;
-        let groups = table.group_ids(&batch)?;
-        while updater.group_count() < table.len() {
-            updater.add_group()?;
-        }
-        workspace.set(updater.memory_bytes() + table.memory_bytes())?;
-        let mask = filter_mask(build.filter, &batch)?;
-        let times = build.time.map(|time| {
-            batch
-                .column(time)
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .expect("summary time columns are timestamps")
-                .clone()
-        });
-        let time_at = |row: usize| times.as_ref().map_or(0, |times| times.value(row));
-        let values = batch.column(build.value);
-        if let Some(values) = values.as_any().downcast_ref::<Float64Array>() {
-            for (row, &group) in groups.iter().enumerate() {
-                // SQL aggregates ignore NULL samples while retaining the group.
-                if !kept(&mask, row) || values.is_null(row) {
-                    continue;
+    while let Some(whole) = input.next().await {
+        let whole = whole?;
+        // A bounded number of rows at a time: memory is checked after each
+        // chunk's new groups, so one large batch cannot overshoot the limit
+        // by more than a chunk's states.
+        for batch in row_chunks(&whole) {
+            let groups = table.group_ids(&batch)?;
+            updater.ensure_groups(table.len())?;
+            workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
+            let mask = filter_mask(build.filter, &batch)?;
+            let times = build.time.map(|time| {
+                batch
+                    .column(time)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("summary time columns are timestamps")
+                    .clone()
+            });
+            let time_at = |row: usize| times.as_ref().map_or(0, |times| times.value(row));
+            let values = batch.column(build.value);
+            if let Some(values) = values.as_any().downcast_ref::<Float64Array>() {
+                for (row, &group) in groups.iter().enumerate() {
+                    // SQL aggregates ignore NULL samples while retaining the group.
+                    if !kept(&mask, row) || values.is_null(row) {
+                        continue;
+                    }
+                    updater.update(group, values.value(row), time_at(row))?;
                 }
-                updater.update(group, values.value(row), time_at(row))?;
-            }
-        } else {
-            // A frequency sketch over item values (UnivMon).
-            let SummaryFamilyType::Plain(dtype) = &input_schema.fields[build.value].dtype else {
-                return Err(invalid("summary values are plain"));
-            };
-            let values = crate::values::arrow_columns::decode(
-                values.as_ref(),
-                dtype,
-                ColumnDepth::BatchColumn,
-            );
-            for (row, &group) in groups.iter().enumerate() {
-                if !kept(&mask, row) || matches!(values[row], Value::Null) {
-                    continue;
+            } else {
+                // A frequency sketch over item values (UnivMon).
+                let SummaryFamilyType::Plain(dtype) = &input_schema.fields[build.value].dtype
+                else {
+                    return Err(invalid("summary values are plain"));
+                };
+                let values = crate::values::arrow_columns::decode(
+                    values.as_ref(),
+                    dtype,
+                    ColumnDepth::BatchColumn,
+                );
+                for (row, &group) in groups.iter().enumerate() {
+                    if !kept(&mask, row) || matches!(values[row], Value::Null) {
+                        continue;
+                    }
+                    updater.update_value(group, &values[row], time_at(row))?;
                 }
-                updater.update_value(group, &values[row], time_at(row))?;
             }
+            work.checkpoint_rows(batch.num_rows()).await?;
+            workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
         }
-        work.checkpoint_rows(batch.num_rows()).await?;
-        workspace.set(updater.memory_bytes() + table.memory_bytes())?;
     }
     grouped_states(&table, updater.seal(), input_schema, output)
 }
@@ -576,27 +580,41 @@ struct KeyedBuild<'a> {
     filter: Option<&'a Expression>,
 }
 
-/// Each row's weight under `row_weight`; `None` for a NULL weight, which
-/// adds nothing.
-fn row_weights(batch: &Batch, row_weight: RowWeight) -> Vec<Option<Value>> {
-    match row_weight {
-        RowWeight::Constant(weight) => {
-            vec![Some(Value::Int64(i64::from(weight.get()))); batch.num_rows()]
-        }
-        RowWeight::Column(column) => {
-            let SummaryFamilyType::Plain(dtype) = &batch.schema().fields[column].dtype else {
-                unreachable!("validated weight column")
-            };
-            crate::values::arrow_columns::decode(
-                batch.column(column).as_ref(),
-                dtype,
-                ColumnDepth::BatchColumn,
-            )
-            .into_iter()
-            .map(|value| (!matches!(value, Value::Null)).then_some(value))
-            .collect()
+/// The weight each row adds in a keyed build.
+enum RowWeights {
+    /// The same weight for every row.
+    Constant(NonZeroU32),
+    /// Each row's weight column value; NULL adds nothing.
+    Column(Vec<Value>),
+}
+
+impl RowWeights {
+    fn of(batch: &Batch, row_weight: RowWeight) -> Self {
+        match row_weight {
+            RowWeight::Constant(weight) => Self::Constant(weight),
+            RowWeight::Column(column) => {
+                let SummaryFamilyType::Plain(dtype) = &batch.schema().fields[column].dtype else {
+                    unreachable!("validated weight column")
+                };
+                Self::Column(crate::values::arrow_columns::decode(
+                    batch.column(column).as_ref(),
+                    dtype,
+                    ColumnDepth::BatchColumn,
+                ))
+            }
         }
     }
+}
+
+/// The rows a build processes at once: memory is checked after each
+/// chunk's new groups.
+const ROWS_PER_CHUNK: usize = 1024;
+
+/// `batch` in slices of at most [`ROWS_PER_CHUNK`] rows (no copy).
+fn row_chunks(batch: &Batch) -> impl Iterator<Item = Batch> + '_ {
+    (0..batch.num_rows())
+        .step_by(ROWS_PER_CHUNK)
+        .map(move |offset| batch.slice(offset, ROWS_PER_CHUNK.min(batch.num_rows() - offset)))
 }
 
 /// The decoded values of `columns` of `batch`, column by column.
@@ -630,37 +648,37 @@ async fn build_per_group_keyed_summary(
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     let mut items = Vec::with_capacity(build.items.len());
-    while let Some(batch) = input.next().await {
-        let batch = batch?;
-        let groups = table.group_ids(&batch)?;
-        while updater.group_count() < table.len() {
-            updater.add_group()?;
-        }
-        workspace.set(updater.memory_bytes() + table.memory_bytes())?;
-        let mask = filter_mask(build.filter, &batch)?;
-        let weights = row_weights(&batch, build.row_weight);
-        let columns = decoded_columns(&batch, build.items);
-        for (row, &group) in groups.iter().enumerate() {
-            if !kept(&mask, row) {
-                continue;
+    while let Some(whole) = input.next().await {
+        let whole = whole?;
+        for batch in row_chunks(&whole) {
+            let groups = table.group_ids(&batch)?;
+            updater.ensure_groups(table.len())?;
+            workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
+            let mask = filter_mask(build.filter, &batch)?;
+            let weights = RowWeights::of(&batch, build.row_weight);
+            let columns = decoded_columns(&batch, build.items);
+            for (row, &group) in groups.iter().enumerate() {
+                if !kept(&mask, row) {
+                    continue;
+                }
+                let weight = match &weights {
+                    RowWeights::Constant(weight) => f64::from(weight.get()),
+                    RowWeights::Column(values) => match &values[row] {
+                        Value::Null => continue,
+                        weight => keyed_weight(weight)?,
+                    },
+                };
+                items.clear();
+                // The kernel keys epoch-millisecond timestamps as Int64.
+                items.extend(columns.iter().map(|column| match &column[row] {
+                    Value::Timestamp(time) => Value::Int64(*time),
+                    value => value.clone(),
+                }));
+                updater.update_item(group, &items, weight)?;
             }
-            let Some(weight) = &weights[row] else {
-                continue;
-            };
-            let weight = match build.row_weight {
-                RowWeight::Constant(weight) => f64::from(weight.get()),
-                RowWeight::Column(_) => keyed_weight(weight)?,
-            };
-            items.clear();
-            // The kernel keys epoch-millisecond timestamps as Int64.
-            items.extend(columns.iter().map(|column| match &column[row] {
-                Value::Timestamp(time) => Value::Int64(*time),
-                value => value.clone(),
-            }));
-            updater.update_item(group, &items, weight)?;
+            work.checkpoint_rows(batch.num_rows()).await?;
+            workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
         }
-        work.checkpoint_rows(batch.num_rows()).await?;
-        workspace.set(updater.memory_bytes() + table.memory_bytes())?;
     }
     grouped_states(&table, updater.seal(), input_schema, output)
 }
@@ -688,53 +706,55 @@ async fn build_all_groups_summary(
     let mut grid = crate::factory::create_hydra_cms(build.family).map_err(Error::Invalid)?;
     let grid_bytes = grid.approx_memory_bytes();
     let mut workspace = Workspace::new(context)?;
-    workspace.set(grid_bytes)?;
+    workspace.set_bytes(grid_bytes)?;
     let mut work = Cooperative::new(context);
     let mut table = GroupTable::new(build.groups.to_vec());
     // Each group's Hydra subpopulation name.
     let mut names: Vec<String> = Vec::new();
     let mut name_bytes = 0;
-    while let Some(batch) = input.next().await {
-        let batch = batch?;
-        let groups = table.group_ids(&batch)?;
-        for group in names.len()..table.len() {
-            let name = (0..build.groups.len())
-                .map(|index| {
-                    let key = table.label(group as u32, index).key()?;
-                    Ok(key.iter().map(|b| format!("{b:02x}")).collect::<String>())
-                })
-                .collect::<Result<Vec<_>, Error>>()?
-                .join(",");
-            name_bytes += name.len();
-            names.push(name);
-        }
-        workspace.set(grid_bytes + table.memory_bytes() + name_bytes)?;
-        let mask = filter_mask(build.filter, &batch)?;
-        let weights = row_weights(&batch, build.row_weight);
-        let items = decoded_columns(&batch, &[build.item]).remove(0);
-        for (row, &group) in groups.iter().enumerate() {
-            if !kept(&mask, row) {
-                continue;
+    while let Some(whole) = input.next().await {
+        let whole = whole?;
+        for batch in row_chunks(&whole) {
+            let groups = table.group_ids(&batch)?;
+            for group in names.len()..table.len() {
+                let name = (0..build.groups.len())
+                    .map(|index| {
+                        let key = table.label(group as u32, index).key()?;
+                        Ok(key.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?
+                    .join(",");
+                name_bytes += name.len();
+                names.push(name);
             }
-            let Some(weight) = &weights[row] else {
-                continue;
-            };
-            let weight = match build.row_weight {
-                RowWeight::Constant(weight) => {
-                    i32::try_from(weight.get()).expect("validated HydraCms constant weight")
+            workspace.set_bytes(grid_bytes + table.memory_bytes() + name_bytes)?;
+            let mask = filter_mask(build.filter, &batch)?;
+            let weights = RowWeights::of(&batch, build.row_weight);
+            let items = decoded_columns(&batch, &[build.item]).remove(0);
+            for (row, &group) in groups.iter().enumerate() {
+                if !kept(&mask, row) {
+                    continue;
                 }
-                RowWeight::Column(_) => hydra_weight(weight)?,
-            };
-            let item = match &items[row] {
-                Value::Utf8(v) => v.to_string(),
-                Value::Int64(v) => v.to_string(),
-                Value::Bool(v) => v.to_string(),
-                _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
-            };
-            grid.count(&names[group as usize], &item, weight)
-                .map_err(|e| Error::Operator(e.to_string()))?;
+                let weight = match &weights {
+                    RowWeights::Constant(weight) => {
+                        i32::try_from(weight.get()).expect("validated HydraCms constant weight")
+                    }
+                    RowWeights::Column(values) => match &values[row] {
+                        Value::Null => continue,
+                        weight => hydra_weight(weight)?,
+                    },
+                };
+                let item = match &items[row] {
+                    Value::Utf8(v) => v.to_string(),
+                    Value::Int64(v) => v.to_string(),
+                    Value::Bool(v) => v.to_string(),
+                    _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
+                };
+                grid.count(&names[group as usize], &item, weight)
+                    .map_err(|e| Error::Operator(e.to_string()))?;
+            }
+            work.checkpoint_rows(batch.num_rows()).await?;
         }
-        work.checkpoint_rows(batch.num_rows()).await?;
     }
     let grid = Arc::new(grid);
     let states = names
@@ -827,23 +847,25 @@ async fn merge_summary(
         // Exact records merge in place, one fixed-size record per group.
         let mut merged: Vec<Option<ScalarState>> = vec![None; table.len()];
         let mut workspace = Workspace::new(context)?;
-        workspace.set(
+        workspace.set_bytes(
             merged.len() * std::mem::size_of::<Option<ScalarState>>() + table.memory_bytes(),
         )?;
-        for &entry in &entries {
-            let (states, index) = state_of(entry);
-            let StateStorage::Exact(records) = states.storage() else {
-                unreachable!("all exact")
-            };
-            let slot = &mut merged[entry.2 as usize];
-            *slot = Some(match slot.take() {
-                None => records[index].clone(),
-                Some(existing) => existing
-                    .merge(&records[index])
-                    .map_err(|e| Error::Operator(e.to_string()))?,
-            });
+        for chunk in entries.chunks(ROWS_PER_CHUNK) {
+            for &entry in chunk {
+                let (states, index) = state_of(entry);
+                let StateStorage::Exact(records) = states.storage() else {
+                    unreachable!("all exact")
+                };
+                let slot = &mut merged[entry.2 as usize];
+                *slot = Some(match slot.take() {
+                    None => records[index].clone(),
+                    Some(existing) => existing
+                        .merge(&records[index])
+                        .map_err(|e| Error::Operator(e.to_string()))?,
+                });
+            }
+            work.checkpoint_rows(chunk.len()).await?;
         }
-        work.checkpoint_rows(entries.len()).await?;
         let records = merged
             .into_iter()
             .map(|record| record.expect("every group has a row"))
@@ -855,7 +877,15 @@ async fn merge_summary(
             output,
         );
     }
-    let merged = merge_objects(&entries, &state_of, table.len(), context, &mut work).await?;
+    let merged = merge_objects(
+        &entries,
+        &state_of,
+        table.len(),
+        table.memory_bytes(),
+        context,
+        &mut work,
+    )
+    .await?;
     grouped_states(
         &table,
         StateColumn::from_objects(family.clone(), merged),
@@ -871,13 +901,15 @@ async fn merge_objects<'b>(
     entries: &[(usize, usize, u32)],
     state_of: &dyn Fn((usize, usize, u32)) -> (&'b StateColumn, usize),
     group_count: usize,
+    table_memory_bytes: usize,
     context: &RunContext,
     work: &mut Cooperative,
 ) -> Result<Vec<Arc<dyn crate::AggregateCore>>, Error> {
     use crate::summary_kernels::{HydraCms, HydraCmsGroup};
     let mut merged: Vec<Option<Arc<dyn crate::AggregateCore>>> = vec![None; group_count];
-    let mut memory = context.reserve(0)?;
-    let mut retained = 0usize;
+    // The group table is held while the states merge.
+    let mut memory = context.reserve(table_memory_bytes)?;
+    let mut retained = table_memory_bytes;
     // States shared by several groups (Hydra grids) are reserved once each.
     let mut shared = BTreeMap::<usize, usize>::new();
     // The inputs are kept so their addresses stay unique while they key the memo.

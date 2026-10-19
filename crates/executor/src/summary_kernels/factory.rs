@@ -32,18 +32,30 @@ macro_rules! impl_clone_accumulator_methods {
         }
 
         fn merge_accumulator(&mut self, other: &dyn AggregateCore) -> Result<(), String> {
-            let merged = self
+            let mut merged = self
                 .$acc_field
                 .merge_with(other)
                 .map_err(|error| error.to_string())?;
-            self.$acc_field = merged
-                .as_any()
-                .downcast_ref()
-                .cloned()
-                .ok_or("a merge changed the state's type")?;
+            // Move the merged state in; the box drops the old one.
+            std::mem::swap(
+                &mut self.$acc_field,
+                merged
+                    .as_any_mut()
+                    .downcast_mut()
+                    .ok_or("a merge changed the state's type")?,
+            );
             Ok(())
         }
     };
+}
+
+/// The default input rule of a numeric kernel: the value must be finite.
+pub(crate) fn finite_input(value: f64) -> Result<(), String> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err("accumulator input must be finite".into())
+    }
 }
 
 /// Shared update interface for query-time and precompute-time accumulation.
@@ -54,11 +66,7 @@ pub trait AccumulatorUpdater: Send {
     /// Validate an immutable precompute input before an updater can silently
     /// discard a value outside its representable domain.
     fn validate_single_input(&self, value: f64) -> Result<(), String> {
-        if value.is_finite() {
-            Ok(())
-        } else {
-            Err("accumulator input must be finite".into())
-        }
+        finite_input(value)
     }
 
     /// Update from one typed row value. Numeric kernels keep their Float64

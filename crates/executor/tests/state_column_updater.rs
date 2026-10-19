@@ -111,7 +111,9 @@ fn value_families() -> Vec<FieldDataType> {
         sketch(
             SketchAlgorithm::Kll,
             SketchParams::Kll {
-                k: 64,
+                // Above any group's sample count (at most 600): no
+                // compaction, so the random compaction coin never flips.
+                k: 1024,
                 failure_probability: None,
             },
         ),
@@ -168,8 +170,8 @@ fn keyed_families() -> Vec<FieldDataType> {
     ]
 }
 
-/// The full content of a state, for byte-for-byte comparison (a KLL's
-/// deterministic part, a UnivMon's answers).
+/// The full content of a state, for byte-for-byte comparison (a KLL's count
+/// and quantiles, a UnivMon's answers).
 fn fingerprint(state: &dyn AggregateCore) -> String {
     let any = state.as_any();
     if let Some(s) = any.downcast_ref::<ExactAccumulator>() {
@@ -177,9 +179,14 @@ fn fingerprint(state: &dyn AggregateCore) -> String {
     }
     if let Some(s) = any.downcast_ref::<DatasketchesKLLAccumulator>() {
         // asap_sketchlib seeds an unseeded KLL's compaction coin from the
-        // wall clock, so no two KLL builds are byte-identical (nor equal in
-        // weighted count), even of one input: compare its shape.
-        return format!("KLL k={}", s.inner.k());
+        // wall clock; with `k` above the sample count nothing compacts, so
+        // its count and quantiles are deterministic.
+        return format!(
+            "KLL k={} n={} q={:?}",
+            s.inner.k(),
+            s.inner.count(),
+            [0.1, 0.5, 0.9, 1.0].map(|q| s.inner.quantile(q).to_bits())
+        );
     }
     if let Some(s) = any.downcast_ref::<DDSketchAccumulator>() {
         return format!("{s:?}");
@@ -281,9 +288,7 @@ fn per_sample_build(
     }
     let shard = |part: &[(String, i64, f64, String)], update: &mut FeedSample<'_>| {
         let mut updater = StateColumnUpdater::new(family).unwrap();
-        for _ in 0..groups.len() {
-            updater.add_group().unwrap();
-        }
+        updater.ensure_groups(groups.len()).unwrap();
         for sample in part {
             update(&mut updater, groups[&sample.0], sample);
         }
@@ -297,7 +302,7 @@ fn per_sample_build(
     let (first, second) = samples.split_at(split);
     let mut updater = shard(first, &mut update);
     if sharded {
-        updater.merge(&shard(second, &mut update)).unwrap();
+        updater.merge(shard(second, &mut update)).unwrap();
     }
     assert_eq!(updater.group_count(), groups.len());
     let states = updater.seal();
@@ -504,4 +509,66 @@ fn per_sample_updates_keep_each_kernels_input_contract() {
     assert!(dd
         .update_item(group, &[Value::Utf8("a".into())], 1.0)
         .is_err());
+}
+
+// Counter shards must not overlap in time: their increases would be added
+// twice. Shard A has samples at t=10 and t=30, shard B at t=20 and t=40;
+// their merge is refused, not (v30-v10)+(v40-v20).
+#[test]
+fn merging_counter_shards_that_overlap_in_time_is_refused() {
+    for family in [
+        exact(ExactKind::Rate, ExactParams::Rate),
+        exact(ExactKind::Increase, ExactParams::Increase),
+    ] {
+        let shard = |samples: &[(i64, f64)]| {
+            let mut updater = StateColumnUpdater::new(&family).unwrap();
+            let group = updater.add_group().unwrap();
+            for &(ts, value) in samples {
+                updater.update(group, value, ts).unwrap();
+            }
+            updater
+        };
+        let mut a = shard(&[(10, 1.0), (30, 3.0)]);
+        let b = shard(&[(20, 2.0), (40, 4.0)]);
+        assert!(
+            matches!(a.merge(b), Err(asap_executor::Error::Invalid(_))),
+            "{family:?}"
+        );
+        // Disjoint shards merge, in either order.
+        let mut late = shard(&[(30, 3.0), (40, 4.0)]);
+        late.merge(shard(&[(10, 1.0), (20, 2.0)])).unwrap();
+        let mut early = shard(&[(10, 1.0), (20, 2.0)]);
+        early.merge(shard(&[(30, 3.0), (40, 4.0)])).unwrap();
+        let read = |updater: StateColumnUpdater| {
+            serde_json::to_string(
+                updater
+                    .seal()
+                    .state(0)
+                    .as_any()
+                    .downcast_ref::<ExactAccumulator>()
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(read(late), read(early));
+    }
+}
+
+// A group number the updater never added is bad input, not a panic.
+#[test]
+fn an_unknown_group_is_bad_input() {
+    let mut sum = StateColumnUpdater::new(&exact(ExactKind::Sum, ExactParams::Sum)).unwrap();
+    sum.add_group().unwrap();
+    assert!(matches!(
+        sum.update(1, 1.0, 0),
+        Err(asap_executor::Error::Invalid(_))
+    ));
+    let mut cms = StateColumnUpdater::new(&keyed_families()[0]).unwrap();
+    assert!(matches!(
+        cms.update_item(0, &[Value::Utf8("a".into())], 1.0),
+        Err(asap_executor::Error::Invalid(_))
+    ));
+    sum.ensure_groups(3).unwrap();
+    assert_eq!(sum.group_count(), 3);
+    sum.update(2, 1.0, 0).unwrap();
 }

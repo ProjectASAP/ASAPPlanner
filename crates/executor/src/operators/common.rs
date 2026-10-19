@@ -63,7 +63,7 @@ impl Workspace {
         })
     }
     /// Reserve exactly `bytes` in total.
-    pub(super) fn set(&mut self, bytes: usize) -> Result<(), Error> {
+    pub(super) fn set_bytes(&mut self, bytes: usize) -> Result<(), Error> {
         self.bytes = bytes;
         self.reservation.resize(bytes)
     }

@@ -7,57 +7,81 @@
 //! tuple of its part ids. A dictionary-encoded text column (a PromQL label
 //! or series identity) is resolved once per distinct dictionary entry per
 //! batch, so a series' group is found once per batch, not once per row.
+//! A group is labelled with its own first row's values, as the row
+//! operators labelled it.
 use crate::values::arrow_columns::{self, ColumnDepth};
 use crate::values::{Batch, Value};
 use crate::Error;
 use ahash::AHashMap as HashMap;
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array,
+    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array, StringArray,
     TimestampMillisecondArray,
 };
 use arrow::datatypes::UInt32Type;
 use planner_types::ir::schema::{DataType, FieldDataType};
 
+/// Approximate bytes of one hash-map entry beyond its key, for accounting.
+const MAP_ENTRY_BYTES: usize = 32;
+
+fn too_many(what: &str) -> Error {
+    Error::Invalid(format!("more than u32::MAX {what}"))
+}
+
 /// The distinct values of one group column, by part id.
 #[derive(Default)]
 struct ColumnParts {
     /// Part id by the value's [`Value::key`] bytes.
-    ids: HashMap<Vec<u8>, u32>,
-    /// The value of each part id.
-    values: Vec<Value>,
-    /// The key bytes of each part id.
-    keys: Vec<Box<[u8]>>,
+    part_of_key: HashMap<Box<[u8]>, u32>,
+    /// The first value seen of each part id.
+    first_values: Vec<Value>,
+    /// Memory the parts hold, in bytes.
+    memory_bytes: usize,
 }
 
 impl ColumnParts {
     /// The part id of the value with key bytes `key`; `value` makes it the
     /// first time.
-    fn part(&mut self, key: &[u8], value: impl FnOnce() -> Value) -> u32 {
-        if let Some(&id) = self.ids.get(key) {
-            return id;
+    fn part(&mut self, key: &[u8], value: impl FnOnce() -> Value) -> Result<u32, Error> {
+        if let Some(&id) = self.part_of_key.get(key) {
+            return Ok(id);
         }
-        let id = self.values.len() as u32;
-        self.ids.insert(key.to_vec(), id);
-        self.values.push(value());
-        self.keys.push(key.into());
-        id
+        let id = u32::try_from(self.first_values.len()).map_err(|_| too_many("group values"))?;
+        let value = value();
+        self.memory_bytes += key.len() + MAP_ENTRY_BYTES + value.bytes();
+        self.part_of_key.insert(key.into(), id);
+        self.first_values.push(value);
+        Ok(id)
+    }
+
+    /// Each part id's position in key order.
+    fn ranks(&self) -> Vec<u32> {
+        let mut by_key = self.part_of_key.iter().collect::<Vec<_>>();
+        by_key.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let mut rank = vec![0u32; by_key.len()];
+        for (position, (_, &part)) in by_key.into_iter().enumerate() {
+            rank[part as usize] = position as u32;
+        }
+        rank
     }
 }
 
 /// Group numbers for the rows of one grouped operator's input.
 pub(crate) struct GroupTable {
     /// The input's group columns.
-    columns: Vec<usize>,
+    group_columns: Vec<usize>,
     /// Per group column, its distinct values.
     parts: Vec<ColumnParts>,
     /// With one group column: the group of each part id.
     group_of_part: Vec<Option<u32>>,
     /// With several group columns: the group of each tuple of part ids.
-    group_of_parts: HashMap<Box<[u32]>, u32>,
+    group_of_part_tuple: HashMap<Box<[u32]>, u32>,
     /// Per group, its part ids, one per group column.
-    group_parts: Vec<Box<[u32]>>,
-    /// Memory the table holds beyond its states, in bytes.
-    memory_bytes: usize,
+    parts_of_group: Vec<Box<[u32]>>,
+    /// With several group columns: each group's own first values, its
+    /// labels (with one column, a part's first value is its group's).
+    labels_of_group: Vec<Box<[Value]>>,
+    /// Memory the groups hold beyond their columns' parts, in bytes.
+    group_memory_bytes: usize,
 }
 
 /// Value::key bytes of a non-null `Float64`, written into `out`.
@@ -73,90 +97,144 @@ fn float_key(value: f64, out: &mut Vec<u8>) {
     out.extend_from_slice(&bits.to_le_bytes());
 }
 
+/// The value of `batch`'s plain column `column` at `row`.
+fn value_at(batch: &Batch, column: usize, row: usize) -> Value {
+    let FieldDataType::Plain(dtype) = &batch.schema().fields[column].dtype else {
+        unreachable!("group columns are plain")
+    };
+    arrow_columns::decode(
+        batch.column(column).slice(row, 1).as_ref(),
+        dtype,
+        ColumnDepth::BatchColumn,
+    )
+    .remove(0)
+}
+
 impl GroupTable {
-    /// A table over the input's group `columns`; with none, every row is in
+    /// A table over the input's `group_columns`; with none, every row is in
     /// one group.
-    pub(crate) fn new(columns: Vec<usize>) -> Self {
+    pub(crate) fn new(group_columns: Vec<usize>) -> Self {
         Self {
-            parts: columns.iter().map(|_| ColumnParts::default()).collect(),
-            columns,
+            parts: group_columns
+                .iter()
+                .map(|_| ColumnParts::default())
+                .collect(),
+            group_columns,
             group_of_part: Vec::new(),
-            group_of_parts: HashMap::new(),
-            group_parts: Vec::new(),
-            memory_bytes: 0,
+            group_of_part_tuple: HashMap::new(),
+            parts_of_group: Vec::new(),
+            labels_of_group: Vec::new(),
+            group_memory_bytes: 0,
         }
     }
 
     /// The number of groups so far.
     pub(crate) fn len(&self) -> usize {
-        self.group_parts.len()
+        self.parts_of_group.len()
     }
 
-    /// Memory the table holds (labels, keys and lookup), in bytes.
+    /// Memory the table holds (values, keys, lookups and labels), in bytes.
     pub(crate) fn memory_bytes(&self) -> usize {
-        self.memory_bytes
+        self.group_memory_bytes
+            + self
+                .parts
+                .iter()
+                .map(|column| column.memory_bytes)
+                .sum::<usize>()
     }
 
     /// Add a group with no group column (the one global group).
-    pub(crate) fn add_empty_group(&mut self) -> u32 {
-        debug_assert!(self.columns.is_empty());
-        self.new_group(Box::new([]))
+    pub(crate) fn add_empty_group(&mut self) -> Result<u32, Error> {
+        debug_assert!(self.group_columns.is_empty());
+        self.new_group(Box::new([]), None)
     }
 
-    fn new_group(&mut self, parts: Box<[u32]>) -> u32 {
-        let group = self.group_parts.len() as u32;
-        let labels = parts
-            .iter()
-            .zip(&self.parts)
-            .map(|(&part, column)| column.values[part as usize].bytes())
-            .sum::<usize>();
-        self.memory_bytes += labels + parts.len() * 4 + 64;
-        if self.columns.len() == 1 {
+    fn new_group(&mut self, parts: Box<[u32]>, labels: Option<Box<[Value]>>) -> Result<u32, Error> {
+        let group = u32::try_from(self.parts_of_group.len()).map_err(|_| too_many("groups"))?;
+        self.group_memory_bytes += parts.len() * std::mem::size_of::<u32>() * 2
+            + MAP_ENTRY_BYTES
+            + labels
+                .iter()
+                .flat_map(|labels| labels.iter())
+                .map(Value::bytes)
+                .sum::<usize>();
+        if self.group_columns.len() == 1 {
             let part = parts[0] as usize;
             if self.group_of_part.len() <= part {
                 self.group_of_part.resize(part + 1, None);
             }
             self.group_of_part[part] = Some(group);
         } else {
-            self.group_of_parts.insert(parts.clone(), group);
+            self.group_of_part_tuple.insert(parts.clone(), group);
         }
-        self.group_parts.push(parts);
-        group
+        if let Some(labels) = labels {
+            self.labels_of_group.push(labels);
+        }
+        self.parts_of_group.push(parts);
+        Ok(group)
     }
 
     /// The part id of each row's value in group column `index`.
     fn column_parts(&mut self, batch: &Batch, index: usize) -> Result<Vec<u32>, Error> {
-        let column = self.columns[index];
+        let column = self.group_columns[index];
         let array = batch.column(column);
         let parts = &mut self.parts[index];
         let rows = batch.num_rows();
         let mut key = Vec::with_capacity(16);
         if let Some(dictionary) = array.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
-            // One lookup per distinct dictionary entry the batch uses.
+            // One lookup per distinct dictionary entry the batch uses: a
+            // dense slot per entry, or a map when the dictionary is much
+            // larger than the batch (a slice of a large batch).
             let texts = dictionary
                 .values()
                 .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
+                .downcast_ref::<StringArray>()
                 .expect("batch text columns are dictionaries over strings");
-            let mut part_of_entry: Vec<Option<u32>> = vec![None; texts.len()];
             let keys = dictionary.keys();
+            let dense = texts.len() <= 4 * rows + 64;
+            let mut slot_of_entry: Vec<Option<u32>> = if dense {
+                vec![None; texts.len()]
+            } else {
+                Vec::new()
+            };
+            let mut map_of_entry: HashMap<u32, u32> = HashMap::new();
             let mut null_part = None;
-            return Ok((0..rows)
+            let mut lookup =
+                |entry: u32, parts: &mut ColumnParts, key: &mut Vec<u8>| -> Result<u32, Error> {
+                    let cached = if dense {
+                        slot_of_entry[entry as usize]
+                    } else {
+                        map_of_entry.get(&entry).copied()
+                    };
+                    if let Some(part) = cached {
+                        return Ok(part);
+                    }
+                    let text = texts.value(entry as usize);
+                    key.clear();
+                    key.push(4);
+                    key.extend_from_slice(text.as_bytes());
+                    let part = parts.part(key, || Value::Utf8(text.into()))?;
+                    if dense {
+                        slot_of_entry[entry as usize] = Some(part);
+                    } else {
+                        map_of_entry.insert(entry, part);
+                    }
+                    Ok(part)
+                };
+            return (0..rows)
                 .map(|row| {
                     if keys.is_null(row) {
-                        *null_part.get_or_insert_with(|| parts.part(&[0], || Value::Null))
+                        if let Some(part) = null_part {
+                            return Ok(part);
+                        }
+                        let part = parts.part(&[0], || Value::Null)?;
+                        null_part = Some(part);
+                        Ok(part)
                     } else {
-                        let entry = keys.value(row) as usize;
-                        *part_of_entry[entry].get_or_insert_with(|| {
-                            let text = texts.value(entry);
-                            key.clear();
-                            key.push(4);
-                            key.extend_from_slice(text.as_bytes());
-                            parts.part(&key, || Value::Utf8(text.into()))
-                        })
+                        lookup(keys.value(row), parts, &mut key)
                     }
                 })
-                .collect());
+                .collect();
         }
         let any = array.as_any();
         macro_rules! primitive {
@@ -164,7 +242,7 @@ impl GroupTable {
                 let typed = any
                     .downcast_ref::<$array>()
                     .expect("declared column layout");
-                return Ok((0..rows)
+                return (0..rows)
                     .map(|row| {
                         key.clear();
                         if typed.is_null(row) {
@@ -178,7 +256,7 @@ impl GroupTable {
                             parts.part(&key, || ($value)(v))
                         }
                     })
-                    .collect());
+                    .collect();
             }};
         }
         let FieldDataType::Plain(dtype) = &batch.schema().fields[column].dtype else {
@@ -216,7 +294,7 @@ impl GroupTable {
                     .into_iter()
                     .map(|value| {
                         let key = value.key()?;
-                        Ok(parts.part(&key, || value))
+                        parts.part(&key, || value)
                     })
                     .collect()
             }
@@ -227,71 +305,76 @@ impl GroupTable {
     /// of group values.
     pub(crate) fn group_ids(&mut self, batch: &Batch) -> Result<Vec<u32>, Error> {
         let rows = batch.num_rows();
-        match self.columns.len() {
+        match self.group_columns.len() {
             0 => {
-                if rows > 0 && self.group_parts.is_empty() {
-                    self.new_group(Box::new([]));
+                if rows > 0 && self.parts_of_group.is_empty() {
+                    self.new_group(Box::new([]), None)?;
                 }
                 Ok(vec![0; rows])
             }
             1 => {
                 let parts = self.column_parts(batch, 0)?;
-                Ok(parts
+                parts
                     .into_iter()
                     .map(
                         |part| match self.group_of_part.get(part as usize).copied().flatten() {
-                            Some(group) => group,
-                            None => self.new_group(Box::new([part])),
+                            Some(group) => Ok(group),
+                            None => self.new_group(Box::new([part]), None),
                         },
                     )
-                    .collect())
+                    .collect()
             }
             width => {
                 let columns = (0..width)
                     .map(|index| self.column_parts(batch, index))
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut key = vec![0u32; width];
-                Ok((0..rows)
+                (0..rows)
                     .map(|row| {
                         for (slot, parts) in key.iter_mut().zip(&columns) {
                             *slot = parts[row];
                         }
-                        match self.group_of_parts.get(key.as_slice()) {
-                            Some(&group) => group,
-                            None => self.new_group(key.clone().into_boxed_slice()),
+                        match self.group_of_part_tuple.get(key.as_slice()) {
+                            Some(&group) => Ok(group),
+                            None => {
+                                let labels = self
+                                    .group_columns
+                                    .iter()
+                                    .map(|&column| value_at(batch, column, row))
+                                    .collect();
+                                self.new_group(key.clone().into_boxed_slice(), Some(labels))
+                            }
                         }
                     })
-                    .collect())
+                    .collect()
             }
         }
     }
 
-    /// Group `group`'s value in group column `index`.
+    /// Group `group`'s label in group column `index`: its first row's value.
     pub(crate) fn label(&self, group: u32, index: usize) -> &Value {
-        let part = self.group_parts[group as usize][index];
-        &self.parts[index].values[part as usize]
+        if let Some(labels) = self.labels_of_group.get(group as usize) {
+            return &labels[index];
+        }
+        let part = self.parts_of_group[group as usize][index];
+        &self.parts[index].first_values[part as usize]
     }
 
     /// The groups in the order of their group values' keys: the order the
     /// row-at-a-time operators emitted groups in (a `BTreeMap` by key).
     /// Each column's parts are ranked once by key; groups sort by rank.
-    pub(crate) fn groups_in_key_order(&self) -> Result<Vec<u32>, Error> {
+    pub(crate) fn groups_in_key_order(&self) -> Vec<u32> {
         let ranks = self
             .parts
             .iter()
-            .map(|column| {
-                let mut order = (0..column.keys.len()).collect::<Vec<_>>();
-                order.sort_unstable_by(|&a, &b| column.keys[a].cmp(&column.keys[b]));
-                let mut rank = vec![0u32; order.len()];
-                for (position, part) in order.into_iter().enumerate() {
-                    rank[part] = position as u32;
-                }
-                rank
-            })
+            .map(ColumnParts::ranks)
             .collect::<Vec<_>>();
         let mut groups = (0..self.len() as u32).collect::<Vec<_>>();
         groups.sort_unstable_by(|&a, &b| {
-            let (a, b) = (&self.group_parts[a as usize], &self.group_parts[b as usize]);
+            let (a, b) = (
+                &self.parts_of_group[a as usize],
+                &self.parts_of_group[b as usize],
+            );
             a.iter()
                 .zip(b.iter())
                 .zip(&ranks)
@@ -299,7 +382,7 @@ impl GroupTable {
                 .find(|order| order.is_ne())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        Ok(groups)
+        groups
     }
 
     /// The group columns of the groups `order`, in the input's types.
@@ -308,7 +391,7 @@ impl GroupTable {
         input: &crate::values::SchemaRef,
         order: &[u32],
     ) -> Result<Vec<ArrayRef>, Error> {
-        self.columns
+        self.group_columns
             .iter()
             .enumerate()
             .map(|(index, &column)| {
@@ -397,10 +480,68 @@ mod tests {
                 }
             }
             assert_eq!(table.len(), reference.len(), "{columns:?}");
-            let order = table.groups_in_key_order().unwrap();
+            let order = table.groups_in_key_order();
             for (group, rows) in order.iter().zip(reference.values()) {
                 assert!(rows.iter().all(|&row| ids[row] == *group), "{columns:?}");
             }
+        }
+    }
+
+    // A group's labels are its own first row's values, as the row operators
+    // kept them: with two group columns, the group (0.0, "a") seen after
+    // (-0.0, "b") is labelled 0.0, not the -0.0 its float part was first
+    // seen with.
+    #[test]
+    fn each_group_keeps_its_own_first_values() {
+        let field = |name: &str, dtype| Field {
+            name: name.into(),
+            dtype: FieldDataType::Plain(dtype),
+            nullable: false,
+            table: None,
+        };
+        let schema = Arc::new(Schema {
+            fields: vec![
+                field("float", DataType::Float64),
+                field("text", DataType::Utf8),
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        let row = |f: f64, t: &str| vec![Value::Float64(f), Value::Utf8(t.into())];
+        let batch = Batch::try_new(
+            schema.clone(),
+            vec![
+                row(-0.0, "b"),
+                row(0.0, "a"),
+                row(0.0, "b"),
+                row(-f64::NAN, "a"),
+            ],
+        )
+        .unwrap();
+        for columns in [vec![0, 1], vec![0]] {
+            let mut table = GroupTable::new(columns.clone());
+            table.group_ids(&batch).unwrap();
+            let groups = (0..table.len() as u32).collect::<Vec<_>>();
+            let labels = table.label_arrays(&schema, &groups).unwrap();
+            let floats = labels[0]
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>();
+            let expected: &[f64] = if columns.len() == 2 {
+                &[-0.0, 0.0, -f64::NAN]
+            } else {
+                &[-0.0, -f64::NAN]
+            };
+            assert_eq!(
+                floats,
+                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{columns:?}"
+            );
         }
     }
 }
