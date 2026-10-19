@@ -10,6 +10,9 @@ decisions, and evolving proposals.
 - [Planner input, output, and workflow](architecture/input-output-workflow.md)
   defines the user-facing contract, required and optional inputs, output data
   structures, and initial-planning and replanning workflows.
+- [Planner layering: stage components, algorithms and code interfaces](planner-layering-components.md)
+  describes how each stage and pass of the planning-stages design is built on
+  `main`: its components, its algorithm, and its code interface.
 - [Decisions](decisions/README.md) records accepted local design choices.
 - [Proposals](proposals/README.md) contains evolving designs and research
   directions; check each document’s status before treating it as current.
