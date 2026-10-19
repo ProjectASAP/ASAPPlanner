@@ -39,18 +39,33 @@ impl StateColumn {
     /// here: callers pass states their own kernel built for `family`, or
     /// states [`super::Batch::try_new`] validated.
     pub(crate) fn from_objects(family: FieldDataType, states: Vec<Arc<dyn AggregateCore>>) -> Self {
-        let shared = states
-            .iter()
-            .filter_map(|state| state.shared_state())
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let state_memory_bytes = states
-            .iter()
-            .map(|state| state.approx_memory_bytes())
-            .sum::<usize>()
-            + shared.values().sum::<usize>();
+        let state_memory_bytes = objects_memory_bytes(states.iter());
         Self {
             family,
             storage: StateStorage::Objects(states),
+            state_memory_bytes,
+            held_outside_run: AtomicBool::new(false),
+        }
+    }
+
+    /// The column of kernel objects `states` taken from other columns, each
+    /// with whether something outside the run holds it. Charged its pointer
+    /// slots plus the states the run holds (built or copied by it); states
+    /// held outside the run are shared by pointer, not charged again.
+    pub(crate) fn from_objects_of(
+        family: FieldDataType,
+        states: Vec<(Arc<dyn AggregateCore>, bool)>,
+    ) -> Self {
+        let state_memory_bytes = states.len() * std::mem::size_of::<Arc<dyn AggregateCore>>()
+            + objects_memory_bytes(
+                states
+                    .iter()
+                    .filter(|(_, held_outside_run)| !held_outside_run)
+                    .map(|(state, _)| state),
+            );
+        Self {
+            family,
+            storage: StateStorage::Objects(states.into_iter().map(|(state, _)| state).collect()),
             state_memory_bytes,
             held_outside_run: AtomicBool::new(false),
         }
@@ -102,6 +117,11 @@ impl StateColumn {
         }
     }
 
+    /// Whether something outside any run holds these states.
+    pub(crate) fn is_held_outside_run(&self) -> bool {
+        self.held_outside_run.load(Ordering::Relaxed)
+    }
+
     /// Records that something outside any run holds these states.
     pub(crate) fn mark_held_outside_run(&self) {
         self.held_outside_run.store(true, Ordering::Relaxed);
@@ -110,12 +130,27 @@ impl StateColumn {
     /// Memory a run that holds this column is charged for its states: none
     /// when something outside the run holds them, else the memory they hold.
     pub(crate) fn charged_state_bytes(&self) -> usize {
-        if self.held_outside_run.load(Ordering::Relaxed) {
+        if self.is_held_outside_run() {
             0
         } else {
             self.state_memory_bytes
         }
     }
+}
+
+/// The memory kernel objects `states` hold: each one's own footprint, plus
+/// each state shared by several of them (one Hydra grid) once.
+fn objects_memory_bytes<'a>(states: impl Iterator<Item = &'a Arc<dyn AggregateCore>>) -> usize {
+    let mut shared = std::collections::BTreeMap::new();
+    let own = states
+        .map(|state| {
+            if let Some((id, bytes)) = state.shared_state() {
+                shared.insert(id, bytes);
+            }
+            state.approx_memory_bytes()
+        })
+        .sum::<usize>();
+    own + shared.values().sum::<usize>()
 }
 
 impl std::fmt::Debug for StateColumn {

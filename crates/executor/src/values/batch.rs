@@ -347,10 +347,16 @@ impl Batch {
                     family,
                     used.iter().map(|&index| records[index].clone()).collect(),
                 ),
-                super::StateStorage::Objects(_) => StateColumn::from_objects(
+                // Shared by pointer: stored sketches are not charged again.
+                super::StateStorage::Objects(_) => StateColumn::from_objects_of(
                     family,
                     used.iter()
-                        .map(|&index| state_column.state(index))
+                        .map(|&index| {
+                            (
+                                state_column.state(index),
+                                state_column.is_held_outside_run(),
+                            )
+                        })
                         .collect(),
                 ),
             }));
@@ -477,7 +483,16 @@ impl Batch {
                             super::StateStorage::Exact(states) if all_exact => {
                                 records.push(states[index as usize].clone())
                             }
-                            _ => objects.push(state_column.state(index as usize)),
+                            // An object is shared by pointer (not charged
+                            // again when held outside the run); an exact
+                            // record becomes a new object.
+                            super::StateStorage::Objects(_) => objects.push((
+                                state_column.state(index as usize),
+                                state_column.is_held_outside_run(),
+                            )),
+                            super::StateStorage::Exact(_) => {
+                                objects.push((state_column.state(index as usize), false))
+                            }
                         }
                         next
                     });
@@ -489,7 +504,7 @@ impl Batch {
             states.push(Some(Arc::new(if all_exact {
                 StateColumn::from_exact(family, records)
             } else {
-                StateColumn::from_objects(family, objects)
+                StateColumn::from_objects_of(family, objects)
             })));
         }
         Self::from_parts(schema.clone(), arrays, states, rows)
@@ -1088,5 +1103,107 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(sums, vec![30.0, 10.0, 30.0, 2.0]);
+    }
+
+    /// A batch of `count` rows, one state each: KLL (k = 200) objects, or
+    /// exact sums.
+    fn state_batch(count: u32, exact: bool) -> Batch {
+        use crate::StateColumnUpdater;
+        use planner_types::ir::schema::{
+            ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams,
+        };
+        let family = if exact {
+            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        } else {
+            FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k: 200,
+                        failure_probability: None,
+                    },
+                ),
+                Default::default(),
+            )
+        };
+        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        updater.ensure_groups(count as usize).unwrap();
+        for group in 0..count {
+            updater.update(group, f64::from(group), 0).unwrap();
+        }
+        let schema = Arc::new(Schema {
+            fields: vec![Field {
+                name: "state".into(),
+                dtype: family,
+                nullable: false,
+                table: None,
+            }],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        Batch::try_from_columns(
+            schema,
+            vec![BatchColumn::States {
+                indices: UInt32Array::from_iter_values(0..count),
+                states: Arc::new(updater.seal()),
+            }],
+        )
+        .unwrap()
+    }
+
+    /// The bytes `batch` is charged for its state columns.
+    fn charged_states(batch: &Batch) -> usize {
+        batch
+            .state_columns
+            .iter()
+            .flatten()
+            .map(|column| column.charged_state_bytes())
+            .sum()
+    }
+
+    // Compacting or concatenating stored (held outside the run) object
+    // columns shares their sketches by pointer: the new column is charged
+    // its pointer slots, not the sketches.
+    #[test]
+    fn derived_columns_of_stored_sketches_charge_only_pointers() {
+        let stored = state_batch(100, false);
+        stored.mark_states_held_outside_run();
+        let pointers =
+            |states: usize| states * std::mem::size_of::<Arc<dyn crate::AggregateCore>>();
+        // Compaction: 10 of 100 rows kept.
+        let keep = BooleanArray::from((0..100).map(|i| i % 10 == 0).collect::<Vec<_>>());
+        let kept = stored.filter(&keep).unwrap();
+        assert_eq!(kept.state_column(0).unwrap().len(), 10);
+        assert_eq!(charged_states(&kept), pointers(10));
+        // Concat of two different stored columns.
+        let other = state_batch(50, false);
+        other.mark_states_held_outside_run();
+        let joined = Batch::concat(stored.schema(), &[stored.clone(), other]).unwrap();
+        assert_eq!(joined.state_column(0).unwrap().len(), 150);
+        assert_eq!(charged_states(&joined), pointers(150));
+        // A run-built column concatenated with a stored one: only the
+        // run-built sketches are charged in full.
+        let built = state_batch(50, false);
+        let built_bytes = charged_states(&built);
+        let mixed = Batch::concat(&stored.schema().clone(), &[stored, built]).unwrap();
+        assert_eq!(charged_states(&mixed), pointers(150) + built_bytes);
+    }
+
+    // Exact records are copied, so compacting or concatenating stored exact
+    // columns is charged for the copied records.
+    #[test]
+    fn derived_columns_of_stored_exact_records_charge_the_copies() {
+        let stored = state_batch(100, true);
+        stored.mark_states_held_outside_run();
+        assert_eq!(charged_states(&stored), 0);
+        let record = std::mem::size_of::<crate::summary_kernels::exact::ScalarState>();
+        let keep = BooleanArray::from((0..100).map(|i| i % 10 == 0).collect::<Vec<_>>());
+        let kept = stored.filter(&keep).unwrap();
+        assert_eq!(charged_states(&kept), 10 * record);
+        let other = state_batch(50, true);
+        other.mark_states_held_outside_run();
+        let joined = Batch::concat(&stored.schema().clone(), &[stored, other]).unwrap();
+        assert!(charged_states(&joined) >= 150 * record);
     }
 }

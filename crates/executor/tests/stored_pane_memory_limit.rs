@@ -20,6 +20,11 @@ const PANES: usize = 12;
 /// One pane of `SERIES` KLL states (k = 200, about 11 kB charged each, so
 /// about 11 MB per pane), keyed by series.
 fn pane() -> (Arc<Schema>, Batch) {
+    pane_of(SERIES)
+}
+
+/// One pane of `series` KLL states (k = 200), keyed by series.
+fn pane_of(series_count: u32) -> (Arc<Schema>, Batch) {
     let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::Kll,
@@ -50,11 +55,11 @@ fn pane() -> (Arc<Schema>, Batch) {
         closed: false,
     });
     let mut updater = StateColumnUpdater::new(&family).unwrap();
-    updater.ensure_groups(SERIES as usize).unwrap();
-    for series in 0..SERIES {
+    updater.ensure_groups(series_count as usize).unwrap();
+    for series in 0..series_count {
         updater.update(series, f64::from(series), 0).unwrap();
     }
-    let names = (0..SERIES)
+    let names = (0..series_count)
         .map(|series| format!("s{series}"))
         .collect::<Vec<_>>();
     let series: DictionaryArray<UInt32Type> = names.iter().map(String::as_str).collect();
@@ -63,7 +68,7 @@ fn pane() -> (Arc<Schema>, Batch) {
         vec![
             BatchColumn::Plain(Arc::new(series)),
             BatchColumn::States {
-                indices: UInt32Array::from_iter_values(0..SERIES),
+                indices: UInt32Array::from_iter_values(0..series_count),
                 states: Arc::new(updater.seal()),
             },
         ],
@@ -124,4 +129,48 @@ fn a_merge_that_allocates_past_the_limit_still_fails() {
         merge_stored_panes(4 << 20),
         Err(Error::MemoryLimit)
     ));
+}
+
+// A Limit keeping 49% of a stored pane of 2,000 KLLs (about 21 MB of
+// states) compacts its state column, and the compacted column shares the
+// stored sketches by pointer: under an 8 MiB limit it is charged for the
+// pointers, not the sketches. Keeping 51% (no compaction) fits too.
+#[test]
+fn compacting_a_stored_pane_does_not_charge_its_shared_sketches() {
+    for kept in [980, 1_020] {
+        let (schema, pane) = pane_of(2_000);
+        let mut dag = PhysicalDAG::default();
+        dag.add(
+            0,
+            vec![],
+            Operator::source(schema.clone(), vec![pane]).unwrap(),
+        )
+        .unwrap();
+        dag.add(
+            1,
+            vec![0],
+            Operator::limit(schema, kept, 0, vec![]).unwrap(),
+        )
+        .unwrap();
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: 0,
+                revision: 1,
+            },
+            Limits {
+                max_bytes: 8 << 20,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        let rows = block_on(async {
+            let mut output = dag.execute(&[1], context).unwrap().remove(0);
+            let mut rows = 0;
+            while let Some(batch) = output.next().await {
+                rows += batch?.num_rows();
+            }
+            Ok::<_, Error>(rows)
+        });
+        assert_eq!(rows.unwrap(), kept as usize, "keeping {kept} rows");
+    }
 }
