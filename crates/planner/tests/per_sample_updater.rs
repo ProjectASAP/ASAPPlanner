@@ -193,3 +193,221 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
     assert_eq!(from_dag.len(), 3);
     assert_eq!(per_sample, from_dag);
 }
+
+/// Run `ids` of `dag` with `inputs` bound at their nodes, in `scope`: each
+/// id's answer rows as (series labels, value), sorted.
+async fn answers(
+    dag: &asap_planner::PhysicalASAPDAG,
+    inputs: BTreeMap<u64, asap_executor::values::Batch>,
+    ids: &[u64],
+    scope: Scope,
+) -> Vec<Vec<(BTreeMap<String, String>, f64)>> {
+    // What each bound input holds: its schema.
+    let contracts = inputs
+        .iter()
+        .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
+        .collect();
+    // The executor's plan for `ids`, cut at the bound inputs.
+    let compiled = compile(dag, contracts, ids).unwrap();
+    // Each input as an in-memory source.
+    let sources = inputs
+        .into_iter()
+        .map(|(id, batch)| {
+            let source = ExecutorOperator::source(batch.schema().clone(), vec![batch]).unwrap();
+            (id, Box::new(source) as Source<'_>)
+        })
+        .collect();
+    let instance = compiled.instantiate(sources).unwrap();
+    let context = RunContext::new(scope, Limits::default()).unwrap();
+    let mut results = Vec::new();
+    for mut output in instance.execute(compiled.roots(), context).unwrap() {
+        let mut rows = Vec::new();
+        while let Some(batch) = output.next().await {
+            let batch = batch.unwrap();
+            for row in batch.rows() {
+                let labels = series_labels_of_output_row(batch.schema(), row).unwrap();
+                let value = row
+                    .iter()
+                    .find_map(|v| match v {
+                        asap_executor::values::Value::Float64(v) => Some(*v),
+                        _ => None,
+                    })
+                    .unwrap();
+                rows.push((labels, value));
+            }
+        }
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        results.push(rows);
+    }
+    results
+}
+
+/// A runtime builds every stored pane sample by sample, installs each as a
+/// batch with `Batch::try_from_columns` (no DAG run), and answers the query
+/// from them: the same answers as the plan's query-time reference over the
+/// raw samples.
+#[tokio::test]
+async fn panes_installed_from_per_sample_states_answer_the_query() {
+    use asap_executor::arrow::array::{DictionaryArray, TimestampMillisecondArray, UInt32Array};
+    use asap_executor::arrow::datatypes::UInt32Type;
+    use asap_executor::series_identity;
+    use asap_executor::values::{Batch, BatchColumn};
+    use std::sync::Arc;
+    // What the user writes: the 5-minute rate of a counter, every minute,
+    // exactly, over 1,000 series sampled every 15 s.
+    let workload: PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "rate(http_requests_total[5m])",
+              "demand": {"fixed_interval": 60000},
+              "requirements": {},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 66.7}},
+              "sources": {"http_requests_total": {"series_count": 1000, "sample_interval": 15000}}}}"#,
+    )
+    .unwrap();
+    // No raw samples retained: five one-minute rate panes built at ingestion.
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan = plan_installable(UserInput::new(
+        &workload,
+        FrontendInput::Promql { histograms: None },
+        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+    ))
+    .await
+    .unwrap();
+    let dag = &plan.dag.dag;
+    // What the runtime received: 3 series, a counter sample every 15 s over
+    // the hour (one series resets), the last at the evaluation time.
+    let samples: Vec<Sample> = ["a", "b", "c"]
+        .iter()
+        .flat_map(|instance| {
+            let mut value = 0.0;
+            (1..=EVALUATION_MS / 15_000).map(move |step| {
+                value = if *instance == "c" && step == 230 {
+                    3.0
+                } else {
+                    value + 7.0
+                };
+                Sample {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "http_requests_total".to_string()),
+                        ("instance".to_string(), instance.to_string()),
+                    ]),
+                    timestamp_ms: step * 15_000,
+                    value,
+                }
+            })
+        })
+        .collect();
+    // Every stored pane, built sample by sample and installed as a batch.
+    let mut panes = BTreeMap::new();
+    for output in &plan.stored_outputs {
+        // The pane's window, `(start_ms, end_ms]`, at this evaluation.
+        let (start_ms, end_ms) = output.pane.bounds_ms(EVALUATION_MS);
+        // The stored node's family and output schema, from the plan.
+        let node = dag.nodes.iter().find(|n| n.id == output.node_id).unwrap();
+        let mut id = output.node_id;
+        let family = loop {
+            let node = dag.nodes.iter().find(|n| n.id == id).unwrap();
+            if let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &node.payload {
+                break family.clone();
+            }
+            id = dag
+                .edges
+                .iter()
+                .find(|e| e.consumer == id)
+                .unwrap()
+                .producer;
+        };
+        // The runtime's per-sample build: a group per series ...
+        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        let mut identities: Vec<String> = Vec::new();
+        let mut group_of_series: BTreeMap<BTreeMap<String, String>, u32> = BTreeMap::new();
+        for sample in samples
+            .iter()
+            .filter(|s| start_ms < s.timestamp_ms && s.timestamp_ms <= end_ms)
+        {
+            let group = match group_of_series.get(&sample.labels) {
+                Some(&group) => group,
+                None => {
+                    let group = updater.add_group().unwrap();
+                    group_of_series.insert(sample.labels.clone(), group);
+                    identities.push(series_identity(&sample.labels).unwrap());
+                    group
+                }
+            };
+            updater
+                .update(group, sample.value, sample.timestamp_ms)
+                .unwrap();
+        }
+        // ... sealed at pane close: one rate record per series.
+        let states = Arc::new(updater.seal());
+        // The pane's columns, in the stored node's schema: the pane end as
+        // its time, each series' state, and its identity.
+        let schema = Arc::new(node.output_schema.clone());
+        let groups = identities.len();
+        let columns = schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                if Some(index) == schema.time_index {
+                    BatchColumn::Values(Arc::new(TimestampMillisecondArray::from(vec![
+                        end_ms;
+                        groups
+                    ])))
+                } else if !field.is_plain() {
+                    BatchColumn::States {
+                        indices: UInt32Array::from_iter_values(0..groups as u32),
+                        states: states.clone(),
+                    }
+                } else {
+                    BatchColumn::Values(Arc::new(
+                        identities
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<DictionaryArray<UInt32Type>>(),
+                    ))
+                }
+            })
+            .collect();
+        // Installed without running the DAG.
+        panes.insert(
+            output.node_id as u64,
+            Batch::try_from_columns(schema, columns).unwrap(),
+        );
+    }
+    assert_eq!(panes.len(), 5);
+    let query = Scope::Query {
+        evaluation_time_ms: EVALUATION_MS,
+        revision: 1,
+    };
+    let roots: Vec<u64> = plan.queries.iter().map(|q| q.root_node_id as u64).collect();
+    // The query's answers from the installed panes.
+    let from_panes = answers(dag, panes, &roots, query.clone()).await;
+    // The plan's query-time reference over the raw samples.
+    let reference = plan.query_time_reference().unwrap();
+    let raw = reference
+        .query_time_raw_windows
+        .iter()
+        .map(|window| {
+            let selector = RawSampleSelector::new(&reference.dag.dag, window).unwrap();
+            let (_, end_ms) = window.bounds_ms(EVALUATION_MS);
+            (
+                window.time_range_node_id as u64,
+                selector.window_batch(end_ms, &samples).unwrap(),
+            )
+        })
+        .collect();
+    let reference_roots: Vec<u64> = reference
+        .queries
+        .iter()
+        .map(|q| q.root_node_id as u64)
+        .collect();
+    let expected = answers(&reference.dag.dag, raw, &reference_roots, query).await;
+    // One rate per series, equal to the reference.
+    assert_eq!(from_panes[0].len(), 3);
+    assert_eq!(from_panes, expected);
+}

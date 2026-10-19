@@ -43,6 +43,21 @@ impl std::fmt::Debug for Batch {
     }
 }
 
+/// One column of a batch built with [`Batch::try_from_columns`].
+pub enum BatchColumn {
+    /// A plain column: an Arrow array in its Planner type's layout (see
+    /// [`super::arrow_columns`]: text is `DictionaryArray<UInt32Type>` over
+    /// `Utf8`, a timestamp `TimestampMillisecondArray`, …).
+    Values(ArrayRef),
+    /// A summary column: row `i`'s state is `states.state(indices[i])`.
+    States {
+        /// Each row's state index; never NULL.
+        indices: UInt32Array,
+        /// The states, e.g. a sealed [`crate::StateColumnUpdater`].
+        states: Arc<StateColumn>,
+    },
+}
+
 /// The Arrow schema of a Planner schema's columns.
 fn arrow_schema(schema: &SchemaRef) -> Arc<ArrowSchema> {
     Arc::new(ArrowSchema::new(
@@ -136,6 +151,73 @@ impl Batch {
         // `memory_bytes`).
         let _ = batch.decoded_rows.set(rows);
         Ok(batch)
+    }
+
+    /// The batch of `columns` in `schema`, one per field, without running
+    /// the DAG: how a runtime installs states it built sample by sample
+    /// (a sealed [`crate::StateColumnUpdater`]) as a stored pane. Bad input
+    /// when a column's count, layout, length or nullability differs from
+    /// the schema, a summary field's states are of another family, or a
+    /// state index is NULL or past its states.
+    pub fn try_from_columns(schema: SchemaRef, columns: Vec<BatchColumn>) -> Result<Self, Error> {
+        validate_schema(&schema)?;
+        if columns.len() != schema.fields.len() {
+            return Err(Error::Invalid(
+                "column count differs from Planner schema".into(),
+            ));
+        }
+        let row_count = columns.first().map_or(0, |column| match column {
+            BatchColumn::Values(array) => array.len(),
+            BatchColumn::States { indices, .. } => indices.len(),
+        });
+        let mut arrays = Vec::with_capacity(columns.len());
+        let mut state_columns = Vec::with_capacity(columns.len());
+        for (column, field) in columns.into_iter().zip(&schema.fields) {
+            match (column, &field.dtype) {
+                (BatchColumn::Values(array), FieldDataType::Plain(dtype)) => {
+                    if array.data_type()
+                        != &arrow_columns::arrow_type(dtype, ColumnDepth::BatchColumn)
+                    {
+                        return Err(Error::Invalid(format!(
+                            "column {} is not in its type's Arrow layout",
+                            field.name
+                        )));
+                    }
+                    arrays.push(array);
+                    state_columns.push(None);
+                }
+                (BatchColumn::States { indices, states }, family)
+                    if !matches!(family, FieldDataType::Plain(_)) =>
+                {
+                    if states.family() != family {
+                        return Err(Error::Invalid(format!(
+                            "states of {} are of another family",
+                            field.name
+                        )));
+                    }
+                    if indices.null_count() > 0
+                        || indices.values().iter().any(|&i| i as usize >= states.len())
+                    {
+                        return Err(Error::Invalid(format!(
+                            "a state index of {} is NULL or past its states",
+                            field.name
+                        )));
+                    }
+                    arrays.push(Arc::new(indices));
+                    state_columns.push(Some(states));
+                }
+                _ => {
+                    return Err(Error::Invalid(format!(
+                        "column {} is a summary column exactly when its field is",
+                        field.name
+                    )))
+                }
+            }
+        }
+        if arrays.iter().any(|array| array.len() != row_count) {
+            return Err(Error::Invalid("columns differ in length".into()));
+        }
+        Self::from_parts(schema, arrays, state_columns, row_count)
     }
 
     /// The batch of `arrays` in `schema`, with `state_columns` for its
@@ -560,5 +642,101 @@ mod tests {
         assert!(Batch::try_new(schema.clone(), vec![vec![Value::Null]]).is_err());
         assert!(Batch::try_new(schema.clone(), vec![vec![Value::Float64(1.)]]).is_err());
         assert!(Batch::try_new(schema, vec![vec![]]).is_err());
+    }
+
+    // A runtime turns sealed per-sample states and their group columns into
+    // a batch: the states and labels read back as the rows say.
+    #[test]
+    fn a_batch_from_columns_holds_sealed_states_and_labels() {
+        use crate::StateColumnUpdater;
+        use planner_types::ir::schema::{ExactKind, ExactParams};
+        let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        updater.ensure_groups(2).unwrap();
+        updater.update(0, 1.5, 0).unwrap();
+        updater.update(1, 4.0, 0).unwrap();
+        updater.update(0, 2.0, 0).unwrap();
+        let states = Arc::new(updater.seal());
+        let schema = Arc::new(Schema {
+            fields: vec![
+                field("job", DataType::Utf8, false),
+                Field {
+                    name: "state".into(),
+                    dtype: family.clone(),
+                    nullable: false,
+                    table: None,
+                },
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        let jobs: ArrayRef = Arc::new(
+            ["api", "web"]
+                .into_iter()
+                .collect::<arrow::array::DictionaryArray<arrow::datatypes::UInt32Type>>(),
+        );
+        let batch = Batch::try_from_columns(
+            schema.clone(),
+            vec![
+                BatchColumn::Values(jobs.clone()),
+                BatchColumn::States {
+                    indices: UInt32Array::from(vec![1, 0]),
+                    states: states.clone(),
+                },
+            ],
+        )
+        .unwrap();
+        let rows = batch.rows();
+        let sum = |value: &Value| {
+            let Value::Summary { state, .. } = value else {
+                panic!()
+            };
+            state
+                .as_any()
+                .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+                .unwrap()
+                .evaluation(crate::Statistic::Sum, None, None)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(
+            format!("{:?}", rows[0][0]),
+            format!("{:?}", Value::Utf8("api".into()))
+        );
+        assert_eq!((sum(&rows[0][1]), sum(&rows[1][1])), (4.0, 3.5));
+        // Bad input: a column of another layout, a state index past the
+        // column, another family, or columns of different lengths.
+        let plain_text: ArrayRef = Arc::new(arrow::array::StringArray::from(vec!["api", "web"]));
+        let indices = |values: Vec<u32>| BatchColumn::States {
+            indices: UInt32Array::from(values),
+            states: states.clone(),
+        };
+        let other_family = Arc::new(
+            StateColumnUpdater::new(&FieldDataType::ExactAggregate(
+                ExactKind::Count,
+                ExactParams::Count,
+            ))
+            .unwrap()
+            .seal(),
+        );
+        for columns in [
+            vec![BatchColumn::Values(plain_text), indices(vec![0, 1])],
+            vec![BatchColumn::Values(jobs.clone()), indices(vec![0, 2])],
+            vec![
+                BatchColumn::Values(jobs.clone()),
+                BatchColumn::States {
+                    indices: UInt32Array::from(vec![0, 0]),
+                    states: other_family,
+                },
+            ],
+            vec![BatchColumn::Values(jobs.clone()), indices(vec![0])],
+            vec![indices(vec![0, 1]), BatchColumn::Values(jobs.clone())],
+        ] {
+            assert!(matches!(
+                Batch::try_from_columns(schema.clone(), columns),
+                Err(Error::Invalid(_))
+            ));
+        }
     }
 }

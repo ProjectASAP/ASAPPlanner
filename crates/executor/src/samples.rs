@@ -169,6 +169,15 @@ impl RawSampleSelector {
     }
 }
 
+/// The series identity of `labels` (every label of a series, `__name__`
+/// included): the text a plan's series identity column holds, for a
+/// runtime that builds a pane's columns itself
+/// ([`crate::values::Batch::try_from_columns`]). The inverse of
+/// [`series_labels_of_output_row`] on that column.
+pub fn series_identity(labels: &BTreeMap<String, String>) -> Result<String, Error> {
+    crate::physical_planner::promql_rows::encode_series_identity(labels)
+}
+
 /// The labels of the series a PromQL answer row belongs to: its series
 /// identity, when the schema keeps one, plus every other non-empty text
 /// column (a label the query grouped by). Bad input when the identity is
