@@ -140,13 +140,16 @@ impl StateColumn {
     }
 
     /// Whether something outside any run holds state `index`: every state
-    /// of a column marked so, or that object of a derived column.
+    /// of a column marked so (`true` for any index, the whole column being
+    /// held outside), or that object of a derived column. For a derived
+    /// column, an index past the column reads `false`, so its state is
+    /// charged in full: a wrong index can overcharge, never undercharge.
     pub(crate) fn state_held_outside_run(&self, index: usize) -> bool {
         self.is_held_outside_run()
             || self
                 .objects_held_outside_run
                 .as_ref()
-                .is_some_and(|held| held[index])
+                .is_some_and(|held| held.get(index).copied().unwrap_or(false))
     }
 
     /// Records that something outside any run holds these states.

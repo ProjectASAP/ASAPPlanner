@@ -706,13 +706,10 @@ async fn build_all_groups_summary(
         for batch in row_chunks(&whole) {
             let groups = table.group_ids(&batch)?;
             for group in names.len()..table.len() {
-                let name = (0..build.groups.len())
-                    .map(|index| {
-                        let key = table.label(group as u32, index).key()?;
-                        Ok(key.iter().map(|b| format!("{b:02x}")).collect::<String>())
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?
-                    .join(",");
+                let key = (0..build.groups.len())
+                    .map(|index| table.label(group as u32, index).clone())
+                    .collect::<Vec<_>>();
+                let name = crate::summary_kernels::hydra_cms::hydra_group_name(&key)?;
                 name_bytes += name.len();
                 names.push(name);
             }
@@ -730,15 +727,10 @@ async fn build_all_groups_summary(
                     }
                     RowWeights::Column(values) => match &values[row] {
                         Value::Null => continue,
-                        weight => hydra_weight(weight)?,
+                        weight => crate::summary_kernels::hydra_cms::hydra_weight(weight)?,
                     },
                 };
-                let item = match &items[row] {
-                    Value::Utf8(v) => v.to_string(),
-                    Value::Int64(v) => v.to_string(),
-                    Value::Bool(v) => v.to_string(),
-                    _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
-                };
+                let item = crate::summary_kernels::hydra_cms::hydra_item(&items[row])?;
                 grid.count(&names[group as usize], &item, weight)
                     .map_err(|e| Error::Operator(e.to_string()))?;
             }
@@ -877,7 +869,7 @@ async fn merge_summary(
     .await?;
     grouped_states(
         &table,
-        StateColumn::from_objects(family.clone(), merged),
+        StateColumn::from_objects_of(family.clone(), merged),
         input_schema,
         output,
     )
@@ -885,7 +877,10 @@ async fn merge_summary(
 
 /// Merge kernel-object states per group, in `entries` order. Each distinct
 /// pair of Hydra grids merges once, and every group of the pair reads the
-/// one merged grid.
+/// one merged grid. Each output state comes with whether something outside
+/// the run holds it: a state passed through unchanged keeps its input's
+/// bit (a stored state is shared by pointer, not charged again); a merged
+/// state is new.
 async fn merge_objects<'b>(
     entries: &[(usize, usize, u32)],
     state_of: &dyn Fn((usize, usize, u32)) -> (&'b StateColumn, usize),
@@ -893,9 +888,9 @@ async fn merge_objects<'b>(
     table_memory_bytes: usize,
     context: &RunContext,
     work: &mut Cooperative,
-) -> Result<Vec<Arc<dyn crate::AggregateCore>>, Error> {
+) -> Result<Vec<(Arc<dyn crate::AggregateCore>, bool)>, Error> {
     use crate::summary_kernels::{HydraCms, HydraCmsGroup};
-    let mut merged: Vec<Option<Arc<dyn crate::AggregateCore>>> = vec![None; group_count];
+    let mut merged: Vec<Option<(Arc<dyn crate::AggregateCore>, bool)>> = vec![None; group_count];
     // The group table is held while the states merge.
     let mut memory = context.reserve(table_memory_bytes)?;
     let mut retained = table_memory_bytes;
@@ -908,21 +903,31 @@ async fn merge_objects<'b>(
         work.checkpoint().await?;
         let (states, index) = state_of(entry);
         let state = states.state(index);
-        if let Some((id, bytes)) = state.shared_state() {
+        let held_outside_run = states.state_held_outside_run(index);
+        // A stored state, and the grid it shares, are held outside the run.
+        if let Some((id, bytes)) = state.shared_state().filter(|_| !held_outside_run) {
             if shared.insert(id, bytes).is_none() {
                 retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
                 memory.resize(retained)?;
             }
         }
         let slot = &mut merged[entry.2 as usize];
-        let Some(existing) = slot else {
+        let Some((existing, existing_held_outside_run)) = slot else {
+            // Passed through: its slot, and the state unless stored.
+            let own_bytes = if held_outside_run {
+                0
+            } else {
+                state.approx_memory_bytes()
+            };
             retained = retained
-                .checked_add(state.approx_memory_bytes() + 64)
+                .checked_add(own_bytes + 64)
                 .ok_or(Error::MemoryLimit)?;
             memory.resize(retained)?;
-            *slot = Some(state);
+            *slot = Some((state, held_outside_run));
             continue;
         };
+        // Whatever follows replaces the slot's state with a new one.
+        let was_held_outside_run = std::mem::replace(existing_held_outside_run, false);
         if let (Some(left), Some(right)) = (
             existing.as_any().downcast_ref::<HydraCmsGroup>(),
             state.as_any().downcast_ref::<HydraCmsGroup>(),
@@ -958,7 +963,12 @@ async fn merge_objects<'b>(
             });
             continue;
         }
-        let old_bytes = existing.approx_memory_bytes();
+        // A stored state was charged only its slot.
+        let old_bytes = if was_held_outside_run {
+            0
+        } else {
+            existing.approx_memory_bytes()
+        };
         // Reserve an estimate for the replacement while both input states remain live.
         memory.resize(
             retained
@@ -1194,25 +1204,4 @@ fn keyed_weight(value: &Value) -> Result<f64, Error> {
         ))),
         _ => Err(Error::Operator("keyed summary weight type".into())),
     }
-}
-
-/// One row's HydraCms weight. sketchlib's Hydra adds `i32` weights, so a
-/// weight must be a non-negative integer within `i32`.
-fn hydra_weight(value: &Value) -> Result<i32, Error> {
-    let weight = match value {
-        Value::Int64(v) => *v as f64,
-        Value::Float64(v) => *v,
-        _ => return Err(Error::Operator("HydraCms weight type".into())),
-    };
-    if weight < 0.0 {
-        return Err(Error::Operator(format!(
-            "HydraCms weights must be non-negative, got {weight}"
-        )));
-    }
-    if !(weight.is_finite() && weight.fract() == 0.0 && weight <= f64::from(i32::MAX)) {
-        return Err(Error::Operator(format!(
-            "HydraCms weights must be integers within i32 (asap_sketchlib's Hydra adds i32 weights), got {weight}"
-        )));
-    }
-    Ok(weight as i32)
 }

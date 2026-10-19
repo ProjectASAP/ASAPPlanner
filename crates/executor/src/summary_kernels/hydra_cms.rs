@@ -165,6 +165,58 @@ impl AggregateCore for HydraCmsGroup {
     }
 }
 
+/// The Hydra subpopulation name of the group whose key (its grouping
+/// columns' values, in order) is `key`: an injective encoding of the typed
+/// values, so the batch build and a per-sample runtime name a group alike.
+pub(crate) fn hydra_group_name(key: &[crate::values::Value]) -> Result<String, crate::Error> {
+    Ok(key
+        .iter()
+        .map(|value| {
+            Ok(value
+                .key()?
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>())
+        })
+        .collect::<Result<Vec<_>, crate::Error>>()?
+        .join(","))
+}
+
+/// The Hydra item of `value`: a non-null Utf8, Int64 or Bool, as text.
+pub(crate) fn hydra_item(value: &crate::values::Value) -> Result<String, crate::Error> {
+    use crate::values::Value;
+    match value {
+        Value::Utf8(v) => Ok(v.to_string()),
+        Value::Int64(v) => Ok(v.to_string()),
+        Value::Bool(v) => Ok(v.to_string()),
+        _ => Err(crate::Error::Operator(
+            "HydraCms item must be non-null Utf8, Int64 or Bool".into(),
+        )),
+    }
+}
+
+/// The Hydra weight of `value`: a non-negative integer within `i32`
+/// (asap_sketchlib's Hydra adds `i32` weights); an operator error otherwise.
+pub(crate) fn hydra_weight(value: &crate::values::Value) -> Result<i32, crate::Error> {
+    use crate::values::Value;
+    let weight = match value {
+        Value::Int64(v) => *v as f64,
+        Value::Float64(v) => *v,
+        _ => return Err(crate::Error::Operator("HydraCms weight type".into())),
+    };
+    if weight < 0.0 {
+        return Err(crate::Error::Operator(format!(
+            "HydraCms weights must be non-negative, got {weight}"
+        )));
+    }
+    if !(weight.is_finite() && weight.fract() == 0.0 && weight <= f64::from(i32::MAX)) {
+        return Err(crate::Error::Operator(format!(
+            "HydraCms weights must be integers within i32 (asap_sketchlib's Hydra adds i32 weights), got {weight}"
+        )));
+    }
+    Ok(weight as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
