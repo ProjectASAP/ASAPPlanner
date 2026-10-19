@@ -559,9 +559,21 @@ impl Batch {
         }
     }
 
+    /// Records that something outside any run (the caller of a plan, a
+    /// store of panes) holds this batch's states, so runs that read them
+    /// are not charged for them again. States a run copies or creates from
+    /// them are new state columns and are charged.
+    pub(crate) fn mark_states_held_outside_run(&self) {
+        for column in self.state_columns.iter().flatten() {
+            column.mark_held_outside_run();
+        }
+    }
+
     /// Memory the batch holds, for execution memory reservations: its
-    /// column buffers, a fixed slot per row, and each state column once.
-    /// Constant time in the number of rows.
+    /// column buffers, a fixed slot per row, and each state column once,
+    /// except states held outside the run (see
+    /// [`Self::mark_states_held_outside_run`]). Constant time in the number
+    /// of rows.
     pub fn memory_bytes(&self) -> usize {
         let mut seen = std::collections::BTreeSet::new();
         let states = self
@@ -569,7 +581,7 @@ impl Batch {
             .iter()
             .flatten()
             .filter(|column| seen.insert(Arc::as_ptr(column)))
-            .map(|column| column.state_memory_bytes())
+            .map(|column| column.charged_state_bytes())
             .sum::<usize>();
         std::mem::size_of::<Self>()
             + self.record_batch.get_array_memory_size()

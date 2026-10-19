@@ -2,6 +2,7 @@
 use crate::summary_kernels::exact::{ExactAccumulator, ScalarState};
 use crate::AggregateCore;
 use planner_types::ir::schema::FieldDataType;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// The summary states of one batch column: one family and parameter set
@@ -17,6 +18,10 @@ pub struct StateColumn {
     /// Memory the states hold: each state's own footprint, plus each state
     /// shared by several states (one Hydra grid) once.
     state_memory_bytes: usize,
+    /// Whether something outside the run holds these states (a stored pane
+    /// handed to a plan as a source): immutable and shared, so a run that
+    /// reads them is not charged for them. Set once, never cleared.
+    held_outside_run: AtomicBool,
 }
 
 /// How a state column stores its states.
@@ -47,6 +52,7 @@ impl StateColumn {
             family,
             storage: StateStorage::Objects(states),
             state_memory_bytes,
+            held_outside_run: AtomicBool::new(false),
         }
     }
 
@@ -57,6 +63,7 @@ impl StateColumn {
             family,
             storage: StateStorage::Exact(states),
             state_memory_bytes,
+            held_outside_run: AtomicBool::new(false),
         }
     }
 
@@ -95,9 +102,19 @@ impl StateColumn {
         }
     }
 
-    /// Memory the states hold, in bytes.
-    pub(crate) fn state_memory_bytes(&self) -> usize {
-        self.state_memory_bytes
+    /// Records that something outside any run holds these states.
+    pub(crate) fn mark_held_outside_run(&self) {
+        self.held_outside_run.store(true, Ordering::Relaxed);
+    }
+
+    /// Memory a run that holds this column is charged for its states: none
+    /// when something outside the run holds them, else the memory they hold.
+    pub(crate) fn charged_state_bytes(&self) -> usize {
+        if self.held_outside_run.load(Ordering::Relaxed) {
+            0
+        } else {
+            self.state_memory_bytes
+        }
     }
 }
 
