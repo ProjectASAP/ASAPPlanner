@@ -354,7 +354,7 @@ impl Batch {
                         .map(|&index| {
                             (
                                 state_column.state(index),
-                                state_column.is_held_outside_run(),
+                                state_column.state_held_outside_run(index),
                             )
                         })
                         .collect(),
@@ -488,7 +488,7 @@ impl Batch {
                             // record becomes a new object.
                             super::StateStorage::Objects(_) => objects.push((
                                 state_column.state(index as usize),
-                                state_column.is_held_outside_run(),
+                                state_column.state_held_outside_run(index as usize),
                             )),
                             super::StateStorage::Exact(_) => {
                                 objects.push((state_column.state(index as usize), false))
@@ -1169,8 +1169,9 @@ mod tests {
     fn derived_columns_of_stored_sketches_charge_only_pointers() {
         let stored = state_batch(100, false);
         stored.mark_states_held_outside_run();
+        // Each derived state: its pointer slot and its "held outside" bit.
         let pointers =
-            |states: usize| states * std::mem::size_of::<Arc<dyn crate::AggregateCore>>();
+            |states: usize| states * (std::mem::size_of::<Arc<dyn crate::AggregateCore>>() + 1);
         // Compaction: 10 of 100 rows kept.
         let keep = BooleanArray::from((0..100).map(|i| i % 10 == 0).collect::<Vec<_>>());
         let kept = stored.filter(&keep).unwrap();
@@ -1205,5 +1206,51 @@ mod tests {
         other.mark_states_held_outside_run();
         let joined = Batch::concat(&stored.schema().clone(), &[stored, other]).unwrap();
         assert!(charged_states(&joined) >= 150 * record);
+    }
+
+    // Deriving twice keeps each sketch's "held outside the run" bit: concat
+    // then compaction, or compaction then concat, of stored sketches is
+    // charged only pointers; run-built sketches stay charged in full.
+    #[test]
+    fn derived_twice_stored_sketches_still_charge_only_pointers() {
+        let slot = std::mem::size_of::<Arc<dyn crate::AggregateCore>>();
+        let stored = |count| {
+            let batch = state_batch(count, false);
+            batch.mark_states_held_outside_run();
+            batch
+        };
+        let every_other =
+            |rows: usize| BooleanArray::from((0..rows).map(|i| i % 10 == 0).collect::<Vec<_>>());
+        // Concat, then compaction.
+        let (a, b) = (stored(100), stored(100));
+        let schema = a.schema().clone();
+        let joined = Batch::concat(&schema, &[a, b]).unwrap();
+        let kept = joined.filter(&every_other(200)).unwrap();
+        assert_eq!(kept.state_column(0).unwrap().len(), 20);
+        assert!(charged_states(&kept) <= 20 * (slot + 1));
+        // Compaction, then concat.
+        let (a, b) = (stored(100), stored(100));
+        let (a, b) = (
+            a.filter(&every_other(100)).unwrap(),
+            b.filter(&every_other(100)).unwrap(),
+        );
+        let joined = Batch::concat(&schema, &[a, b]).unwrap();
+        assert_eq!(joined.state_column(0).unwrap().len(), 20);
+        assert!(charged_states(&joined) <= 20 * (slot + 1));
+        // Mixed: 50 run-built and 100 stored sketches, concatenated, then
+        // compacted to every tenth row (5 run-built, 10 stored), then
+        // concatenated with another compacted stored batch (10 stored).
+        let built = state_batch(50, false);
+        let one_built = charged_states(&built) / 50;
+        let mixed = Batch::concat(&schema, &[built, stored(100)]).unwrap();
+        let kept = mixed.filter(&every_other(150)).unwrap();
+        assert_eq!(kept.state_column(0).unwrap().len(), 15);
+        let charged = charged_states(&kept);
+        assert!(charged >= 5 * one_built && charged <= 5 * one_built + 15 * (slot + 1));
+        let other = stored(100).filter(&every_other(100)).unwrap();
+        let joined = Batch::concat(&schema, &[kept, other]).unwrap();
+        assert_eq!(joined.state_column(0).unwrap().len(), 25);
+        let charged = charged_states(&joined);
+        assert!(charged >= 5 * one_built && charged <= 5 * one_built + 25 * (slot + 1));
     }
 }

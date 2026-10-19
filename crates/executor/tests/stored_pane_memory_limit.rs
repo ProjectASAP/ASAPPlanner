@@ -3,7 +3,7 @@
 //! allocates. A merge over them still charges the states it creates.
 use asap_executor::arrow::array::{DictionaryArray, UInt32Array};
 use asap_executor::arrow::datatypes::UInt32Type;
-use asap_executor::operators::Operator;
+use asap_executor::operators::{Operator, SortKey};
 use asap_executor::plan::PhysicalDAG;
 use asap_executor::planner::ir::schema::{
     DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams,
@@ -173,4 +173,54 @@ fn compacting_a_stored_pane_does_not_charge_its_shared_sketches() {
         });
         assert_eq!(rows.unwrap(), kept as usize, "keeping {kept} rows");
     }
+}
+
+// topk over several panes: a Sort concatenates two stored panes of 1,000
+// KLLs (about 21 MB of states), then a Limit keeps 49% and compacts the
+// concatenated column. Both derivations share the stored sketches by
+// pointer, so the run fits in 8 MiB.
+#[test]
+fn sorting_then_limiting_stored_panes_does_not_charge_their_sketches() {
+    let (schema, first) = pane_of(SERIES);
+    let (_, second) = pane_of(SERIES);
+    let mut dag = PhysicalDAG::default();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(schema.clone(), vec![first, second]).unwrap(),
+    )
+    .unwrap();
+    let key = SortKey {
+        column: 0,
+        descending: false,
+        nulls_first: false,
+    };
+    dag.add(
+        1,
+        vec![0],
+        Operator::sort(schema.clone(), vec![key], vec![]).unwrap(),
+    )
+    .unwrap();
+    dag.add(2, vec![1], Operator::limit(schema, 980, 0, vec![]).unwrap())
+        .unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+            revision: 1,
+        },
+        Limits {
+            max_bytes: 8 << 20,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let rows = block_on(async {
+        let mut output = dag.execute(&[2], context).unwrap().remove(0);
+        let mut rows = 0;
+        while let Some(batch) = output.next().await {
+            rows += batch?.num_rows();
+        }
+        Ok::<_, Error>(rows)
+    });
+    assert_eq!(rows.unwrap(), 980);
 }

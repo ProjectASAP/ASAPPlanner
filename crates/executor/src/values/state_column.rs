@@ -22,6 +22,10 @@ pub struct StateColumn {
     /// handed to a plan as a source): immutable and shared, so a run that
     /// reads them is not charged for them. Set once, never cleared.
     held_outside_run: AtomicBool,
+    /// For an object column derived from other columns (compaction,
+    /// concat): per object, whether something outside the run holds it.
+    /// `None` when no object is.
+    objects_held_outside_run: Option<Box<[bool]>>,
 }
 
 /// How a state column stores its states.
@@ -45,18 +49,29 @@ impl StateColumn {
             storage: StateStorage::Objects(states),
             state_memory_bytes,
             held_outside_run: AtomicBool::new(false),
+            objects_held_outside_run: None,
         }
     }
 
     /// The column of kernel objects `states` taken from other columns, each
-    /// with whether something outside the run holds it. Charged its pointer
-    /// slots plus the states the run holds (built or copied by it); states
-    /// held outside the run are shared by pointer, not charged again.
+    /// with whether something outside the run holds it, a bit the column
+    /// keeps per object so later derivations read it too. Charged its
+    /// pointer slots and bits, plus the states the run holds (built or
+    /// copied by it); states held outside the run are shared by pointer,
+    /// not charged again.
     pub(crate) fn from_objects_of(
         family: FieldDataType,
         states: Vec<(Arc<dyn AggregateCore>, bool)>,
     ) -> Self {
+        let held = states
+            .iter()
+            .map(|(_, held_outside_run)| *held_outside_run)
+            .collect::<Box<[bool]>>();
+        let objects_held_outside_run = held.contains(&true).then_some(held);
         let state_memory_bytes = states.len() * std::mem::size_of::<Arc<dyn AggregateCore>>()
+            + objects_held_outside_run
+                .as_ref()
+                .map_or(0, |held| held.len())
             + objects_memory_bytes(
                 states
                     .iter()
@@ -68,6 +83,7 @@ impl StateColumn {
             storage: StateStorage::Objects(states.into_iter().map(|(state, _)| state).collect()),
             state_memory_bytes,
             held_outside_run: AtomicBool::new(false),
+            objects_held_outside_run,
         }
     }
 
@@ -79,6 +95,7 @@ impl StateColumn {
             storage: StateStorage::Exact(states),
             state_memory_bytes,
             held_outside_run: AtomicBool::new(false),
+            objects_held_outside_run: None,
         }
     }
 
@@ -120,6 +137,16 @@ impl StateColumn {
     /// Whether something outside any run holds these states.
     pub(crate) fn is_held_outside_run(&self) -> bool {
         self.held_outside_run.load(Ordering::Relaxed)
+    }
+
+    /// Whether something outside any run holds state `index`: every state
+    /// of a column marked so, or that object of a derived column.
+    pub(crate) fn state_held_outside_run(&self, index: usize) -> bool {
+        self.is_held_outside_run()
+            || self
+                .objects_held_outside_run
+                .as_ref()
+                .is_some_and(|held| held[index])
     }
 
     /// Records that something outside any run holds these states.
