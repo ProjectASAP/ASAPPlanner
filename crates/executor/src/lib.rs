@@ -17,6 +17,7 @@ mod samples;
 pub use samples::{series_labels_of_output_row, RawSampleSelector, Sample};
 mod supported_summaries;
 pub use summary_kernels::factory;
+pub use summary_kernels::state_column_updater::StateColumnUpdater;
 pub use supported_summaries::supported_summary_families;
 
 /// The exact Planner contract used by these kernels.

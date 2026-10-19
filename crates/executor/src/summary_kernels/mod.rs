@@ -20,5 +20,6 @@ pub use increase::*;
 pub use kmv::*;
 
 pub mod factory;
+pub mod state_column_updater;
 pub mod traits;
 pub mod weighted_frequency;

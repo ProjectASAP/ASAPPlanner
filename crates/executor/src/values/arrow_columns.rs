@@ -26,6 +26,7 @@
 //! Arrow fields are always declared nullable here; the Planner schema owns
 //! nullability and [`super::Batch::try_new`] enforces it.
 use crate::{values::Value, Error};
+use ahash::AHashMap as HashMap;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Date32Array, DictionaryArray, Float64Array, Int64Array,
     IntervalMonthDayNanoArray, ListArray, MapArray, NullArray, StringArray, StructArray,
@@ -36,7 +37,7 @@ use arrow::datatypes::{
     DataType as ArrowType, Field as ArrowField, Fields, IntervalMonthDayNano, TimeUnit, UInt32Type,
 };
 use planner_types::ir::schema::DataType;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 /// Where a column sits: a batch column, whose text is dictionary encoded, or
 /// a child of a list, struct or map, whose text is a plain string array.
