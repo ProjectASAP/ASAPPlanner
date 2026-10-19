@@ -24,7 +24,7 @@ pub(crate) fn value_schema(scalar: bool) -> SchemaRef {
     schema(fields)
 }
 
-fn is_scalar(input: &SchemaRef) -> Result<bool, Error> {
+pub(super) fn is_scalar(input: &SchemaRef) -> Result<bool, Error> {
     for scalar in [true, false] {
         let expected = value_schema(scalar);
         if input.fields.len() == expected.fields.len()
@@ -82,8 +82,9 @@ impl Operator {
 }
 
 type Labels = BTreeMap<Arc<str>, Arc<str>>;
-fn labels(row: &[Value]) -> Result<Labels, Error> {
-    let Some(Value::Map(entries)) = row.first() else {
+/// A vector row's label set, from its label map.
+fn labels(map: &Value) -> Result<Labels, Error> {
+    let Value::Map(entries) = map else {
         return Err(invalid("vector requires label map"));
     };
     let mut result = BTreeMap::new();
@@ -102,14 +103,31 @@ fn identity(mut labels: Labels) -> Labels {
     labels.retain(|_, value| !value.is_empty());
     labels
 }
-fn value(row: &[Value]) -> Result<f64, Error> {
-    match row.last() {
-        Some(Value::Float64(value)) => Ok(*value),
-        _ => Err(invalid("binary value must be Float64")),
-    }
-}
 fn label_bytes(labels: &Labels) -> usize {
     labels.iter().map(|(k, v)| 64 + k.len() + v.len()).sum()
+}
+
+/// One operand's columns: label maps (none for a scalar) and values.
+struct Operand {
+    labels: Vec<Value>,
+    values: Vec<f64>,
+}
+
+fn operand(batch: &Batch, scalar: bool) -> Result<Operand, Error> {
+    let value_column = batch.schema().fields.len() - 1;
+    let values = decoded(batch, value_column)?
+        .into_iter()
+        .map(|value| match value {
+            Value::Float64(value) => Ok(value),
+            _ => Err(invalid("binary value must be Float64")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let labels = if scalar {
+        Vec::new()
+    } else {
+        decoded(batch, 0)?
+    };
+    Ok(Operand { labels, values })
 }
 
 pub(super) fn execute<'a>(
@@ -129,14 +147,20 @@ pub(super) fn execute<'a>(
     let right = inputs.pop().ok_or_else(|| invalid("missing right input"))?;
     let left = inputs.pop().ok_or_else(|| invalid("missing left input"))?;
     Ok(futures::stream::once(async move {
-        let ((left, _left_memory), (right, _right_memory)) =
-            futures::try_join!(collect_rows(left, &context), collect_rows(right, &context))?;
-        if (left_scalar && left.len() != 1) || (right_scalar && right.len() != 1) {
+        let (left_input, right_input) = futures::try_join!(
+            collect_batch(left, &op.inputs[0], &context),
+            collect_batch(right, &op.inputs[1], &context)
+        )?;
+        let left = operand(&left_input.batch, left_scalar)?;
+        let right = operand(&right_input.batch, right_scalar)?;
+        if (left_scalar && left.values.len() != 1) || (right_scalar && right.values.len() != 1) {
             return Err(invalid("scalar input must contain exactly one value"));
         }
         let mut workspace = Workspace::new(&context)?;
         let mut work = Cooperative::new(&context);
-        let mut rows = Vec::new();
+        // The output columns: label maps (vectors only) and values.
+        let mut out_labels: Vec<Value> = Vec::new();
+        let mut out_values: Vec<f64> = Vec::new();
         let mut result_identities = std::collections::BTreeSet::new();
         let mut emit = |labels: Labels, a: f64, b: f64| -> Result<(), Error> {
             let arithmetic = matches!(operator.kind, BinaryOpKind::Arithmetic(_));
@@ -159,7 +183,6 @@ pub(super) fn execute<'a>(
                 Value::Bool(false) => return Ok(()),
                 _ => return Err(invalid("invalid binary result")),
             };
-            let mut row = Vec::new();
             if !left_scalar || !right_scalar {
                 let labels = if arithmetic || *return_bool {
                     identity(labels)
@@ -170,12 +193,8 @@ pub(super) fn execute<'a>(
                 if !result_identities.insert(labels.clone()) {
                     return Err(invalid("duplicate vector result labels"));
                 }
-                workspace.grow(
-                    label_bytes(&labels)
-                        + std::mem::size_of::<Vec<Value>>()
-                        + 2 * std::mem::size_of::<Value>(),
-                )?;
-                row.push(Value::Map(
+                workspace.grow(label_bytes(&labels) + 16)?;
+                out_labels.push(Value::Map(
                     labels
                         .into_iter()
                         .map(|(k, v)| (Value::Utf8(k), Value::Utf8(v)))
@@ -183,62 +202,77 @@ pub(super) fn execute<'a>(
                         .into(),
                 ));
             } else {
-                workspace.grow(std::mem::size_of::<Vec<Value>>() + std::mem::size_of::<Value>())?;
+                workspace.grow(8)?;
             }
-            row.push(Value::Float64(result));
-            rows.push(row);
+            out_values.push(result);
             Ok(())
         };
         if left_scalar || right_scalar {
-            let vectors = if left_scalar { &right } else { &left };
-            for row in vectors {
-                work.checkpoint().await?;
+            let vector = if left_scalar { &right } else { &left };
+            for row in 0..vector.values.len() {
                 let labels = if left_scalar && right_scalar {
                     Labels::new()
                 } else {
-                    labels(row)?
+                    labels(&vector.labels[row])?
                 };
                 emit(
                     labels,
                     if left_scalar {
-                        value(&left[0])?
+                        left.values[0]
                     } else {
-                        value(row)?
+                        vector.values[row]
                     },
                     if right_scalar {
-                        value(&right[0])?
+                        right.values[0]
                     } else {
-                        value(row)?
+                        vector.values[row]
                     },
                 )?;
             }
+            work.checkpoint_rows(vector.values.len()).await?;
         } else {
             let mut rhs = BTreeMap::new();
             // Keep matching workspace separate from the output reservation captured by emit.
             let mut matching = Workspace::new(&context)?;
-            for row in &right {
-                work.checkpoint().await?;
-                let key = identity(labels(row)?);
+            for row in 0..right.values.len() {
+                let key = identity(labels(&right.labels[row])?);
                 matching.grow(label_bytes(&key) + 64)?;
-                if rhs.insert(key, value(row)?).is_some() {
+                if rhs.insert(key, right.values[row]).is_some() {
                     return Err(invalid("duplicate vector matching labels"));
                 }
             }
+            work.checkpoint_rows(right.values.len()).await?;
             let mut seen = std::collections::BTreeSet::new();
-            for row in &left {
-                work.checkpoint().await?;
-                let labels = labels(row)?;
+            for row in 0..left.values.len() {
+                let labels = labels(&left.labels[row])?;
                 let key = identity(labels.clone());
                 matching.grow(label_bytes(&key) + 64)?;
                 if !seen.insert(key.clone()) {
                     return Err(invalid("duplicate vector matching labels"));
                 }
                 if let Some(b) = rhs.get(&key) {
-                    emit(labels, value(row)?, *b)?;
+                    emit(labels, left.values[row], *b)?;
                 }
             }
+            work.checkpoint_rows(left.values.len()).await?;
         }
-        Batch::try_new(op.output.clone(), rows)
+        let rows = out_values.len();
+        let mut arrays = Vec::new();
+        if !left_scalar || !right_scalar {
+            arrays.push(crate::values::arrow_columns::encode(
+                op.output.fields[0].plain_dtype().expect("plain"),
+                crate::values::arrow_columns::ColumnDepth::BatchColumn,
+                &out_labels.iter().collect::<Vec<_>>(),
+            )?);
+        }
+        arrays
+            .push(Arc::new(arrow::array::Float64Array::from(out_values)) as arrow::array::ArrayRef);
+        Batch::from_parts(
+            op.output.clone(),
+            arrays,
+            vec![None; op.output.fields.len()],
+            rows,
+        )
     })
     .boxed_local())
 }

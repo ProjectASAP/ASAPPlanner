@@ -101,71 +101,19 @@ pub(super) fn execute<'a>(
         let right = inputs.pop().ok_or_else(|| invalid("right input missing"))?;
         let left = inputs.pop().ok_or_else(|| invalid("left input missing"))?;
         return Ok(futures::stream::once(async move {
-            use planner_types::ir::operator::JoinKind;
-            let ((left, _left_memory), (right, _right_memory)) =
-                futures::try_join!(collect_rows(left, &context), collect_rows(right, &context))?;
-            let mut workspace = Workspace::new(&context)?;
-            let mut work = Cooperative::new(&context);
-            workspace.grow(right.len())?;
-            let mut result = Vec::new();
-            let mut right_matched = vec![false; right.len()];
-            for left_row in &left {
-                work.checkpoint().await?;
-                let mut matched = false;
-                for (i, right_row) in right.iter().enumerate() {
-                    work.checkpoint().await?;
-                    let mut joined = left_row.clone();
-                    joined.extend(right_row.iter().cloned());
-                    if *kind == JoinKind::Cross
-                        || matches!(predicate.evaluate(&joined)?, Value::Bool(true))
-                    {
-                        matched = true;
-                        right_matched[i] = true;
-                        match kind {
-                            JoinKind::Semi => {
-                                workspace.grow(row_bytes(left_row))?;
-                                result.push(left_row.clone());
-                                break;
-                            }
-                            JoinKind::Anti => break,
-                            _ => {
-                                workspace.grow(row_bytes(&joined))?;
-                                result.push(joined);
-                            }
-                        }
-                    }
-                }
-                if !matched {
-                    match kind {
-                        JoinKind::Left | JoinKind::Full => {
-                            let mut joined = left_row.clone();
-                            joined.resize(
-                                joined.len() + operator.inputs[1].fields.len(),
-                                Value::Null,
-                            );
-                            workspace.grow(row_bytes(&joined))?;
-                            result.push(joined);
-                        }
-                        JoinKind::Anti => {
-                            workspace.grow(row_bytes(left_row))?;
-                            result.push(left_row.clone());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if matches!(kind, JoinKind::Right | JoinKind::Full) {
-                for (matched, row) in right_matched.into_iter().zip(right) {
-                    work.checkpoint().await?;
-                    if !matched {
-                        let mut joined = vec![Value::Null; operator.inputs[0].fields.len()];
-                        joined.extend(row);
-                        workspace.grow(row_bytes(&joined))?;
-                        result.push(joined);
-                    }
-                }
-            }
-            Batch::try_new(output, result)
+            let (left, right) = futures::try_join!(
+                collect_batch(left, &operator.inputs[0], &context),
+                collect_batch(right, &operator.inputs[1], &context)
+            )?;
+            relational_join(
+                operator,
+                kind,
+                predicate,
+                &left.batch,
+                &right.batch,
+                &context,
+            )
+            .await
         })
         .boxed_local());
     }
@@ -177,61 +125,211 @@ pub(super) fn execute<'a>(
         let right = inputs.pop().ok_or_else(|| invalid("right input missing"))?;
         let left = inputs.pop().ok_or_else(|| invalid("left input missing"))?;
         return Ok(futures::stream::once(async move {
+            use super::aligned_binary::{key_batch, matchable_rows};
             // Poll both branches together: either may depend on a common producer.
-            let ((left, _left_memory), (right, _right_memory)) =
-                futures::try_join!(collect_rows(left, &context), collect_rows(right, &context))?;
-            let right_cols = keys.iter().map(|(_, r)| *r).collect::<Vec<_>>();
-            let left_cols = keys.iter().map(|(l, _)| *l).collect::<Vec<_>>();
-            let mut members = std::collections::BTreeSet::new();
-            let mut workspace = Workspace::new(&context)?;
+            let (left, right) = futures::try_join!(
+                collect_batch(left, &operator.inputs[0], &context),
+                collect_batch(right, &operator.inputs[1], &context)
+            )?;
+            let (left, right) = (&left.batch, &right.batch);
+            let left_keys = key_batch(left, &keys.iter().map(|(l, _)| *l).collect::<Vec<_>>())?;
+            let right_keys = key_batch(right, &keys.iter().map(|(_, r)| *r).collect::<Vec<_>>())?;
+            let mut table = super::group_table::GroupTable::new((0..keys.len()).collect());
             let mut work = Cooperative::new(&context);
-            for row in &right {
-                work.checkpoint().await?;
-                if right_cols.iter().all(|&i| matchable_key(&row[i])) {
-                    let key = group_key(row, &right_cols)?;
-                    if !members.contains(&key) {
-                        workspace.grow(key_bytes(&key))?;
-                        members.insert(key);
-                    }
+            let mut workspace = Workspace::new(&context)?;
+            // The right side's matchable keys.
+            let mut members = ahash::AHashSet::new();
+            let right_ids =
+                chunked_group_ids(&mut table, &right_keys, &mut workspace, 0, &mut work).await?;
+            for (id, matchable) in right_ids.into_iter().zip(matchable_rows(&right_keys)) {
+                if matchable {
+                    members.insert(id);
                 } else if *require_complete_right {
                     return Err(invalid(
                         "certified pruning candidate has an unmatchable key",
                     ));
                 }
             }
-            let mut rows = Vec::new();
-            let mut covered = std::collections::BTreeSet::new();
-            for row in left {
-                work.checkpoint().await?;
-                if left_cols.iter().all(|&i| matchable_key(&row[i]))
-                    && members.contains(&group_key(&row, &left_cols)?)
-                {
-                    if *require_complete_right {
-                        let key = group_key(&row, &left_cols)?;
-                        if !covered.contains(&key) {
-                            workspace.grow(key_bytes(&key))?;
-                            covered.insert(key);
-                        }
+            work.checkpoint_rows(right.num_rows()).await?;
+            workspace.set_bytes(table.memory_bytes() + 32 * members.len())?;
+            let mut covered = ahash::AHashSet::new();
+            let held = 32 * members.len();
+            let left_ids =
+                chunked_group_ids(&mut table, &left_keys, &mut workspace, held, &mut work).await?;
+            let keep = left_ids
+                .into_iter()
+                .zip(matchable_rows(&left_keys))
+                .map(|(id, matchable)| {
+                    let kept = matchable && members.contains(&id);
+                    if kept && *require_complete_right {
+                        covered.insert(id);
                     }
-                    workspace.grow(std::mem::size_of::<Vec<Value>>())?;
-                    rows.push(row);
-                }
-            }
+                    Some(kept)
+                })
+                .collect::<arrow::array::BooleanArray>();
+            work.checkpoint_rows(left.num_rows()).await?;
             if *require_complete_right && members != covered {
                 return Err(invalid("certified pruning key has no authoritative value"));
             }
-            Batch::try_new(output, rows)
+            let kept = left.filter(&keep)?;
+            workspace.grow(kept.memory_bytes())?;
+            let _ = output;
+            Ok(kept)
         })
         .boxed_local());
     }
     unreachable!()
 }
 
-// Group keys canonicalize NaNs, but equality joins must not match them.
-fn matchable_key(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Float64(v) => !v.is_nan(),
-        _ => true,
+/// A nested-loop join: each left row against all right rows at once, its
+/// predicate one column over the pairs.
+async fn relational_join(
+    operator: &Operator,
+    kind: &planner_types::ir::operator::JoinKind,
+    predicate: &crate::expressions::CompiledExpression,
+    left: &Batch,
+    right: &Batch,
+    context: &RunContext,
+) -> Result<Batch, Error> {
+    use arrow::array::{Array, UInt32Array};
+    use planner_types::ir::operator::JoinKind;
+    let output = &operator.output;
+    let mut workspace = Workspace::new(context)?;
+    let mut work = Cooperative::new(context);
+    workspace.grow(right.num_rows())?;
+    let left_width = operator.inputs[0].fields.len();
+    // The schema of a joined pair: left columns, then right columns.
+    let mut joined_fields = operator.inputs[0].fields.clone();
+    joined_fields.extend(operator.inputs[1].fields.iter().cloned());
+    let joined_schema = schema(joined_fields);
+    // The output pairs: a left row (or none), a right row (or none).
+    let (mut out_left, mut out_right): (Vec<Option<u32>>, Vec<Option<u32>>) =
+        (Vec::new(), Vec::new());
+    let mut right_matched = vec![false; right.num_rows()];
+    for left_row in 0..left.num_rows() as u32 {
+        // The pairs of this left row with every right row.
+        let matches: Vec<bool> = if *kind == JoinKind::Cross {
+            vec![true; right.num_rows()]
+        } else {
+            let pairs = joined(left, right, left_row, &joined_schema)?;
+            match predicate.evaluate_batch(&pairs) {
+                Ok(result) => {
+                    let result = result
+                        .as_any()
+                        .downcast_ref::<arrow::array::BooleanArray>()
+                        .ok_or_else(|| invalid("join predicate must be boolean"))?
+                        .clone();
+                    (0..right.num_rows())
+                        .map(|row| result.is_valid(row) && result.value(row))
+                        .collect()
+                }
+                // A failing pair fails only if the row join reaches it:
+                // replay this left row pair by pair, as the row join did.
+                Err(_) => {
+                    let rows = pairs.rows();
+                    let mut matches = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let matched = matches!(predicate.evaluate(row)?, Value::Bool(true));
+                        matches.push(matched);
+                        if matched && matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                            break;
+                        }
+                    }
+                    matches.resize(right.num_rows(), false);
+                    matches
+                }
+            }
+        };
+        work.checkpoint_rows(right.num_rows().max(1)).await?;
+        let mut matched = false;
+        for (right_row, &is_match) in matches.iter().enumerate() {
+            if !is_match {
+                continue;
+            }
+            matched = true;
+            right_matched[right_row] = true;
+            match kind {
+                JoinKind::Semi => {
+                    out_left.push(Some(left_row));
+                    break;
+                }
+                JoinKind::Anti => break,
+                _ => {
+                    out_left.push(Some(left_row));
+                    out_right.push(Some(right_row as u32));
+                }
+            }
+        }
+        if !matched {
+            match kind {
+                JoinKind::Left | JoinKind::Full => {
+                    out_left.push(Some(left_row));
+                    out_right.push(None);
+                }
+                JoinKind::Anti => out_left.push(Some(left_row)),
+                _ => {}
+            }
+        }
+        workspace.set_bytes(right.num_rows() + 8 * (out_left.len() + out_right.len()))?;
     }
+    if matches!(kind, JoinKind::Right | JoinKind::Full) {
+        for (right_row, matched) in right_matched.into_iter().enumerate() {
+            if !matched {
+                out_left.push(None);
+                out_right.push(Some(right_row as u32));
+            }
+        }
+    }
+    let rows = out_left.len();
+    // The output columns: the left rows' cells, then the right rows' cells,
+    // NULL for a missing side (the output declares those columns nullable).
+    let take =
+        |batch: &Batch, indices: Vec<Option<u32>>| -> Result<Vec<arrow::array::ArrayRef>, Error> {
+            let indices = UInt32Array::from(indices);
+            if indices.null_count() > 0
+                && (0..batch.schema().fields.len()).any(|c| batch.state_column(c).is_some())
+            {
+                return Err(invalid("a summary column has no NULL row"));
+            }
+            batch
+                .record_batch()
+                .columns()
+                .iter()
+                .map(|array| {
+                    arrow::compute::take(array.as_ref(), &indices, None)
+                        .map_err(|e| invalid(&e.to_string()))
+                })
+                .collect()
+        };
+    let mut arrays = take(left, out_left)?;
+    let mut states = (0..left_width)
+        .map(|c| left.state_column(c).cloned())
+        .collect::<Vec<_>>();
+    if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+        arrays.extend(take(right, out_right)?);
+        states.extend((0..right.schema().fields.len()).map(|c| right.state_column(c).cloned()));
+    }
+    let result = Batch::from_parts(output.clone(), arrays, states, rows)?;
+    workspace.grow(result.memory_bytes())?;
+    Ok(result)
+}
+
+/// Left row `left_row` beside every right row: the pairs a join predicate
+/// is evaluated on. The right columns are shared; only the left row is
+/// repeated.
+fn joined(
+    left: &Batch,
+    right: &Batch,
+    left_row: u32,
+    joined_schema: &SchemaRef,
+) -> Result<Batch, Error> {
+    let rows = right.num_rows();
+    let repeated = left.take(&arrow::array::UInt32Array::from(vec![left_row; rows]))?;
+    let mut arrays = repeated.record_batch().columns().to_vec();
+    arrays.extend(right.record_batch().columns().iter().cloned());
+    let mut states = (0..repeated.schema().fields.len())
+        .map(|c| repeated.state_column(c).cloned())
+        .collect::<Vec<_>>();
+    states.extend((0..right.schema().fields.len()).map(|c| right.state_column(c).cloned()));
+    Batch::from_parts(joined_schema.clone(), arrays, states, rows)
 }

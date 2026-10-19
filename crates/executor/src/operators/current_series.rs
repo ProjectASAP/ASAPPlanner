@@ -46,65 +46,68 @@ pub(super) fn execute<'a>(
     let input = inputs
         .pop()
         .ok_or_else(|| invalid("current-series input missing"))?;
-    let output = operator.output.clone();
     let (start, end) = window(lookback_ms, &context)?;
     Ok(futures::stream::once(async move {
-        let (rows, _memory) = collect_rows(input, &context).await?;
-        let mut latest = BTreeMap::<Vec<u8>, usize>::new();
+        let input = collect_batch(input, &operator.inputs[0], &context).await?;
+        let batch = &input.batch;
+        let times = batch
+            .column(coordinate)
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            .expect("timestamps")
+            .clone();
+        let values = batch
+            .column(value)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("Float64 values")
+            .clone();
+        // Each series' latest row in the window, by its identity.
+        let mut table = super::group_table::GroupTable::new(vec![identity]);
         let mut work = Cooperative::new(&context);
         let mut workspace = Workspace::new(&context)?;
-        for (index, row) in rows.iter().enumerate() {
-            work.checkpoint().await?;
-            let Value::Timestamp(timestamp) = row[coordinate] else {
-                unreachable!()
-            };
+        let series = chunked_group_ids(&mut table, batch, &mut workspace, 0, &mut work).await?;
+        let mut latest: Vec<Option<u32>> = vec![None; table.len()];
+        for (row, &series) in series.iter().enumerate() {
+            let timestamp = times.value(row);
             if timestamp <= start || timestamp > end {
                 continue;
             }
-            let key = row[identity].key()?;
-            if let Some(&previous) = latest.get(&key) {
-                let Value::Timestamp(previous_time) = rows[previous][coordinate] else {
-                    unreachable!()
-                };
+            let slot = &mut latest[series as usize];
+            if let Some(previous) = *slot {
+                let previous_time = times.value(previous as usize);
                 if timestamp < previous_time {
                     continue;
                 }
                 if timestamp == previous_time {
-                    let (Value::Float64(a), Value::Float64(b)) =
-                        (&row[value], &rows[previous][value])
-                    else {
-                        unreachable!()
-                    };
-                    if a.to_bits() != b.to_bits() {
+                    if values.value(row).to_bits() != values.value(previous as usize).to_bits() {
                         return Err(invalid("conflicting samples for one series timestamp"));
                     }
                     continue;
                 }
-            } else {
-                workspace.grow(64 + key.len())?;
             }
-            latest.insert(key, index);
+            *slot = Some(row as u32);
         }
-        let mut result = Vec::new();
-        for index in latest.into_values() {
-            work.checkpoint().await?;
-            let Value::Float64(sample) = rows[index][value] else {
-                unreachable!()
-            };
-            if sample.to_bits() == 0x7ff0_0000_0000_0002 {
-                continue;
-            }
-            workspace.grow(row_bytes(&rows[index]))?;
-            let mut row = rows[index].clone();
-            row[coordinate] = Value::Timestamp(end);
-            result.push(row);
-        }
-        Batch::try_new(output, result)
+        work.checkpoint_rows(batch.num_rows()).await?;
+        workspace.set_bytes(table.memory_bytes() + latest.len() * 8)?;
+        // In identity key order, without stale markers.
+        let rows = table
+            .groups_in_key_order()
+            .into_iter()
+            .filter_map(|series| latest[series as usize])
+            .filter(|&row| values.value(row as usize).to_bits() != 0x7ff0_0000_0000_0002)
+            .collect::<Vec<_>>();
+        let selected = batch.take(&arrow::array::UInt32Array::from(rows))?;
+        let stamped = std::sync::Arc::new(arrow::array::TimestampMillisecondArray::from(vec![
+            end;
+            selected.num_rows()
+        ]));
+        selected.with_plain_column(coordinate, stamped)
     })
     .boxed_local())
 }
 
-fn window(lookback_ms: i64, context: &RunContext) -> Result<(i64, i64), Error> {
+pub(super) fn window(lookback_ms: i64, context: &RunContext) -> Result<(i64, i64), Error> {
     let end = match context.scope {
         crate::runtime::Scope::Query {
             evaluation_time_ms, ..

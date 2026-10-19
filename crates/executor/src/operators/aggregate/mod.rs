@@ -226,9 +226,9 @@ pub(super) fn execute<'a>(
                 groups,
                 window,
             } => {
-                let (rows, _memory) = collect_rows(input, &context).await?;
-                let result = crate::operators::aggregate::temporal::reduce(
-                    rows,
+                let input = collect_batch(input, &operator.inputs[0], &context).await?;
+                let (mut arrays, results) = crate::operators::aggregate::temporal::reduce_batch(
+                    &input.batch,
                     intent,
                     groups,
                     *coordinate,
@@ -237,7 +237,18 @@ pub(super) fn execute<'a>(
                     &context,
                 )
                 .await?;
-                Batch::try_new(output, result)
+                let (dtype, _) = plain(&output, output.fields.len() - 1)?;
+                arrays.push(crate::values::arrow_columns::encode(
+                    dtype,
+                    crate::values::arrow_columns::ColumnDepth::BatchColumn,
+                    &results.iter().collect::<Vec<_>>(),
+                )?);
+                Batch::from_parts(
+                    output.clone(),
+                    arrays,
+                    vec![None; output.fields.len()],
+                    results.len(),
+                )
             }
             Kind::Aggregate {
                 groups,

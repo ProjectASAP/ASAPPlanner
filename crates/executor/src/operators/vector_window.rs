@@ -50,27 +50,42 @@ pub(super) fn execute<'a>(
                 .pop()
                 .ok_or_else(|| invalid("missing matrix input"))?;
             Ok(futures::stream::once(async move {
-                let (rows, _memory) = collect_rows(input, &context).await?;
+                let input = collect_batch(input, &operator.inputs[0], &context).await?;
+                let batch = &input.batch;
+                // Every row shares one nonempty window.
+                let bounds = |column: usize| {
+                    batch
+                        .column(column)
+                        .as_any()
+                        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                        .cloned()
+                        .ok_or_else(|| invalid("missing matrix window bounds"))
+                };
+                let (starts, ends) = (bounds(3)?, bounds(4)?);
                 let mut window = None;
-                let mut work = Cooperative::new(&context);
-                for row in &rows {
-                    work.checkpoint().await?;
-                    let (Value::Timestamp(start), Value::Timestamp(end)) = (&row[3], &row[4])
-                    else {
-                        return Err(invalid("missing matrix window bounds"));
-                    };
-                    if start >= end || window.is_some_and(|bounds| bounds != (*start, *end)) {
+                for row in 0..batch.num_rows() {
+                    let (start, end) = (starts.value(row), ends.value(row));
+                    if start >= end || window.is_some_and(|bounds| bounds != (start, end)) {
                         return Err(invalid("matrix rows must share one nonempty window"));
                     }
-                    window = Some((*start, *end));
+                    window = Some((start, end));
                 }
-                let mut rows =
-                    aggregate::temporal::reduce(rows, intent, &[0], 1, 2, window, &context).await?;
-                for row in &mut rows {
-                    work.checkpoint().await?;
-                    row[1] = Expression::ExactFloat64(1).evaluate(row)?;
-                }
-                Batch::try_new(operator.output.clone(), rows)
+                let (mut arrays, results) =
+                    aggregate::temporal::reduce_batch(batch, intent, &[0], 1, 2, window, &context)
+                        .await?;
+                // The result as an exact Float64.
+                let values = results
+                    .iter()
+                    .map(|result| {
+                        Expression::ExactFloat64(0).evaluate(std::slice::from_ref(result))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                arrays.push(crate::values::arrow_columns::encode(
+                    &DataType::Float64,
+                    crate::values::arrow_columns::ColumnDepth::BatchColumn,
+                    &values.iter().collect::<Vec<_>>(),
+                )?);
+                Batch::from_parts(operator.output.clone(), arrays, vec![None; 2], values.len())
             })
             .boxed_local())
         }
@@ -80,26 +95,31 @@ pub(super) fn execute<'a>(
                 .ok_or_else(|| invalid("missing histogram buckets"))?;
             let quantile = inputs.pop().ok_or_else(|| invalid("missing quantile"))?;
             Ok(futures::stream::once(async move {
-                let ((quantile, _q_memory), (buckets, _bucket_memory)) = futures::try_join!(
-                    collect_rows(quantile, &context),
-                    collect_rows(buckets, &context)
+                let (quantile, buckets) = futures::try_join!(
+                    collect_batch(quantile, &operator.inputs[0], &context),
+                    collect_batch(buckets, &operator.inputs[1], &context)
                 )?;
-                let [row] = quantile.as_slice() else {
-                    return Err(invalid("histogram quantile requires one scalar"));
+                let quantile = decoded(&quantile.batch, 0)?;
+                let [Value::Float64(q)] = quantile.as_slice() else {
+                    return Err(invalid(if quantile.len() == 1 {
+                        "invalid quantile scalar"
+                    } else {
+                        "histogram quantile requires one scalar"
+                    }));
                 };
-                let [Value::Float64(q)] = row.as_slice() else {
-                    return Err(invalid("invalid quantile scalar"));
-                };
-                let mut rows = Vec::new();
-                let mut work = Cooperative::new(&context);
-                let mut workspace = Workspace::new(&context)?;
-                for row in buckets {
-                    work.checkpoint().await?;
-                    let Value::Map(entries) = &row[0] else {
+                let batch = &buckets.batch;
+                let label_sets = decoded(batch, 0)?;
+                let counts = decoded(batch, 1)?;
+                // Each bucket row with an `le`: its labels without `le` and
+                // `__name__`, its bound and its count.
+                let (mut labels_out, mut bounds_out, mut counts_out) =
+                    (Vec::new(), Vec::new(), Vec::new());
+                for (labels, count) in label_sets.into_iter().zip(counts) {
+                    let Value::Map(entries) = &labels else {
                         return Err(invalid("histogram buckets require labels"));
                     };
                     let mut bound = None;
-                    let mut labels = BTreeMap::new();
+                    let mut kept = BTreeMap::new();
                     let mut seen = std::collections::BTreeSet::new();
                     for (key, value) in entries.iter() {
                         let (Value::Utf8(key), Value::Utf8(value)) = (key, value) else {
@@ -111,27 +131,50 @@ pub(super) fn execute<'a>(
                         if key.as_ref() == "le" {
                             bound = value.parse::<f64>().ok();
                         } else if key.as_ref() != "__name__" && !value.is_empty() {
-                            labels.insert(key.clone(), value.clone());
+                            kept.insert(key.clone(), value.clone());
                         }
                     }
                     if let Some(bound) = bound {
-                        let projected = vec![
-                            Value::Map(
-                                labels
-                                    .into_iter()
-                                    .map(|(k, v)| (Value::Utf8(k), Value::Utf8(v)))
-                                    .collect::<Vec<_>>()
-                                    .into(),
-                            ),
-                            Value::Float64(bound),
-                            row[1].clone(),
-                        ];
-                        workspace.grow(row_bytes(&projected))?;
-                        rows.push(projected);
+                        labels_out.push(Value::Map(
+                            kept.into_iter()
+                                .map(|(k, v)| (Value::Utf8(k), Value::Utf8(v)))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        ));
+                        bounds_out.push(bound);
+                        counts_out.push(count);
                     }
                 }
-                let result = aggregate::temporal::reduce(
-                    rows,
+                let projected_schema = schema(vec![
+                    vector_binary::value_schema(false).fields[0].clone(),
+                    result_field("le", DataType::Float64, false),
+                    result_field("value", DataType::Float64, false),
+                ]);
+                let projected = Batch::from_parts(
+                    projected_schema.clone(),
+                    vec![
+                        crate::values::arrow_columns::encode(
+                            &projected_schema.fields[0]
+                                .plain_dtype()
+                                .cloned()
+                                .expect("plain"),
+                            crate::values::arrow_columns::ColumnDepth::BatchColumn,
+                            &labels_out.iter().collect::<Vec<_>>(),
+                        )?,
+                        Arc::new(arrow::array::Float64Array::from(bounds_out)),
+                        crate::values::arrow_columns::encode(
+                            &DataType::Float64,
+                            crate::values::arrow_columns::ColumnDepth::BatchColumn,
+                            &counts_out.iter().collect::<Vec<_>>(),
+                        )?,
+                    ],
+                    vec![None; 3],
+                    labels_out.len(),
+                )?;
+                let mut workspace = Workspace::new(&context)?;
+                workspace.grow(projected.memory_bytes())?;
+                let (mut arrays, results) = aggregate::temporal::reduce_batch(
+                    &projected,
                     &AggIntent::HistogramQuantile {
                         q: *q,
                         le: ColumnRef::Named("le".into()),
@@ -143,7 +186,17 @@ pub(super) fn execute<'a>(
                     &context,
                 )
                 .await?;
-                Batch::try_new(operator.output.clone(), result)
+                arrays.push(crate::values::arrow_columns::encode(
+                    &DataType::Float64,
+                    crate::values::arrow_columns::ColumnDepth::BatchColumn,
+                    &results.iter().collect::<Vec<_>>(),
+                )?);
+                Batch::from_parts(
+                    operator.output.clone(),
+                    arrays,
+                    vec![None; 2],
+                    results.len(),
+                )
             })
             .boxed_local())
         }

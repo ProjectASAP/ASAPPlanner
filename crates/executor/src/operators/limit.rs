@@ -14,56 +14,56 @@ pub(super) fn execute<'a>(
     mut inputs: Vec<Input<'a, Batch>>,
     context: RunContext,
 ) -> Result<OutputStream<'a, Batch>, Error> {
-    let output = operator.output.clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
-    match &operator.kind {
-        Kind::Limit { n, offset, groups } => {
-            let counts = BTreeMap::<Vec<Vec<u8>>, u64>::new();
-            Ok(futures::stream::try_unfold(
-                (input, counts, Vec::<Reservation>::new(), false),
-                move |(mut input, mut counts, mut memory, done)| {
-                    let output = output.clone();
-                    let context = context.clone();
-                    async move {
-                        if done || *n == 0 {
-                            return Ok(None);
-                        }
-                        let Some(batch) = input.next().await else {
-                            return Ok(None);
-                        };
-                        let batch = batch?;
-                        let mut rows = Vec::new();
-                        for row in batch.rows() {
-                            let key = group_key(row, groups)?;
-                            if !counts.contains_key(&key) {
-                                memory.push(
-                                    context.reserve(
-                                        key.iter()
-                                            .map(|part| part.len() + std::mem::size_of::<Vec<u8>>())
-                                            .sum::<usize>()
-                                            + 64,
-                                    )?,
-                                );
-                            }
-                            let count = counts.entry(key).or_default();
-                            if *count >= *offset && count.saturating_sub(*offset) < *n {
-                                rows.push(row.clone());
-                            }
-                            *count = count.saturating_add(1);
-                        }
-                        let done = groups.is_empty()
-                            && counts
-                                .get(&vec![])
-                                .is_some_and(|count| count.saturating_sub(*offset) >= *n);
-                        Ok(Some((
-                            Batch::try_new(output, rows)?,
-                            (input, counts, memory, done),
-                        )))
-                    }
-                },
-            )
-            .boxed_local())
-        }
-        _ => unreachable!(),
-    }
+    let Kind::Limit { n, offset, groups } = &operator.kind else {
+        unreachable!()
+    };
+    let (n, offset) = (*n, *offset);
+    // Rows seen per group so far, across batches.
+    let state = (
+        input,
+        super::group_table::GroupTable::new(groups.clone()),
+        Vec::<u64>::new(),
+        Workspace::new(&context)?,
+        false,
+    );
+    Ok(futures::stream::try_unfold(
+        state,
+        move |(mut input, mut table, mut seen, mut workspace, done)| {
+            let context = context.clone();
+            async move {
+                if done || n == 0 {
+                    return Ok(None);
+                }
+                let Some(batch) = input.next().await else {
+                    return Ok(None);
+                };
+                let batch = batch?;
+                let mut work = Cooperative::new(&context);
+                let held = seen.capacity() * std::mem::size_of::<u64>();
+                let ids =
+                    chunked_group_ids(&mut table, &batch, &mut workspace, held, &mut work).await?;
+                seen.resize(table.len(), 0);
+                workspace.set_bytes(
+                    table.memory_bytes() + seen.capacity() * std::mem::size_of::<u64>(),
+                )?;
+                let keep = ids
+                    .iter()
+                    .map(|&group| {
+                        let count = &mut seen[group as usize];
+                        let kept = *count >= offset && count.saturating_sub(offset) < n;
+                        *count = count.saturating_add(1);
+                        Some(kept)
+                    })
+                    .collect::<arrow::array::BooleanArray>();
+                let done = groups.is_empty()
+                    && seen
+                        .first()
+                        .is_some_and(|count| count.saturating_sub(offset) >= n);
+                let kept = batch.filter(&keep)?;
+                Ok(Some((kept, (input, table, seen, workspace, done))))
+            }
+        },
+    )
+    .boxed_local())
 }

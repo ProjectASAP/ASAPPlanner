@@ -6,19 +6,19 @@ use crate::expressions::binary::BinaryOperator;
 use planner_types::ir::operator::VectorMatchKind;
 use planner_types::ir::schema::PROMQL_SERIES_IDENTITY;
 
-type Labels = BTreeMap<String, String>;
+pub(super) type Labels = BTreeMap<String, String>;
 
 /// Where a row's label set lives: the encoded series identity when present,
 /// otherwise the non-empty Utf8 label columns. The one Float64 column is the
 /// sample value, whatever an aggregate named it.
 #[derive(Clone, Debug)]
-struct Layout {
-    identity: Option<usize>,
-    labels: Vec<usize>,
-    value: usize,
+pub(super) struct Layout {
+    pub(super) identity: Option<usize>,
+    pub(super) labels: Vec<usize>,
+    pub(super) value: usize,
 }
 
-fn layout(input: &SchemaRef) -> Result<Layout, Error> {
+pub(super) fn layout(input: &SchemaRef) -> Result<Layout, Error> {
     let mut identity = None;
     let mut labels = Vec::new();
     let mut value = None;
@@ -39,7 +39,8 @@ fn layout(input: &SchemaRef) -> Result<Layout, Error> {
 }
 
 impl Layout {
-    fn read(&self, input: &SchemaRef, row: &[Value]) -> Result<Labels, Error> {
+    #[cfg(test)]
+    pub(super) fn read(&self, input: &SchemaRef, row: &[Value]) -> Result<Labels, Error> {
         if let Some(i) = self.identity {
             let Value::Utf8(encoded) = &row[i] else {
                 return Err(invalid("series identity must be Utf8"));
@@ -64,7 +65,13 @@ impl Layout {
     }
 
     /// Replace the row's labels; a label column absent from `labels` is empty.
-    fn write(&self, input: &SchemaRef, row: &mut [Value], labels: &Labels) -> Result<(), Error> {
+    #[cfg(test)]
+    pub(super) fn write(
+        &self,
+        input: &SchemaRef,
+        row: &mut [Value],
+        labels: &Labels,
+    ) -> Result<(), Error> {
         if let Some(i) = self.identity {
             let encoded = serde_json::to_string(labels).map_err(|e| invalid(&e.to_string()))?;
             row[i] = Value::Utf8(encoded.into());
@@ -277,7 +284,7 @@ impl Operator {
 
 /// PromQL's matching signature: `on` keeps only the listed labels; `ignoring`
 /// drops them and the metric name.
-fn signature(kind: &VectorMatchKind, names: &[String], mut labels: Labels) -> Labels {
+pub(super) fn signature(kind: &VectorMatchKind, names: &[String], mut labels: Labels) -> Labels {
     match kind {
         VectorMatchKind::On => labels.retain(|k, _| names.contains(k)),
         VectorMatchKind::Ignoring => labels.retain(|k, _| k != "__name__" && !names.contains(k)),
@@ -285,20 +292,15 @@ fn signature(kind: &VectorMatchKind, names: &[String], mut labels: Labels) -> La
     labels
 }
 
-fn label_bytes(labels: &Labels) -> usize {
+pub(super) fn label_bytes(labels: &Labels) -> usize {
     labels.iter().map(|(k, v)| 64 + k.len() + v.len()).sum()
 }
 
-fn float(layout: &Layout, row: &[Value]) -> Result<f64, Error> {
-    match row[layout.value] {
-        Value::Float64(value) => Ok(value),
-        _ => Err(invalid("vector value must be Float64")),
-    }
-}
-
-/// The value of a matched pair, or `None` when a comparison filters it out.
-/// A filter keeps the left value.
-fn apply(operator: &BinaryOperator, left: f64, right: f64) -> Result<Option<f64>, Error> {
+pub(super) fn apply(
+    operator: &BinaryOperator,
+    left: f64,
+    right: f64,
+) -> Result<Option<f64>, Error> {
     let unmatched = BinaryOperator {
         vector_match: None,
         ..operator.clone()
@@ -310,45 +312,408 @@ fn apply(operator: &BinaryOperator, left: f64, right: f64) -> Result<Option<f64>
     }
 }
 
-/// Evaluate `Kind::SeriesBinary` over the collected operand rows.
+/// A bucket bound as Go's `strconv.ParseFloat` reads it, except hex floats:
+/// an out-of-range literal is an error, not an infinity.
+pub(super) fn parse_bound(text: &str) -> Option<f64> {
+    let bound = text.parse::<f64>().ok()?;
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let infinite = ["inf", "infinity"]
+        .iter()
+        .any(|word| unsigned.eq_ignore_ascii_case(word));
+    (bound.is_finite() || bound.is_nan() || infinite).then_some(bound)
+}
+
+/// One operand's series: each row's label set (by its label source, a
+/// series identity or a tuple of label columns, read once per batch), its
+/// value and its time.
+struct SeriesRows {
+    /// Each row's label source.
+    source_of_row: Vec<u32>,
+    /// Each source's label set, as `Layout::read` reads it.
+    sets: Vec<Labels>,
+    /// Each row's value.
+    values: arrow::array::Float64Array,
+    /// Each row's time, when the schema has a time column.
+    times: Option<arrow::array::TimestampMillisecondArray>,
+}
+
+impl SeriesRows {
+    fn labels(&self, row: usize) -> &Labels {
+        &self.sets[self.source_of_row[row] as usize]
+    }
+    fn value(&self, row: usize) -> f64 {
+        self.values.value(row)
+    }
+    fn time(&self, row: usize) -> Option<i64> {
+        self.times.as_ref().map(|times| times.value(row))
+    }
+    fn len(&self) -> usize {
+        self.source_of_row.len()
+    }
+}
+
+/// Each row's label source and each source's label set (`Layout::read`):
+/// the parsed series identity (empty values dropped), or the non-empty label
+/// columns.
+fn label_sources(
+    batch: &Batch,
+    layout: &Layout,
+    schema: &SchemaRef,
+) -> Result<(Vec<u32>, Vec<Labels>), Error> {
+    use arrow::array::{DictionaryArray, StringArray};
+    use arrow::datatypes::UInt32Type;
+    let rows = batch.num_rows();
+    match layout.identity {
+        Some(identity) => {
+            let dictionary = batch
+                .column(identity)
+                .as_any()
+                .downcast_ref::<DictionaryArray<UInt32Type>>()
+                .expect("batch text columns are dictionaries");
+            let texts = dictionary
+                .values()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("dictionaries over strings");
+            let keys = dictionary.keys();
+            let mut source_of_entry = ahash::AHashMap::<u32, u32>::new();
+            let mut sets = Vec::new();
+            let mut source_of_row = Vec::with_capacity(rows);
+            for row in 0..rows {
+                let entry = keys.value(row);
+                let source = match source_of_entry.get(&entry) {
+                    Some(&source) => source,
+                    None => {
+                        let mut labels: Labels = serde_json::from_str(texts.value(entry as usize))
+                            .map_err(|e| invalid(&e.to_string()))?;
+                        // PromQL treats an empty label value as an absent label.
+                        labels.retain(|_, v| !v.is_empty());
+                        sets.push(labels);
+                        let source = (sets.len() - 1) as u32;
+                        source_of_entry.insert(entry, source);
+                        source
+                    }
+                };
+                source_of_row.push(source);
+            }
+            Ok((source_of_row, sets))
+        }
+        None => {
+            let mut table = super::group_table::GroupTable::new(layout.labels.clone());
+            let source_of_row = table.group_ids(batch)?;
+            let sets = (0..table.len() as u32)
+                .map(|group| {
+                    let mut labels = Labels::new();
+                    for (index, &column) in layout.labels.iter().enumerate() {
+                        match table.label(group, index) {
+                            Value::Utf8(v) if !v.is_empty() => {
+                                labels.insert(schema.fields[column].name.clone(), v.to_string());
+                            }
+                            Value::Utf8(_) | Value::Null => {}
+                            _ => return Err(invalid("label must be Utf8")),
+                        }
+                    }
+                    Ok(labels)
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok((source_of_row, sets))
+        }
+    }
+}
+
+fn series_rows(batch: &Batch, schema: &SchemaRef) -> Result<SeriesRows, Error> {
+    let layout = layout(schema)?;
+    let (source_of_row, sets) = label_sources(batch, &layout, schema)?;
+    let values = batch
+        .column(layout.value)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .cloned()
+        .ok_or_else(|| invalid("vector value must be Float64"))?;
+    let times = schema.time_index.map(|index| {
+        batch
+            .column(index)
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            .expect("series timestamps are timestamps")
+            .clone()
+    });
+    Ok(SeriesRows {
+        source_of_row,
+        sets,
+        values,
+        times,
+    })
+}
+
+/// A dictionary text column with row `i` holding `texts[i]`.
+fn interned_texts(texts: impl Iterator<Item = String>) -> Result<arrow::array::ArrayRef, Error> {
+    let mut codes = ahash::AHashMap::<String, u32>::new();
+    let mut values: Vec<String> = Vec::new();
+    let keys = texts
+        .map(|text| {
+            let next = values.len() as u32;
+            *codes.entry(text.clone()).or_insert_with(|| {
+                values.push(text);
+                next
+            })
+        })
+        .collect::<arrow::array::UInt32Array>();
+    Ok(Arc::new(
+        arrow::array::DictionaryArray::<arrow::datatypes::UInt32Type>::try_new(
+            keys,
+            Arc::new(arrow::array::StringArray::from(values)),
+        )
+        .map_err(|e| invalid(&e.to_string()))?,
+    ))
+}
+
+/// The batch of `output` holding `rows`, each (time, label set, value),
+/// written as `Layout::write` writes a label set: the identity as the set's
+/// canonical text, each label column its label or empty.
+fn render(output: &SchemaRef, rows: &[(Option<i64>, Labels, f64)]) -> Result<Batch, Error> {
+    let to = layout(output)?;
+    let mut arrays: Vec<Option<arrow::array::ArrayRef>> = vec![None; output.fields.len()];
+    if let Some(identity) = to.identity {
+        arrays[identity] = Some(interned_texts(
+            rows.iter()
+                .map(|(_, labels, _)| {
+                    serde_json::to_string(labels).map_err(|e| invalid(&e.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter(),
+        )?);
+    }
+    for &column in &to.labels {
+        let name = &output.fields[column].name;
+        arrays[column] =
+            Some(interned_texts(rows.iter().map(|(_, labels, _)| {
+                labels.get(name).cloned().unwrap_or_default()
+            }))?);
+    }
+    if let Some(index) = output.time_index {
+        arrays[index] = Some(Arc::new(
+            rows.iter()
+                .map(|(time, _, _)| *time)
+                .collect::<arrow::array::TimestampMillisecondArray>(),
+        ));
+    }
+    arrays[to.value] = Some(Arc::new(arrow::array::Float64Array::from_iter_values(
+        rows.iter().map(|(_, _, value)| *value),
+    )));
+    let arrays = arrays
+        .into_iter()
+        .map(|array| {
+            array.ok_or_else(|| invalid("PromQL vector requires labels, time and one value"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Batch::from_parts(
+        output.clone(),
+        arrays,
+        vec![None; output.fields.len()],
+        rows.len(),
+    )
+}
+
+pub(super) fn execute<'a>(
+    operator: &'a Operator,
+    mut inputs: Vec<Input<'a, Batch>>,
+    context: RunContext,
+) -> Result<OutputStream<'a, Batch>, Error> {
+    let right = match operator.kind {
+        Kind::SeriesBinary { .. } => {
+            Some(inputs.pop().ok_or_else(|| invalid("missing right input"))?)
+        }
+        _ => None,
+    };
+    let left = inputs.pop().ok_or_else(|| invalid("missing left input"))?;
+    if let Kind::SeriesLabels {
+        kind,
+        labels,
+        unique,
+    } = &operator.kind
+    {
+        return Ok(futures::stream::once(rewrite_label_sets(
+            left, operator, kind, labels, *unique, context,
+        ))
+        .boxed_local());
+    }
+    Ok(futures::stream::once(async move {
+        let mut work = Cooperative::new(&context);
+        let mut workspace = Workspace::new(&context)?;
+        let output = &operator.output;
+        let left = collect_batch(left, &operator.inputs[0], &context).await?;
+        let result = match (&operator.kind, right) {
+            (
+                Kind::SeriesBinary {
+                    operator: binary,
+                    scalars,
+                },
+                Some(right),
+            ) => {
+                let right = collect_batch(right, &operator.inputs[1], &context).await?;
+                series_binary(
+                    operator,
+                    binary,
+                    *scalars,
+                    [&left.batch, &right.batch],
+                    &mut work,
+                    &mut workspace,
+                )
+                .await?
+            }
+            (
+                Kind::SeriesRelabel {
+                    destination,
+                    replacement,
+                    source_regex,
+                },
+                None,
+            ) => {
+                let rows = series_rows(&left.batch, &operator.inputs[0])?;
+                let regex = source_regex
+                    .as_ref()
+                    .map(|(_, pattern)| regex::Regex::new(&format!("^(?s:{pattern})$")))
+                    .transpose()
+                    .map_err(|e| invalid(&e.to_string()))?;
+                // Each source's relabelled set, once.
+                let relabelled = rows
+                    .sets
+                    .iter()
+                    .map(|labels| {
+                        let mut labels = labels.clone();
+                        let rewritten = match (&source_regex, &regex) {
+                            (Some((source, _)), Some(regex)) => regex
+                                .captures(labels.get(source).map_or("", String::as_str))
+                                .map(|captures| {
+                                    let mut value = String::new();
+                                    captures.expand(replacement, &mut value);
+                                    value
+                                }),
+                            _ => Some(replacement.clone()),
+                        };
+                        if let Some(value) = rewritten {
+                            if value.is_empty() {
+                                labels.remove(destination);
+                            } else {
+                                labels.insert(destination.clone(), value);
+                            }
+                        }
+                        labels
+                    })
+                    .collect::<Vec<_>>();
+                let mut seen = std::collections::BTreeSet::new();
+                let mut out = Vec::with_capacity(rows.len());
+                for row in 0..rows.len() {
+                    let labels = &relabelled[rows.source_of_row[row] as usize];
+                    if !seen.insert(labels) {
+                        return Err(invalid(
+                            "vector cannot contain metrics with the same labelset",
+                        ));
+                    }
+                    workspace.grow(label_bytes(labels) + 32)?;
+                    out.push((rows.time(row), labels.clone(), rows.value(row)));
+                }
+                work.checkpoint_rows(rows.len()).await?;
+                render(output, &out)?
+            }
+            (Kind::SeriesHistogramQuantile { quantile, le }, None) => {
+                let input = &operator.inputs[0];
+                let rows = series_rows(&left.batch, input)?;
+                let bucket = &input.fields[*le].name;
+                let mut histograms = BTreeMap::<Labels, Vec<(f64, f64)>>::new();
+                for row in 0..rows.len() {
+                    let mut set = rows.labels(row).clone();
+                    // Prometheus skips a series whose `le` is not a float.
+                    let Some(bound) = set.remove(bucket).and_then(|v| parse_bound(&v)) else {
+                        continue;
+                    };
+                    workspace.grow(
+                        64 + set
+                            .iter()
+                            .map(|(k, v)| 64 + k.len() + v.len())
+                            .sum::<usize>(),
+                    )?;
+                    // The histogram identity keeps `__name__`; only the result drops it.
+                    histograms
+                        .entry(set)
+                        .or_default()
+                        .push((bound, rows.value(row)));
+                }
+                work.checkpoint_rows(rows.len()).await?;
+                let q = f64::from_bits(*quantile);
+                let mut seen = std::collections::BTreeSet::new();
+                let mut out = Vec::new();
+                for (mut set, buckets) in histograms {
+                    work.checkpoint().await?;
+                    set.remove("__name__");
+                    let value = aggregate::temporal::bucket_quantile(q, buckets, &context).await?;
+                    if !seen.insert(set.clone()) {
+                        return Err(invalid(
+                            "vector cannot contain metrics with the same labelset",
+                        ));
+                    }
+                    out.push((None, set, value));
+                }
+                render(output, &out)?
+            }
+            _ => return Err(invalid("series label operator inputs mismatch")),
+        };
+        workspace.grow(result.memory_bytes())?;
+        Ok(result)
+    })
+    .boxed_local())
+}
+
+/// The value of a PromQL scalar operand: its one row's value.
+fn scalar_value(batch: &Batch) -> Result<f64, Error> {
+    if batch.num_rows() != 1 {
+        return Err(invalid("PromQL scalar operand must have one row"));
+    }
+    match decoded(batch, 0)?.remove(0) {
+        Value::Float64(value) => Ok(value),
+        _ => Err(invalid("PromQL scalar must be Float64")),
+    }
+}
+
+/// `Kind::SeriesBinary` over the operands' batches: the row operator's
+/// matching, computed from each row's label set, value and time.
 async fn series_binary(
     operator: &Operator,
     binary: &BinaryOperator,
     scalars: [bool; 2],
-    rows: [Vec<Vec<Value>>; 2],
+    batches: [&Batch; 2],
     work: &mut Cooperative,
     workspace: &mut Workspace,
-) -> Result<Vec<Vec<Value>>, Error> {
+) -> Result<Batch, Error> {
     use planner_types::ir::operator::{GroupSide, PromQLVectorSetOpKind};
+    let output = &operator.output;
     let drops_name = matches!(
         binary.kind,
         BinaryOpKind::Arithmetic(_) | BinaryOpKind::CompareBool(_)
     );
-    let scalar = |rows: &[Vec<Value>]| match rows {
-        [row] => match row[0] {
-            Value::Float64(value) => Ok(value),
-            _ => Err(invalid("PromQL scalar must be Float64")),
-        },
-        _ => Err(invalid("PromQL scalar operand must have one row")),
-    };
-    let [left, right] = rows;
-    let mut result = Vec::new();
     if scalars == [true, true] {
-        let value = apply(binary, scalar(&left)?, scalar(&right)?)?
+        let value = apply(binary, scalar_value(batches[0])?, scalar_value(batches[1])?)?
             .ok_or_else(|| invalid("scalar comparison requires bool"))?;
-        return Ok(vec![vec![Value::Float64(value)]]);
+        return Batch::from_parts(
+            output.clone(),
+            vec![Arc::new(arrow::array::Float64Array::from(vec![value]))],
+            vec![None],
+            1,
+        );
     }
     if scalars[0] || scalars[1] {
         let (constant, vector, schema) = if scalars[0] {
-            (scalar(&left)?, right, &operator.inputs[1])
+            (scalar_value(batches[0])?, batches[1], &operator.inputs[1])
         } else {
-            (scalar(&right)?, left, &operator.inputs[0])
+            (scalar_value(batches[1])?, batches[0], &operator.inputs[0])
         };
-        let layout = layout(schema)?;
+        let rows = series_rows(vector, schema)?;
         let mut seen = std::collections::BTreeSet::new();
-        for mut row in vector {
-            work.checkpoint().await?;
-            let value = float(&layout, &row)?;
+        // Kept rows and their values; with the name dropped, their sets.
+        let (mut kept, mut computed_values, mut rendered) = (Vec::new(), Vec::new(), Vec::new());
+        for row in 0..rows.len() {
+            let value = rows.value(row);
             let (l, r) = if scalars[0] {
                 (constant, value)
             } else {
@@ -361,95 +726,104 @@ async fn series_binary(
             if matches!(binary.kind, BinaryOpKind::Compare(_)) {
                 computed = value;
             }
-            let mut set = layout.read(schema, &row)?;
+            let mut set = rows.labels(row).clone();
             if drops_name {
                 set.remove("__name__");
-                layout.write(schema, &mut row, &set)?;
+                rendered.push((rows.time(row), set.clone(), computed));
             }
-            row[layout.value] = Value::Float64(computed);
-            workspace.grow(row_bytes(&row) + label_bytes(&set))?;
+            workspace.grow(label_bytes(&set) + 32)?;
             if !seen.insert(set) {
                 return Err(invalid(
                     "vector cannot contain metrics with the same labelset",
                 ));
             }
-            result.push(row);
+            kept.push(row as u32);
+            computed_values.push(computed);
         }
-        return Ok(result);
+        work.checkpoint_rows(rows.len()).await?;
+        if drops_name {
+            return render(output, &rendered);
+        }
+        // The kept rows as they were, with their computed values.
+        let layout = layout(schema)?;
+        let taken = vector.take(&arrow::array::UInt32Array::from(kept))?;
+        let mut arrays = taken.record_batch().columns().to_vec();
+        arrays[layout.value] = Arc::new(arrow::array::Float64Array::from(computed_values));
+        return Batch::from_parts(
+            output.clone(),
+            arrays,
+            vec![None; output.fields.len()],
+            taken.num_rows(),
+        );
     }
-    let schemas = [&operator.inputs[0], &operator.inputs[1]];
-    let layouts = [layout(schemas[0])?, layout(schemas[1])?];
+    let sides = [
+        series_rows(batches[0], &operator.inputs[0])?,
+        series_rows(batches[1], &operator.inputs[1])?,
+    ];
     let (kind, names, grouping) = match &binary.vector_match {
         None => (VectorMatchKind::Ignoring, &[][..], None),
         Some(m) => (m.kind.clone(), m.labels.as_slice(), m.grouping.as_ref()),
     };
-    let read = |side: usize, row: &[Value]| layouts[side].read(schemas[side], row);
-    let output = &operator.output;
-    let output_layout = layout(output)?;
-    let render =
-        |side: usize, row: &[Value], labels: &Labels, value: f64| -> Result<Vec<Value>, Error> {
-            let mut result = vec![Value::Null; output.fields.len()];
-            if let (Some(to), Some(from)) = (output.time_index, schemas[side].time_index) {
-                result[to] = row[from].clone();
-            }
-            output_layout.write(output, &mut result, labels)?;
-            result[output_layout.value] = Value::Float64(value);
-            Ok(result)
-        };
+    // An output row from row `row` of side `side`: its time, a set, a value.
+    let at = |side: usize, row: usize| {
+        if output.time_index.is_some() && operator.inputs[side].time_index.is_some() {
+            sides[side].time(row)
+        } else {
+            None
+        }
+    };
+    let mut result = Vec::new();
     if let BinaryOpKind::Set(set) = &binary.kind {
         // `and`/`unless` look up the right side; `or` adds unmatched right rows.
-        let lookup = if *set == PromQLVectorSetOpKind::Or {
-            &left
-        } else {
-            &right
-        };
         let side = usize::from(*set != PromQLVectorSetOpKind::Or);
+        let lookup = &sides[side];
         let mut signatures = std::collections::BTreeSet::new();
-        for row in lookup {
-            work.checkpoint().await?;
-            let labels = signature(&kind, names, read(side, row)?);
+        for row in 0..lookup.len() {
+            let labels = signature(&kind, names, lookup.labels(row).clone());
             workspace.grow(label_bytes(&labels))?;
             signatures.insert(labels);
         }
+        work.checkpoint_rows(lookup.len()).await?;
         let and = *set == PromQLVectorSetOpKind::And;
-        for row in &left {
-            work.checkpoint().await?;
-            let found = signatures.contains(&signature(&kind, names, read(0, row)?));
+        for row in 0..sides[0].len() {
+            let found = signatures.contains(&signature(&kind, names, sides[0].labels(row).clone()));
             if *set == PromQLVectorSetOpKind::Or || found == and {
-                workspace.grow(row_bytes(row))?;
-                result.push(render(0, row, &read(0, row)?, float(&layouts[0], row)?)?);
+                workspace.grow(label_bytes(sides[0].labels(row)) + 32)?;
+                result.push((
+                    at(0, row),
+                    sides[0].labels(row).clone(),
+                    sides[0].value(row),
+                ));
             }
         }
+        work.checkpoint_rows(sides[0].len()).await?;
         if *set == PromQLVectorSetOpKind::Or {
-            for row in &right {
-                work.checkpoint().await?;
-                let labels = read(1, row)?;
+            for row in 0..sides[1].len() {
+                let labels = sides[1].labels(row);
                 if signatures.contains(&signature(&kind, names, labels.clone())) {
                     continue;
                 }
-                let out = render(1, row, &labels, float(&layouts[1], row)?)?;
-                workspace.grow(row_bytes(&out))?;
-                result.push(out);
+                workspace.grow(label_bytes(labels) + 32)?;
+                result.push((at(1, row), labels.clone(), sides[1].value(row)));
             }
+            work.checkpoint_rows(sides[1].len()).await?;
         }
-        return Ok(result);
+        return render(output, &result);
     }
     // Prometheus returns before matching when either side is empty.
-    if left.is_empty() || right.is_empty() {
-        return Ok(result);
+    if sides[0].len() == 0 || sides[1].len() == 0 {
+        return render(output, &result);
     }
     // `group_right` makes the left side the "one" side.
     let swapped = matches!(grouping, Some(g) if g.side == GroupSide::Right);
     let (one, many) = if swapped { (0, 1) } else { (1, 0) };
-    let sides = [&left, &right];
     let mut ones = BTreeMap::new();
-    for (index, row) in sides[one].iter().enumerate() {
-        work.checkpoint().await?;
-        let labels = read(one, row)?;
+    for row in 0..sides[one].len() {
+        let labels = sides[one].labels(row).clone();
         let key = signature(&kind, names, labels.clone());
         workspace.grow(2 * label_bytes(&labels))?;
         if ones
-            .insert(key, (labels, float(&layouts[one], row)?, index))
+            .insert(key, (labels, sides[one].value(row), row))
             .is_some()
         {
             return Err(invalid(&format!(
@@ -458,15 +832,15 @@ async fn series_binary(
             )));
         }
     }
+    work.checkpoint_rows(sides[one].len()).await?;
     let mut matched = BTreeMap::<Labels, std::collections::BTreeSet<Labels>>::new();
-    for row in sides[many].iter() {
-        work.checkpoint().await?;
-        let labels = read(many, row)?;
+    for row in 0..sides[many].len() {
+        let labels = sides[many].labels(row).clone();
         let key = signature(&kind, names, labels.clone());
         let Some((one_labels, one_value, one_index)) = ones.get(&key) else {
             continue;
         };
-        let value = float(&layouts[many], row)?;
+        let value = sides[many].value(row);
         let (l, r) = if swapped {
             (*one_value, value)
         } else {
@@ -509,176 +883,17 @@ async fn series_binary(
                 "multiple matches for labels: grouping labels must ensure unique matches",
             ));
         }
-        let out = if swapped {
-            render(0, &left[*one_index], &metric, computed)?
+        // The output row takes its time from the left side's row.
+        let time = if swapped {
+            at(0, *one_index)
         } else {
-            render(0, row, &metric, computed)?
+            at(0, row)
         };
-        workspace.grow(row_bytes(&out))?;
-        result.push(out);
+        workspace.grow(label_bytes(&metric) + 32)?;
+        result.push((time, metric, computed));
     }
-    Ok(result)
-}
-
-pub(super) fn execute<'a>(
-    operator: &'a Operator,
-    mut inputs: Vec<Input<'a, Batch>>,
-    context: RunContext,
-) -> Result<OutputStream<'a, Batch>, Error> {
-    let output = operator.output.clone();
-    let right = match operator.kind {
-        Kind::SeriesBinary { .. } => {
-            Some(inputs.pop().ok_or_else(|| invalid("missing right input"))?)
-        }
-        _ => None,
-    };
-    let left = inputs.pop().ok_or_else(|| invalid("missing left input"))?;
-    if let Kind::SeriesLabels {
-        kind,
-        labels,
-        unique,
-    } = &operator.kind
-    {
-        return Ok(futures::stream::once(rewrite_label_sets(
-            left, operator, kind, labels, *unique, context,
-        ))
-        .boxed_local());
-    }
-    Ok(futures::stream::once(async move {
-        let mut work = Cooperative::new(&context);
-        let mut workspace = Workspace::new(&context)?;
-        let (rows, _memory) = collect_rows(left, &context).await?;
-        let mut result = Vec::new();
-        match (&operator.kind, right) {
-            (
-                Kind::SeriesBinary {
-                    operator: binary,
-                    scalars,
-                },
-                Some(right),
-            ) => {
-                let (right, _right_memory) = collect_rows(right, &context).await?;
-                result = series_binary(
-                    operator,
-                    binary,
-                    *scalars,
-                    [rows, right],
-                    &mut work,
-                    &mut workspace,
-                )
-                .await?;
-            }
-            (
-                Kind::SeriesRelabel {
-                    destination,
-                    replacement,
-                    source_regex,
-                },
-                None,
-            ) => {
-                let input = &operator.inputs[0];
-                let from = layout(input)?;
-                let to = layout(&output)?;
-                let regex = source_regex
-                    .as_ref()
-                    .map(|(_, pattern)| regex::Regex::new(&format!("^(?s:{pattern})$")))
-                    .transpose()
-                    .map_err(|e| invalid(&e.to_string()))?;
-                let mut seen = std::collections::BTreeSet::new();
-                for row in rows {
-                    work.checkpoint().await?;
-                    let mut labels = from.read(input, &row)?;
-                    let rewritten = match (&source_regex, &regex) {
-                        (Some((source, _)), Some(regex)) => regex
-                            .captures(labels.get(source).map_or("", String::as_str))
-                            .map(|captures| {
-                                let mut value = String::new();
-                                captures.expand(replacement, &mut value);
-                                value
-                            }),
-                        _ => Some(replacement.clone()),
-                    };
-                    if let Some(value) = rewritten {
-                        if value.is_empty() {
-                            labels.remove(destination);
-                        } else {
-                            labels.insert(destination.clone(), value);
-                        }
-                    }
-                    if !seen.insert(labels.clone()) {
-                        return Err(invalid(
-                            "vector cannot contain metrics with the same labelset",
-                        ));
-                    }
-                    let mut out = vec![Value::Null; output.fields.len()];
-                    if let (Some(from), Some(to)) = (input.time_index, output.time_index) {
-                        out[to] = row[from].clone();
-                    }
-                    out[to.value] = row[from.value].clone();
-                    to.write(&output, &mut out, &labels)?;
-                    workspace.grow(row_bytes(&out) + label_bytes(&labels))?;
-                    result.push(out);
-                }
-            }
-            (Kind::SeriesHistogramQuantile { quantile, le }, None) => {
-                let input = &operator.inputs[0];
-                let left_layout = layout(input)?;
-                let bucket = &input.fields[*le].name;
-                let mut histograms = BTreeMap::<Labels, Vec<(f64, f64)>>::new();
-                for row in rows {
-                    work.checkpoint().await?;
-                    let mut set = left_layout.read(input, &row)?;
-                    // Prometheus skips a series whose `le` is not a float.
-                    let Some(bound) = set.remove(bucket).and_then(|v| parse_bound(&v)) else {
-                        continue;
-                    };
-                    let Value::Float64(count) = row[left_layout.value] else {
-                        return Err(invalid("vector value must be Float64"));
-                    };
-                    workspace.grow(
-                        64 + set
-                            .iter()
-                            .map(|(k, v)| 64 + k.len() + v.len())
-                            .sum::<usize>(),
-                    )?;
-                    // The histogram identity keeps `__name__`; only the result drops it.
-                    histograms.entry(set).or_default().push((bound, count));
-                }
-                let out_layout = layout(&output)?;
-                let q = f64::from_bits(*quantile);
-                let mut seen = std::collections::BTreeSet::new();
-                for (mut set, buckets) in histograms {
-                    work.checkpoint().await?;
-                    set.remove("__name__");
-                    let value = aggregate::temporal::bucket_quantile(q, buckets, &context).await?;
-                    let mut row = vec![Value::Null; output.fields.len()];
-                    out_layout.write(&output, &mut row, &set)?;
-                    row[out_layout.value] = Value::Float64(value);
-                    if !seen.insert(set) {
-                        return Err(invalid(
-                            "vector cannot contain metrics with the same labelset",
-                        ));
-                    }
-                    workspace.grow(row_bytes(&row))?;
-                    result.push(row);
-                }
-            }
-            _ => return Err(invalid("series label operator inputs mismatch")),
-        }
-        Batch::try_new(output.clone(), result)
-    })
-    .boxed_local())
-}
-
-/// A bucket bound as Go's `strconv.ParseFloat` reads it, except hex floats:
-/// an out-of-range literal is an error, not an infinity.
-fn parse_bound(text: &str) -> Option<f64> {
-    let bound = text.parse::<f64>().ok()?;
-    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
-    let infinite = ["inf", "infinity"]
-        .iter()
-        .any(|word| unsigned.eq_ignore_ascii_case(word));
-    (bound.is_finite() || bound.is_nan() || infinite).then_some(bound)
+    work.checkpoint_rows(sides[many].len()).await?;
+    render(output, &result)
 }
 
 /// `SeriesLabels` over column batches: each distinct label set (a series
