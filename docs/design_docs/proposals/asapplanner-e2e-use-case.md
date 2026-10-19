@@ -14,6 +14,7 @@ Next, in this doc, we introduce how to make ASAPPlanner support a new use case, 
 - [Given a use case, how to define the query workloads and data workloads](#given-a-use-case-how-to-define-the-query-workloads-and-data-workloads)
 - [List of (Examples) Query Patterns Mapping to ASAP Primitives](#list-of-examples-query-patterns-mapping-to-asap-primitives)
 - [Process of Adding a New ASAP Primitive to ASAPPlanner](#process-of-adding-a-new-asap-primitive-to-asapplanner)
+- [Implementing Your Own Planning Logic in ASAPPlanner](#implementing-your-own-planning-logic-in-asapplanner)
 - [Integrating ASAPPlanner to the Use Case Deployment](#integrating-asapplanner-to-the-use-case-deployment)
   - [Workflow of ASAPPlanner and Deployment](#workflow-of-asapplanner-and-deployment)
   - [Key Interfaces between ASAPPlanner and Use Case Deployment](#key-interfaces-between-asapplanner-and-use-case-deployment)
@@ -78,6 +79,30 @@ Key points (to be expanded; extends [planner-layering.md "Adding a new summary f
 8. **Tests**: Pass 1 offer, guarantee, Stage 3 validity and cost, executor result vs exact within the bound, and one end-to-end example through the stage pipeline.
 
 - What does not change: frontends, the stage structure, other families' candidates.
+
+## Implementing Your Own Planning Logic in ASAPPlanner
+
+Key points (to be expanded):
+
+- **Where planning logic plugs in: `PlanningModels`**, passed with the workload in `UserInput` to `e2e_plan` or `plan_installable`. A use case keeps the planner's stages and replaces the decisions it owns, without forking the planner. `PlanningModels::builtin()` gives the defaults.
+
+| What you decide | Interface (in `asap-plan-selection` unless noted) | Default | Read by |
+|---|---|---|---|
+| Whether a guarantee meets a target | implement `AccuracyModel::satisfies` | `BuiltinAccuracyModel` (the analytical rules) | Stage 3 |
+| Accepting an output whatever its guarantee (e.g. your own validation) | override `AccuracyModel::accepts_output_regardless_of_guarantee` | accepts none | Stage 3, checked before the guarantee |
+| Facts about your data the error bounds need, and measured accuracy of whole outputs | implement `AccuracyEvidenceProvider` (`operand_domain`, `output_guarantee`) | `NoAccuracyEvidence` | Stage 3 |
+| How plans are compared | `PlanSelectionSettings.cost_model`: cost model 1 (pay per use), 2 (provisioned), 3 (your own cluster's limits and an objective) | cost model 1, illustrative prices | Stage 3 |
+| Prices and speeds | `ResourceUnitCost` (e.g. the AWS Fargate preset), `ResourceSpeed` | illustrative | Stage 3 |
+| Your runtime's measured costs | `PlanSelectionSettings.measured_operation_costs` (`MeasuredOperationCost`) | empty: priced from formulas | Stage 3 |
+| What your runtime can run and keep | `DeploymentCapabilities` (`asap-logical-asap-optimization`): supported summaries, raw data retained, query-time results kept | everything supported, raw retained | Stages 1–3 |
+
+- **Example**: a deployment that trusts only exact answers implements `AccuracyModel` with `satisfies` returning `guarantee.is_exact()`, and passes it as `PlanningModels.accuracy`. The candidates stay the same; only the ones Stage 3 accepts change (`crates/planner/tests/deployment_accuracy_model.rs`).
+- **Settings as data**: `PlanSelectionSettings` and `DeploymentCapabilities` load from JSON (`stage_pipeline --plan-selection-settings`, `--deployment-capabilities`), so a deployment can change them without code.
+- **What is not pluggable** (change it in the planner instead):
+  - candidate generation (Stage 1 Pass 1 and 2) and guarantee composition, which use the built-in rules;
+  - Stage 2 materialization;
+  - new summaries, which follow the previous section.
+- **Rules**: models are planning logic only; they never execute. Evidence is a scoped fact about one deployment. A model cannot make a non-executable plan valid: a Count-Min plan over weights not proven non-negative is rejected whatever the model says.
 
 ## Integrating ASAPPlanner to the Use Case Deployment
 
