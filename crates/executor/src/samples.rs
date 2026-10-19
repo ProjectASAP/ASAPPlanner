@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use crate::expressions::CompiledExpression;
 use crate::physical_planner::promql_rows::{
-    decode_series_identity, series_row, SERIES_IDENTITY_COLUMN,
+    decode_series_identity, series_batch, SERIES_IDENTITY_COLUMN,
 };
 use crate::values::{Batch, SchemaRef, Value};
 use crate::Error;
@@ -147,24 +147,29 @@ impl RawSampleSelector {
             }
             kept = latest.into_values().collect();
         }
-        let mut rows = Vec::with_capacity(kept.len());
-        'samples: for sample in kept {
-            let row = series_row(
-                &self.scan_schema,
-                &sample.labels,
-                sample.timestamp_ms,
-                sample.value,
-            )?;
-            for predicate in &self.predicates {
-                match predicate.evaluate(&row)? {
-                    Value::Bool(true) => {}
-                    Value::Bool(false) | Value::Null => continue 'samples,
-                    _ => return Err(Error::Invalid("Scan predicate is not boolean".into())),
-                }
+        // Columns first, with each series' labels and identity built once;
+        // then each predicate (label matcher) once per distinct label value.
+        let samples = kept
+            .iter()
+            .map(|sample| (&sample.labels, sample.timestamp_ms, sample.value))
+            .collect::<Vec<_>>();
+        let mut batch = series_batch(
+            &self.scan_schema,
+            Arc::clone(&self.time_range_schema),
+            &samples,
+        )?;
+        for predicate in &self.predicates {
+            if batch.num_rows() == 0 {
+                break;
             }
-            rows.push(row);
+            let keep = predicate.evaluate_batch(&batch)?;
+            let keep = keep
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .ok_or_else(|| Error::Invalid("Scan predicate is not boolean".into()))?;
+            batch = batch.filter(keep)?;
         }
-        Batch::try_new(Arc::clone(&self.time_range_schema), rows)
+        Ok(batch)
     }
 }
 
@@ -327,5 +332,39 @@ mod tests {
             RawSampleSelector::new(&dag, &window),
             Err(Error::Invalid(_))
         ));
+    }
+
+    /// The selector's batch has the rows the row encoding (`series_row`)
+    /// gives, with each label column stored once per distinct series, not
+    /// once per sample (the matcher's filter keeps the dictionary).
+    #[test]
+    fn selected_columns_equal_the_row_encoding_with_one_label_per_series() {
+        use crate::physical_planner::promql_rows::series_row;
+        use arrow::array::AsArray;
+        let (dag, window) = window_over(latency_ms(), 10_000, TimeRangeKind::Range);
+        let selector = RawSampleSelector::new(&dag, &window).unwrap();
+        let samples = (0..30)
+            .map(|i| {
+                sample(
+                    "latency_ms",
+                    ["a", "b", "a"][i % 3],
+                    1_000 + i as i64,
+                    i as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let batch = selector.rows(10_000, &samples).unwrap();
+        let expected = samples
+            .iter()
+            .filter(|s| s.labels["instance"] == "a")
+            .map(|s| series_row(&selector.scan_schema, &s.labels, s.timestamp_ms, s.value).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(format!("{:?}", batch.rows()), format!("{expected:?}"));
+        for column in [0, 3] {
+            let dictionary = batch
+                .column(column)
+                .as_dictionary::<arrow::datatypes::UInt32Type>();
+            assert_eq!(dictionary.values().len(), 2, "column {column}");
+        }
     }
 }

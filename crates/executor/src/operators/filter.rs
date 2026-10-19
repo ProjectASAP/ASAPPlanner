@@ -16,22 +16,23 @@ pub(super) fn execute<'a>(
     mut inputs: Vec<Input<'a, Batch>>,
     context: RunContext,
 ) -> Result<OutputStream<'a, Batch>, Error> {
-    let output = operator.output.clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     match &operator.kind {
+        // The predicate is one column per batch; Arrow's filter kernel then
+        // copies the kept cells of each plain column. State columns are
+        // shared, not copied.
         Kind::Filter(predicate) => Ok(input
             .map(move |batch| {
                 if context.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
                 let batch = batch?;
-                let mut rows = Vec::new();
-                for row in batch.rows() {
-                    if matches!(predicate.evaluate(row)?, Value::Bool(true)) {
-                        rows.push(row.clone());
-                    }
-                }
-                Batch::try_new(output.clone(), rows)
+                let keep = predicate.evaluate_batch(&batch, &DataType::Bool)?;
+                let keep = keep
+                    .as_any()
+                    .downcast_ref::<arrow::array::BooleanArray>()
+                    .ok_or_else(|| invalid("filter predicate must be boolean"))?;
+                batch.filter(keep)
             })
             .boxed_local()),
         _ => unreachable!(),

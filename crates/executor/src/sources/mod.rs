@@ -3,7 +3,7 @@ use crate::{
     expressions::CompiledExpression,
     plan::PhysicalOperator,
     runtime::{Input, OutputStream, RunContext},
-    values::{Batch, SchemaRef, Value},
+    values::{Batch, SchemaRef},
     Error,
 };
 use futures::{stream, StreamExt};
@@ -143,29 +143,22 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 }
                 let _workspace =
                     context.reserve(batch.bytes().checked_mul(2).ok_or(Error::MemoryLimit)?)?;
-                let mut rows = Vec::new();
-                for row in batch.rows() {
-                    if context.is_cancelled() {
-                        return Err(Error::Cancelled);
+                // Each predicate is one column over the rows the earlier ones
+                // kept; over dictionary-encoded labels it is evaluated once
+                // per distinct label value, not once per row.
+                let mut batch = batch;
+                for predicate in &self.predicates {
+                    if batch.num_rows() == 0 {
+                        break;
                     }
-                    let mut keep = true;
-                    for predicate in &self.predicates {
-                        match predicate.evaluate(row)? {
-                            Value::Bool(true) => {}
-                            Value::Bool(false) | Value::Null => {
-                                keep = false;
-                                break;
-                            }
-                            _ => {
-                                return Err(Error::Invalid("Scan predicate is not boolean".into()))
-                            }
-                        }
-                    }
-                    if keep {
-                        rows.push(row.clone());
-                    }
+                    let keep = predicate.evaluate_batch(&batch)?;
+                    let keep = keep
+                        .as_any()
+                        .downcast_ref::<arrow::array::BooleanArray>()
+                        .ok_or_else(|| Error::Invalid("Scan predicate is not boolean".into()))?;
+                    batch = batch.filter(keep)?;
                 }
-                Batch::try_new(self.output.clone(), rows)
+                Ok(batch)
             })
             .boxed_local())
     }
