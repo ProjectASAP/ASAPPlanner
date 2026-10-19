@@ -15,6 +15,7 @@ use super::asap::ASAPOp;
 use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 use super::operator_properties::TimeShift;
+use super::query::QueryRoot;
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::SchemaDerivationError;
 
@@ -161,7 +162,74 @@ fn build_over(
 pub fn expand_pane_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    expand(root, &mut HashMap::new())
+    expand(root, &mut ExpansionMemo::default())
+}
+
+/// A workload with its pane chains expanded
+/// ([`expand_pane_chains_in_workload`]).
+#[derive(Debug, Clone)]
+pub struct PaneChainExpansion {
+    /// The workload's roots, in order, with every chain expanded.
+    pub roots: Vec<QueryRoot>,
+    /// Each expanded chain with its panes, newest first, in the order the
+    /// chains were first reached.
+    pub chains: Vec<ExpandedPaneChain>,
+}
+
+/// One expanded chain: the `PaneChain` node of the input workload and the
+/// `SummaryAgg` panes that replace it.
+#[derive(Debug, Clone)]
+pub struct ExpandedPaneChain {
+    /// The chain node, as the input workload holds it.
+    pub chain: Rc<OperatorNode>,
+    /// Its panes in the expanded workload, newest first.
+    pub panes: Vec<Rc<OperatorNode>>,
+}
+
+/// [`expand_pane_chains`] over every root of one workload, with one memo, so
+/// a node several roots share stays one node and a chain several merges
+/// read expands into one set of panes. A standalone scalar root has the
+/// operators it reads expanded. Also returns each chain's panes, so a
+/// caller can carry what it knows about a chain (e.g. its retention) to
+/// them.
+pub fn expand_pane_chains_in_workload(
+    roots: &[QueryRoot],
+) -> Result<PaneChainExpansion, SchemaDerivationError> {
+    let mut memo = ExpansionMemo::default();
+    let roots = roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => expand(node, &mut memo).map(QueryRoot::Operator),
+            QueryRoot::Scalar(expr) => {
+                let mut error = None;
+                let expr = expr.map_operator_refs(&mut |node| {
+                    expand(node, &mut memo).unwrap_or_else(|e| {
+                        error.get_or_insert(e);
+                        Rc::clone(node)
+                    })
+                });
+                match error {
+                    Some(e) => Err(e),
+                    None => Ok(QueryRoot::Scalar(expr)),
+                }
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let chains = memo
+        .chains
+        .into_iter()
+        .map(|chain| {
+            let pane_count = match chain.asap() {
+                Some(ASAPOp::PaneChain { pane_count, .. }) => *pane_count,
+                _ => unreachable!("only chains are recorded"),
+            };
+            let panes = (0..pane_count)
+                .map(|index| Rc::clone(&memo.panes[&(Rc::as_ptr(&chain), index)]))
+                .collect();
+            ExpandedPaneChain { chain, panes }
+        })
+        .collect();
+    Ok(PaneChainExpansion { roots, chains })
 }
 
 /// The untimed `node` with `timing` written into it and into every untimed
@@ -180,11 +248,22 @@ fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode 
     .with_timing(Some(timing))
 }
 
+/// What one expansion has built: each expanded node by its input's
+/// address, and each pane by its chain's address and index, so a chain two
+/// merges read expands into one set of panes.
+#[derive(Default)]
+struct ExpansionMemo {
+    nodes: HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    panes: HashMap<(*const OperatorNode, u32), Rc<OperatorNode>>,
+    /// Each chain expanded, in the order first reached.
+    chains: Vec<Rc<OperatorNode>>,
+}
+
 fn expand(
     node: &Rc<OperatorNode>,
-    memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    memo: &mut ExpansionMemo,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+    if let Some(done) = memo.nodes.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
     }
     let out = match &node.operator {
@@ -197,14 +276,24 @@ fn expand(
                 match child.asap() {
                     Some(ASAPOp::PaneChain { pane_count, .. }) => {
                         for index in 0..*pane_count {
+                            let key = (Rc::as_ptr(child), index);
+                            if let Some(done) = memo.panes.get(&key) {
+                                inputs.push(Rc::clone(done));
+                                continue;
+                            }
                             let pane = Rc::new(pane(child, index)?);
-                            inputs.push(match child.timing {
+                            let pane = match child.timing {
                                 Some(timing) => Rc::new(
                                     timed_like(&pane, timing)
                                         .with_materialization(child.materialization),
                                 ),
                                 None => pane,
-                            });
+                            };
+                            if index == 0 {
+                                memo.chains.push(Rc::clone(child));
+                            }
+                            memo.panes.insert(key, Rc::clone(&pane));
+                            inputs.push(pane);
                         }
                     }
                     _ => inputs.push(expand(child, memo)?),
@@ -243,6 +332,6 @@ fn expand(
             }
         }
     };
-    memo.insert(Rc::as_ptr(node), Rc::clone(&out));
+    memo.nodes.insert(Rc::as_ptr(node), Rc::clone(&out));
     Ok(out)
 }

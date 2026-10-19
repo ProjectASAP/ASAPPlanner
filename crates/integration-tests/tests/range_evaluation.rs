@@ -291,3 +291,40 @@ fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
     let without_retention = run_promql(&exact_panel(query, 60_000, Some(LAST_HOUR_BY_MINUTE)));
     assert_eq!(without_retention.selection.selected, ingestion);
 }
+
+/// (e) A chain over an offset input reaches back its offset further: with
+/// no raw data kept, `max_over_time(m[60m] offset 10m)` every 10 minutes
+/// keeps six 10-minute panes ending 10 minutes before each evaluation, so
+/// its panes must be kept for 10 min + 60 min = 4,200,000 ms, and the kept
+/// memory Stage 3 prices covers that seventh pane; without the offset the
+/// retention is the window, 3,600,000 ms.
+#[test]
+fn an_offset_chain_is_retained_and_priced_for_its_offset() {
+    let no_raw_data = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plain = run_promql_for(
+        &exact_panel("max_over_time(m[60m])", 600_000, None),
+        &no_raw_data,
+    );
+    let offset = run_promql_for(
+        &exact_panel("max_over_time(m[60m] offset 10m)", 600_000, None),
+        &no_raw_data,
+    );
+    let retention =
+        |run: &Run| -> Vec<u64> { run.selection.pane_retention_ms.values().copied().collect() };
+    assert_eq!(retention(&plain), [3_600_000]);
+    assert_eq!(retention(&offset), [4_200_000]);
+    let memory = |run: &Run| {
+        run.selection.costs[&run.selection.selected]
+            .usage
+            .average_memory_bytes
+    };
+    assert!(
+        memory(&offset) > memory(&plain),
+        "{} vs {}",
+        memory(&offset),
+        memory(&plain)
+    );
+}

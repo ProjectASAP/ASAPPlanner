@@ -111,6 +111,13 @@
 // writes from sketch-bench's `rqe_atomic_costs.json`); a sketch node with an
 // entry is priced from it, and each node's `price_source` says `measured`
 // or `analytical`.
+// `--plan-selection-settings <file>` reads all of Stage 3's settings from
+// one JSON file (`PlanSelectionSettings`: `cost_model`, e.g.
+// `{"usage_over_time": {"cost_per_cpu_op": 1e-6, ...}}` with the
+// deployment's own unit costs, `resource_speed`,
+// `non_repeating_query_horizon_seconds` and `measured_operation_costs`;
+// an omitted field takes its default). It replaces `--cost-model`, the
+// `--cluster-*` flags and `--measured-operation-costs`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
@@ -154,7 +161,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--deployment-capabilities <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
+[--plan-selection-settings <file>] [--deployment-capabilities <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) a run enumerates.
@@ -245,6 +252,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut deployment_capabilities = DeploymentCapabilities::default();
     let mut out = None;
     let mut measured_operation_costs_path: Option<String> = None;
+    let mut plan_selection_settings_path: Option<String> = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value"));
@@ -299,6 +307,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             }
             "--out" => out = Some(value()?),
             "--measured-operation-costs" => measured_operation_costs_path = Some(value()?),
+            "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -309,6 +318,20 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
+    if plan_selection_settings_path.is_some()
+        && (cost_model.is_some()
+            || cluster_memory.is_some()
+            || cluster_disk.is_some()
+            || cluster_cores.is_some()
+            || cluster_objective.is_some()
+            || measured_operation_costs_path.is_some())
+    {
+        return Err(
+            "--plan-selection-settings replaces --cost-model, the --cluster-* flags \
+                    and --measured-operation-costs"
+                .into(),
+        );
+    }
     let cluster = (cluster_memory, cluster_disk, cluster_objective.as_deref());
     // The settings every flag below leaves at its default; the Fargate
     // preset converts its prices at their `resource_speed`.
@@ -360,10 +383,18 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         None => Vec::new(),
     };
-    let plan_selection = PlanSelectionSettings {
-        cost_model,
-        measured_operation_costs,
-        ..default_settings
+    let plan_selection = match &plan_selection_settings_path {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?;
+            serde_json::from_str(&text)
+                .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?
+        }
+        None => PlanSelectionSettings {
+            cost_model,
+            measured_operation_costs,
+            ..default_settings
+        },
     };
     let from_file = match &workload_path {
         Some(path) if example.is_none() && queries.is_empty() => {

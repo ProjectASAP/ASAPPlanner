@@ -62,6 +62,14 @@ jobs:
       env:
         RUSTC_WRAPPER: sccache
 
+    # A deployment runtime uses only the facade's and the executor's public
+    # APIs. asap-planner's tests check that, but only when the executor links
+    # without its `test-support` feature, which a workspace build turns on.
+    - name: Check the runtime tests against the public APIs alone
+      run: cargo check -p asap-planner --tests --locked
+      env:
+        RUSTC_WRAPPER: sccache
+
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest

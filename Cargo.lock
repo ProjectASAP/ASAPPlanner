@@ -333,6 +333,7 @@ dependencies = [
 name = "asap-executor"
 version = "0.1.0"
 dependencies = [
+ "asap-executor",
  "asap-frontend-promql",
  "asap-logical-asap-optimization",
  "asap-plan-selection",
@@ -452,12 +453,17 @@ dependencies = [
 name = "asap-planner"
 version = "0.1.0"
 dependencies = [
+ "asap-executor",
  "asap-frontend-metricsql",
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-logical-asap-optimization",
  "asap-plan-selection",
  "asap-types",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
 ]
