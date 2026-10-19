@@ -93,11 +93,11 @@ fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
     );
     result[0]
         .iter()
-        .flat_map(|batch| batch.rows())
-        .flat_map(|row| row.iter())
+        .flat_map(|batch| batch.to_rows())
+        .flatten()
         .filter_map(|value| match value {
-            Value::Float64(value) => Some(*value),
-            Value::Int64(value) => Some(*value as f64),
+            Value::Float64(value) => Some(value),
+            Value::Int64(value) => Some(value as f64),
             _ => None,
         })
         .collect()

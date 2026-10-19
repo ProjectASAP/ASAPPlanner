@@ -133,8 +133,8 @@ fn answers(batches: &[Batch]) -> Vec<Answer> {
     let mut answers: Vec<_> = batches
         .iter()
         .flat_map(|batch| {
-            batch.rows().iter().map(|row| {
-                let labels = series_labels_of_output_row(batch.schema(), row).unwrap();
+            batch.to_rows().into_iter().map(|row| {
+                let labels = series_labels_of_output_row(batch.schema(), &row).unwrap();
                 let value = row.iter().find_map(|v| match v {
                     Value::Float64(v) => Some(*v),
                     _ => None,
@@ -344,7 +344,7 @@ fn run_data_plane(
             let built = run(dag, pane_input, &[output.node_id as u64], scope).remove(0);
             // The pane's state, as the cache keeps it, in one batch.
             let schema = built[0].schema().clone();
-            let state_rows = built.iter().flat_map(|b| b.rows().to_vec()).collect();
+            let state_rows = built.iter().flat_map(|b| b.to_rows().to_vec()).collect();
             let state = Batch::try_new(schema, state_rows).unwrap();
             store.insert(
                 pane_key.clone(),

@@ -17,6 +17,7 @@
 //!
 //! Errors are those of row-by-row evaluation: vectorized operations cannot
 //! fail, and the per-input path visits inputs in row order.
+use super::planner::ScalarExpr;
 use super::{arithmetic, Expression};
 use crate::values::arrow_columns::{self, ColumnDepth};
 use crate::values::{Batch, Value};
@@ -29,7 +30,6 @@ use arrow::array::{
 use arrow::datatypes::UInt32Type;
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use planner_types::ir::schema::{DataType, FieldDataType, Schema};
-use planner_types::ir::ScalarExpr;
 use std::sync::Arc;
 
 /// An expression lowered to the operations evaluated over whole columns.
@@ -747,6 +747,7 @@ mod tests {
     use crate::expressions::{binary::BinaryOperator, CompiledExpression};
     use planner_types::ir::scalar::ExprSemantics;
     use planner_types::ir::schema::Field;
+    use planner_types::ir::ScalarExpr;
 
     fn field(name: &str, dtype: DataType, nullable: bool) -> Field {
         Field {
@@ -826,7 +827,7 @@ mod tests {
     fn check(expression: &Expression, batch: &Batch) {
         let (dtype, _) = expression.dtype(batch.schema()).unwrap();
         let expected = batch
-            .rows()
+            .to_rows()
             .iter()
             .map(|row| expression.evaluate(row))
             .collect::<Result<Vec<_>, _>>();

@@ -161,7 +161,7 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     )
     .remove(0)
     .iter()
-    .flat_map(|batch| batch.rows().to_vec())
+    .flat_map(|batch| batch.to_rows().to_vec())
     .map(|row: Vec<Value>| format!("{row:?}"))
     .collect();
     rows.sort();

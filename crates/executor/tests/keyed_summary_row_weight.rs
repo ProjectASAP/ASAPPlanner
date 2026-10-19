@@ -108,7 +108,7 @@ fn top_items(build: Operator, input: SchemaRef, batch: Batch) -> Vec<(String, St
         let mut rows = Vec::new();
         let mut stream = dag.execute(&[2], context).unwrap().remove(0);
         while let Some(batch) = stream.next().await {
-            rows.extend(batch.unwrap().rows().iter().cloned());
+            rows.extend(batch.unwrap().to_rows().iter().cloned());
         }
         rows
     })
@@ -355,7 +355,7 @@ fn null_weight_adds_nothing() {
     let states = block_on(dag.execute(&[1], context).unwrap().remove(0).next())
         .unwrap()
         .unwrap();
-    assert_eq!(states.rows().len(), 2, "one state per job");
+    assert_eq!(states.to_rows().len(), 2, "one state per job");
     assert_eq!(
         top_items(
             keyed_build(&nullable, RowWeight::Column(2)),

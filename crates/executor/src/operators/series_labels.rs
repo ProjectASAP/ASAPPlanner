@@ -1249,7 +1249,7 @@ mod columnar_tests {
                     let mut output = dag.execute(&[1], context).unwrap().remove(0);
                     let mut rows = Vec::new();
                     while let Some(batch) = output.next().await {
-                        rows.extend(batch?.rows().iter().cloned());
+                        rows.extend(batch?.to_rows().iter().cloned());
                     }
                     Ok::<_, Error>(rows)
                 });

@@ -143,7 +143,12 @@ impl TryFrom<UncheckedOperator> for Operator {
                 input(0)?,
                 input(1)?,
                 kind,
-                &planner_types::ir::Predicate(predicate.expression().clone()),
+                // A compiled predicate reads no other operator.
+                &planner_types::ir::Predicate(predicate.expression().map_operator_refs(
+                    &mut |_| -> std::rc::Rc<planner_types::ir::OperatorNode> {
+                        unreachable!("compiled expressions hold no operator reference")
+                    },
+                )),
                 output.clone(),
             )?,
             Kind::PerGroupSummaryBuild {

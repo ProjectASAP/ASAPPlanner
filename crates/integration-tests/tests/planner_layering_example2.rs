@@ -1001,10 +1001,10 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
     );
     let values: Vec<f64> = result[0]
         .iter()
-        .flat_map(|batch| batch.rows())
-        .flat_map(|row| row.iter())
+        .flat_map(|batch| batch.to_rows())
+        .flatten()
         .filter_map(|value| match value {
-            Value::Float64(v) => Some(*v),
+            Value::Float64(v) => Some(v),
             _ => None,
         })
         .collect();

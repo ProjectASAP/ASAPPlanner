@@ -230,7 +230,7 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
             .remove(0);
         let mut rows = vec![];
         while let Some(batch) = stream.next().await {
-            rows.extend(batch.unwrap().rows().iter().cloned());
+            rows.extend(batch.unwrap().to_rows().iter().cloned());
         }
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 1);
@@ -368,7 +368,7 @@ async fn batch_planning_replaces_summary_operators() {
                 revision: 1,
             },
         );
-        let rows: Vec<_> = result[0].iter().flat_map(|batch| batch.rows()).collect();
+        let rows: Vec<_> = result[0].iter().flat_map(|batch| batch.to_rows()).collect();
         assert_eq!(rows.len(), 1);
         assert!(
             matches!(rows[0][0], Value::Float64(v) if v == expected),

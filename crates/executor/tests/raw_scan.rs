@@ -173,7 +173,7 @@ fn raw_scan_to_sort_limit_at_both_phases() {
             let mut output = bound.execute(&[2], ctx.clone()).unwrap().remove(0);
             let mut rows = vec![];
             while let Some(batch) = output.next().await {
-                rows.extend(batch.unwrap().rows().iter().cloned());
+                rows.extend(batch.unwrap().to_rows().iter().cloned());
             }
             rows
         });
@@ -357,7 +357,7 @@ fn empty_sources_and_three_valued_predicates() {
             let mut s = physical_dag.execute(&[0], context()).unwrap().remove(0);
             let mut count = 0;
             while let Some(b) = s.next().await {
-                count += b.unwrap().rows().len();
+                count += b.unwrap().to_rows().len();
             }
             assert_eq!(count, expected);
         });
@@ -392,7 +392,7 @@ fn compile_without_readers_and_rebind_inputs() {
         assert_eq!(
             result
                 .iter()
-                .map(|b| b.as_ref().unwrap().rows().len())
+                .map(|b| b.as_ref().unwrap().to_rows().len())
                 .sum::<usize>(),
             2
         );
@@ -417,4 +417,34 @@ fn compilation_rejects_unknown_boundedness_for_sort() {
         },
     };
     assert!(compile(&dag, BTreeMap::from([(0, input)]), &[2]).is_err());
+}
+
+// A filtering Scan reserves room for the filtered copy and the predicate's
+// temporaries (masks, per-value columns): at peak, twice its input batch.
+#[test]
+fn a_filtering_scan_reserves_for_its_predicate_temporaries() {
+    let (scan, schema, _) = fixture();
+    let batch = Batch::try_new(
+        schema.clone(),
+        (0..10_000).map(|i| vec![Value::Int64(i)]).collect(),
+    )
+    .unwrap();
+    let input_bytes = batch.memory_bytes();
+    let sources = registry(Arc::new(
+        MemorySource::new(schema.clone(), vec![batch]).unwrap(),
+    ));
+    let plan = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
+    let physical_dag = bind_with_data_sources(&plan, BTreeMap::new(), &[0], &sources).unwrap();
+    let ctx = context();
+    block_on(async {
+        let mut s = physical_dag.execute(&[0], ctx.clone()).unwrap().remove(0);
+        while let Some(batch) = s.next().await {
+            batch.unwrap();
+        }
+    });
+    assert!(
+        ctx.peak_bytes() >= 2 * input_bytes,
+        "peak {} for an input of {input_bytes} bytes",
+        ctx.peak_bytes()
+    );
 }

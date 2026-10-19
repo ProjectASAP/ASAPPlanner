@@ -229,7 +229,7 @@ fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -
     let mut rows: Vec<Vec<Value>> = physical_common::execute(plan, inputs, scope)
         .remove(0)
         .iter()
-        .flat_map(|batch| batch.rows().to_vec())
+        .flat_map(|batch| batch.to_rows().to_vec())
         .collect();
     rows.sort_by_key(|row| format!("{row:?}"));
     rows

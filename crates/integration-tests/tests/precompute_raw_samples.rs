@@ -173,7 +173,7 @@ fn execute(
             .remove(0);
         let mut result = Vec::new();
         while let Some(batch) = stream.next().await {
-            for row in batch.unwrap().rows() {
+            for row in &batch.unwrap().to_rows() {
                 let [Value::Map(labels), Value::Timestamp(6000), Value::Summary { state, .. }] =
                     row.as_slice()
                 else {

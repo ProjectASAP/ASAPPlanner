@@ -128,7 +128,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             }
             let mut actual: Vec<_> = batches
                 .iter()
-                .flat_map(|batch| batch.rows())
+                .flat_map(|batch| batch.to_rows())
                 .map(|row| {
                     let Value::Utf8(service) = &row[0] else {
                         panic!("missing service")

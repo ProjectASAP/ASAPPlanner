@@ -240,7 +240,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             },
         );
         assert!(
-            matches!(output[0].rows()[0][1], Value::Float64(value) if value == expected_rate_sum)
+            matches!(output[0].to_rows()[0][1], Value::Float64(value) if value == expected_rate_sum)
         );
     }
     let contracts = BTreeMap::from([(
@@ -334,13 +334,13 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         };
         let output = run(&candidate.query, inputs, query_scope.clone());
         assert_eq!(output.len(), 1);
-        assert_eq!(output[0].rows().len(), 1);
-        assert!(matches!(&output[0].rows()[0][0], Value::Utf8(job) if job.as_ref() == "api"));
+        assert_eq!(output[0].to_rows().len(), 1);
+        assert!(matches!(&output[0].to_rows()[0][0], Value::Utf8(job) if job.as_ref() == "api"));
         assert!(
-            matches!(output[0].rows()[0][1], Value::Float64(value) if value == expected_rate_sum)
+            matches!(output[0].to_rows()[0][1], Value::Float64(value) if value == expected_rate_sum)
         );
         results.push(
-            output[0].rows()[0]
+            output[0].to_rows()[0]
                 .iter()
                 .map(|value| value.key().unwrap())
                 .collect::<Vec<_>>(),
@@ -521,18 +521,18 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                 },
             );
             assert_eq!(output.len(), 1);
-            assert_eq!(output[0].rows().len(), 1);
+            assert_eq!(output[0].to_rows().len(), 1);
             assert!(output[0]
                 .schema()
                 .fields
                 .iter()
                 .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
             assert!(
-                output[0].rows()[0]
+                output[0].to_rows()[0]
                     .iter()
                     .any(|value| matches!(value, Value::Float64(x) if (*x - 2.).abs() < 1e-12)),
                 "{:?}",
-                output[0].rows()
+                output[0].to_rows()
             );
             executed += 1;
         }

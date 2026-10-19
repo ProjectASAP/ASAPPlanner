@@ -125,7 +125,7 @@ pub fn execute_raw_rows(
         let mut output = plan.execute(&[root_id], context.clone()).unwrap().remove(0);
         let mut rows = vec![];
         while let Some(batch) = output.next().await {
-            rows.extend_from_slice(batch.unwrap().rows());
+            rows.extend(batch.unwrap().to_rows());
         }
         rows
     });

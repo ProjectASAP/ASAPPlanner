@@ -83,7 +83,7 @@ fn pane_state(maintenance: &CompiledPhysicalDAG, pane: i64) -> Arc<dyn Aggregate
             revision: 1,
         },
     );
-    let Value::Summary { state, .. } = &state[0][0].rows()[0][0] else {
+    let Value::Summary { state, .. } = &state[0][0].to_rows()[0][0] else {
         panic!("missing KLL")
     };
     state.clone()
@@ -221,7 +221,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
                 revision: 1,
             },
         );
-        let Value::Summary { state, .. } = &result[0][0].rows()[0][0] else {
+        let Value::Summary { state, .. } = &result[0][0].to_rows()[0][0] else {
             panic!("missing merged state")
         };
         let kll = state
@@ -229,7 +229,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
             .downcast_ref::<DatasketchesKLLAccumulator>()
             .unwrap();
         assert_eq!(kll.inner.count(), 100);
-        let value = |index: usize| match result[index][0].rows()[0][0] {
+        let value = |index: usize| match result[index][0].to_rows()[0][0] {
             Value::Float64(value) => value,
             _ => panic!("missing quantile"),
         };

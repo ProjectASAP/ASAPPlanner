@@ -473,7 +473,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(
-                    format!("{:?}", result[0].rows()[0][0]),
+                    format!("{:?}", result[0].to_rows()[0][0]),
                     format!("{expected:?}")
                 );
             }

@@ -131,10 +131,10 @@ mod tests {
                 evaluate_batch(batch, vec![negate], context.clone())
             })
             .unwrap();
-            assert!(matches!(result[0].rows()[0][0], Value::Float64(-7.)));
+            assert!(matches!(result[0].to_rows()[0][0], Value::Float64(-7.)));
             let source = Operator::scalar(Value::Float64(9.), DataType::Float64).unwrap();
             let scalar = evaluate_source(source, context).unwrap();
-            assert!(matches!(scalar[0].rows()[0][0], Value::Float64(9.)));
+            assert!(matches!(scalar[0].to_rows()[0][0], Value::Float64(9.)));
         }
     }
 

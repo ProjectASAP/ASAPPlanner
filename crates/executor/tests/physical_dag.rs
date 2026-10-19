@@ -47,7 +47,7 @@ fn run(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64, scope: Scope) -> Vec<
         let mut stream = dag.execute(&[root], context.clone()).unwrap().remove(0);
         let mut rows = vec![];
         while let Some(batch) = stream.next().await {
-            rows.extend(batch.unwrap().rows().iter().cloned());
+            rows.extend(batch.unwrap().to_rows().iter().cloned());
         }
         assert_eq!(context.retained_bytes(), 0);
         rows
@@ -1276,7 +1276,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     let rows = block_on(async {
         let mut rows = vec![];
         while let Some(batch) = stream.next().await {
-            rows.extend_from_slice(batch.unwrap().rows());
+            rows.extend(batch.unwrap().to_rows());
         }
         rows
     });
@@ -1381,7 +1381,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                     .remove(0);
                 let mut rows = vec![];
                 while let Some(batch) = stream.next().await {
-                    rows.extend(batch?.rows().iter().cloned());
+                    rows.extend(batch?.to_rows().iter().cloned());
                 }
                 Ok::<_, asap_executor::Error>(rows)
             });
@@ -1493,7 +1493,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
                 .remove(0);
             let mut rows = Vec::new();
             while let Some(batch) = stream.next().await {
-                rows.extend(batch?.rows().iter().cloned());
+                rows.extend(batch?.to_rows().iter().cloned());
             }
             Ok::<_, asap_executor::Error>(rows)
         });

@@ -85,7 +85,7 @@ fn three_statistics(batch: Batch, build: Operator) -> Result<Vec<f64>, Error> {
         .into_iter()
         .map(|stream| {
             let batches = stream.into_iter().collect::<Result<Vec<_>, _>>()?;
-            Ok(value(&batches[0].rows()[0]))
+            Ok(value(&batches[0].to_rows()[0]))
         })
         .collect()
 }

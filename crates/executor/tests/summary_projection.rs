@@ -167,10 +167,10 @@ fn post_asap_summary_projection_survives_recovery() {
     block_on(async {
         let mut output = physical_dag.execute(&[1], context).unwrap().remove(0);
         let batch = output.next().await.unwrap().unwrap();
-        assert!(matches!(&batch.rows()[0][0], Value::Utf8(label) if label.as_ref() == "api"));
+        assert!(matches!(&batch.to_rows()[0][0], Value::Utf8(label) if label.as_ref() == "api"));
         let Value::Summary {
             state: projected, ..
-        } = &batch.rows()[0][1]
+        } = &batch.to_rows()[0][1]
         else {
             panic!("missing summary")
         };

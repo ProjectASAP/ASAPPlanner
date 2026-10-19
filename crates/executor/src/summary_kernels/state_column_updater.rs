@@ -345,7 +345,7 @@ mod tests {
             );
             assert_eq!(
                 charged,
-                updater.seal().state_memory_bytes(),
+                updater.seal().charged_state_bytes(),
                 "{groups} groups"
             );
         }

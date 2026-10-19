@@ -146,7 +146,7 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
         .position(|field| !field.is_plain())
         .unwrap();
     let from_dag: BTreeMap<BTreeMap<String, String>, String> = pane
-        .rows()
+        .to_rows()
         .iter()
         .map(|row| {
             let asap_executor::values::Value::Summary { state, .. } = &row[state_column] else {
@@ -224,7 +224,7 @@ async fn answers(
         let mut rows = Vec::new();
         while let Some(batch) = output.next().await {
             let batch = batch.unwrap();
-            for row in batch.rows() {
+            for row in &batch.to_rows() {
                 let labels = series_labels_of_output_row(batch.schema(), row).unwrap();
                 let value = row
                     .iter()

@@ -53,7 +53,7 @@ fn collect(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64) -> Vec<Vec<Value>
         let mut stream = dag.execute(&[root], run.clone()).unwrap().remove(0);
         let mut rows = vec![];
         while let Some(batch) = stream.next().await {
-            rows.extend_from_slice(batch.unwrap().rows());
+            rows.extend(batch.unwrap().to_rows());
         }
         rows
     });
@@ -463,7 +463,7 @@ fn limit_branch_finishes_without_blocking_shared_sibling() {
     let mut count = 0;
     for _ in 0..2000 {
         match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(Some(batch)) => count += batch.unwrap().rows().len(),
+            Poll::Ready(Some(batch)) => count += batch.unwrap().to_rows().len(),
             Poll::Ready(None) => {
                 assert_eq!(count, 101);
                 drop(stream);
@@ -633,7 +633,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
                 asap_executor::Error,
             >]| {
                 assert_eq!(batches.len(), 1);
-                match batches[0].as_ref().unwrap().rows()[0][0] {
+                match batches[0].as_ref().unwrap().to_rows()[0][0] {
                     Value::Float64(v) => v,
                     _ => panic!("quantile must be Float64"),
                 }

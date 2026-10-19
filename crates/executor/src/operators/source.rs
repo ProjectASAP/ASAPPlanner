@@ -13,6 +13,11 @@ impl Operator {
         if batches.iter().any(|b| b.schema() != &output) {
             return Err(invalid("source schema mismatch"));
         }
+        // The caller holds these batches: a run reading them is charged for
+        // what it allocates, not for their states again.
+        for batch in &batches {
+            batch.mark_states_held_outside_run();
+        }
         Ok(Self {
             kind: Kind::Source(batches),
             inputs: vec![],

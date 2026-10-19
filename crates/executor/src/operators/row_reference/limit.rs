@@ -26,7 +26,7 @@ pub(super) fn execute<'a>(
                         };
                         let batch = batch?;
                         let mut rows = Vec::new();
-                        for row in batch.rows() {
+                        for row in &batch.to_rows() {
                             let key = group_key(row, groups)?;
                             if !counts.contains_key(&key) {
                                 memory.push(

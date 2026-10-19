@@ -141,6 +141,9 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 if self.predicates.is_empty() {
                     return Ok(batch);
                 }
+                // The filtered copy is at most the batch again; the
+                // predicates' temporaries (masks, per-value and intermediate
+                // columns) at most once more.
                 let _workspace = context.reserve(
                     batch
                         .memory_bytes()
