@@ -2,7 +2,7 @@
 //! checked against the Planner's internals; the runtime's own end-to-end
 //! run, with public APIs only, is `crates/planner/tests/runtime_install.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use asap_executor::physical_planner::{compile, frontier_from_timing, InputContract};
@@ -11,7 +11,9 @@ use asap_planner::{
     e2e_plan, plan_installable, FrontendInput, InstallablePlan, InstallablePlanError, PlanError,
     PlanOutput, PlanningModels, UserInput,
 };
-use asap_types::ir::physical_export::{compile_physical_asap_workload, PhysicalASAPDAG};
+use asap_types::ir::physical_export::{
+    compile_physical_asap_workload, PhysicalASAPDAG, PhysicalASAPNodeId,
+};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::physical::Materialization;
@@ -365,8 +367,9 @@ async fn stored_panes_carry_stage3_pane_retention() {
 
 /// A chain over an offset input keeps its panes for its window plus the
 /// offset: `[60m] offset 10m` reaches 70 minutes back (4,200,000 ms), the
-/// unshifted query's chain 60 minutes. Their panes are one computation, so
-/// each pane is kept for the longer of the two on every output.
+/// unshifted query's chain 60 minutes (3,600,000 ms). Each stored output
+/// carries its own node's requirement; a runtime that stores the twins'
+/// identical panes once keeps them for the larger one.
 #[tokio::test]
 async fn an_offset_chain_keeps_its_panes_for_its_window_plus_the_offset() {
     let plan = installable(&repeating(&[
@@ -374,24 +377,38 @@ async fn an_offset_chain_keeps_its_panes_for_its_window_plus_the_offset() {
         "quantile_over_time(0.99, latency_ms[60m] offset 10m)",
     ]))
     .await;
-    // The twins' panes share one computation, so every output of it
-    // carries the longest retention: the offset chain's 70 minutes.
-    let computations: std::collections::BTreeSet<_> = plan
-        .stored_outputs
-        .iter()
-        .map(|o| &o.computation_id)
-        .collect();
-    assert_eq!(computations.len(), 1);
-    assert!(
+    assert_eq!(plan.stored_outputs.len(), 12);
+    // The retention of the stored outputs below each query's root.
+    let retention_ms_under = |root| {
+        let below = nodes_below(&plan.dag.dag, root);
         plan.stored_outputs
             .iter()
-            .all(|o| o.retention_ms == 4_200_000),
-        "{:?}",
-        plan.stored_outputs
-            .iter()
+            .filter(|o| below.contains(&o.node_id))
             .map(|o| o.retention_ms)
             .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        retention_ms_under(plan.queries[0].root_node_id),
+        [3_600_000; 6]
     );
+    assert_eq!(
+        retention_ms_under(plan.queries[1].root_node_id),
+        [4_200_000; 6]
+    );
+}
+
+/// Every node `root` reads, directly or through other nodes.
+fn nodes_below(dag: &PhysicalASAPDAG, root: PhysicalASAPNodeId) -> BTreeSet<PhysicalASAPNodeId> {
+    let mut below = BTreeSet::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        for edge in dag.edges.iter().filter(|edge| edge.consumer == node) {
+            if below.insert(edge.producer) {
+                pending.push(edge.producer);
+            }
+        }
+    }
+    below
 }
 
 /// A standalone scalar query (`scalar(sum(latency_ms))`) has no DAG node

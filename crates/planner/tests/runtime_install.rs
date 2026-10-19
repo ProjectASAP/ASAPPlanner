@@ -13,8 +13,8 @@ use asap_executor::values::{Batch, Value};
 use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
-    PhysicalASAPDAG, PlanSelectionSettings, PlanningModels, PlanningWorkload, StoredOutputBuild,
-    UserInput,
+    PhysicalASAPDAG, PlanSelectionSettings, PlanningModels, PlanningWorkload, StoredOutput,
+    StoredOutputBuild, UserInput,
 };
 use futures::{executor::block_on, StreamExt};
 
@@ -215,24 +215,69 @@ struct DataPlaneRun {
     /// Per query, the query-time reference's answers.
     reference_answers_per_query: Vec<Vec<Answer>>,
     /// How many panes this evaluation built (ingestion or query runs);
-    /// the others it read came from the store.
+    /// the others it read came from the cache.
     panes_built: usize,
 }
 
-/// One pane the data plane stores: its built state, and how long to keep it.
+/// One pane this test caches: its built state, and how long to keep it.
 struct StoredPane {
-    /// The built state, bound at each stored output of its computation.
+    /// The built state, bound at every stored output with its cache key.
     state: Batch,
     /// When the pane's window starts, in Unix milliseconds.
     start_ms: i64,
-    /// How far back from the newest evaluation the pane is kept.
+    /// How far back from the newest evaluation the pane is kept: the
+    /// largest `retention_ms` among the stored outputs it served.
     retention_ms: u64,
 }
 
-/// The data plane's pane store, by computation and pane end: stored
-/// outputs with the same key are the same state, across queries and
-/// evaluations.
-type PaneStore = BTreeMap<(String, i64), StoredPane>;
+/// This stand-in runtime's pane cache, by the test's own key
+/// ([`pane_cache_key`]). The plan carries no summary identity: a real
+/// runtime decides which stored outputs are the same state.
+type PaneStore = BTreeMap<String, StoredPane>;
+
+/// The test's own cache key for `output`'s pane ending at `end_ms`: the
+/// stored node's and its pane's `Scan`'s operators and output schemas
+/// without node ids, the pane's width, and the pane's end. Two pane nodes of one chain (or of
+/// an offset twin) that cover the same window get the same key; the pane's
+/// offset only says which window it covers at an evaluation. Holds for the
+/// plans here, whose stored nodes read their pane's `TimeRange` directly
+/// (asserted).
+fn pane_cache_key(dag: &PhysicalASAPDAG, output: &StoredOutput, end_ms: i64) -> String {
+    // The stored node's only input is its pane's TimeRange.
+    let inputs: Vec<_> = dag
+        .edges
+        .iter()
+        .filter(|edge| edge.consumer == output.node_id)
+        .map(|edge| edge.producer)
+        .collect();
+    assert_eq!(inputs, [output.pane.time_range_node_id]);
+    // A node by what it computes rather than by its ids.
+    let node_of = |id| {
+        let node = dag.nodes.iter().find(|n| n.id == id).unwrap();
+        let mut payload = serde_json::to_value(&node.payload).unwrap();
+        drop_child_ids(&mut payload);
+        serde_json::json!([payload, node.output_schema])
+    };
+    serde_json::json!({
+        "stored_node": node_of(output.node_id),
+        "pane_width_ms": output.pane.width_ms,
+        "scan": node_of(output.pane.scan_node_id),
+        "pane_end_ms": end_ms,
+    })
+    .to_string()
+}
+
+/// `value` without its `child` fields, which hold node ids.
+fn drop_child_ids(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.remove("child");
+            fields.values_mut().for_each(drop_child_ids);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(drop_child_ids),
+        _ => {}
+    }
+}
 
 /// The node that answers each query of `plan`, in workload order.
 fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
@@ -244,7 +289,7 @@ fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
 
 /// The data plane at evaluation time `evaluation_ms`: from `plan_json`,
 /// `samples` and the panes earlier evaluations left in `store`, build each
-/// distinct stored pane the store lacks once, answer every query, drop the
+/// pane the cache lacks once, answer every query, drop the
 /// panes past their retention, and answer the queries again with the
 /// query-time reference.
 fn run_data_plane(
@@ -265,8 +310,9 @@ fn run_data_plane(
     for output in &installed.stored_outputs {
         // The pane's window at this evaluation, `(start_ms, end_ms]`.
         let (start_ms, end_ms) = output.pane.bounds_ms(evaluation_ms);
-        // The pane's identity: its computation and where it ends.
-        let pane_key = (output.computation_id.clone(), end_ms);
+        // The test's own cache key: what the output computes and the
+        // window its pane covers at this evaluation.
+        let pane_key = pane_cache_key(dag, output, end_ms);
         if !store.contains_key(&pane_key) {
             // Prepared once per window: routes by metric, applies the Scan.
             let selector = RawSampleSelector::new(dag, &output.pane).unwrap();
@@ -296,7 +342,7 @@ fn run_data_plane(
             let pane_input = BTreeMap::from([(output.pane.time_range_node_id as u64, rows)]);
             // The batches that run built.
             let built = run(dag, pane_input, &[output.node_id as u64], scope).remove(0);
-            // The pane's state, as the store keeps it, in one batch.
+            // The pane's state, as the cache keeps it, in one batch.
             let schema = built[0].schema().clone();
             let state_rows = built.iter().flat_map(|b| b.rows().to_vec()).collect();
             let state = Batch::try_new(schema, state_rows).unwrap();
@@ -310,7 +356,11 @@ fn run_data_plane(
             );
             panes_built += 1;
         }
-        inputs.insert(output.node_id as u64, store[&pane_key].state.clone());
+        // One cached pane serves every output with its key, so it is kept
+        // for the largest retention any of them requires.
+        let cached = store.get_mut(&pane_key).unwrap();
+        cached.retention_ms = cached.retention_ms.max(output.retention_ms);
+        inputs.insert(output.node_id as u64, cached.state.clone());
     }
     // Raw samples read at query time, other than stored outputs' panes.
     for window in &installed.query_time_raw_windows {
@@ -332,7 +382,7 @@ fn run_data_plane(
         .iter()
         .map(|batches| answers(batches))
         .collect();
-    // The store drops each pane whose window starts more than its
+    // The cache drops each pane whose window starts more than its
     // retention before this evaluation.
     store.retain(|_, pane| pane.start_ms >= evaluation_ms - pane.retention_ms as i64);
 
@@ -407,11 +457,11 @@ async fn label_matchers_select_the_series_a_pane_reads() {
 }
 
 /// The p99 over the last hour and over the hour before the last 10
-/// minutes store 12 panes of one computation; five panes are the same
-/// (offsets 10..50 min), so the data plane builds 7, and both answers equal
-/// the reference.
+/// minutes store six panes each; five of them cover the same windows
+/// (offsets 10..50 min), which this runtime's own cache key finds, so it
+/// builds 7. Both answers equal the reference.
 #[tokio::test]
-async fn panes_of_one_computation_build_once_across_queries() {
+async fn an_hour_and_its_offset_twin_both_equal_the_reference() {
     let plan_json = plan_json(&[
         "quantile_over_time(0.99, latency_ms[60m])",
         "quantile_over_time(0.99, latency_ms[60m] offset 10m)",
@@ -419,12 +469,6 @@ async fn panes_of_one_computation_build_once_across_queries() {
     .await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
     assert_eq!(installed.stored_outputs.len(), 12);
-    let computations: BTreeSet<&str> = installed
-        .stored_outputs
-        .iter()
-        .map(|o| o.computation_id.as_str())
-        .collect();
-    assert_eq!(computations.len(), 1);
     let run = run_data_plane(
         &plan_json,
         &remote_write_samples(),
@@ -542,7 +586,7 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
         .query_time_raw_windows
         .iter()
         .all(|w| !pane_ranges.contains(&w.time_range_node_id)));
-    // The store the data plane keeps across evaluations.
+    // The pane cache the data plane keeps across evaluations.
     let mut store = PaneStore::new();
     let first = run_data_plane(
         &plan_json,
@@ -559,6 +603,6 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
         EVALUATION_MS + 60_000,
         &mut store,
     );
-    assert_eq!(next.panes_built, 1, "four panes reused from the store");
+    assert_eq!(next.panes_built, 1, "four panes reused from the cache");
     assert_eq!(next.answers_per_query, next.reference_answers_per_query);
 }

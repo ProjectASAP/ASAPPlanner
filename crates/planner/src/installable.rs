@@ -31,7 +31,6 @@ use asap_types::ir::{
 };
 use asap_types::physical::Materialization;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{e2e_plan, PlanError, UserInput};
 
@@ -82,22 +81,18 @@ pub struct StoredOutput {
     /// Which run builds it: an ingestion run over its pane's window, or
     /// the query run of the evaluation that first reads it.
     pub built_at: StoredOutputBuild,
-    /// Hex SHA-256 of what the output computes, independent of node ids
-    /// and of which pane it reads: stored outputs that differ only in
-    /// `pane.end_offset_ms` share it, so a runtime builds each pane
-    /// once; equal across plans of one DAG wire version.
-    pub computation_id: String,
     /// The pane of raw samples it is built from.
     pub pane: RawSampleWindow,
-    /// How far back from the newest evaluation time the runtime keeps this
-    /// pane once built (a pane whose window starts earlier is dropped):
-    /// Stage 3's retention of its chain (`Selection::pane_retention_ms`:
-    /// its input's offset plus its window plus the longest
-    /// range-evaluation span of its readers); or, for an output Stage 3
-    /// records none for, how far back its pane reaches
-    /// (`pane.end_offset_ms + pane.width_ms`). Every output with the same
-    /// `computation_id` carries the largest of these among them, since a
-    /// runtime keeps their panes as one.
+    /// How far back from the newest evaluation time this node's output
+    /// must stay available once built (an output whose pane starts
+    /// earlier is no longer read): Stage 3's retention of its chain
+    /// (`Selection::pane_retention_ms`: its input's offset plus its window
+    /// plus the longest range-evaluation span of its readers); or, for an
+    /// output Stage 3 records none for, how far back its pane reaches
+    /// (`pane.end_offset_ms + pane.width_ms`). This is this node's own
+    /// requirement: a runtime that stores identical outputs of several
+    /// nodes once must keep them for the largest requirement among those
+    /// nodes, which is the runtime's choice.
     pub retention_ms: u64,
 }
 
@@ -110,10 +105,10 @@ pub enum StoredOutputBuild {
     /// samples have arrived, and stores the result.
     IngestionRun,
     /// Built at query time and kept across evaluations
-    /// (`MatAtQueryKeptAcrossEvaluations`): when an evaluation needs the
-    /// pane and the store lacks it, the runtime runs the node in a query
-    /// run over its pane's samples, stores the result, and binds it like
-    /// a stored pane. Its `TimeRange` is fed only through this build, so
+    /// (`MatAtQueryKeptAcrossEvaluations`): when an evaluation needs this
+    /// output for a pane it has not been built for yet, the runtime runs
+    /// the node in a query run over its pane's samples, keeps the result,
+    /// and binds it like an output built at ingestion. Its `TimeRange` is fed only through this build, so
     /// it is not listed in `query_time_raw_windows`.
     QueryRun,
 }
@@ -492,7 +487,7 @@ impl<'a> IndexedDag<'a> {
         }
     }
 
-    /// The pane stored output `node` is built from: follow single inputs
+    /// The pane of raw samples stored output `node` is built from: follow single inputs
     /// down to a `TimeRange`, then [`Self::window_at`] it.
     fn pane_of(&self, node: PhysicalASAPNodeId) -> Result<RawSampleWindow, InstallablePlanError> {
         let without_pane = || InstallablePlanError::StoredOutputWithoutPane { node_id: node };
@@ -518,7 +513,6 @@ fn runtime_inputs_of(
     retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
 ) -> Result<(Vec<StoredOutput>, Vec<RawSampleWindow>), InstallablePlanError> {
     let indexed = IndexedDag::new(dag);
-    let mut computation_hashes = HashMap::new();
     let mut stored_outputs = Vec::new();
     // Every raw-sample window with its timing, and the ranges of stored
     // outputs' panes, which are fed through those outputs' builds.
@@ -542,10 +536,6 @@ fn runtime_inputs_of(
                     .get(&node.id)
                     .copied()
                     .unwrap_or_else(|| pane.reach_ms()),
-                computation_id: computation_hash(node.id, &indexed, &mut computation_hashes)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect(),
                 pane,
             });
         }
@@ -557,18 +547,6 @@ fn runtime_inputs_of(
             raw_windows.push((node.output_state.timing, indexed.window_at(node.id)?));
         }
     }
-    // Outputs of one computation are one pane store: each keeps its panes
-    // for the longest retention any of them needs.
-    let mut longest_retention_ms: HashMap<String, u64> = HashMap::new();
-    for output in &stored_outputs {
-        let longest = longest_retention_ms
-            .entry(output.computation_id.clone())
-            .or_default();
-        *longest = (*longest).max(output.retention_ms);
-    }
-    for output in &mut stored_outputs {
-        output.retention_ms = longest_retention_ms[&output.computation_id];
-    }
     let query_time_raw_windows = raw_windows
         .into_iter()
         .filter(|(timing, window)| {
@@ -578,40 +556,6 @@ fn runtime_inputs_of(
         .map(|(_, window)| window)
         .collect();
     Ok((stored_outputs, query_time_raw_windows))
-}
-
-/// SHA-256 over a node's payload (input ids zeroed) and output schema, then
-/// its inputs' hashes in edge order. An offset `TimeShift` with one input
-/// takes its input's hash: the offset says which pane an output reads, not
-/// what it computes.
-fn computation_hash(
-    node: PhysicalASAPNodeId,
-    dag: &IndexedDag,
-    done: &mut HashMap<PhysicalASAPNodeId, [u8; 32]>,
-) -> [u8; 32] {
-    if let Some(hash) = done.get(&node) {
-        return *hash;
-    }
-    let dag_node = dag.nodes[&node];
-    let node_inputs = dag.inputs.get(&node).map(Vec::as_slice).unwrap_or_default();
-    let hash = match (&dag_node.payload, node_inputs) {
-        (Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }), [input]) if shift.at.is_none() => {
-            computation_hash(*input, dag, done)
-        }
-        _ => {
-            let payload = dag_node.payload.map_children(|_| 0);
-            let mut hasher = Sha256::new();
-            hasher.update(
-                serde_json::to_vec(&(&payload, &dag_node.output_schema)).expect("serializes"),
-            );
-            for &input in node_inputs {
-                hasher.update(computation_hash(input, dag, done));
-            }
-            hasher.finalize().into()
-        }
-    };
-    done.insert(node, hash);
-    hash
 }
 
 /// The installable DAG of the timed selected plan, with each expanded
