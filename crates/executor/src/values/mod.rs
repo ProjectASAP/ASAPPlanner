@@ -5,6 +5,9 @@ use planner_types::ir::schema::{
     DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema,
 };
 use std::{cmp::Ordering, sync::Arc};
+pub(crate) mod arrow_columns;
+mod batch;
+pub use batch::{Batch, StateColumn};
 /// Shared ownership of schema metadata; the field model is identical at planning
 /// and execution time.
 pub type SchemaRef = Arc<Schema>;
@@ -197,68 +200,6 @@ impl Value {
         })
     }
 }
-#[derive(Clone, Debug)]
-pub struct Batch {
-    schema: SchemaRef,
-    rows: Vec<Vec<Value>>,
-}
-impl Batch {
-    pub fn try_new(schema: SchemaRef, rows: Vec<Vec<Value>>) -> Result<Self, Error> {
-        validate_schema(&schema)?;
-        for row in &rows {
-            if row.len() != schema.fields.len() {
-                return Err(Error::Invalid(
-                    "row width differs from Planner schema".into(),
-                ));
-            }
-            for (value, field) in row.iter().zip(&schema.fields) {
-                let matches = match (&field.dtype, value) {
-                    (SummaryFamilyType::Plain(dtype), value) => {
-                        value.matches(dtype, field.nullable)
-                    }
-                    (expected, Value::Summary { family, state }) => {
-                        expected == family && validate_state(family, state.as_ref()).is_ok()
-                    }
-                    _ => false,
-                };
-                if !matches {
-                    return Err(Error::Invalid(format!(
-                        "value differs from type of {}",
-                        field.name
-                    )));
-                }
-            }
-        }
-        Ok(Self { schema, rows })
-    }
-    pub fn schema(&self) -> &SchemaRef {
-        &self.schema
-    }
-    pub fn rows(&self) -> &[Vec<Value>] {
-        &self.rows
-    }
-    pub fn bytes(&self) -> usize {
-        // A summary state shared by several rows is counted once.
-        let shared = self
-            .rows
-            .iter()
-            .flat_map(|r| r.iter())
-            .filter_map(|v| match v {
-                Value::Summary { state, .. } => state.shared_state(),
-                _ => None,
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        std::mem::size_of::<Self>()
-            + self.rows.capacity() * std::mem::size_of::<Vec<Value>>()
-            + self
-                .rows
-                .iter()
-                .flat_map(|r| r.iter())
-                .map(Value::bytes)
-                .sum::<usize>()
-            + shared.values().sum::<usize>()
-    }
-}
 pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>, Error> {
     columns
         .iter()
@@ -272,7 +213,10 @@ pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>
 
 pub(crate) use crate::capability::validate_native_family as validate_family;
 
-fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Result<(), Error> {
+pub(super) fn validate_state(
+    family: &SummaryFamilyType,
+    state: &dyn AggregateCore,
+) -> Result<(), Error> {
     use crate::summary_kernels::{
         count_min_sketch::CountMinSketchAccumulator, datasketches_kll::DatasketchesKLLAccumulator,
         dd_sketch::DDSketchAccumulator, exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,

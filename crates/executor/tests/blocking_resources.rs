@@ -283,8 +283,9 @@ fn frequency_dictionary_enforces_memory_budget() {
         (Reduction::FrequencyEntropy(0), false),
         (Reduction::Cardinality(vec![0]), false),
     ] {
-        // Count needs about 13.4 kB here, the dictionaries at least 14.5 kB.
-        let run = context(14_000);
+        // Count needs about 2.9 kB here, the dictionaries at least 9.0 kB
+        // (columnar input: 64 Int64 values are 1.2 kB, not 3.5 kB of rows).
+        let run = context(6_000);
         let inputs = sources.execute(&[0], run.clone()).unwrap();
         let operator =
             Operator::aggregate(input.clone(), vec![], vec![("result".into(), reduction)]).unwrap();

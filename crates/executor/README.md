@@ -2,8 +2,9 @@
 
 An independent Rust physical operator DAG runtime shared by ingestion time and
 query time execution. The library requires neither backend engine, a server,
-a storage implementation, Arrow nor DataFusion. DataFusion informed the design;
-it is not the execution framework.
+a storage implementation nor DataFusion. Batches are Arrow columns
+(`values::Batch`); DataFusion informed the design, it is not the execution
+framework.
 
 `plan::PhysicalDAG` binds typed operator inputs to node IDs. Each execution starts
 one producer per reachable node, shares output batches among its consumers, and
