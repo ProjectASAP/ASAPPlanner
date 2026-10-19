@@ -127,8 +127,10 @@ impl StateColumnUpdater {
             .map_err(|_| Error::Invalid("more than u32::MAX groups".into()))?;
         self.memory_bytes += match &mut self.states {
             GroupStates::Exact { empty, states } => {
+                // The buffer's growth: the column holds its capacity.
+                let before = states.capacity();
                 states.push(empty.clone());
-                std::mem::size_of::<ScalarState>()
+                (states.capacity() - before) * std::mem::size_of::<ScalarState>()
             }
             GroupStates::Sketches(states) => {
                 let state = Self::sketch_updater(&self.family)?;
@@ -316,6 +318,36 @@ impl StateColumnUpdater {
                     .map(|state| Arc::new(state) as Arc<dyn AggregateCore>)
                     .collect(),
             ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use planner_types::ir::schema::ExactParams;
+
+    // An exact updater charges the buffer it holds (its capacity), the
+    // same bytes its sealed column charges.
+    #[test]
+    fn exact_memory_is_the_buffer_capacity() {
+        let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        for groups in [1, 5, 17] {
+            let mut updater = StateColumnUpdater::new(&family).unwrap();
+            updater.ensure_groups(groups).unwrap();
+            let charged = updater.memory_bytes();
+            let GroupStates::Exact { states, .. } = &updater.states else {
+                unreachable!()
+            };
+            assert_eq!(
+                charged,
+                states.capacity() * std::mem::size_of::<ScalarState>()
+            );
+            assert_eq!(
+                charged,
+                updater.seal().state_memory_bytes(),
+                "{groups} groups"
+            );
         }
     }
 }
