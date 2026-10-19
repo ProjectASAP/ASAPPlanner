@@ -401,26 +401,46 @@ impl Batch {
                 states.push(Some(first.clone()));
                 continue;
             }
-            // Different state columns: one column of all their states, the
-            // indices offset into it.
+            // Different state columns: one column of the states the rows
+            // reference (each once), exact records kept as records.
+            let all_exact = columns.iter().all(|column| {
+                matches!(
+                    column.map(|column| column.storage()),
+                    Some(super::StateStorage::Exact(_))
+                )
+            });
             let mut indices = Vec::with_capacity(rows);
-            let mut joined = Vec::new();
+            let mut objects = Vec::new();
+            let mut records = Vec::new();
             for (batch, state_column) in batches.iter().zip(&columns) {
                 let state_column = state_column.expect("one schema");
-                let offset = joined.len() as u32;
-                joined.extend((0..state_column.len()).map(|i| state_column.state(i)));
                 let local = batch
                     .column(column)
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .expect("summary columns hold state indices");
-                indices.extend(local.values().iter().map(|&i| i + offset));
+                let mut moved = ahash::AHashMap::<u32, u32>::new();
+                for &index in local.values().iter() {
+                    let next = (objects.len() + records.len()) as u32;
+                    let new_index = *moved.entry(index).or_insert_with(|| {
+                        match state_column.storage() {
+                            super::StateStorage::Exact(states) if all_exact => {
+                                records.push(states[index as usize].clone())
+                            }
+                            _ => objects.push(state_column.state(index as usize)),
+                        }
+                        next
+                    });
+                    indices.push(new_index);
+                }
             }
             arrays.push(Arc::new(UInt32Array::from(indices)) as ArrayRef);
-            states.push(Some(Arc::new(StateColumn::from_objects(
-                first.family().clone(),
-                joined,
-            ))));
+            let family = first.family().clone();
+            states.push(Some(Arc::new(if all_exact {
+                StateColumn::from_exact(family, records)
+            } else {
+                StateColumn::from_objects(family, objects)
+            })));
         }
         Self::from_parts(schema.clone(), arrays, states, rows)
     }

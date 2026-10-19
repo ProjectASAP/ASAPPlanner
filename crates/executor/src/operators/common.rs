@@ -152,3 +152,23 @@ pub(super) fn decoded(batch: &Batch, column: usize) -> Result<Vec<Value>, Error>
         crate::values::arrow_columns::ColumnDepth::BatchColumn,
     ))
 }
+
+/// The group of each row of `batch` in `table`, found a chunk of rows at a
+/// time, with the table's memory (plus `held_bytes`) charged to `workspace`
+/// after each chunk: one large batch cannot grow the table far past the
+/// limit before it is charged.
+pub(super) async fn chunked_group_ids(
+    table: &mut super::group_table::GroupTable,
+    batch: &Batch,
+    workspace: &mut Workspace,
+    held_bytes: usize,
+    work: &mut Cooperative,
+) -> Result<Vec<u32>, Error> {
+    let mut ids = Vec::with_capacity(batch.num_rows());
+    for chunk in row_chunks(batch) {
+        ids.extend(table.group_ids(&chunk)?);
+        workspace.set_bytes(held_bytes + table.memory_bytes() + 4 * ids.capacity())?;
+        work.checkpoint_rows(chunk.num_rows()).await?;
+    }
+    Ok(ids)
+}

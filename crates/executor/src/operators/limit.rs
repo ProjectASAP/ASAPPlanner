@@ -29,33 +29,40 @@ pub(super) fn execute<'a>(
     );
     Ok(futures::stream::try_unfold(
         state,
-        move |(mut input, mut table, mut seen, mut workspace, done)| async move {
-            if done || n == 0 {
-                return Ok(None);
+        move |(mut input, mut table, mut seen, mut workspace, done)| {
+            let context = context.clone();
+            async move {
+                if done || n == 0 {
+                    return Ok(None);
+                }
+                let Some(batch) = input.next().await else {
+                    return Ok(None);
+                };
+                let batch = batch?;
+                let mut work = Cooperative::new(&context);
+                let held = seen.capacity() * std::mem::size_of::<u64>();
+                let ids =
+                    chunked_group_ids(&mut table, &batch, &mut workspace, held, &mut work).await?;
+                seen.resize(table.len(), 0);
+                workspace.set_bytes(
+                    table.memory_bytes() + seen.capacity() * std::mem::size_of::<u64>(),
+                )?;
+                let keep = ids
+                    .iter()
+                    .map(|&group| {
+                        let count = &mut seen[group as usize];
+                        let kept = *count >= offset && count.saturating_sub(offset) < n;
+                        *count = count.saturating_add(1);
+                        Some(kept)
+                    })
+                    .collect::<arrow::array::BooleanArray>();
+                let done = groups.is_empty()
+                    && seen
+                        .first()
+                        .is_some_and(|count| count.saturating_sub(offset) >= n);
+                let kept = batch.filter(&keep)?;
+                Ok(Some((kept, (input, table, seen, workspace, done))))
             }
-            let Some(batch) = input.next().await else {
-                return Ok(None);
-            };
-            let batch = batch?;
-            let ids = table.group_ids(&batch)?;
-            seen.resize(table.len(), 0);
-            workspace
-                .set_bytes(table.memory_bytes() + seen.capacity() * std::mem::size_of::<u64>())?;
-            let keep = ids
-                .iter()
-                .map(|&group| {
-                    let count = &mut seen[group as usize];
-                    let kept = *count >= offset && count.saturating_sub(offset) < n;
-                    *count = count.saturating_add(1);
-                    Some(kept)
-                })
-                .collect::<arrow::array::BooleanArray>();
-            let done = groups.is_empty()
-                && seen
-                    .first()
-                    .is_some_and(|count| count.saturating_sub(offset) >= n);
-            let kept = batch.filter(&keep)?;
-            Ok(Some((kept, (input, table, seen, workspace, done))))
         },
     )
     .boxed_local())

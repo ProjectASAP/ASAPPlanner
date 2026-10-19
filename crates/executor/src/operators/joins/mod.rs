@@ -136,9 +136,11 @@ pub(super) fn execute<'a>(
             let right_keys = key_batch(right, &keys.iter().map(|(_, r)| *r).collect::<Vec<_>>())?;
             let mut table = super::group_table::GroupTable::new((0..keys.len()).collect());
             let mut work = Cooperative::new(&context);
+            let mut workspace = Workspace::new(&context)?;
             // The right side's matchable keys.
             let mut members = ahash::AHashSet::new();
-            let right_ids = table.group_ids(&right_keys)?;
+            let right_ids =
+                chunked_group_ids(&mut table, &right_keys, &mut workspace, 0, &mut work).await?;
             for (id, matchable) in right_ids.into_iter().zip(matchable_rows(&right_keys)) {
                 if matchable {
                     members.insert(id);
@@ -149,10 +151,11 @@ pub(super) fn execute<'a>(
                 }
             }
             work.checkpoint_rows(right.num_rows()).await?;
-            let mut workspace = Workspace::new(&context)?;
             workspace.set_bytes(table.memory_bytes() + 32 * members.len())?;
             let mut covered = ahash::AHashSet::new();
-            let left_ids = table.group_ids(&left_keys)?;
+            let held = 32 * members.len();
+            let left_ids =
+                chunked_group_ids(&mut table, &left_keys, &mut workspace, held, &mut work).await?;
             let keep = left_ids
                 .into_iter()
                 .zip(matchable_rows(&left_keys))
@@ -194,7 +197,7 @@ async fn relational_join(
     let mut workspace = Workspace::new(context)?;
     let mut work = Cooperative::new(context);
     workspace.grow(right.num_rows())?;
-    let (right_rows, left_width) = (right.num_rows() as u32, operator.inputs[0].fields.len());
+    let left_width = operator.inputs[0].fields.len();
     // The schema of a joined pair: left columns, then right columns.
     let mut joined_fields = operator.inputs[0].fields.clone();
     joined_fields.extend(operator.inputs[1].fields.iter().cloned());
@@ -203,13 +206,12 @@ async fn relational_join(
     let (mut out_left, mut out_right): (Vec<Option<u32>>, Vec<Option<u32>>) =
         (Vec::new(), Vec::new());
     let mut right_matched = vec![false; right.num_rows()];
-    let all_right = UInt32Array::from_iter_values(0..right_rows);
     for left_row in 0..left.num_rows() as u32 {
         // The pairs of this left row with every right row.
         let matches: Vec<bool> = if *kind == JoinKind::Cross {
             vec![true; right.num_rows()]
         } else {
-            let pairs = joined(left, right, left_row, &all_right, &joined_schema)?;
+            let pairs = joined(left, right, left_row, &joined_schema)?;
             match predicate.evaluate_batch(&pairs) {
                 Ok(result) => {
                     let result = result
@@ -312,25 +314,22 @@ async fn relational_join(
     Ok(result)
 }
 
-/// Left row `left_row` beside right rows `right_rows`: the pairs a join
-/// predicate is evaluated on.
+/// Left row `left_row` beside every right row: the pairs a join predicate
+/// is evaluated on. The right columns are shared; only the left row is
+/// repeated.
 fn joined(
     left: &Batch,
     right: &Batch,
     left_row: u32,
-    right_rows: &arrow::array::UInt32Array,
     joined_schema: &SchemaRef,
 ) -> Result<Batch, Error> {
-    let repeated = left.take(&arrow::array::UInt32Array::from(vec![
-        left_row;
-        right_rows.len()
-    ]))?;
-    let right = right.take(right_rows)?;
+    let rows = right.num_rows();
+    let repeated = left.take(&arrow::array::UInt32Array::from(vec![left_row; rows]))?;
     let mut arrays = repeated.record_batch().columns().to_vec();
     arrays.extend(right.record_batch().columns().iter().cloned());
     let mut states = (0..repeated.schema().fields.len())
         .map(|c| repeated.state_column(c).cloned())
         .collect::<Vec<_>>();
     states.extend((0..right.schema().fields.len()).map(|c| right.state_column(c).cloned()));
-    Batch::from_parts(joined_schema.clone(), arrays, states, right_rows.len())
+    Batch::from_parts(joined_schema.clone(), arrays, states, rows)
 }

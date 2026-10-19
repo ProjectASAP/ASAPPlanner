@@ -107,7 +107,14 @@ pub(in crate::operators) async fn reduce_batch(
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     let mut table = crate::operators::group_table::GroupTable::new(groups.to_vec());
-    let ids = table.group_ids(batch)?;
+    let ids = crate::operators::common::chunked_group_ids(
+        &mut table,
+        batch,
+        &mut workspace,
+        16 * batch.num_rows(),
+        &mut work,
+    )
+    .await?;
     let values = batch
         .column(value)
         .as_any()

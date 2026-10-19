@@ -240,7 +240,14 @@ pub(super) fn execute<'a>(
             .filter(|&i| i != coordinate && i != value)
             .collect::<Vec<_>>();
         let mut table = super::group_table::GroupTable::new(identity);
-        let series_of_row = table.group_ids(batch)?;
+        let series_of_row = chunked_group_ids(
+            &mut table,
+            batch,
+            &mut workspace,
+            16 * batch.num_rows(),
+            &mut work,
+        )
+        .await?;
         // Each series' first row (its labels) and samples.
         let mut template = vec![0u32; table.len()];
         let mut points: Vec<Vec<(i64, f64)>> = vec![Vec::new(); table.len()];
@@ -252,7 +259,12 @@ pub(super) fn execute<'a>(
             samples.push((times.value(row), values.value(row)));
         }
         work.checkpoint_rows(batch.num_rows()).await?;
-        workspace.set_bytes(table.memory_bytes() + 16 * batch.num_rows() + 8 * table.len())?;
+        // Held while the output grows: the group table and the samples.
+        let held_bytes = table.memory_bytes() + 16 * batch.num_rows() + 8 * table.len();
+        workspace.set_bytes(held_bytes)?;
+        // Each output row: its index, time and value now, and its copy of a
+        // template row once taken.
+        let output_row_bytes = 4 + 8 + 8 + batch.memory_bytes() / batch.num_rows().max(1);
         for samples in points.iter_mut() {
             samples.sort_by_key(|p| p.0);
             if samples.windows(2).any(|p| p[0].0 == p[1].0) {
@@ -310,6 +322,9 @@ pub(super) fn execute<'a>(
                     out_rows.push(template[series as usize]);
                     out_times.push(time);
                     out_values.push(result);
+                    if out_rows.len() % super::common::ROWS_PER_CHUNK == 0 {
+                        workspace.set_bytes(held_bytes + out_rows.len() * output_row_bytes)?;
+                    }
                 }
             }
             work.checkpoint_rows(order.len()).await?;
@@ -328,7 +343,7 @@ pub(super) fn execute<'a>(
                 value,
                 std::sync::Arc::new(arrow::array::Float64Array::from(out_values)),
             )?;
-        workspace.grow(output.memory_bytes())?;
+        workspace.set_bytes(held_bytes + output.memory_bytes())?;
         Ok(output)
     })
     .boxed_local())

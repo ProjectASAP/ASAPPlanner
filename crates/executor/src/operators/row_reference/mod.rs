@@ -107,6 +107,31 @@ pub(crate) mod harness {
         })
     }
 
+    /// A summary state's content: an exact state serialized, a KLL's size
+    /// and quantiles, a keyed frequency state serialized.
+    pub(crate) fn state_fingerprint(state: &dyn crate::AggregateCore) -> String {
+        use crate::summary_kernels::{
+            exact::ExactAccumulator, weighted_frequency::WeightedFrequency,
+            DatasketchesKLLAccumulator,
+        };
+        let any = state.as_any();
+        if let Some(exact) = any.downcast_ref::<ExactAccumulator>() {
+            return serde_json::to_string(exact).unwrap();
+        }
+        if let Some(kll) = any.downcast_ref::<DatasketchesKLLAccumulator>() {
+            return format!(
+                "KLL k={} n={} q={:?}",
+                kll.inner.k(),
+                kll.inner.count(),
+                [0.1, 0.5, 0.9].map(|q| kll.inner.quantile(q).to_bits())
+            );
+        }
+        if let Some(frequency) = any.downcast_ref::<WeightedFrequency>() {
+            return serde_json::to_string(frequency).unwrap();
+        }
+        panic!("no fingerprint for this state kind")
+    }
+
     /// Exact equality of rows, float bits included.
     pub(crate) fn same_rows(a: &[Vec<Value>], b: &[Vec<Value>]) -> bool {
         fn same(a: &Value, b: &Value) -> bool {
@@ -122,8 +147,7 @@ pub(crate) mod harness {
                             .all(|((ak, av), (bk, bv))| same(ak, bk) && same(av, bv))
                 }
                 (Value::Summary { state: a, .. }, Value::Summary { state: b, .. }) => {
-                    format!("{:?}", a.approx_memory_bytes())
-                        == format!("{:?}", b.approx_memory_bytes())
+                    state_fingerprint(a.as_ref()) == state_fingerprint(b.as_ref())
                 }
                 _ => format!("{a:?}") == format!("{b:?}"),
             }
@@ -1096,6 +1120,271 @@ mod tests {
                 },
                 1,
                 query(1000),
+            );
+        }
+    }
+
+    /// A sum state over `values`.
+    fn sum_state(values: &[f64]) -> Value {
+        use crate::summary_kernels::exact::ExactAccumulator;
+        let family = SummaryFamilyType::ExactAggregate(
+            planner_types::ir::schema::ExactKind::Sum,
+            planner_types::ir::schema::ExactParams::Sum,
+        );
+        let mut state = ExactAccumulator::new(family.clone(), false).unwrap();
+        for value in values {
+            state.update(None, *value, 0);
+        }
+        Value::Summary {
+            family,
+            state: Arc::new(state),
+        }
+    }
+
+    // Empty inputs (no batch, or one empty batch) give the row operators'
+    // results; summary state columns pass through collection, concatenation,
+    // Sort, Limit and joins as the row operators passed them.
+    #[test]
+    fn empty_inputs_and_state_columns_match_the_row_reference() {
+        use crate::operators::SortKey;
+        use crate::plan::PhysicalDAG;
+        use planner_types::ir::operator::{AggIntent, JoinKind};
+        use planner_types::ir::scalar::{CompareOpKind, ExprSemantics};
+        use planner_types::ir::{Predicate, ScalarExpr};
+        let schema = mixed_schema();
+        let (series_schema, _) = series_batches(0, 0, 0, true);
+        let empties = |schema: &SchemaRef| {
+            vec![
+                vec![],
+                vec![Batch::try_new(schema.clone(), vec![]).unwrap()],
+            ]
+        };
+        let sort = Operator::sort(
+            schema.clone(),
+            vec![SortKey {
+                column: 2,
+                descending: false,
+                nulls_first: false,
+            }],
+            vec![0],
+        )
+        .unwrap();
+        let limit = Operator::limit(schema.clone(), 2, 0, vec![0]).unwrap();
+        let current = Operator::current_series(series_schema.clone(), 0, 1, 2, 1000).unwrap();
+        let window = Operator::series_window(
+            series_schema.clone(),
+            Some(AggIntent::Rate),
+            2000,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+        let temporal = Operator::window(
+            series_schema.clone(),
+            AggIntent::Sum { col: None },
+            1,
+            2,
+            vec![3],
+            Some((0, 5000)),
+        )
+        .unwrap();
+        for (name, input, operator) in [
+            ("sort", schema.clone(), sort),
+            ("limit", schema.clone(), limit),
+            ("current series", series_schema.clone(), current),
+            ("series window", series_schema.clone(), window),
+            ("window", series_schema.clone(), temporal),
+        ] {
+            for batches in empties(&input) {
+                let (input, operator) = (input.clone(), operator.clone());
+                let count = batches.len();
+                assert_matches_reference(
+                    &format!("{name} over {count} empty batches"),
+                    &move || over_source(input.clone(), batches.clone(), operator.clone()),
+                    1,
+                    query(5000),
+                );
+            }
+        }
+        let predicate = Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(1)),
+            op: CompareOpKind::Eq,
+            right: Box::new(ScalarExpr::Column(5)),
+            semantics: ExprSemantics::Sql,
+        });
+        let join_output = |kind: &JoinKind, left: &SchemaRef, right: &SchemaRef| {
+            if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                left.clone()
+            } else {
+                let mut fields = left.fields.clone();
+                fields.extend(right.fields.iter().cloned());
+                for field in &mut fields {
+                    field.nullable = true;
+                }
+                Arc::new(planner_types::ir::schema::Schema {
+                    fields,
+                    time_index: None,
+                    unique_keys: vec![],
+                    closed: false,
+                })
+            }
+        };
+        let some = Generator::new(21).batches(&schema, 1, 6);
+        for kind in [
+            JoinKind::Inner,
+            JoinKind::Left,
+            JoinKind::Right,
+            JoinKind::Full,
+            JoinKind::Semi,
+            JoinKind::Anti,
+            JoinKind::Cross,
+        ] {
+            for (left, right) in [
+                (vec![], some.clone()),
+                (some.clone(), vec![]),
+                (empties(&schema)[1].clone(), some.clone()),
+                (some.clone(), empties(&schema)[1].clone()),
+            ] {
+                let join = Operator::relational_join(
+                    schema.clone(),
+                    schema.clone(),
+                    kind.clone(),
+                    &predicate,
+                    join_output(&kind, &schema, &schema),
+                )
+                .unwrap();
+                let schema = schema.clone();
+                let sizes = (left.len(), right.len());
+                assert_matches_reference(
+                    &format!("join {kind:?} over empty side {sizes:?}"),
+                    &move || {
+                        let mut dag = PhysicalDAG::default();
+                        dag.add(
+                            0,
+                            vec![],
+                            Operator::source(schema.clone(), left.clone()).unwrap(),
+                        )
+                        .unwrap();
+                        dag.add(
+                            1,
+                            vec![],
+                            Operator::source(schema.clone(), right.clone()).unwrap(),
+                        )
+                        .unwrap();
+                        dag.add(2, vec![0, 1], join.clone()).unwrap();
+                        dag
+                    },
+                    2,
+                    query(0),
+                );
+            }
+        }
+        // A schema with a summary column; two batches with their own states.
+        let state_schema = Arc::new(planner_types::ir::schema::Schema {
+            fields: vec![
+                plain_field("k", DataType::Utf8, false),
+                plain_field("x", DataType::Int64, false),
+                planner_types::ir::schema::Field {
+                    name: "state".into(),
+                    dtype: SummaryFamilyType::ExactAggregate(
+                        planner_types::ir::schema::ExactKind::Sum,
+                        planner_types::ir::schema::ExactParams::Sum,
+                    ),
+                    nullable: false,
+                    table: None,
+                },
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        let state_batches = (0..2)
+            .map(|b| {
+                Batch::try_new(
+                    state_schema.clone(),
+                    (0..5)
+                        .map(|i| {
+                            vec![
+                                Value::Utf8(["a", "b"][i % 2].into()),
+                                Value::Int64((5 - i) as i64),
+                                sum_state(&[(b * 10 + i) as f64, 0.5]),
+                            ]
+                        })
+                        .collect(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let state_sort = Operator::sort(
+            state_schema.clone(),
+            vec![SortKey {
+                column: 1,
+                descending: true,
+                nulls_first: false,
+            }],
+            vec![0],
+        )
+        .unwrap();
+        let state_limit = Operator::limit(state_schema.clone(), 2, 1, vec![0]).unwrap();
+        for (name, operator) in [("sort", state_sort), ("limit", state_limit)] {
+            let (state_schema, state_batches) = (state_schema.clone(), state_batches.clone());
+            assert_matches_reference(
+                &format!("{name} with states"),
+                &move || {
+                    over_source(
+                        state_schema.clone(),
+                        state_batches.clone(),
+                        operator.clone(),
+                    )
+                },
+                1,
+                query(0),
+            );
+        }
+        let state_predicate = Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(1)),
+            op: CompareOpKind::Eq,
+            right: Box::new(ScalarExpr::Column(4)),
+            semantics: ExprSemantics::Sql,
+        });
+        for kind in [
+            JoinKind::Inner,
+            JoinKind::Left,
+            JoinKind::Semi,
+            JoinKind::Anti,
+        ] {
+            let join = Operator::relational_join(
+                state_schema.clone(),
+                state_schema.clone(),
+                kind.clone(),
+                &state_predicate,
+                join_output(&kind, &state_schema, &state_schema),
+            );
+            let Ok(join) = join else { continue };
+            let (state_schema, state_batches) = (state_schema.clone(), state_batches.clone());
+            assert_matches_reference(
+                &format!("join {kind:?} with states"),
+                &move || {
+                    let mut dag = PhysicalDAG::default();
+                    dag.add(
+                        0,
+                        vec![],
+                        Operator::source(state_schema.clone(), state_batches.clone()).unwrap(),
+                    )
+                    .unwrap();
+                    dag.add(
+                        1,
+                        vec![],
+                        Operator::source(state_schema.clone(), state_batches[..1].to_vec())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    dag.add(2, vec![0, 1], join.clone()).unwrap();
+                    dag
+                },
+                2,
+                query(0),
             );
         }
     }

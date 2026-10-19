@@ -64,9 +64,10 @@ pub(super) fn execute<'a>(
             .clone();
         // Each series' latest row in the window, by its identity.
         let mut table = super::group_table::GroupTable::new(vec![identity]);
-        let series = table.group_ids(batch)?;
-        let mut latest: Vec<Option<u32>> = vec![None; table.len()];
         let mut work = Cooperative::new(&context);
+        let mut workspace = Workspace::new(&context)?;
+        let series = chunked_group_ids(&mut table, batch, &mut workspace, 0, &mut work).await?;
+        let mut latest: Vec<Option<u32>> = vec![None; table.len()];
         for (row, &series) in series.iter().enumerate() {
             let timestamp = times.value(row);
             if timestamp <= start || timestamp > end {
@@ -88,7 +89,6 @@ pub(super) fn execute<'a>(
             *slot = Some(row as u32);
         }
         work.checkpoint_rows(batch.num_rows()).await?;
-        let mut workspace = Workspace::new(&context)?;
         workspace.set_bytes(table.memory_bytes() + latest.len() * 8)?;
         // In identity key order, without stale markers.
         let rows = table

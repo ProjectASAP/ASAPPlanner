@@ -138,7 +138,9 @@ pub(super) fn execute<'a>(
         // The right side's value of each key.
         let right_values = float_values(right, values.1)?;
         let mut indexed: Vec<Option<f64>> = Vec::new();
-        for (row, group) in table.group_ids(&right_keys)?.into_iter().enumerate() {
+        let right_ids =
+            chunked_group_ids(&mut table, &right_keys, &mut workspace, 0, &mut work).await?;
+        for (row, group) in right_ids.into_iter().enumerate() {
             let value = right_values.value(row);
             if !value.is_finite() {
                 return Err(invalid("aligned arithmetic input is non-finite"));
@@ -152,7 +154,10 @@ pub(super) fn execute<'a>(
         workspace.set_bytes(table.memory_bytes() + 16 * indexed.len())?;
         let left_values = float_values(left, values.0)?;
         let mut results = Vec::with_capacity(left.num_rows());
-        for (row, group) in table.group_ids(&left_keys)?.into_iter().enumerate() {
+        let held = 16 * indexed.len();
+        let left_ids =
+            chunked_group_ids(&mut table, &left_keys, &mut workspace, held, &mut work).await?;
+        for (row, group) in left_ids.into_iter().enumerate() {
             let right = indexed
                 .get_mut(group as usize)
                 .and_then(Option::take)
