@@ -203,6 +203,7 @@ impl Value {
         })
     }
 }
+#[cfg(test)]
 pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>, Error> {
     columns
         .iter()

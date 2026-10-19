@@ -314,6 +314,117 @@ impl Batch {
         })
     }
 
+    /// The rows `indices` (in that order, repeats allowed), sharing the
+    /// state columns. A NULL index gives a row of NULLs, which a summary
+    /// column cannot hold (bad input).
+    pub(crate) fn take(&self, indices: &UInt32Array) -> Result<Self, Error> {
+        if indices.null_count() > 0 && self.state_columns.iter().any(Option::is_some) {
+            return Err(Error::Invalid("a summary column has no NULL row".into()));
+        }
+        let arrays = self
+            .record_batch
+            .columns()
+            .iter()
+            .map(|array| {
+                arrow::compute::take(array.as_ref(), indices, None)
+                    .map_err(|error| Error::Invalid(format!("columnar take: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_parts(
+            self.schema.clone(),
+            arrays,
+            self.state_columns.to_vec(),
+            indices.len(),
+        )
+    }
+
+    /// The columns `columns` of this batch (shared, not copied), as a batch
+    /// of `schema`.
+    pub(crate) fn project(&self, schema: SchemaRef, columns: &[usize]) -> Result<Self, Error> {
+        Self::from_parts(
+            schema,
+            columns.iter().map(|&c| self.column(c).clone()).collect(),
+            columns
+                .iter()
+                .map(|&c| self.state_column(c).cloned())
+                .collect(),
+            self.num_rows(),
+        )
+    }
+
+    /// This batch with column `index` replaced by `array` (a plain column
+    /// of its field's layout).
+    pub(crate) fn with_plain_column(&self, index: usize, array: ArrayRef) -> Result<Self, Error> {
+        let mut arrays = self.record_batch.columns().to_vec();
+        let mut states = self.state_columns.to_vec();
+        arrays[index] = array;
+        states[index] = None;
+        Self::from_parts(self.schema.clone(), arrays, states, self.num_rows())
+    }
+
+    /// `batches`, all in `schema`, as one batch: plain columns copied,
+    /// state columns joined (shared when every batch shares one).
+    pub(crate) fn concat(schema: &SchemaRef, batches: &[Self]) -> Result<Self, Error> {
+        match batches {
+            [] => return Self::try_new(schema.clone(), Vec::new()),
+            [batch] => return Ok(batch.clone()),
+            _ => {}
+        }
+        let rows = batches.iter().map(Self::num_rows).sum();
+        let mut arrays = Vec::with_capacity(schema.fields.len());
+        let mut states = Vec::with_capacity(schema.fields.len());
+        for column in 0..schema.fields.len() {
+            let pieces = batches
+                .iter()
+                .map(|batch| batch.column(column).as_ref())
+                .collect::<Vec<_>>();
+            let columns = batches
+                .iter()
+                .map(|batch| batch.state_column(column))
+                .collect::<Vec<_>>();
+            let Some(Some(first)) = columns.first().copied() else {
+                arrays.push(
+                    arrow::compute::concat(&pieces)
+                        .map_err(|error| Error::Invalid(format!("columnar concat: {error}")))?,
+                );
+                states.push(None);
+                continue;
+            };
+            if columns
+                .iter()
+                .all(|other| other.is_some_and(|other| Arc::ptr_eq(other, first)))
+            {
+                arrays.push(
+                    arrow::compute::concat(&pieces)
+                        .map_err(|error| Error::Invalid(format!("columnar concat: {error}")))?,
+                );
+                states.push(Some(first.clone()));
+                continue;
+            }
+            // Different state columns: one column of all their states, the
+            // indices offset into it.
+            let mut indices = Vec::with_capacity(rows);
+            let mut joined = Vec::new();
+            for (batch, state_column) in batches.iter().zip(&columns) {
+                let state_column = state_column.expect("one schema");
+                let offset = joined.len() as u32;
+                joined.extend((0..state_column.len()).map(|i| state_column.state(i)));
+                let local = batch
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .expect("summary columns hold state indices");
+                indices.extend(local.values().iter().map(|&i| i + offset));
+            }
+            arrays.push(Arc::new(UInt32Array::from(indices)) as ArrayRef);
+            states.push(Some(Arc::new(StateColumn::from_objects(
+                first.family().clone(),
+                joined,
+            ))));
+        }
+        Self::from_parts(schema.clone(), arrays, states, rows)
+    }
+
     /// The Planner schema of the columns.
     pub fn schema(&self) -> &SchemaRef {
         &self.schema

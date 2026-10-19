@@ -3,7 +3,7 @@ mod aligned_binary;
 use crate::plan::{Boundedness, Emission, PhysicalOperator, PlanProperties};
 use crate::{
     runtime::{Cooperative, Input, OutputStream, Reservation, RunContext},
-    values::{field, group_key, plain, Batch, SchemaRef, Value},
+    values::{field, plain, Batch, SchemaRef, Value},
     Error,
 };
 use futures::StreamExt;
@@ -15,6 +15,8 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(crate) mod common;
 use crate::expressions::ordered;
 pub use crate::expressions::Expression;
+#[cfg(test)]
+use crate::values::group_key;
 use common::*;
 mod aggregate;
 mod current_series;
@@ -23,6 +25,8 @@ pub(crate) mod group_table;
 mod joins;
 mod limit;
 mod projection;
+#[cfg(test)]
+pub(crate) mod row_reference;
 mod scope_timestamp;
 mod series_labels;
 mod series_window;
@@ -398,6 +402,14 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
         inputs: Vec<Input<'a, Batch>>,
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
+        #[cfg(test)]
+        let inputs = {
+            // Tests compare converted operators with their row reference.
+            if row_reference::enabled_for(&self.kind) {
+                return row_reference::start(self, inputs, context).expect("enabled");
+            }
+            inputs
+        };
         match self.kind {
             Kind::Source(_)
             | Kind::Constant { .. }

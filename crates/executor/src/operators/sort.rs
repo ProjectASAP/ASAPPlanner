@@ -25,50 +25,81 @@ pub(super) fn execute<'a>(
     mut inputs: Vec<Input<'a, Batch>>,
     context: RunContext,
 ) -> Result<OutputStream<'a, Batch>, Error> {
-    let output = operator.output.clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
+    let Kind::Sort { keys, groups } = &operator.kind else {
+        unreachable!()
+    };
     Ok(futures::stream::once(async move {
-        let (rows, _memory) = collect_rows(input, &context).await?;
-        let result = match &operator.kind {
-            Kind::Sort { keys, groups } => {
-                let mut grouped = BTreeMap::<Vec<Vec<u8>>, Vec<Vec<Value>>>::new();
-                let mut work = Cooperative::new(&context);
-                let mut workspace = Workspace::new(&context)?;
-                for row in rows {
-                    work.checkpoint().await?;
-                    for key in keys {
-                        if matches!(row[key.column], Value::Map(_)) && nested_nan(&row[key.column])
-                        {
-                            return Err(invalid("NaN in collection sort key"));
-                        }
-                    }
-                    let key = group_key(&row, groups)?;
-                    workspace.grow(std::mem::size_of::<Vec<Value>>())?;
-                    if !grouped.contains_key(&key) {
-                        workspace.grow(key_bytes(&key))?;
-                    }
-                    grouped.entry(key).or_default().push(row);
-                }
-                let mut result = Vec::new();
-                for rows in grouped.into_values() {
-                    let rows =
-                        cooperative_sort(rows, |a, b| compare_rows(a, b, keys), &context).await?;
-                    result.extend(rows);
-                }
-                result
+        let input = collect_batch(input, &operator.inputs[0], &context).await?;
+        let batch = &input.batch;
+        let rows = batch.num_rows();
+        // The sort keys' values, column by column.
+        let key_values = keys
+            .iter()
+            .map(|key| decoded(batch, key.column))
+            .collect::<Result<Vec<_>, _>>()?;
+        for values in &key_values {
+            if values
+                .iter()
+                .any(|value| matches!(value, Value::Map(_)) && nested_nan(value))
+            {
+                return Err(invalid("NaN in collection sort key"));
             }
-            _ => unreachable!(),
-        };
-        Batch::try_new(output, result)
+        }
+        // Groups in key order, then rows by the sort keys; ties keep input
+        // order (a stable sort).
+        let mut table = super::group_table::GroupTable::new(groups.clone());
+        let ids = table.group_ids(batch)?;
+        let mut rank = vec![0u32; table.len()];
+        for (position, group) in table.groups_in_key_order().into_iter().enumerate() {
+            rank[group as usize] = position as u32;
+        }
+        let mut workspace = Workspace::new(&context)?;
+        workspace.set_bytes(
+            table.memory_bytes()
+                + rows * 2 * std::mem::size_of::<u32>()
+                + key_values.iter().flatten().map(Value::bytes).sum::<usize>(),
+        )?;
+        let order = cooperative_sort(
+            (0..rows as u32).collect::<Vec<_>>(),
+            |&a, &b| {
+                rank[ids[a as usize] as usize]
+                    .cmp(&rank[ids[b as usize] as usize])
+                    .then_with(|| {
+                        keys.iter()
+                            .zip(&key_values)
+                            .map(|(key, values)| {
+                                compare_key(&values[a as usize], &values[b as usize], key)
+                            })
+                            .find(|order| order.is_ne())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            },
+            &context,
+        )
+        .await?;
+        batch.take(&arrow::array::UInt32Array::from(order))
     })
     .boxed_local())
 }
 
-fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> std::cmp::Ordering {
-    use std::cmp::Ordering::*;
+#[cfg(test)]
+pub(super) fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> std::cmp::Ordering {
     for key in keys {
-        let (a, b) = (&a[key.column], &b[key.column]);
-        let order = match (a, b) {
+        let order = compare_key(&a[key.column], &b[key.column], key);
+        if order.is_ne() {
+            return order;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// The order of two values of one sort key: NULLs first or last, NaN after
+/// every number, then the key's direction.
+fn compare_key(a: &Value, b: &Value, key: &SortKey) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    {
+        match (a, b) {
             (Value::Null, Value::Null) => Equal,
             (Value::Null, _) => {
                 if key.nulls_first {
@@ -99,14 +130,10 @@ fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> std::cmp::Orderin
                     order
                 }
             }
-        };
-        if order != Equal {
-            return order;
         }
     }
-    Equal
 }
-fn nested_nan(value: &Value) -> bool {
+pub(super) fn nested_nan(value: &Value) -> bool {
     match value {
         Value::Float64(value) => value.is_nan(),
         Value::Map(values) => values

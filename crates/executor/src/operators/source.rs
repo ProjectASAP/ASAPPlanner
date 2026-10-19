@@ -63,10 +63,7 @@ pub(super) fn execute<'a>(
         return Ok(futures::stream::iter(batches.iter().cloned().map(Ok)).boxed_local());
     }
     if let Kind::Constant { value, .. } = &operator.kind {
-        return Ok(futures::stream::once(async move {
-            Batch::try_new(output, vec![vec![value.clone()]])
-        })
-        .boxed_local());
+        return Ok(futures::stream::once(async move { single_value(output, value) }).boxed_local());
     }
     if matches!(operator.kind, Kind::EvaluationTime) {
         let at = match context.scope {
@@ -76,7 +73,7 @@ pub(super) fn execute<'a>(
             crate::runtime::Scope::Ingestion { window_end_ms, .. } => window_end_ms,
         };
         return Ok(futures::stream::once(async move {
-            Batch::try_new(output, vec![vec![Value::Float64(at as f64 / 1000.0)]])
+            single_value(output, &Value::Float64(at as f64 / 1000.0))
         })
         .boxed_local());
     }
@@ -88,29 +85,42 @@ pub(super) fn execute<'a>(
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     match &operator.kind {
         Kind::VectorToScalar { column } => Ok(futures::stream::once(async move {
+            // PromQL `scalar()`: the one sample's value, NaN otherwise.
             let mut input = input;
             let mut work = Cooperative::new(&context);
-            let mut value = f64::NAN;
-            let mut count = 0usize;
+            let (mut count, mut value) = (0usize, f64::NAN);
             while let Some(batch) = input.next().await {
-                for row in batch?.rows() {
-                    work.checkpoint().await?;
-                    count = count.saturating_add(1);
-                    if let Value::Float64(v) = row[*column] {
-                        value = v;
+                let batch = batch?;
+                work.checkpoint_rows(batch.num_rows()).await?;
+                count = count.saturating_add(batch.num_rows());
+                if let Some(values) = batch
+                    .column(*column)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Float64Array>()
+                {
+                    if let Some(last) = values.len().checked_sub(1) {
+                        value = values.value(last);
                     }
                 }
             }
-            Batch::try_new(
+            single_value(
                 output,
-                vec![vec![Value::Float64(if count == 1 {
-                    value
-                } else {
-                    f64::NAN
-                })]],
+                &Value::Float64(if count == 1 { value } else { f64::NAN }),
             )
         })
         .boxed_local()),
         _ => unreachable!(),
     }
+}
+
+/// The one-row batch of `output` (one column) holding `value`.
+fn single_value(output: SchemaRef, value: &Value) -> Result<Batch, Error> {
+    let (dtype, _) = plain(&output, 0)?;
+    let array = crate::values::arrow_columns::repeat(
+        dtype,
+        crate::values::arrow_columns::ColumnDepth::BatchColumn,
+        value,
+        1,
+    )?;
+    Batch::from_parts(output, vec![array], vec![None], 1)
 }

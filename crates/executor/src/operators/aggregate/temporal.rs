@@ -1,19 +1,20 @@
 //! Windowed computations use Planner intents; deployments supply the input window.
+#[cfg(test)]
+use crate::operators::common::{key_bytes, row_bytes};
+#[cfg(test)]
+use crate::values::group_key;
 use crate::{
-    operators::{
-        common::{key_bytes, row_bytes, Workspace},
-        sort::cooperative_sort,
-    },
+    operators::{common::Workspace, sort::cooperative_sort},
     runtime::{Cooperative, RunContext},
 };
-use crate::{
-    values::{group_key, Value},
-    Error,
-};
+use crate::{values::Value, Error};
 use planner_types::ir::operator::AggIntent;
 use planner_types::ir::scalar::ColumnRef;
+#[cfg(test)]
 use std::collections::BTreeMap;
 
+/// The row-at-a-time reducer (reference for tests).
+#[cfg(test)]
 pub(in crate::operators) async fn reduce(
     rows: Vec<Vec<Value>>,
     intent: &AggIntent<ColumnRef>,
@@ -85,6 +86,95 @@ pub(in crate::operators) async fn reduce(
         }
     }
     Ok(output)
+}
+
+/// Each group's temporal value over `batch`: the groups of `groups` in key
+/// order, labelled as their first rows, each with its `intent` over its
+/// samples (`coordinate` a Timestamp, or a Float64 bucket bound for a
+/// histogram quantile; `value` Float64). A group whose value PromQL omits
+/// has no row. The result is the label columns and the value column of
+/// `output_value` type.
+pub(in crate::operators) async fn reduce_batch(
+    batch: &crate::values::Batch,
+    intent: &AggIntent<ColumnRef>,
+    groups: &[usize],
+    coordinate: usize,
+    value: usize,
+    window: Option<(i64, i64)>,
+    context: &RunContext,
+) -> Result<(Vec<arrow::array::ArrayRef>, Vec<Value>), Error> {
+    use arrow::array::{Array, Float64Array, TimestampMillisecondArray};
+    let mut work = Cooperative::new(context);
+    let mut workspace = Workspace::new(context)?;
+    let mut table = crate::operators::group_table::GroupTable::new(groups.to_vec());
+    let ids = table.group_ids(batch)?;
+    let values = batch
+        .column(value)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| Error::Invalid("window value must be Float64".into()))?;
+    let coordinates = batch.column(coordinate);
+    let times = coordinates
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>();
+    let bounds = coordinates.as_any().downcast_ref::<Float64Array>();
+    let (mut buckets, mut points) = (vec![Vec::new(); table.len()], vec![Vec::new(); table.len()]);
+    for (row, &group) in ids.iter().enumerate() {
+        if values.is_null(row) {
+            return Err(Error::Invalid("window value must be Float64".into()));
+        }
+        let v = values.value(row);
+        match (times, bounds) {
+            (Some(times), _) if times.is_valid(row) => {
+                points[group as usize].push((times.value(row), v))
+            }
+            (_, Some(bounds)) if bounds.is_valid(row) => {
+                buckets[group as usize].push((bounds.value(row), v))
+            }
+            _ => return Err(Error::Invalid("invalid window coordinate".into())),
+        }
+    }
+    work.checkpoint_rows(batch.num_rows()).await?;
+    workspace.set_bytes(table.memory_bytes() + 16 * batch.num_rows())?;
+    let mut kept = Vec::new();
+    let mut results = Vec::new();
+    for group in table.groups_in_key_order() {
+        work.checkpoint().await?;
+        let buckets = std::mem::take(&mut buckets[group as usize]);
+        let points = std::mem::take(&mut points[group as usize]);
+        let result = if let AggIntent::HistogramQuantile { q, .. } = intent {
+            Some(Value::Float64(bucket_quantile(*q, buckets, context).await?))
+        } else {
+            let points = cooperative_sort(points, |a, b| a.0.cmp(&b.0), context).await?;
+            let (start, end) =
+                window.ok_or_else(|| Error::Invalid("missing temporal window".into()))?;
+            if points.iter().any(|p| p.0 < start || p.0 > end)
+                || points.windows(2).any(|p| p[0].0 == p[1].0)
+            {
+                return Err(Error::Invalid(
+                    "duplicate or out-of-window timestamp".into(),
+                ));
+            }
+            window_value(
+                intent,
+                &points,
+                start,
+                end,
+                match context.scope {
+                    crate::runtime::Scope::Query {
+                        evaluation_time_ms, ..
+                    } => evaluation_time_ms,
+                    _ => end,
+                },
+            )?
+        };
+        if let Some(result) = result {
+            kept.push(group);
+            results.push(result);
+        }
+    }
+    let labels = table.label_arrays(batch.schema(), &kept)?;
+    Ok((labels, results))
 }
 
 /// One series' value over its sorted samples in the window `(start, end]`.

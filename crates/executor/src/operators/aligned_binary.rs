@@ -65,6 +65,33 @@ impl Operator {
     }
 }
 
+/// The key columns of `batch` (in `schema`) as a batch of their own, so
+/// both sides of a match share one group table.
+pub(super) fn key_batch(batch: &Batch, columns: &[usize]) -> Result<Batch, Error> {
+    let fields = columns
+        .iter()
+        .map(|&c| batch.schema().fields[c].clone())
+        .collect();
+    batch.project(schema(fields), columns)
+}
+
+/// Whether row `row` of a key batch can match: no NULL and no NaN key.
+pub(super) fn matchable_rows(keys: &Batch) -> Vec<bool> {
+    let mut matchable = vec![true; keys.num_rows()];
+    for column in keys.record_batch().columns() {
+        let nulls = column.logical_nulls();
+        let floats = column.as_any().downcast_ref::<arrow::array::Float64Array>();
+        for (row, slot) in matchable.iter_mut().enumerate() {
+            if nulls.as_ref().is_some_and(|nulls| nulls.is_null(row))
+                || floats.is_some_and(|floats| floats.value(row).is_nan())
+            {
+                *slot = false;
+            }
+        }
+    }
+    matchable
+}
+
 pub(super) fn execute<'a>(
     op: &'a Operator,
     mut inputs: Vec<Input<'a, Batch>>,
@@ -85,62 +112,74 @@ pub(super) fn execute<'a>(
         .pop()
         .ok_or_else(|| invalid("missing aligned left input"))?;
     Ok(futures::stream::once(async move {
-        let ((left, _left_memory), (right, _right_memory)) =
-            futures::try_join!(collect_rows(left, &context), collect_rows(right, &context))?;
-        if left.is_empty() || left.len() != right.len() {
+        let (left, right) = futures::try_join!(
+            collect_batch(left, &op.inputs[0], &context),
+            collect_batch(right, &op.inputs[1], &context)
+        )?;
+        let (left, right) = (&left.batch, &right.batch);
+        if left.num_rows() == 0 || left.num_rows() != right.num_rows() {
             return Err(invalid(
                 "aligned arithmetic requires matching nonempty key sets",
             ));
         }
         let mut work = Cooperative::new(&context);
         let mut workspace = Workspace::new(&context)?;
-        let columns = |side: bool| {
-            keys.iter()
-                .map(|&(l, r)| if side { r } else { l })
-                .collect::<Vec<_>>()
+        let left_keys = key_batch(left, &keys.iter().map(|&(l, _)| l).collect::<Vec<_>>())?;
+        let right_keys = key_batch(right, &keys.iter().map(|&(_, r)| r).collect::<Vec<_>>())?;
+        let mut table = super::group_table::GroupTable::new((0..keys.len()).collect());
+        let float_values = |batch: &Batch, column: usize| {
+            batch
+                .column(column)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .cloned()
+                .ok_or_else(|| invalid("invalid aligned value"))
         };
-        let left_columns = columns(false);
-        let right_columns = columns(true);
-        let mut indexed = BTreeMap::new();
-        for row in right {
-            work.checkpoint().await?;
-            let key = group_key(&row, &right_columns)?;
-            let Value::Float64(value) = row[values.1] else {
-                return Err(invalid("invalid aligned value"));
-            };
+        // The right side's value of each key.
+        let right_values = float_values(right, values.1)?;
+        let mut indexed: Vec<Option<f64>> = Vec::new();
+        for (row, group) in table.group_ids(&right_keys)?.into_iter().enumerate() {
+            let value = right_values.value(row);
             if !value.is_finite() {
                 return Err(invalid("aligned arithmetic input is non-finite"));
             }
-            workspace.grow(key_bytes(&key) + 64)?;
-            if indexed.insert(key, value).is_some() {
+            indexed.resize(table.len(), None);
+            if indexed[group as usize].replace(value).is_some() {
                 return Err(invalid("aligned arithmetic input has duplicate keys"));
             }
         }
-        let mut rows = Vec::new();
-        for mut row in left {
-            work.checkpoint().await?;
-            let key = group_key(&row, &left_columns)?;
+        work.checkpoint_rows(right.num_rows()).await?;
+        workspace.set_bytes(table.memory_bytes() + 16 * indexed.len())?;
+        let left_values = float_values(left, values.0)?;
+        let mut results = Vec::with_capacity(left.num_rows());
+        for (row, group) in table.group_ids(&left_keys)?.into_iter().enumerate() {
             let right = indexed
-                .remove(&key)
+                .get_mut(group as usize)
+                .and_then(Option::take)
                 .ok_or_else(|| invalid("aligned arithmetic input has missing or duplicate keys"))?;
-            let Value::Float64(left) = row[values.0] else {
-                return Err(invalid("invalid aligned value"));
-            };
+            let left = left_values.value(row);
             if !left.is_finite() {
                 return Err(invalid("aligned arithmetic input is non-finite"));
             }
             let result = crate::expressions::arithmetic::evaluate_binary(operator, left, right)?;
-            if !matches!(result, Value::Float64(value) if value.is_finite()) {
+            let Value::Float64(result) = result else {
+                return Err(invalid("aligned arithmetic produced a non-finite update"));
+            };
+            if !result.is_finite() {
                 return Err(invalid("aligned arithmetic produced a non-finite update"));
             }
-            row[values.0] = result;
-            workspace.grow(std::mem::size_of::<Vec<Value>>())?;
-            rows.push(row);
+            results.push(result);
         }
-        if !indexed.is_empty() {
+        work.checkpoint_rows(left.num_rows()).await?;
+        if indexed.iter().any(Option::is_some) {
             return Err(invalid("aligned arithmetic has unmatched input keys"));
         }
-        Batch::try_new(op.output.clone(), rows)
+        let output = left.with_plain_column(
+            values.0,
+            Arc::new(arrow::array::Float64Array::from(results)),
+        )?;
+        workspace.grow(output.memory_bytes())?;
+        Ok(output)
     })
     .boxed_local())
 }
