@@ -8,7 +8,7 @@ use std::{cmp::Ordering, sync::Arc};
 pub(crate) mod arrow_columns;
 mod batch;
 mod state_column;
-pub use batch::Batch;
+pub use batch::{Batch, BatchColumn};
 pub use state_column::StateColumn;
 pub(crate) use state_column::StateStorage;
 /// Shared ownership of schema metadata; the field model is identical at planning
