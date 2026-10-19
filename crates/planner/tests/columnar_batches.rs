@@ -79,7 +79,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     // The pane's Scan and TimeRange, prepared once for the window.
     let selector = RawSampleSelector::new(&plan.dag.dag, &output.pane).unwrap();
     // The pane's input: the 120 samples as Arrow columns.
-    let input: Batch = selector.rows(end_ms, &samples).unwrap();
+    let input: Batch = selector.window_batch(end_ms, &samples).unwrap();
     assert_eq!(input.num_rows(), 120);
     // The series identity column: one u32 key per sample into a dictionary
     // holding each series' identity once.

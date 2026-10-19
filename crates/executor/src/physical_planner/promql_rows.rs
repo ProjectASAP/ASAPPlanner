@@ -98,21 +98,21 @@ enum SeriesColumn {
     Label,
 }
 
-/// The columns of `samples`, each one `(labels, timestamp_ms, value)`, in
-/// `schema`: the batch [`series_row`] builds row by row, with each series'
+/// The columns of `samples` in `schema`: the batch [`series_row`] builds row by row, with each series'
 /// identity and label cells computed once per distinct label set and stored
 /// dictionary encoded. The batch is labelled `output`, which must have the
 /// same columns. Bad input as for [`series_row`].
 pub(crate) fn series_batch(
     schema: &SchemaRef,
     output: SchemaRef,
-    samples: &[(&BTreeMap<String, String>, i64, f64)],
+    samples: &[&crate::Sample],
 ) -> Result<crate::values::Batch, Error> {
     use crate::values::{Batch, Value};
     use arrow::array::{
         ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMillisecondArray,
         UInt32Array,
     };
+    use planner_types::ir::schema::FieldDataType;
     if samples.is_empty() {
         return Batch::try_new(output, vec![]);
     }
@@ -121,7 +121,8 @@ pub(crate) fn series_batch(
         std::collections::HashMap::new();
     let mut series_cells: Vec<Vec<Value>> = Vec::new();
     let mut sample_series = Vec::with_capacity(samples.len());
-    for (labels, _, _) in samples {
+    for sample in samples {
+        let labels = &sample.labels;
         let next = series_cells.len() as u32;
         let id = match series_ids.get(labels) {
             Some(&id) => id,
@@ -143,7 +144,7 @@ pub(crate) fn series_batch(
             } else if Some(index) == schema.time_index {
                 SeriesColumn::Timestamp
             } else if field.name == "value"
-                && field.dtype == SummaryFamilyType::Plain(DataType::Float64)
+                && field.dtype == FieldDataType::Plain(DataType::Float64)
             {
                 SeriesColumn::SampleValue
             } else {
@@ -155,10 +156,10 @@ pub(crate) fn series_batch(
     for (index, kind) in kinds.iter().enumerate() {
         arrays.push(match kind {
             SeriesColumn::Timestamp => Arc::new(TimestampMillisecondArray::from_iter_values(
-                samples.iter().map(|(_, timestamp, _)| *timestamp),
+                samples.iter().map(|sample| sample.timestamp_ms),
             )),
             SeriesColumn::SampleValue => Arc::new(Float64Array::from_iter_values(
-                samples.iter().map(|(_, _, value)| *value),
+                samples.iter().map(|sample| sample.value),
             )),
             SeriesColumn::Identity | SeriesColumn::Label => {
                 // Distinct texts of this column, and each series' code.

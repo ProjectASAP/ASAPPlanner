@@ -6,7 +6,7 @@ use crate::{AggregateCore, Error};
 use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
 use arrow::datatypes::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
+use planner_types::ir::schema::FieldDataType;
 use std::sync::{Arc, OnceLock};
 
 /// Each row is charged this many bytes on top of its column buffers, so a
@@ -20,24 +20,24 @@ const ROW_SLOT_BYTES: usize = 8;
 /// copy a sketch.
 pub struct StateColumn {
     /// The family and parameters every state of the column has.
-    family: SummaryFamilyType,
+    family: FieldDataType,
     /// The states, addressed by the indices in the batch column.
     states: Vec<Arc<dyn AggregateCore>>,
     /// Memory the states hold: each state's own footprint, plus each state
     /// shared by several states (one Hydra grid) once.
-    state_bytes: usize,
+    state_memory_bytes: usize,
 }
 
 impl StateColumn {
     /// The column of `states`, all of `family`. Not checked here: callers
     /// pass states their own kernel built for `family`, or states
     /// [`Batch::try_new`] validated.
-    pub fn new(family: SummaryFamilyType, states: Vec<Arc<dyn AggregateCore>>) -> Self {
+    pub(crate) fn new(family: FieldDataType, states: Vec<Arc<dyn AggregateCore>>) -> Self {
         let shared = states
             .iter()
             .filter_map(|state| state.shared_state())
             .collect::<std::collections::BTreeMap<_, _>>();
-        let state_bytes = states
+        let state_memory_bytes = states
             .iter()
             .map(|state| state.approx_memory_bytes())
             .sum::<usize>()
@@ -45,20 +45,12 @@ impl StateColumn {
         Self {
             family,
             states,
-            state_bytes,
+            state_memory_bytes,
         }
-    }
-    /// The family and parameters of every state.
-    pub fn family(&self) -> &SummaryFamilyType {
-        &self.family
     }
     /// The states, indexed by the batch column's state indices.
     pub fn states(&self) -> &[Arc<dyn AggregateCore>] {
         &self.states
-    }
-    /// Memory the states hold, in bytes.
-    pub fn state_bytes(&self) -> usize {
-        self.state_bytes
     }
 }
 
@@ -83,7 +75,7 @@ pub struct Batch {
     schema: SchemaRef,
     /// One Arrow column per Planner field; a summary field holds state
     /// indices into its entry of `state_columns`.
-    columns: RecordBatch,
+    record_batch: RecordBatch,
     /// Per Planner field, the states of a summary field; `None` for a plain
     /// field.
     state_columns: Arc<[Option<Arc<StateColumn>>]>,
@@ -96,7 +88,7 @@ impl std::fmt::Debug for Batch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Batch")
             .field("schema", &self.schema)
-            .field("rows", &self.rows())
+            .field("num_rows", &self.num_rows())
             .finish()
     }
 }
@@ -111,7 +103,7 @@ fn arrow_schema(schema: &SchemaRef) -> Arc<ArrowSchema> {
                 ArrowField::new(
                     &field.name,
                     match &field.dtype {
-                        SummaryFamilyType::Plain(dtype) => {
+                        FieldDataType::Plain(dtype) => {
                             arrow_columns::arrow_type(dtype, ColumnDepth::BatchColumn)
                         }
                         _ => ArrowType::UInt32,
@@ -137,9 +129,7 @@ impl Batch {
             }
             for (value, field) in row.iter().zip(&schema.fields) {
                 let matches = match (&field.dtype, value) {
-                    (SummaryFamilyType::Plain(dtype), value) => {
-                        value.matches(dtype, field.nullable)
-                    }
+                    (FieldDataType::Plain(dtype), value) => value.matches(dtype, field.nullable),
                     (expected, Value::Summary { family, state }) => {
                         expected == family && validate_state(family, state.as_ref()).is_ok()
                     }
@@ -158,7 +148,7 @@ impl Batch {
         for (index, field) in schema.fields.iter().enumerate() {
             let cells = rows.iter().map(|row| &row[index]).collect::<Vec<_>>();
             match &field.dtype {
-                SummaryFamilyType::Plain(dtype) => {
+                FieldDataType::Plain(dtype) => {
                     arrays.push(arrow_columns::encode(
                         dtype,
                         ColumnDepth::BatchColumn,
@@ -189,7 +179,8 @@ impl Batch {
             }
         }
         let batch = Self::from_parts(schema, arrays, state_columns, rows.len())?;
-        // The caller's rows are the decoded rows; keep them.
+        // The caller's rows are the decoded rows; keep them (charged in
+        // `memory_bytes`).
         let _ = batch.decoded_rows.set(rows);
         Ok(batch)
     }
@@ -210,7 +201,7 @@ impl Batch {
             ));
         }
         for ((array, states), field) in arrays.iter().zip(&state_columns).zip(&schema.fields) {
-            let plain = matches!(field.dtype, SummaryFamilyType::Plain(_));
+            let plain = matches!(field.dtype, FieldDataType::Plain(_));
             if plain == states.is_some() {
                 return Err(Error::Invalid(format!(
                     "column {} has states exactly when it is a summary column",
@@ -224,7 +215,7 @@ impl Batch {
                 )));
             }
         }
-        let columns = RecordBatch::try_new_with_options(
+        let record_batch = RecordBatch::try_new_with_options(
             arrow_schema(&schema),
             arrays,
             &RecordBatchOptions::new().with_row_count(Some(row_count)),
@@ -232,7 +223,7 @@ impl Batch {
         .map_err(|error| Error::Invalid(format!("columnar batch: {error}")))?;
         Ok(Self {
             schema,
-            columns,
+            record_batch,
             state_columns: state_columns.into(),
             decoded_rows: Arc::new(OnceLock::new()),
         })
@@ -244,11 +235,11 @@ impl Batch {
         if keep.true_count() == self.num_rows() && keep.null_count() == 0 {
             return Ok(self.clone());
         }
-        let columns = arrow::compute::filter_record_batch(&self.columns, keep)
+        let record_batch = arrow::compute::filter_record_batch(&self.record_batch, keep)
             .map_err(|error| Error::Invalid(format!("columnar filter: {error}")))?;
         Ok(Self {
             schema: self.schema.clone(),
-            columns,
+            record_batch,
             state_columns: self.state_columns.clone(),
             decoded_rows: Arc::new(OnceLock::new()),
         })
@@ -261,18 +252,18 @@ impl Batch {
 
     /// The number of rows.
     pub fn num_rows(&self) -> usize {
-        self.columns.num_rows()
+        self.record_batch.num_rows()
     }
 
     /// The Arrow columns, one per Planner field. A summary field's column
     /// holds `UInt32` indices into [`Self::state_column`].
     pub fn record_batch(&self) -> &RecordBatch {
-        &self.columns
+        &self.record_batch
     }
 
     /// The Arrow column of field `index`.
     pub fn column(&self, index: usize) -> &ArrayRef {
-        self.columns.column(index)
+        self.record_batch.column(index)
     }
 
     /// The states of summary field `index`; `None` for a plain field.
@@ -285,11 +276,13 @@ impl Batch {
     pub fn rows(&self) -> &[Vec<Value>] {
         self.decoded_rows.get_or_init(|| {
             let length = self.num_rows();
-            let mut rows = vec![Vec::with_capacity(self.schema.fields.len()); length];
+            let width = self.schema.fields.len();
+            let mut rows: Vec<Vec<Value>> =
+                (0..length).map(|_| Vec::with_capacity(width)).collect();
             for (index, field) in self.schema.fields.iter().enumerate() {
-                let array = self.columns.column(index);
+                let array = self.record_batch.column(index);
                 let column = match (&field.dtype, self.state_column(index)) {
-                    (SummaryFamilyType::Plain(dtype), _) => {
+                    (FieldDataType::Plain(dtype), _) => {
                         arrow_columns::decode(array.as_ref(), dtype, ColumnDepth::BatchColumn)
                     }
                     (_, Some(states)) => {
@@ -317,21 +310,28 @@ impl Batch {
     }
 
     /// Memory the batch holds, for execution memory reservations: its
-    /// column buffers, a fixed slot per row, and each state column once.
-    /// Counted once per batch, not per row.
-    pub fn bytes(&self) -> usize {
+    /// column buffers, a fixed slot per row, each state column once, and,
+    /// when the batch holds its rows as values (kept from [`Self::try_new`]
+    /// or decoded by [`Self::rows`]), an estimate of those rows. Constant
+    /// time in the number of rows.
+    pub fn memory_bytes(&self) -> usize {
         let mut seen = std::collections::BTreeSet::new();
         let states = self
             .state_columns
             .iter()
             .flatten()
             .filter(|column| seen.insert(Arc::as_ptr(column)))
-            .map(|column| column.state_bytes)
+            .map(|column| column.state_memory_bytes)
             .sum::<usize>();
+        let rows = self.decoded_rows.get().map_or(0, |rows| {
+            rows.capacity() * std::mem::size_of::<Vec<Value>>()
+                + rows.len() * self.schema.fields.len() * std::mem::size_of::<Value>()
+        });
         std::mem::size_of::<Self>()
-            + self.columns.get_array_memory_size()
+            + self.record_batch.get_array_memory_size()
             + self.num_rows() * ROW_SLOT_BYTES
             + states
+            + rows
     }
 }
 
@@ -346,7 +346,7 @@ mod tests {
     fn field(name: &str, dtype: DataType, nullable: bool) -> Field {
         Field {
             name: name.into(),
-            dtype: SummaryFamilyType::Plain(dtype),
+            dtype: FieldDataType::Plain(dtype),
             nullable,
             table: None,
         }
@@ -512,8 +512,8 @@ mod tests {
         assert_eq!(column.keys().values().to_vec(), vec![0, 1, 0, 0, 1]);
     }
 
-    fn dd_family() -> SummaryFamilyType {
-        SummaryFamilyType::Sketch(
+    fn dd_family() -> FieldDataType {
+        FieldDataType::Sketch(
             SketchKind::new(
                 SketchAlgorithm::DDSketch,
                 SketchParams::DDSketch { alpha: 0.01 },
@@ -572,7 +572,11 @@ mod tests {
         let none = Batch::try_new(empty.clone(), vec![]).unwrap();
         let many = Batch::try_new(empty, vec![vec![]; 200]).unwrap();
         assert_eq!(many.num_rows(), 200);
-        assert_eq!(many.bytes() - none.bytes(), 200 * ROW_SLOT_BYTES);
+        // Both keep their (zero-width) rows: 200 row headers more.
+        assert_eq!(
+            many.memory_bytes() - none.memory_bytes(),
+            200 * (ROW_SLOT_BYTES + std::mem::size_of::<Vec<Value>>())
+        );
     }
 
     // A runtime can share batches, stored panes included, across threads.

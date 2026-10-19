@@ -170,7 +170,7 @@ mod tests {
             closed: false,
         });
         let batch = Batch::try_new(schema.clone(), vec![vec![]]).unwrap();
-        let bytes = batch.bytes();
+        let bytes = batch.memory_bytes();
         let source = Operator::source(schema, vec![batch]).unwrap();
         let context = RunContext::new(
             Scope::Query {

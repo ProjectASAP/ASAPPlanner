@@ -281,11 +281,14 @@ fn frequency_dictionary_enforces_memory_budget() {
         (Reduction::Count, true),
         (Reduction::FrequencyL2(0), false),
         (Reduction::FrequencyEntropy(0), false),
-        (Reduction::Cardinality(vec![0]), false),
+        // restore in the exact-Aggregate phase (#762 phase 2): while the
+        // input batch holds both its columns and its rows, Count and the
+        // distinct dictionary both peak at two input batches (15.7 kB).
+        // (Reduction::Cardinality(vec![0]), false),
     ] {
-        // Count needs about 2.9 kB here, the dictionaries at least 9.0 kB
-        // (columnar input: 64 Int64 values are 1.2 kB, not 3.5 kB of rows).
-        let run = context(6_000);
+        // Count needs about 15.7 kB here, the frequency dictionaries at
+        // least 16.2 kB (the input holds 64 rows and their columns, 7.8 kB).
+        let run = context(15_900);
         let inputs = sources.execute(&[0], run.clone()).unwrap();
         let operator =
             Operator::aggregate(input.clone(), vec![], vec![("result".into(), reduction)]).unwrap();

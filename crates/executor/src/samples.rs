@@ -5,7 +5,7 @@
 //! A [`RawSampleSelector`] is prepared once per raw-sample window of the
 //! installable DAG. It says which metric's samples the window reads
 //! ([`RawSampleSelector::metric`]), and turns the samples a runtime
-//! received into the window's input rows ([`RawSampleSelector::rows`]):
+//! received into the window's input rows ([`RawSampleSelector::window_batch`]):
 //! those in the window, kept by the window's `Scan` predicates (its label
 //! matchers) and, for an instant selector, only each series' latest one.
 //! [`series_labels_of_output_row`] reads the labels of an answer row back.
@@ -39,7 +39,7 @@ pub struct Sample {
 
 /// One raw-sample window of an installable DAG, prepared to turn samples
 /// into its input rows: built once per window ([`RawSampleSelector::new`]),
-/// then called for each window end ([`RawSampleSelector::rows`]).
+/// then called for each window end ([`RawSampleSelector::window_batch`]).
 pub struct RawSampleSelector {
     /// The metric the window's `Scan` reads (`__name__`).
     metric: String,
@@ -118,19 +118,19 @@ impl RawSampleSelector {
     }
 
     /// The metric whose samples the window reads; a runtime routes only
-    /// those samples to [`Self::rows`].
+    /// those samples to [`Self::window_batch`].
     pub fn metric(&self) -> &str {
         &self.metric
     }
 
-    /// The window's input rows for the window ending at `window_end_ms`:
+    /// The window's input batch (Arrow columns) for the window ending at `window_end_ms`:
     /// the samples of [`Self::metric`] in `(window_end_ms - width,
     /// window_end_ms]` that the `Scan`'s predicates keep, and, for an
     /// instant selector, only each series' latest one; in the `TimeRange`'s
     /// schema, bound to the window's `TimeRange`. `samples` may hold other
     /// series and times. Bad input when a sample's labels cannot fill the
     /// schema.
-    pub fn rows(&self, window_end_ms: i64, samples: &[Sample]) -> Result<Batch, Error> {
+    pub fn window_batch(&self, window_end_ms: i64, samples: &[Sample]) -> Result<Batch, Error> {
         let start_ms = window_end_ms - self.width_ms;
         let mut kept: Vec<&Sample> = samples
             .iter()
@@ -149,14 +149,10 @@ impl RawSampleSelector {
         }
         // Columns first, with each series' labels and identity built once;
         // then each predicate (label matcher) once per distinct label value.
-        let samples = kept
-            .iter()
-            .map(|sample| (&sample.labels, sample.timestamp_ms, sample.value))
-            .collect::<Vec<_>>();
         let mut batch = series_batch(
             &self.scan_schema,
             Arc::clone(&self.time_range_schema),
-            &samples,
+            &kept,
         )?;
         for predicate in &self.predicates {
             if batch.num_rows() == 0 {
@@ -303,7 +299,7 @@ mod tests {
             sample("latency_ms", "b", 9_500, 5.0),
             sample("cpu_seconds", "a", 9_500, 6.0),
         ];
-        let rows = selector.rows(10_000, &samples).unwrap();
+        let rows = selector.window_batch(10_000, &samples).unwrap();
         assert_eq!(points(&rows), [(9_001, 2.0), (10_000, 3.0)]);
     }
 
@@ -317,7 +313,7 @@ mod tests {
             sample("latency_ms", "a", 9_900, 10.0),
             sample("latency_ms", "a", 9_500, 5.0),
         ];
-        let rows = selector.rows(10_000, &samples).unwrap();
+        let rows = selector.window_batch(10_000, &samples).unwrap();
         assert_eq!(points(&rows), [(9_900, 10.0)]);
     }
 
@@ -353,7 +349,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let batch = selector.rows(10_000, &samples).unwrap();
+        let batch = selector.window_batch(10_000, &samples).unwrap();
         let expected = samples
             .iter()
             .filter(|s| s.labels["instance"] == "a")

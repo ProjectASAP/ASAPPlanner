@@ -630,7 +630,7 @@ fn source_batches_must_match_the_bound_schema() {
             self.schema.clone()
         }
         fn output_bytes(&self, value: &Batch) -> usize {
-            value.bytes()
+            value.memory_bytes()
         }
         fn start<'a>(
             &'a self,

@@ -96,7 +96,12 @@ fn lower_expression(expression: &Expression, schema: &Schema) -> Option<(VectorE
             VectorExpr::Literal(value.clone(), dtype.clone()),
             dtype.clone(),
         ),
-        E::ExactFloat64(column) if plain_type(schema, *column)? == &DataType::Float64 => {
+        // Only a non-null Float64 column is its own exact Float64 value; a
+        // null fails on the row path.
+        E::ExactFloat64(column)
+            if plain_type(schema, *column)? == &DataType::Float64
+                && !schema.fields[*column].nullable =>
+        {
             (VectorExpr::Column(*column), DataType::Float64)
         }
         E::Negate(operand) => {
@@ -549,32 +554,46 @@ fn evaluate_per_input(
             .iter()
             .map(arrow_columns::dictionary_texts)
             .collect::<Vec<_>>();
-        let mut seen: HashMap<Vec<Option<u32>>, u32> = HashMap::new();
         let mut results: Vec<Value> = Vec::new();
         let mut indices = Vec::with_capacity(rows);
-        let mut key = Vec::with_capacity(columns.len());
-        for index in 0..rows {
-            key.clear();
-            key.extend(dictionaries.iter().map(|dictionary| {
-                let keys = dictionary.keys();
-                (!keys.is_null(index)).then(|| keys.value(index))
-            }));
-            let position = match seen.get(&key) {
-                Some(&position) => position,
-                None => {
-                    for ((&column, code), texts) in columns.iter().zip(&key).zip(&texts) {
-                        row[column] = match code {
-                            Some(code) => Value::Utf8(texts[*code as usize].clone()),
-                            None => Value::Null,
+        if let ([column], [dictionary], [texts]) =
+            (columns, dictionaries.as_slice(), texts.as_slice())
+        {
+            // One column: a dense slot per dictionary key, the last for null.
+            let keys = dictionary.keys();
+            let null_slot = texts.len();
+            let mut positions: Vec<Option<u32>> = vec![None; texts.len() + 1];
+            for index in 0..rows {
+                let slot = if keys.is_null(index) {
+                    null_slot
+                } else {
+                    keys.value(index) as usize
+                };
+                let position = match positions[slot] {
+                    Some(position) => position,
+                    None => {
+                        row[*column] = if slot == null_slot {
+                            Value::Null
+                        } else {
+                            Value::Utf8(texts[slot].clone())
                         };
+                        results.push(evaluate_row(&row)?);
+                        let position = (results.len() - 1) as u32;
+                        positions[slot] = Some(position);
+                        position
                     }
-                    results.push(evaluate_row(&row)?);
-                    let position = (results.len() - 1) as u32;
-                    seen.insert(key.clone(), position);
-                    position
-                }
-            };
-            indices.push(position);
+                };
+                indices.push(position);
+            }
+        } else {
+            (results, indices) = evaluate_per_key_combination(
+                rows,
+                &dictionaries,
+                &texts,
+                columns,
+                &mut row,
+                &mut evaluate_row,
+            )?;
         }
         let distinct = arrow_columns::encode(
             dtype,
@@ -611,6 +630,48 @@ fn evaluate_per_input(
         ColumnDepth::BatchColumn,
         &results.iter().collect::<Vec<_>>(),
     )
+}
+
+/// [`evaluate_per_input`] over several dictionary columns: once per
+/// distinct combination of keys, in order of first appearance, for each of
+/// the `rows` rows (an expression reading no column runs once). Returns the
+/// distinct results and each row's position among them.
+fn evaluate_per_key_combination(
+    rows: usize,
+    dictionaries: &[DictionaryArray<UInt32Type>],
+    texts: &[Vec<Arc<str>>],
+    columns: &[usize],
+    row: &mut [Value],
+    evaluate_row: &mut impl FnMut(&[Value]) -> Result<Value, Error>,
+) -> Result<(Vec<Value>, Vec<u32>), Error> {
+    let mut results = Vec::new();
+    let mut indices = Vec::with_capacity(rows);
+    let mut seen: HashMap<Vec<Option<u32>>, u32> = HashMap::new();
+    let mut key = Vec::with_capacity(columns.len());
+    for index in 0..rows {
+        key.clear();
+        key.extend(dictionaries.iter().map(|dictionary| {
+            let keys = dictionary.keys();
+            (!keys.is_null(index)).then(|| keys.value(index))
+        }));
+        let position = match seen.get(&key) {
+            Some(&position) => position,
+            None => {
+                for ((&column, code), texts) in columns.iter().zip(&key).zip(texts) {
+                    row[column] = match code {
+                        Some(code) => Value::Utf8(texts[*code as usize].clone()),
+                        None => Value::Null,
+                    };
+                }
+                results.push(evaluate_row(row)?);
+                let position = (results.len() - 1) as u32;
+                seen.insert(key.clone(), position);
+                position
+            }
+        };
+        indices.push(position);
+    }
+    Ok((results, indices))
 }
 
 fn expression_columns(expression: &Expression, columns: &mut Vec<usize>) {
@@ -940,6 +1001,14 @@ mod tests {
                 ScalarExpr::FunctionCall {
                     name: "promql_abs".into(),
                     args: vec![ScalarExpr::Column(1)],
+                },
+                &batch,
+            ),
+            // Reads no column and has no vectorized form: one value per row.
+            planner(
+                ScalarExpr::FunctionCall {
+                    name: "promql_abs".into(),
+                    args: vec![ScalarExpr::Literal(ScalarValue::Float64(-2.0))],
                 },
                 &batch,
             ),
