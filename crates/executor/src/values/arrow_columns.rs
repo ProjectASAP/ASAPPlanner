@@ -309,16 +309,54 @@ pub(crate) fn repeat(
     encode(dtype, depth, &vec![value; length])
 }
 
-/// The values of a dictionary-encoded text column, each decoded once.
-pub(crate) fn dictionary_texts(array: &DictionaryArray<UInt32Type>) -> Vec<Arc<str>> {
-    let values = array
-        .values()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("batch text columns are dictionaries over strings");
-    (0..values.len())
-        .map(|i| Arc::<str>::from(values.value(i)))
-        .collect()
+/// The texts of a dictionary-encoded column, each decoded once, on first
+/// use. A slot per entry when the dictionary is not much larger than the
+/// rows read (`rows`), else a map, so reading a slice of a column with a
+/// large dictionary costs its rows, not its dictionary.
+pub(crate) struct DictionaryTexts<'a> {
+    /// The dictionary's distinct texts.
+    values: &'a StringArray,
+    /// The texts decoded so far.
+    decoded: DecodedTexts,
+}
+
+/// The texts a [`DictionaryTexts`] decoded so far, by entry.
+enum DecodedTexts {
+    Dense(Vec<Option<Arc<str>>>),
+    Sparse(HashMap<u32, Arc<str>>),
+}
+
+/// Whether a per-entry table of a `entries`-entry dictionary is worth it
+/// for reading `rows` rows.
+pub(crate) fn dense_dictionary(entries: usize, rows: usize) -> bool {
+    entries <= 4 * rows + 64
+}
+
+impl<'a> DictionaryTexts<'a> {
+    /// The texts of `array`, to be read for about `rows` rows.
+    pub(crate) fn new(array: &'a DictionaryArray<UInt32Type>, rows: usize) -> Self {
+        let values = array
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("batch text columns are dictionaries over strings");
+        let decoded = if dense_dictionary(values.len(), rows) {
+            DecodedTexts::Dense(vec![None; values.len()])
+        } else {
+            DecodedTexts::Sparse(HashMap::new())
+        };
+        Self { values, decoded }
+    }
+
+    /// The text of dictionary entry `entry`.
+    pub(crate) fn get(&mut self, entry: u32) -> Arc<str> {
+        let values = self.values;
+        let make = || Arc::<str>::from(values.value(entry as usize));
+        match &mut self.decoded {
+            DecodedTexts::Dense(texts) => texts[entry as usize].get_or_insert_with(make).clone(),
+            DecodedTexts::Sparse(texts) => texts.entry(entry).or_insert_with(make).clone(),
+        }
+    }
 }
 
 /// Every value of `array`, a column of Planner type `dtype`.
@@ -362,14 +400,14 @@ pub(crate) fn decode(array: &dyn Array, dtype: &DataType, depth: ColumnDepth) ->
                 .as_any()
                 .downcast_ref::<DictionaryArray<UInt32Type>>()
                 .expect("batch text columns are dictionaries");
-            let texts = dictionary_texts(typed);
+            let mut texts = DictionaryTexts::new(typed, length);
             let keys = typed.keys();
             (0..length)
                 .map(|i| {
                     if keys.is_null(i) {
                         Value::Null
                     } else {
-                        Value::Utf8(texts[keys.value(i) as usize].clone())
+                        Value::Utf8(texts.get(keys.value(i)))
                     }
                 })
                 .collect()

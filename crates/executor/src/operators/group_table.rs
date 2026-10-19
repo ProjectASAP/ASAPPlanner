@@ -77,9 +77,12 @@ pub(crate) struct GroupTable {
     group_of_part_tuple: HashMap<Box<[u32]>, u32>,
     /// Per group, its part ids, one per group column.
     parts_of_group: Vec<Box<[u32]>>,
-    /// With several group columns: each group's own first values, its
-    /// labels (with one column, a part's first value is its group's).
-    labels_of_group: Vec<Box<[Value]>>,
+    /// With several group columns, of which some can hold values that are
+    /// equal by key but differ (Float64 zero signs and NaN payloads, also
+    /// inside nested values): each group's own first value in those
+    /// columns, its label there. Elsewhere a part's first value is its
+    /// groups' label.
+    labels_of_group: Vec<Box<[Option<Value>]>>,
     /// Memory the groups hold beyond their columns' parts, in bytes.
     group_memory_bytes: usize,
 }
@@ -97,13 +100,28 @@ fn float_key(value: f64, out: &mut Vec<u8>) {
     out.extend_from_slice(&bits.to_le_bytes());
 }
 
-/// The value of `batch`'s plain column `column` at `row`.
+/// The value of `batch`'s plain column `column` at `row`. A dictionary
+/// text reads its one entry; decoding the slice would decode the whole
+/// dictionary.
 fn value_at(batch: &Batch, column: usize, row: usize) -> Value {
+    let array = batch.column(column);
+    if let Some(dictionary) = array.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
+        let keys = dictionary.keys();
+        if keys.is_null(row) {
+            return Value::Null;
+        }
+        let texts = dictionary
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("batch text columns are dictionaries over strings");
+        return Value::Utf8(texts.value(keys.value(row) as usize).into());
+    }
     let FieldDataType::Plain(dtype) = &batch.schema().fields[column].dtype else {
         unreachable!("group columns are plain")
     };
     arrow_columns::decode(
-        batch.column(column).slice(row, 1).as_ref(),
+        array.slice(row, 1).as_ref(),
         dtype,
         ColumnDepth::BatchColumn,
     )
@@ -149,13 +167,17 @@ impl GroupTable {
         self.new_group(Box::new([]), None)
     }
 
-    fn new_group(&mut self, parts: Box<[u32]>, labels: Option<Box<[Value]>>) -> Result<u32, Error> {
+    fn new_group(
+        &mut self,
+        parts: Box<[u32]>,
+        labels: Option<Box<[Option<Value>]>>,
+    ) -> Result<u32, Error> {
         let group = u32::try_from(self.parts_of_group.len()).map_err(|_| too_many("groups"))?;
         self.group_memory_bytes += parts.len() * std::mem::size_of::<u32>() * 2
             + MAP_ENTRY_BYTES
             + labels
                 .iter()
-                .flat_map(|labels| labels.iter())
+                .flat_map(|labels| labels.iter().flatten())
                 .map(Value::bytes)
                 .sum::<usize>();
         if self.group_columns.len() == 1 {
@@ -191,7 +213,7 @@ impl GroupTable {
                 .downcast_ref::<StringArray>()
                 .expect("batch text columns are dictionaries over strings");
             let keys = dictionary.keys();
-            let dense = texts.len() <= 4 * rows + 64;
+            let dense = arrow_columns::dense_dictionary(texts.len(), rows);
             let mut slot_of_entry: Vec<Option<u32>> = if dense {
                 vec![None; texts.len()]
             } else {
@@ -328,6 +350,27 @@ impl GroupTable {
                 let columns = (0..width)
                     .map(|index| self.column_parts(batch, index))
                     .collect::<Result<Vec<_>, _>>()?;
+                // Columns whose values can differ while equal by key keep
+                // each group's own first value.
+                let own_labels = self
+                    .group_columns
+                    .iter()
+                    .map(|&column| {
+                        !matches!(
+                            &batch.schema().fields[column].dtype,
+                            FieldDataType::Plain(
+                                DataType::Utf8
+                                    | DataType::Int64
+                                    | DataType::Bool
+                                    | DataType::Timestamp
+                                    | DataType::Date
+                                    | DataType::Interval
+                                    | DataType::Null
+                            )
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let any_own_label = own_labels.iter().any(|&own| own);
                 let mut key = vec![0u32; width];
                 (0..rows)
                     .map(|row| {
@@ -337,12 +380,16 @@ impl GroupTable {
                         match self.group_of_part_tuple.get(key.as_slice()) {
                             Some(&group) => Ok(group),
                             None => {
-                                let labels = self
-                                    .group_columns
-                                    .iter()
-                                    .map(|&column| value_at(batch, column, row))
-                                    .collect();
-                                self.new_group(key.clone().into_boxed_slice(), Some(labels))
+                                let labels = any_own_label.then(|| {
+                                    self.group_columns
+                                        .iter()
+                                        .zip(&own_labels)
+                                        .map(|(&column, &own)| {
+                                            own.then(|| value_at(batch, column, row))
+                                        })
+                                        .collect()
+                                });
+                                self.new_group(key.clone().into_boxed_slice(), labels)
                             }
                         }
                     })
@@ -353,8 +400,12 @@ impl GroupTable {
 
     /// Group `group`'s label in group column `index`: its first row's value.
     pub(crate) fn label(&self, group: u32, index: usize) -> &Value {
-        if let Some(labels) = self.labels_of_group.get(group as usize) {
-            return &labels[index];
+        if let Some(Some(label)) = self
+            .labels_of_group
+            .get(group as usize)
+            .map(|labels| &labels[index])
+        {
+            return label;
         }
         let part = self.parts_of_group[group as usize][index];
         &self.parts[index].first_values[part as usize]
