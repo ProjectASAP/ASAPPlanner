@@ -7,6 +7,7 @@ use planner_types::ir::scalar::ArithmeticOpKind;
 use planner_types::ir::schema::DataType;
 pub mod arithmetic;
 pub mod binary;
+mod columnar;
 mod planner;
 pub use planner::CompiledExpression;
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]

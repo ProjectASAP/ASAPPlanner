@@ -233,7 +233,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
             self.source.schema()
         }
         fn output_bytes(&self, batch: &Batch) -> usize {
-            batch.bytes()
+            batch.memory_bytes()
         }
         fn properties(&self, inputs: &[PlanProperties]) -> PlanProperties {
             self.source.properties(inputs)

@@ -323,7 +323,7 @@ fn run_data_plane(
                 .cloned()
                 .collect();
             // The pane's input rows: the samples its Scan selects in its window.
-            let rows = selector.rows(end_ms, &routed).unwrap();
+            let rows = selector.window_batch(end_ms, &routed).unwrap();
             // The run that builds the pane: an ingestion run over its
             // window, or, for a query-time result kept across evaluations,
             // the query run of this evaluation.
@@ -369,7 +369,7 @@ fn run_data_plane(
         let (_, end_ms) = window.bounds_ms(evaluation_ms);
         inputs.insert(
             window.time_range_node_id as u64,
-            selector.rows(end_ms, samples).unwrap(),
+            selector.window_batch(end_ms, samples).unwrap(),
         );
     }
     // The query evaluation, which merges the stored panes.
@@ -401,7 +401,7 @@ fn run_data_plane(
             let (_, end_ms) = window.bounds_ms(evaluation_ms);
             (
                 window.time_range_node_id as u64,
-                selector.rows(end_ms, samples).unwrap(),
+                selector.window_batch(end_ms, samples).unwrap(),
             )
         })
         .collect();
@@ -532,7 +532,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
         sample("latency_ms", "b", EVALUATION_MS - 200, 100.0),
     ];
     let selector = RawSampleSelector::new(dag, window).unwrap();
-    let rows = selector.rows(EVALUATION_MS, &samples).unwrap();
+    let rows = selector.window_batch(EVALUATION_MS, &samples).unwrap();
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
         revision: 1,

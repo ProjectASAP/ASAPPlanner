@@ -19,4 +19,6 @@ exclude = ["crates/metricsql-parser-vendored"]
 resolver = "2"
 
 [workspace.dependencies]
+# The one Arrow version of the workspace (DataFusion in the SQL frontend uses it too).
+arrow = { version = "58.4", default-features = false }
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "3f44cf1c2d823b844c17796f24408e03863149ee" }

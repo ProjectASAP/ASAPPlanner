@@ -340,7 +340,7 @@ impl PhysicalOperator<Batch, SchemaRef> for InputContract {
         self.properties
     }
     fn output_bytes(&self, batch: &Batch) -> usize {
-        batch.bytes()
+        batch.memory_bytes()
     }
     fn start<'a>(
         &'a self,

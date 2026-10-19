@@ -36,7 +36,7 @@ impl RawSource for MemorySource {
                 if context.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
-                let _allocation = context.reserve(batch.bytes())?;
+                let _allocation = context.reserve(batch.memory_bytes())?;
                 Ok(batch.clone())
             })
             .boxed_local())

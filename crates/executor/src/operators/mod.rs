@@ -390,7 +390,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
         self.output.clone()
     }
     fn output_bytes(&self, value: &Batch) -> usize {
-        value.bytes()
+        value.memory_bytes()
     }
     fn start<'a>(
         &'a self,

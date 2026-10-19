@@ -30,3 +30,5 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 # The runtime end-to-end test runs the executor as a runtime does.
 futures = "0.3"
+# The columnar batch test reads the executor's Arrow columns.
+arrow.workspace = true
