@@ -172,8 +172,7 @@ impl AccumulatorUpdater for KllAccumulatorUpdater {
     }
 
     fn memory_usage_bytes(&self) -> usize {
-        std::mem::size_of::<DatasketchesKLLAccumulator>()
-            + crate::summary_kernels::datasketches_kll::kll_memory_bytes(self.k)
+        self.acc.approx_memory_bytes()
     }
 }
 

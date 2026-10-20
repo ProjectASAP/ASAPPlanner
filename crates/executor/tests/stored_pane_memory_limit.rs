@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 const SERIES: u32 = 1_000;
 const PANES: usize = 12;
+const SAMPLES_PER_SERIES: u32 = 600;
 
-/// One pane of `SERIES` KLL states (k = 200, about 11 kB charged each, so
-/// about 11 MB per pane), keyed by series.
+/// One pane of `SERIES` KLL states (k = 200, 600 samples each: about
+/// 5.5 kB charged each, so about 5.5 MB per pane), keyed by series.
 fn pane() -> (Arc<Schema>, Batch) {
     pane_of(SERIES)
 }
@@ -56,8 +57,13 @@ fn pane_of(series_count: u32) -> (Arc<Schema>, Batch) {
     });
     let mut updater = StateColumnUpdater::new(&family).unwrap();
     updater.ensure_groups(series_count as usize).unwrap();
+    // More samples than k, so each sketch holds a full-size buffer.
     for series in 0..series_count {
-        updater.update(series, f64::from(series), 0).unwrap();
+        for sample in 0..SAMPLES_PER_SERIES {
+            updater
+                .update(series, f64::from(series * SAMPLES_PER_SERIES + sample), 0)
+                .unwrap();
+        }
     }
     let names = (0..series_count)
         .map(|series| format!("s{series}"))
@@ -114,15 +120,15 @@ fn merge_stored_panes(max_bytes: usize) -> Result<usize, Error> {
     })
 }
 
-// Twelve stored panes hold about 130 MB of states, which charging them per
+// Twelve stored panes hold about 66 MB of states, which charging them per
 // read would put far past a 32 MiB limit. The merge allocates one state per
-// series (about 11 MB), so it fits.
+// series (about 5.5 MB), so it fits.
 #[test]
 fn reading_stored_panes_does_not_charge_their_states() {
     assert_eq!(merge_stored_panes(32 << 20).unwrap(), SERIES as usize);
 }
 
-// The merged states themselves (about 11 MB) do not fit in 4 MiB.
+// The merged states themselves (about 5.5 MB) do not fit in 4 MiB.
 #[test]
 fn a_merge_that_allocates_past_the_limit_still_fails() {
     assert!(matches!(
@@ -131,7 +137,7 @@ fn a_merge_that_allocates_past_the_limit_still_fails() {
     ));
 }
 
-// A Limit keeping 49% of a stored pane of 2,000 KLLs (about 21 MB of
+// A Limit keeping 49% of a stored pane of 2,000 KLLs (about 11 MB of
 // states) compacts its state column, and the compacted column shares the
 // stored sketches by pointer: under an 8 MiB limit it is charged for the
 // pointers, not the sketches. Keeping 51% (no compaction) fits too.
@@ -176,7 +182,7 @@ fn compacting_a_stored_pane_does_not_charge_its_shared_sketches() {
 }
 
 // topk over several panes: a Sort concatenates two stored panes of 1,000
-// KLLs (about 21 MB of states), then a Limit keeps 49% and compacts the
+// KLLs (about 11 MB of states), then a Limit keeps 49% and compacts the
 // concatenated column. Both derivations share the stored sketches by
 // pointer, so the run fits in 8 MiB.
 #[test]
@@ -225,7 +231,7 @@ fn sorting_then_limiting_stored_panes_does_not_charge_their_sketches() {
     assert_eq!(rows.unwrap(), 980);
 }
 
-// A merge over one stored pane of 2,000 KLLs (about 21 MB of states), one
+// A merge over one stored pane of 2,000 KLLs (about 11 MB of states), one
 // state per series: every state passes through unchanged, shared by
 // pointer, so the merge fits in 8 MiB.
 #[test]
