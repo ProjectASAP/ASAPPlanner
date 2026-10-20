@@ -1,6 +1,7 @@
 //! UnivMon's readouts and the guarantees `asap_sketchlib`'s standard-mode
-//! estimators carry (the derivations are in the library's `calc_l2` and
-//! `calc_card` doc comments):
+//! estimators carry (the derivations are in the library's
+//! `docs/api/api_univmon.md`, the bounds `estimate_l2` and
+//! `estimate_cardinality` cite):
 //! - the total (a bare `PointCount`) is the exact unit-update count;
 //! - L2 reads layer 0's Count Sketch directly: per row, Chebyshev with
 //!   `Var ≤ 2q F2²`, and the median of the rows fails only when at least
@@ -20,7 +21,8 @@ use asap_types::ir::operator::AggIntent;
 
 /// Layers `asap_sketchlib` builds: layer `i` hashes at seed index `i`, and
 /// seed 19 picks the layers a key reaches.
-pub(crate) const MAX_LAYERS: u8 = asap_sketchlib::sketch_framework::univmon::MAX_LAYER_SIZE as u8;
+pub(crate) const MAX_LAYERS: u8 =
+    asap_sketchlib::sketch_framework::univmon::UNIVMON_MAX_LAYERS as u8;
 /// Rows the executor builds an L2 sketch with: the deepest odd shape under
 /// its 20-row limit.
 const MAX_L2_ROWS: u32 = 19;
@@ -30,7 +32,7 @@ const HASH_BITS: u32 = 128;
 /// more than `ε₂ F2` with probability at most `2q/ε₂² = 0.1`. Fixing it
 /// lets a shape state one `(ε, δ)`: the columns give `ε`, the rows `δ`.
 const L2_ROW_FAILURE: f64 = 0.1;
-/// `Var[calc_card] ≤ 1.35 F0²/k` for `k ≥ 8`, the constant the library
+/// `Var[estimate_cardinality] ≤ 1.35 F0²/k` for `k ≥ 8`, the constant the library
 /// proves (it also states the looser `2 F0²/k`).
 const DISTINCT_VARIANCE: f64 = 1.35;
 /// The smallest heap the distinct-count variance bound holds for.

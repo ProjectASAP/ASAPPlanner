@@ -24,7 +24,7 @@ pub struct UnivMonAccumulator {
 impl UnivMonAccumulator {
     /// Empty the sketch in place, keeping its shape.
     pub(crate) fn clear(&mut self) {
-        self.inner.free();
+        self.inner.clear();
         self.max_key_bytes = 0;
         self.inserted_key_bytes = 0;
     }
@@ -32,7 +32,7 @@ impl UnivMonAccumulator {
     pub fn new(heap_size: usize, rows: usize, cols: usize, layers: usize) -> Result<Self, Error> {
         UnivMon::check_shape(heap_size, rows, cols, layers)?;
         Ok(Self {
-            inner: UnivMon::init_univmon(heap_size, rows, cols, layers),
+            inner: UnivMon::new(heap_size, rows, cols, layers),
             max_key_bytes: 0,
             inserted_key_bytes: 0,
         })
@@ -42,21 +42,16 @@ impl UnivMonAccumulator {
     /// bytes. Rejects dimensions [`Self::new`] rejects and terminal-mode
     /// sketches, which do not accept this accumulator's updates.
     pub fn from_sketch(sketch: UnivMon) -> Result<Self, Error> {
-        UnivMon::check_shape(
-            sketch.heap_size,
-            sketch.sketch_row,
-            sketch.sketch_col,
-            sketch.layer_size,
-        )?;
+        UnivMon::check_shape(sketch.heap_size, sketch.rows, sketch.cols, sketch.layers)?;
         if !sketch.accepts_standard_updates() {
             return Err("terminal-mode UnivMon state cannot accept standard updates".into());
         }
         // One walk of the decoded heaps, not one per charge.
-        let keys: Vec<usize> = (0..sketch.layer_size)
-            .flat_map(|layer| sketch.hh_layers[layer].heap())
+        let keys: Vec<usize> = (0..sketch.layers)
+            .flat_map(|layer| sketch.layer_heaps[layer].heap())
             .map(|item| match &item.key {
-                asap_sketchlib::HeapItem::String(key) => key.capacity(),
-                asap_sketchlib::HeapItem::Bytes(key) => key.capacity(),
+                asap_sketchlib::OwnedDataInput::String(key) => key.capacity(),
+                asap_sketchlib::OwnedDataInput::Bytes(key) => key.capacity(),
                 _ => 0,
             })
             .collect();
@@ -79,11 +74,11 @@ impl UnivMonAccumulator {
             return Ok(());
         }
         self.inner
-            .bucket_size
+            .total_weight
             .checked_add(1)
             .ok_or("UnivMon count overflow")?;
         let bits = if value == 0.0 { 0 } else { value.to_bits() };
-        self.inner.insert(&DataInput::U64(bits), 1);
+        self.inner.update_weighted(&DataInput::U64(bits), 1);
         Ok(())
     }
 
@@ -101,10 +96,10 @@ impl UnivMonAccumulator {
         }
         let key = value.key()?;
         self.inner
-            .bucket_size
+            .total_weight
             .checked_add(1)
             .ok_or("UnivMon count overflow")?;
-        self.inner.insert(&DataInput::Bytes(&key), 1);
+        self.inner.update_weighted(&DataInput::Bytes(&key), 1);
         self.max_key_bytes = self.max_key_bytes.max(key.len());
         self.inserted_key_bytes = self.inserted_key_bytes.saturating_add(key.len());
         Ok(())
@@ -113,23 +108,23 @@ impl UnivMonAccumulator {
     fn compatible(&self, other: &Self) -> bool {
         (
             self.inner.heap_size,
-            self.inner.sketch_row,
-            self.inner.sketch_col,
-            self.inner.layer_size,
+            self.inner.rows,
+            self.inner.cols,
+            self.inner.layers,
         ) == (
             other.inner.heap_size,
-            other.inner.sketch_row,
-            other.inner.sketch_col,
-            other.inner.layer_size,
+            other.inner.rows,
+            other.inner.cols,
+            other.inner.layers,
         )
     }
 
     pub fn dimensions(&self) -> (usize, usize, usize, usize) {
         (
             self.inner.heap_size,
-            self.inner.sketch_row,
-            self.inner.sketch_col,
-            self.inner.layer_size,
+            self.inner.rows,
+            self.inner.cols,
+            self.inner.layers,
         )
     }
 
@@ -138,8 +133,8 @@ impl UnivMonAccumulator {
             return Err("incompatible UnivMon dimensions".into());
         }
         self.inner
-            .bucket_size
-            .checked_add(other.inner.bucket_size)
+            .total_weight
+            .checked_add(other.inner.total_weight)
             .ok_or("UnivMon count overflow")?;
         self.inner.merge(&other.inner);
         self.max_key_bytes = self.max_key_bytes.max(other.max_key_bytes);
@@ -158,7 +153,7 @@ impl AggregateCore for UnivMonAccumulator {
     /// every row; the library exposes no eviction hook for an exact running
     /// total, so a stream of long keys is still overcounted.
     fn approx_memory_bytes(&self) -> usize {
-        let layers = self.inner.layer_size;
+        let layers = self.inner.layers;
         let key_bytes = layers
             .saturating_mul(self.inner.heap_size)
             .saturating_mul(self.max_key_bytes)
@@ -166,10 +161,10 @@ impl AggregateCore for UnivMonAccumulator {
         key_bytes
             .saturating_add(std::mem::size_of::<Self>())
             .saturating_add(
-                self.inner.layer_size.saturating_mul(
+                self.inner.layers.saturating_mul(
                     self.inner
-                        .sketch_row
-                        .saturating_mul(self.inner.sketch_col)
+                        .rows
+                        .saturating_mul(self.inner.cols)
                         .saturating_mul(16)
                         .saturating_add(self.inner.heap_size.saturating_mul(256)),
                 ),
@@ -202,10 +197,10 @@ impl AggregateCore for UnivMonAccumulator {
             SketchStatistic::PointCount {
                 key: ColumnRef::SampleValue,
                 value: None,
-            } => self.inner.calc_l1(),
-            SketchStatistic::Cardinality => self.inner.calc_card(),
-            SketchStatistic::FrequencyL2 => self.inner.calc_l2(),
-            SketchStatistic::FrequencyEntropy => self.inner.calc_entropy(),
+            } => self.inner.estimate_l1(),
+            SketchStatistic::Cardinality => self.inner.estimate_cardinality(),
+            SketchStatistic::FrequencyL2 => self.inner.estimate_l2(),
+            SketchStatistic::FrequencyEntropy => self.inner.estimate_entropy(),
             other => return Err(format!("UnivMon does not answer {other:?}").into()),
         })
     }
@@ -264,14 +259,14 @@ mod tests {
     // Adoption rejects terminal-mode sketches and dimensions `new` rejects.
     #[test]
     fn adoption_rejects_terminal_or_invalid_sketches() {
-        let mut terminal = UnivMon::init_univmon(4, 3, 16, 2);
-        terminal.fast_insert(&DataInput::U64(1), 1);
+        let mut terminal = UnivMon::new(4, 3, 16, 2);
+        terminal.update_weighted_terminal(&DataInput::U64(1), 1);
         assert!(UnivMonAccumulator::from_sketch(terminal.clone()).is_err());
-        terminal.free();
+        terminal.clear();
         assert!(UnivMonAccumulator::from_sketch(terminal).is_ok());
-        // `init_univmon` refuses 21 rows; a state claiming them is refused too.
-        let mut misshapen = UnivMon::init_univmon(4, 3, 16, 2);
-        misshapen.sketch_row = 21;
+        // `UnivMon::new` refuses 21 rows; a state claiming them is refused too.
+        let mut misshapen = UnivMon::new(4, 3, 16, 2);
+        misshapen.rows = 21;
         assert!(UnivMonAccumulator::from_sketch(misshapen).is_err());
     }
 

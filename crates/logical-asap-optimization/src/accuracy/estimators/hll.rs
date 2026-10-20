@@ -434,11 +434,11 @@ mod tests {
             h = (h ^ (h >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
             h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
             h ^= h >> 31;
-            single.insert_with_hash(h);
+            single.update_with_hash(h);
             if n % 2 == 0 {
-                left.insert_with_hash(h);
+                left.update_with_hash(h);
             } else {
-                right.insert_with_hash(h);
+                right.update_with_hash(h);
             }
         }
         left.merge(&right);
