@@ -23,8 +23,10 @@ use asap_types::ir::operator::AggIntent;
 /// seed 19 picks the layers a key reaches.
 pub(crate) const MAX_LAYERS: u8 =
     asap_sketchlib::sketch_framework::univmon::UNIVMON_MAX_LAYERS as u8;
-/// Rows the executor builds an L2 sketch with: the deepest odd shape under
-/// its 20-row limit.
+/// The most rows an L2 sketch is sized with: odd, so the row median is one
+/// row's estimate, and within the hash budget at the more than 20 columns an
+/// L2 guarantee needs (5 column bits: 19 · 6 = 114 ≤ 128). The budget also
+/// admits 21 rows (126 bits).
 const MAX_L2_ROWS: u32 = 19;
 /// Each row of a layer reads its column and sign bits from one hash.
 const HASH_BITS: u32 = 128;
@@ -94,9 +96,9 @@ pub(super) fn guarantee(
 }
 
 /// Whether `asap_sketchlib` builds this shape, with independent hashes: at
-/// most [`MAX_LAYERS`] layers and 20 rows, and `rows · (⌈log2 cols⌉ + 1) ≤
-/// 128` ([`asap_sketchlib::UnivMon::check_shape`]; the heap size is not part
-/// of the hash rules).
+/// most [`MAX_LAYERS`] layers, and `rows · (⌈log2 cols⌉ + 1) ≤ 128`
+/// ([`asap_sketchlib::UnivMon::check_shape`]; the heap size is not part of
+/// the hash rules).
 pub(crate) fn hash_independent(rows: u32, cols: u32, layers: u8) -> bool {
     asap_sketchlib::UnivMon::check_shape(1, rows as usize, cols as usize, usize::from(layers))
         .is_ok()
@@ -487,14 +489,14 @@ mod tests {
         }
     }
 
-    /// The library builds at most 20 rows, so a 21-row UnivMon certifies
-    /// nothing even though its hashes fit the budget (21 · (3 + 1) = 84 ≤
-    /// 128 at 8 columns).
+    /// Rows past 20 hash independently while they fit the hash budget:
+    /// 21 · (5 + 1) = 126 ≤ 128 at 32 columns, 22 · 6 = 132 past it.
     #[test]
-    fn univmon_past_twenty_rows_is_not_hash_independent() {
-        assert!(hash_independent(20, 8, 1));
-        assert!(!hash_independent(21, 8, 1));
-        assert!(l2(&univmon(1, 21, 8, 1, None)).is_none());
+    fn univmon_rows_are_bounded_by_the_hash_budget() {
+        assert!(hash_independent(21, 32, 1));
+        assert!(!hash_independent(22, 32, 1));
+        assert!(l2(&univmon(1, 21, 32, 1, None)).is_some());
+        assert!(l2(&univmon(1, 22, 32, 1, None)).is_none());
     }
 
     /// Each distinct-count heap meets its target once the source's bound

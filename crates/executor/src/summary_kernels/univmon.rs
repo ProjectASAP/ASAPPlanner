@@ -264,9 +264,10 @@ mod tests {
         assert!(UnivMonAccumulator::from_sketch(terminal.clone()).is_err());
         terminal.clear();
         assert!(UnivMonAccumulator::from_sketch(terminal).is_ok());
-        // `UnivMon::new` refuses 21 rows; a state claiming them is refused too.
+        // `UnivMon::new` refuses 26 rows of 16 columns (130 hash bits); a
+        // state claiming them is refused too.
         let mut misshapen = UnivMon::new(4, 3, 16, 2);
-        misshapen.rows = 21;
+        misshapen.rows = 26;
         assert!(UnivMonAccumulator::from_sketch(misshapen).is_err());
     }
 
