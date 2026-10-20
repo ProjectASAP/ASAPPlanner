@@ -366,17 +366,17 @@ impl AccumulatorUpdater for WeightedFrequencyUpdater {
 
 pub struct HydraKllAccumulatorUpdater {
     acc: HydraKllSketchAccumulator,
-    row_num: usize,
-    col_num: usize,
+    rows: usize,
+    cols: usize,
     k: u16,
 }
 
 impl HydraKllAccumulatorUpdater {
-    pub fn new(row_num: usize, col_num: usize, k: u16) -> Self {
+    pub fn new(rows: usize, cols: usize, k: u16) -> Self {
         Self {
-            acc: HydraKllSketchAccumulator::new(row_num, col_num, k),
-            row_num,
-            col_num,
+            acc: HydraKllSketchAccumulator::new(rows, cols, k),
+            rows,
+            cols,
             k,
         }
     }
@@ -400,7 +400,7 @@ impl AccumulatorUpdater for HydraKllAccumulatorUpdater {
     impl_clone_accumulator_methods!(acc);
 
     fn reset(&mut self) {
-        self.acc = HydraKllSketchAccumulator::new(self.row_num, self.col_num, self.k);
+        self.acc = HydraKllSketchAccumulator::new(self.rows, self.cols, self.k);
     }
 
     fn is_keyed(&self) -> bool {
