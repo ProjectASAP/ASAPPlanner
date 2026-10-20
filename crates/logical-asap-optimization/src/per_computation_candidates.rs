@@ -174,6 +174,10 @@ pub enum PruneReason {
     /// answer the measure's readout from it
     /// ([`DeploymentCapabilities::supports`]).
     UnsupportedByDeployment,
+    /// The quantile's φ is outside [0, 1], where PromQL answers -Inf or
+    /// +Inf: no sketch estimates that, and the executor's sketches refuse
+    /// such a φ, so only the exact answer remains.
+    QuantileOutsideUnitInterval,
 }
 
 /// Unranked candidates of one measure and the candidates pruned for it.
@@ -481,7 +485,14 @@ pub fn computation_candidates_for_intent(
             }
         }
         let summaries = summary_candidates(intent).iter().cloned();
-        if target.is_exact() {
+        if matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q)) {
+            choices.pruned.extend(summaries.map(|algorithm| {
+                (
+                    ComputationCandidate::Summary(algorithm),
+                    PruneReason::QuantileOutsideUnitInterval,
+                )
+            }));
+        } else if target.is_exact() {
             choices.pruned.extend(summaries.map(|algorithm| {
                 (
                     ComputationCandidate::Summary(algorithm),
@@ -1677,10 +1688,12 @@ fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
             } => estimates_samples_of(child),
             _ => None,
         },
+        // Only a φ in [0, 1] picks one of the values; outside it the answer
+        // is -Inf or +Inf, whatever their sign.
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
-            query: SketchStatistic::Quantile { .. },
-        }) => match summary_input.asap()? {
+            query: SketchStatistic::Quantile { q },
+        }) if (0.0..=1.0).contains(q) => match summary_input.asap()? {
             ASAPOp::SummaryAgg {
                 input:
                     SummaryUpdate {
@@ -4372,6 +4385,44 @@ mod tests {
         assert_eq!(inventory.combinations(), n * m + whole);
         assert_eq!(inventory.combinations(), 6);
         assert_eq!(inventory.combinations(), enumerated);
+    }
+
+    /// A quantile estimate of a metric's samples carries their sign only for
+    /// φ in [0, 1]: outside it PromQL answers -Inf or +Inf. Pass 1 offers
+    /// no sketch for such a φ.
+    #[test]
+    fn a_quantile_estimate_shares_its_samples_sign_only_inside_the_unit_interval() {
+        let estimate_of = |query: &str| {
+            let inventory = inventory(query);
+            (0..inventory.targets.len())
+                .flat_map(|t| composed_with(&inventory, t))
+                .find_map(|(_, root)| {
+                    OperatorNode::reachable(&root)
+                        .into_iter()
+                        .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryEstimate { .. })))
+                })
+        };
+        let inside = estimate_of("quantile_over_time(0.5, m[1m])").expect("a sketch estimate");
+        assert_eq!(estimates_samples_of(&inside).as_deref(), Some("m"));
+        let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = inside.asap() else {
+            unreachable!()
+        };
+        for q in [-1.0, 2.0] {
+            let outside = OperatorNode::with_schema(
+                Operator::ASAP(ASAPOp::SummaryEstimate {
+                    summary_input: Rc::clone(summary_input),
+                    query: SketchStatistic::Quantile { q },
+                }),
+                inside.schema.clone(),
+            );
+            assert_eq!(estimates_samples_of(&outside), None, "q = {q}");
+        }
+        for query in [
+            "quantile_over_time(-1, m[1m])",
+            "quantile_over_time(2, m[1m])",
+        ] {
+            assert!(estimate_of(query).is_none(), "{query}: a sketch is offered");
+        }
     }
 
     /// The metric whose raw samples, or plain sums of them, a composed node's

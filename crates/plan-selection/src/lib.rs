@@ -5301,6 +5301,48 @@ mod tests {
         }
     }
 
+    /// PromQL answers a quantile with φ outside [0, 1] as -Inf or +Inf,
+    /// which no sketch estimates and the executor's sketches refuse: such a
+    /// quantile gets no sketch candidate, so the exact plan is selected, and
+    /// a sketch never inherits its samples' sign for it, even over a gauge
+    /// declared non-negative.
+    #[test]
+    fn a_quantile_outside_the_unit_interval_is_answered_exactly() {
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.01)
+            .accuracy_metric(AccuracyMetric::Relative);
+        for query in [
+            "avg by (region) (quantile_over_time(-1, x[100s]))",
+            "avg by (region) (quantile_over_time(2, x[100s]))",
+            "quantile_over_time(2, x[100s])",
+            "max by (region) (quantile_over_time(-1, x[100s]))",
+        ] {
+            let candidates = all_candidates(query, &target);
+            assert!(
+                candidates.iter().all(|c| !has_summary_estimate(c)),
+                "{query}: a sketch candidate is offered"
+            );
+            let mut data = with_metric_types(data(), &[("x", MetricType::Gauge)]);
+            data.sources.get_mut("x").unwrap().values_non_negative = true;
+            let selection = select_plan(
+                &candidates,
+                &[entry_with(target.clone(), repeating(10_000))],
+                &data,
+                PlanningModels::builtin(),
+            )
+            .unwrap();
+            let selected = candidates
+                .iter()
+                .find(|c| c.id == selection.selected)
+                .unwrap();
+            assert!(
+                !has_summary_estimate(selected),
+                "{query}: {}",
+                selection.selected
+            );
+        }
+    }
+
     /// `topk(k, irate(m[w]))`, now a heavy-hitter ranking as `rate`'s is,
     /// still plans: Stages 1-3 compose its candidates and select one.
     #[test]
