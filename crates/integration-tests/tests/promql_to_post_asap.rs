@@ -835,11 +835,23 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
             };
             let mut sketch = asap_sketchlib::DdSketch::new(alpha);
             for v in values {
-                sketch.try_update(v).unwrap();
+                sketch.try_add(&v).unwrap();
             }
+            // PromQL's quantile: interpolated between neighbouring order
+            // statistics, the `j`-th smallest read at rank `j + 1`.
+            let n = sketch.get_count();
+            let interpolated = |q: f64| {
+                let order_statistic = |j: u64| {
+                    sketch
+                        .get_value_at_quantile((j as f64 + 0.5) / n as f64)
+                        .unwrap()
+                };
+                let r = q * (n - 1) as f64;
+                order_statistic(r.floor() as u64) * (1. - r.fract())
+                    + order_statistic(r.ceil() as u64) * r.fract()
+            };
             let want = exact(0.9) / exact(0.5);
-            let got = sketch.quantile_interpolated(0.9).unwrap()
-                / sketch.quantile_interpolated(0.5).unwrap();
+            let got = interpolated(0.9) / interpolated(0.5);
             assert!((got - want).abs() / want.abs() <= bound + 1e-12);
         }
     }

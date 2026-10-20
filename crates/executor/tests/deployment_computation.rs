@@ -667,9 +667,9 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     .unwrap();
     let program: CompiledPhysicalDAG =
         serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap();
-    let mut sketch = CountMinSketchAccumulator::new(*depth as usize, *width as usize);
-    sketch.inner.update("a", 3.0);
-    sketch.inner.update("b", 7.0);
+    let mut sketch = CountMinSketchAccumulator::new(*depth as usize, *width as usize).unwrap();
+    sketch.update("a", 3.0);
+    sketch.update("b", 7.0);
     let row = schema
         .fields
         .iter()

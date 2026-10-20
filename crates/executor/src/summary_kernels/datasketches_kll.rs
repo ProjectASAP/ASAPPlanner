@@ -1,41 +1,37 @@
-//! KLL quantile summary over `asap_sketchlib::KllSketch`.
+//! KLL quantile summary over `asap_sketchlib::Kll`.
 use crate::{AggregateCore, KernelError};
-use asap_sketchlib::KllSketch;
+use asap_sketchlib::Kll;
 use planner_types::ir::schema::SketchStatistic;
 
 #[derive(Clone)]
 pub struct DatasketchesKLLAccumulator {
-    pub inner: KllSketch,
+    pub inner: Kll,
 }
 
 impl DatasketchesKLLAccumulator {
     pub fn new(k: u16) -> Self {
         Self {
-            inner: KllSketch::new(k),
+            inner: Kll::with_k(i32::from(k)),
         }
     }
 
     pub fn update(&mut self, value: f64) {
-        self.inner.update(value);
+        self.inner.update(&value);
     }
 
+    /// The value at `quantile`; 0 for an empty sketch.
     pub fn get_quantile(&self, quantile: f64) -> f64 {
+        if self.is_empty() {
+            return 0.0;
+        }
         self.inner.quantile(quantile)
     }
-}
-
-/// The memory one KLL sketch of parameter `k` holds: asap_sketchlib
-/// allocates its compactor buffers up front, about 4.5 KiB plus 32 bytes
-/// per unit of `k` (10 KiB at k = 200, 36 KiB at k = 1024), and they do
-/// not grow with updates.
-pub(crate) fn kll_memory_bytes(k: u16) -> usize {
-    4_608 + 32 * usize::from(k)
 }
 
 impl std::fmt::Debug for DatasketchesKLLAccumulator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DatasketchesKLLAccumulator")
-            .field("k", &self.inner.k)
+            .field("k", &self.inner.k())
             .field("sketch_n", &self.inner.count())
             .finish()
     }
@@ -58,9 +54,17 @@ impl AggregateCore for DatasketchesKLLAccumulator {
             .as_any()
             .downcast_ref::<Self>()
             .ok_or("KLL merges only with KLL")?;
-        Ok(Box::new(Self {
-            inner: KllSketch::merge_refs(&[&self.inner, &other.inner])?,
-        }))
+        if self.inner.k() != other.inner.k() {
+            return Err(format!(
+                "KLL merges only with the same k ({} vs {})",
+                self.inner.k(),
+                other.inner.k()
+            )
+            .into());
+        }
+        let mut merged = self.clone();
+        merged.inner.merge(&other.inner);
+        Ok(Box::new(merged))
     }
 
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
@@ -79,7 +83,7 @@ impl AggregateCore for DatasketchesKLLAccumulator {
     }
 
     fn approx_memory_bytes(&self) -> usize {
-        kll_memory_bytes(self.inner.k())
+        std::mem::size_of::<Self>().saturating_add(self.inner.memory_bytes())
     }
 }
 
@@ -114,5 +118,17 @@ mod tests {
         let kll = DatasketchesKLLAccumulator::new(200);
         assert!(kll.estimate(&SketchStatistic::Quantile { q: 1.5 }).is_err());
         assert!(kll.estimate(&SketchStatistic::Cardinality).is_err());
+    }
+
+    // States of different k do not merge.
+    #[test]
+    fn merge_rejects_a_different_k() {
+        let kll = DatasketchesKLLAccumulator::new(200);
+        assert!(kll
+            .merge_with(&DatasketchesKLLAccumulator::new(100))
+            .is_err());
+        assert!(kll
+            .merge_with(&DatasketchesKLLAccumulator::new(200))
+            .is_ok());
     }
 }

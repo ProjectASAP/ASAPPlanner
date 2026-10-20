@@ -105,6 +105,22 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
     }
 }
 
+/// The PromQL quantile over a DDSketch: the linear interpolation at rank
+/// `q (n - 1)` between the sketch's two neighbouring order statistics.
+fn interpolated_quantile(sketch: &asap_sketchlib::DdSketch, q: f64) -> f64 {
+    let n = sketch.get_count();
+    // The `j`-th smallest (from 0): the sketch's value at rank `ceil(p n) = j + 1`.
+    let order_statistic = |j: u64| {
+        sketch
+            .get_value_at_quantile((j as f64 + 0.5) / n as f64)
+            .unwrap()
+    };
+    let rank = q * (n - 1) as f64;
+    let (lower, upper) = (rank.floor() as u64, rank.ceil() as u64);
+    let fraction = rank - lower as f64;
+    order_statistic(lower) * (1. - fraction) + order_statistic(upper) * fraction
+}
+
 /// A finite, nonzero approximate denominator does not certify a ratio bound.
 #[test]
 fn checked_ratio_must_not_certify_cross_zero_interpolation() {
@@ -125,9 +141,9 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     let estimate = |q| {
         let mut sketch = asap_sketchlib::DdSketch::new(alpha);
         for value in [-1., 1.011] {
-            sketch.try_update(value).unwrap();
+            sketch.try_add(&value).unwrap();
         }
-        sketch.quantile_interpolated(q).unwrap()
+        interpolated_quantile(&sketch, q)
     };
     let numerator = estimate(0.5);
     let denominator = estimate(0.9);
@@ -238,26 +254,25 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             }
         }
         for value in [1., 0., 3., -3.] {
-            let mut cms =
-                asap_sketchlib::message_pack_format::portable::countminsketch::new_sketchlib_cms(
-                    5, 128,
-                );
+            let key = asap_sketchlib::DataInput::Str("a");
+            let mut cms: asap_sketchlib::CountMinF64 =
+                asap_sketchlib::CountMinSketch::with_dimensions(5, 128);
             let mut cs =
-                asap_sketchlib::message_pack_format::portable::countsketch::CountSketch::new(
+                asap_sketchlib::CountSketch::<asap_sketchlib::Vector2D<f64>>::with_dimensions(
                     5, 128,
                 );
             for _ in 0..10 {
                 let weight = contribution(family, update, value);
                 if is_count {
-                    cms.insert_many(&asap_sketchlib::DataInput::String("a".into()), weight);
+                    cms.update_weighted(&key, weight);
                 } else {
-                    cs.update("a", weight);
+                    cs.update_weighted(&key, weight);
                 }
             }
             let got = if is_count {
-                cms.estimate(&asap_sketchlib::DataInput::String("a".into()))
+                cms.estimate(&key)
             } else {
-                cs.estimate("a")
+                cs.estimate(&key)
             };
             assert_eq!(got, if is_count { 10. } else { 10. * value });
         }

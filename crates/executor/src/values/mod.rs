@@ -262,15 +262,15 @@ pub(super) fn validate_state(
             SketchParams::Kll { k, .. } => state
                 .as_any()
                 .downcast_ref::<DatasketchesKLLAccumulator>()
-                .is_some_and(|s| u32::from(s.inner.k()) == *k),
+                .is_some_and(|s| s.inner.k() == *k as usize),
             SketchParams::DDSketch { alpha } => state
                 .as_any()
                 .downcast_ref::<DDSketchAccumulator>()
-                .is_some_and(|s| s.inner.alpha == *alpha),
+                .is_some_and(|s| s.inner.alpha() == *alpha),
             SketchParams::Hll { precision, .. } => state
                 .as_any()
                 .downcast_ref::<HllSketchAccumulator>()
-                .is_some_and(|s| s.inner.precision == u32::from(*precision)),
+                .is_some_and(|s| s.precision() == *precision),
             SketchParams::Kmv { k, .. } => state
                 .as_any()
                 .downcast_ref::<KmvAccumulator>()
