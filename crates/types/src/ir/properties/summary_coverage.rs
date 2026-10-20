@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 use std::rc::Rc;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ir::operator::asap::ASAPOp;
@@ -34,34 +35,155 @@ pub struct SummaryCoverage {
 }
 
 /// A conjunction of per-column constraints and an optional time window.
-/// A column or time it does not mention is unrestricted.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// A column or time it does not mention is unrestricted. JSON: `columns` is
+/// a list of `{column, constraint}` (its keys are not strings), and a bound
+/// is `{"included": v}`, `{"excluded": v}` or `"unbounded"`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectionBox {
+    #[serde(with = "columns_as_list")]
     pub columns: BTreeMap<ColumnIdentity, Constraint>,
     /// Offsets from the evaluation time in milliseconds: a PromQL range
     /// `TimeRange(w)` over `TimeShift(s)` is `(-(s + w), -s]`. Absolute
     /// time will be an ordinary interval on the timestamp column once the IR
     /// has timestamp literals.
+    #[serde(with = "relative_time_bounds")]
     pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
+}
+
+/// `SelectionBox::columns` as a list of `{column, constraint}`.
+mod columns_as_list {
+    use super::{ColumnIdentity, Constraint};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        column: ColumnIdentity,
+        constraint: Constraint,
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        columns: &BTreeMap<ColumnIdentity, Constraint>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let entries: Vec<Entry> = columns
+            .iter()
+            .map(|(column, constraint)| Entry {
+                column: column.clone(),
+                constraint: constraint.clone(),
+            })
+            .collect();
+        entries.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<ColumnIdentity, Constraint>, D::Error> {
+        let entries = Vec::<Entry>::deserialize(deserializer)?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| (entry.column, entry.constraint))
+            .collect())
+    }
+}
+
+/// A `Bound` in JSON: `{"included": v}`, `{"excluded": v}` or `"unbounded"`.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireBound<T> {
+    Included(T),
+    Excluded(T),
+    Unbounded,
+}
+
+impl<T: Clone> From<&Bound<T>> for WireBound<T> {
+    fn from(bound: &Bound<T>) -> Self {
+        match bound {
+            Bound::Included(v) => Self::Included(v.clone()),
+            Bound::Excluded(v) => Self::Excluded(v.clone()),
+            Bound::Unbounded => Self::Unbounded,
+        }
+    }
+}
+
+impl<T> From<WireBound<T>> for Bound<T> {
+    fn from(bound: WireBound<T>) -> Self {
+        match bound {
+            WireBound::Included(v) => Bound::Included(v),
+            WireBound::Excluded(v) => Bound::Excluded(v),
+            WireBound::Unbounded => Bound::Unbounded,
+        }
+    }
+}
+
+/// `SelectionBox::relative_time` as `[lower, upper]` wire bounds.
+mod relative_time_bounds {
+    use super::WireBound;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::ops::Bound;
+
+    pub(super) fn serialize<S: Serializer>(
+        window: &Option<(Bound<i64>, Bound<i64>)>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        window
+            .as_ref()
+            .map(|(lower, upper)| (WireBound::from(lower), WireBound::from(upper)))
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<(Bound<i64>, Bound<i64>)>, D::Error> {
+        let window = Option::<(WireBound<i64>, WireBound<i64>)>::deserialize(deserializer)?;
+        Ok(window.map(|(lower, upper)| (lower.into(), upper.into())))
+    }
 }
 
 /// A column of the definition child's output, by `(table, name)`. A
 /// `Project` below renames its columns and sets their table to its
 /// qualifier (none by default).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ColumnIdentity {
     pub table: Option<String>,
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Constraint {
     In(Vec<ScalarValue>),
     NotIn(Vec<ScalarValue>),
     Interval {
+        #[serde(with = "value_bound")]
         lower: Bound<ScalarValue>,
+        #[serde(with = "value_bound")]
         upper: Bound<ScalarValue>,
     },
+}
+
+/// A `Constraint::Interval` bound as a [`WireBound`].
+mod value_bound {
+    use super::WireBound;
+    use crate::ir::scalar::expr_ir::ScalarValue;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::ops::Bound;
+
+    pub(super) fn serialize<S: Serializer>(
+        bound: &Bound<ScalarValue>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        WireBound::from(bound).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Bound<ScalarValue>, D::Error> {
+        Ok(WireBound::deserialize(deserializer)?.into())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -109,6 +231,19 @@ impl SummaryCoverage {
     /// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
         Self::derive_memoized(node, &mut CoverageMemo::new())
+    }
+
+    /// A stable identity of `definition`: the 128-bit FNV-1a hash, in hex,
+    /// of its sub-DAG's operators, output kinds and schemas, children
+    /// first, without planning metadata (`timing`, `guarantee`,
+    /// `materialization`). Two equal definitions (the equality a merge
+    /// requires) get equal ids on any node and in any process, so a summary
+    /// store can key states by this id and a concrete selection.
+    pub fn definition_id(&self) -> String {
+        format!(
+            "{:032x}",
+            definition_hash(&self.definition, &mut HashMap::new())
+        )
     }
 
     /// [`derive`](Self::derive), reusing and recording the coverage of
@@ -214,6 +349,38 @@ fn windows_ordered_apart(inputs: &[SummaryCoverage]) -> bool {
         let ((_, upper), (lower, _)) = (pair[0], pair[1]);
         ends_before(upper, lower, |a: &i64, b: &i64| Some(a.cmp(b)))
     })
+}
+
+/// The hash [`SummaryCoverage::definition_id`] reports: each node's
+/// operator without its children, output kind and schema (in their `Debug`
+/// form, which every IR type derives and which is fixed for a given IR),
+/// then its children's hashes in order. `memo` hashes a shared node once.
+fn definition_hash(node: &Rc<OperatorNode>, memo: &mut HashMap<*const OperatorNode, u128>) -> u128 {
+    if let Some(hash) = memo.get(&Rc::as_ptr(node)) {
+        return *hash;
+    }
+    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013b;
+    let mut hash = OFFSET;
+    let mut write = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u128::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
+    let own = format!(
+        "{:?}|{:?}|{:?}",
+        node.operator.map_children(|_| ()),
+        node.result_kind,
+        node.schema
+    );
+    write(own.as_bytes());
+    for child in node.children() {
+        let child_hash = definition_hash(child, memo);
+        write(&child_hash.to_le_bytes());
+    }
+    memo.insert(Rc::as_ptr(node), hash);
+    hash
 }
 
 /// Structural equality ignoring planning metadata (`timing`, `guarantee`).
