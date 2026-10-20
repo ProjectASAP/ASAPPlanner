@@ -189,7 +189,7 @@ use std::rc::Rc;
 use asap_types::ir::operator::operator_properties::{
     BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind,
 };
-use asap_types::ir::operator::{AggIntent, Reduction, Source};
+use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, AggIntent, Reduction, Source};
 use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
@@ -675,7 +675,7 @@ pub struct Rejection {
     pub reason: String,
 }
 
-/// Why Stage 3 did not select a candidate. The first seven mean the
+/// Why Stage 3 did not select a candidate. The first eight mean the
 /// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
 /// rest mean it was valid and lost under the cost model. JSON: the
 /// snake_case variant name, e.g. `"costlier"`.
@@ -693,6 +693,11 @@ pub enum RejectionCause {
     /// counter). The executor cannot run it, so the deployment's accuracy
     /// model cannot accept it either.
     CountMinWeightsNotProvenNonNegative,
+    /// It reduces each series' raw samples with an exact aggregate the
+    /// executor has no kernel for (e.g. `stddev_over_time`), so the
+    /// executor cannot compile it
+    /// ([`asap_types::ir::operator::agg_has_exact_per_entity_kernel`]).
+    PerEntityAggregateNotExecutable,
     /// A query's output has no accuracy guarantee (Stage 1 has no
     /// analytical rule for it and the deployment's evidence supplies none),
     /// and the deployment's accuracy model did not accept it directly
@@ -725,14 +730,16 @@ pub enum RejectionCause {
 }
 
 impl RejectionCause {
-    /// Whether the candidate failed a check (accuracy, raw data, latency
-    /// bound or cluster capacity) rather than losing under the cost model.
+    /// Whether the candidate failed a check (executability, accuracy, raw
+    /// data, latency bound or cluster capacity) rather than losing under the
+    /// cost model.
     pub fn failed_a_check(self) -> bool {
         matches!(
             self,
             Self::FailureProbabilityResizeFailed
                 | Self::AccuracyTargetMissed
                 | Self::CountMinWeightsNotProvenNonNegative
+                | Self::PerEntityAggregateNotExecutable
                 | Self::NoAccuracyGuarantee
                 | Self::RawDataNotRetained
                 | Self::LatencyBoundExceeded
@@ -852,12 +859,12 @@ pub enum SelectionError {
     NoValidCandidate(Vec<Rejection>),
 }
 
-/// Stage 3 (plan selection): reject candidates that miss a query's accuracy
-/// target or latency bound (or, under cost model 3, the cluster's
-/// capacity), measure the rest's resource usage per second and choose one
-/// under the deployment's cost model (`models.plan_selection`): the
-/// cheapest under cost models 1 and 2, the best by the cluster objective
-/// under cost model 3 (the first on ties). `entries[i]` is the workload
+/// Stage 3 (plan selection): reject candidates that the executor cannot
+/// run or that miss a query's accuracy target or latency bound (or, under
+/// cost model 3, the cluster's capacity), measure the rest's resource
+/// usage per second and choose one under the deployment's cost model
+/// (`models.plan_selection`): the cheapest under cost models 1 and 2, the
+/// best by the cluster objective under cost model 3 (the first on ties). `entries[i]` is the workload
 /// entry of `candidate.roots[i]`: its accuracy target, its latency bound and
 /// how often it is evaluated.
 pub fn select_plan(
@@ -903,6 +910,14 @@ pub fn select_plan(
                 continue;
             }
         };
+        if let Some(reason) = per_entity_aggregate_violation(&candidate.dag) {
+            rejected.push(Rejection {
+                id: candidate.id.clone(),
+                cause: RejectionCause::PerEntityAggregateNotExecutable,
+                reason,
+            });
+            continue;
+        }
         let accepted_accuracy = match accuracy_check(&candidate, targets, data, &models) {
             Ok(accepted_accuracy) => accepted_accuracy,
             Err((cause, reason)) => {
@@ -3252,6 +3267,37 @@ fn raw_data_violation(
     })
 }
 
+/// Why the executor cannot compile `dag`, if it cannot: an exact per-entity
+/// `Aggregate` (a per-series range reduction over raw samples) the executor
+/// does not run. It runs one with a single measure that has an exact
+/// per-entity kernel ([`agg_has_exact_per_entity_kernel`]), no measure
+/// filter and no `HAVING`.
+fn per_entity_aggregate_violation(dag: &PhysicalASAPDAG) -> Option<String> {
+    dag.nodes.iter().find_map(|node| match &node.payload {
+        Payload::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures,
+            filters,
+            having,
+            ..
+        }) => {
+            let one_kernel = match measures.as_slice() {
+                [measure] => agg_has_exact_per_entity_kernel(measure),
+                _ => false,
+            };
+            let executable = one_kernel && filters.iter().all(Option::is_none) && having.is_none();
+            (!executable).then(|| {
+                format!(
+                    "node {}: the executor has no exact per-series aggregate {measures:?} \
+                     over raw samples",
+                    node.id
+                )
+            })
+        }
+        _ => None,
+    })
+}
+
 /// The windows, in milliseconds, read above the scan `scan` at query time:
 /// each range `TimeRange` and `PaneChain` (its whole window, or one pane
 /// for a chain in `kept_chains`, which builds only its newest pane per
@@ -4718,6 +4764,81 @@ mod tests {
             "{reason}"
         );
         assert!(reason.contains("not declared a counter"), "{reason}");
+    }
+
+    /// The ids of `candidates` whose DAG reduces raw samples per series with
+    /// an exact `Aggregate`.
+    fn with_per_entity_aggregate(candidates: &[PhysicalCandidate]) -> Vec<String> {
+        candidates
+            .iter()
+            .filter(|c| {
+                c.dag.nodes.iter().any(|node| {
+                    matches!(
+                        node.payload,
+                        Payload::NonASAP(NonASAPOp::Aggregate {
+                            reduction: Reduction::PerEntity,
+                            ..
+                        })
+                    )
+                })
+            })
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    /// The executor has no exact per-series `stddev_over_time`: each
+    /// candidate that reduces raw samples with one is rejected as
+    /// `PerEntityAggregateNotExecutable` and never selected (issue #770).
+    #[test]
+    fn a_per_entity_aggregate_the_executor_cannot_run_is_rejected() {
+        let target = AccuracyTarget::exact();
+        let candidates = all_candidates("stddev_over_time(x[5m])", &target);
+        let unsupported = with_per_entity_aggregate(&candidates);
+        assert!(!unsupported.is_empty());
+        let rejected = match select_plan(
+            &candidates,
+            &[entry_with(target, repeating(10_000))],
+            &data(),
+            PlanningModels::builtin(),
+        ) {
+            Ok(selection) => {
+                assert!(!unsupported.contains(&selection.selected), "{selection:?}");
+                selection.rejected
+            }
+            Err(SelectionError::NoValidCandidate(rejected)) => rejected,
+            Err(error) => panic!("{error}"),
+        };
+        for id in &unsupported {
+            let rejection = rejected.iter().find(|r| &r.id == id).unwrap();
+            assert_eq!(
+                rejection.cause,
+                RejectionCause::PerEntityAggregateNotExecutable,
+                "{}",
+                rejection.reason
+            );
+            assert!(rejection.reason.contains("StdDev"), "{}", rejection.reason);
+            assert!(rejection.cause.failed_a_check());
+        }
+    }
+
+    /// An exact per-series `quantile_over_time`, which the executor runs, is
+    /// not rejected as `PerEntityAggregateNotExecutable`.
+    #[test]
+    fn an_executable_per_entity_aggregate_is_not_rejected() {
+        let target = AccuracyTarget::exact();
+        let candidates = all_candidates("quantile_over_time(0.99, x[5m])", &target);
+        assert!(!with_per_entity_aggregate(&candidates).is_empty());
+        let selection = select_plan(
+            &candidates,
+            &[entry_with(target, repeating(10_000))],
+            &data(),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
+        assert!(selection
+            .rejected
+            .iter()
+            .all(|r| r.cause != RejectionCause::PerEntityAggregateNotExecutable));
     }
 
     /// The model's hook has priority over every guarantee. The summary
