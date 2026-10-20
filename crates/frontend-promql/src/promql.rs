@@ -798,7 +798,10 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
                     ..
                 } if matches!(measures.as_slice(), [AggIntent::Sum { .. }])
                     && matches!(sum_child.as_ref(), Unresolved::Aggregate { measures, .. }
-                        if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
+                        if matches!(
+                            measures.as_slice(),
+                            [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
+                        ))
             );
             let direct_counter_ranking = matches!(&child, Unresolved::Aggregate {
                 measures, reduction: Reduction::PerEntity, ..

@@ -285,9 +285,28 @@ pub(crate) fn realize_keyed_additive_summary_input(
     if asap_types::ir::operator::non_asap::any_measure_filtered(filters) {
         return None;
     }
-    let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-        && matches!(raw_child.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
-            if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
+    // A grouped sum of per-series `rate`/`increase`/`irate` values: the
+    // metric they derive from, whose declared type decides their sign.
+    let derivative_of = match (measures.as_slice(), raw_child.non_asap()) {
+        (
+            [AggIntent::Sum { .. }],
+            Some(NonASAPOp::Aggregate {
+                measures: derivative,
+                child: samples,
+                ..
+            }),
+        ) if matches!(
+            derivative.as_slice(),
+            [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
+        ) =>
+        {
+            Some(crate::per_computation_candidates::samples_of_metric(
+                samples,
+            ))
+        }
+        _ => None,
+    };
+    let counter_input = derivative_of.is_some();
     let weight = match measures.as_slice() {
         [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
         [AggIntent::Sum { .. }] if counter_input => {
@@ -309,13 +328,16 @@ pub(crate) fn realize_keyed_additive_summary_input(
         [AggIntent::Count { .. }] => WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::UnitCount,
         },
-        [AggIntent::Sum { .. }] if counter_input => WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
+        _ => match derivative_of {
+            Some(Some(metric)) => WeightDomain::CounterDerivativeOfMetric { metric },
+            _ => WeightDomain::UnknownOrSigned,
         },
-        _ => WeightDomain::UnknownOrSigned,
     };
     if matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
-        && !matches!(weight_domain, WeightDomain::NonNegative { .. })
+        && !matches!(
+            weight_domain,
+            WeightDomain::NonNegative { .. } | WeightDomain::CounterDerivativeOfMetric { .. }
+        )
     {
         // Unsupported: value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values.
         return None;

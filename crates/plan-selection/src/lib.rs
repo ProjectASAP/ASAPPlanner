@@ -1608,6 +1608,9 @@ fn accuracy_check(
                     WeightDomain::SamplesOfMetric { metric } => {
                         format!(" (samples of `{metric}`, which is not declared a counter)")
                     }
+                    WeightDomain::CounterDerivativeOfMetric { metric } => format!(
+                        " (rates or increases of `{metric}`, which is not declared a counter)"
+                    ),
                     _ => String::new(),
                 };
                 // Count-Min (plain, CmsWithHeap or Hydra Count-Min) over
@@ -3822,6 +3825,76 @@ mod tests {
                     "{}",
                     p2.reason
                 );
+            }
+        }
+    }
+
+    /// The Count-Min sketch algorithms (plain or with a heap) `candidate`
+    /// builds.
+    fn count_min_builds(candidate: &PhysicalCandidate) -> Vec<SketchAlgorithm> {
+        candidate
+            .dag
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.payload {
+                Payload::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) if matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap
+                ) =>
+                {
+                    Some(kind.algorithm().clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `increase` (and `rate`, `irate`) over a counter is non-negative, since
+    /// resets are corrected: the Count-Min-with-heap top-k of
+    /// `topk(10, sum by (job) (increase(data_total[5m])))` passes the weight
+    /// check when `data_total` is declared a counter, and goes on to the
+    /// accuracy and cost checks. Over a gauge it is still rejected for its
+    /// weights (issue #773).
+    #[test]
+    fn count_min_over_a_counter_derivative_needs_a_declared_counter() {
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
+        for function in ["increase", "rate", "irate"] {
+            let query = format!("topk(10, sum by (job) ({function}(data_total[5m])))");
+            let candidates = all_candidates(&query, &target);
+            let count_min: Vec<&str> = candidates
+                .iter()
+                .filter(|c| count_min_builds(c).contains(&SketchAlgorithm::CmsWithHeap))
+                .map(|c| c.id.as_str())
+                .collect();
+            assert!(!count_min.is_empty(), "{query}");
+            for (metric_type, admitted) in [(MetricType::Counter, true), (MetricType::Gauge, false)]
+            {
+                let data = with_metric_types(data(), &[("data_total", metric_type)]);
+                let rejected = match select_plan(
+                    &candidates,
+                    &[entry_with(target.clone(), repeating(10_000))],
+                    &data,
+                    PlanningModels::builtin(),
+                ) {
+                    Ok(selection) => selection.rejected,
+                    Err(SelectionError::NoValidCandidate(rejected)) => rejected,
+                    Err(error) => panic!("{query}: {error}"),
+                };
+                for id in &count_min {
+                    let weights_rejected = rejected.iter().any(|r| {
+                        &r.id == id
+                            && r.cause == RejectionCause::CountMinWeightsNotProvenNonNegative
+                    });
+                    assert_eq!(
+                        weights_rejected, !admitted,
+                        "{query} over a {metric_type:?}, {id}: {rejected:?}"
+                    );
+                }
             }
         }
     }

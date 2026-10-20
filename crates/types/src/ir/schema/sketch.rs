@@ -694,13 +694,27 @@ pub enum WeightDomain {
     SamplesOfMetric {
         metric: String,
     },
+    /// An open requirement, not a proof: the weights are reset-corrected
+    /// `rate`, `increase` or `irate` values of `metric`'s samples, or plain
+    /// sums of them. Reset correction keeps them non-negative exactly when
+    /// the samples are, that is when `metric` is a counter; over a gauge a
+    /// negative sample can give a negative value. Plan selection confirms
+    /// it from the declared metric types, as
+    /// [`SamplesOfMetric`](Self::SamplesOfMetric). Unconfirmed, it counts as
+    /// not proven.
+    CounterDerivativeOfMetric {
+        metric: String,
+    },
 }
 
 impl WeightDomain {
-    /// The domain once `is_counter` has answered an open
-    /// [`SamplesOfMetric`](Self::SamplesOfMetric) requirement: proven
-    /// ([`NonNegativeWeightProof::CounterSamples`]) when the metric is a
-    /// counter, else unknown. Any other domain is returned unchanged.
+    /// The domain once `is_counter` has answered an open requirement
+    /// ([`SamplesOfMetric`](Self::SamplesOfMetric) or
+    /// [`CounterDerivativeOfMetric`](Self::CounterDerivativeOfMetric)):
+    /// proven when the metric is a counter
+    /// ([`NonNegativeWeightProof::CounterSamples`] or
+    /// [`NonNegativeWeightProof::ResetAwareCounterDerivative`]), else
+    /// unknown. Any other domain is returned unchanged.
     pub fn confirmed(&self, is_counter: impl Fn(&str) -> bool) -> WeightDomain {
         match self {
             WeightDomain::SamplesOfMetric { metric } if is_counter(metric) => {
@@ -708,7 +722,13 @@ impl WeightDomain {
                     proof: NonNegativeWeightProof::CounterSamples,
                 }
             }
-            WeightDomain::SamplesOfMetric { .. } => WeightDomain::UnknownOrSigned,
+            WeightDomain::CounterDerivativeOfMetric { metric } if is_counter(metric) => {
+                WeightDomain::NonNegative {
+                    proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
+                }
+            }
+            WeightDomain::SamplesOfMetric { .. }
+            | WeightDomain::CounterDerivativeOfMetric { .. } => WeightDomain::UnknownOrSigned,
             other => other.clone(),
         }
     }
@@ -718,8 +738,11 @@ impl WeightDomain {
 #[serde(rename_all = "snake_case")]
 pub enum NonNegativeWeightProof {
     UnitCount,
-    /// PromQL counter reset correction produces a non-negative increase; rate
-    /// divides that increase by a positive duration.
+    /// `rate`, `increase` or `irate` of a counter's samples, or plain sums
+    /// of them: reset correction over non-negative samples gives a
+    /// non-negative increase, and a rate divides it by a positive duration.
+    /// Plan selection gives it on confirming a
+    /// [`WeightDomain::CounterDerivativeOfMetric`] requirement.
     ResetAwareCounterDerivative,
     /// Raw samples of a metric declared a counter
     /// ([`MetricType::Counter`](crate::workload::MetricType::Counter)), or
