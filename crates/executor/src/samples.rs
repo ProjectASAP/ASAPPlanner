@@ -8,6 +8,8 @@
 //! received into the window's input rows ([`RawSampleSelector::window_batch`]):
 //! those in the window, kept by the window's `Scan` predicates (its label
 //! matchers) and, for an instant selector, only each series' latest one.
+//! Stale markers are dropped there, once for every consumer: they end a
+//! series and are not samples.
 //! [`series_labels_of_output_row`] reads the labels of an answer row back.
 
 use std::collections::BTreeMap;
@@ -20,6 +22,7 @@ use planner_types::ir::{NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 use std::rc::Rc;
 
 use crate::expressions::CompiledExpression;
+use crate::operators::STALE_MARKER;
 use crate::physical_planner::promql_rows::{
     decode_series_identity, series_batch, SERIES_IDENTITY_COLUMN,
 };
@@ -128,8 +131,11 @@ impl RawSampleSelector {
     /// window_end_ms]` that the `Scan`'s predicates keep, and, for an
     /// instant selector, only each series' latest one; in the `TimeRange`'s
     /// schema, bound to the window's `TimeRange`. `samples` may hold other
-    /// series and times. Bad input when a sample's labels cannot fill the
-    /// schema.
+    /// series and times. A stale marker (the Prometheus end-of-series NaN)
+    /// is never a row: a range window drops it, and an instant selector
+    /// whose latest sample is one has no row for that series, as in PromQL.
+    /// An ordinary NaN is a sample and is kept. Bad input when a sample's
+    /// labels cannot fill the schema.
     pub fn window_batch(&self, window_end_ms: i64, samples: &[Sample]) -> Result<Batch, Error> {
         let start_ms = window_end_ms - self.width_ms;
         let mut kept: Vec<&Sample> = samples
@@ -147,6 +153,7 @@ impl RawSampleSelector {
             }
             kept = latest.into_values().collect();
         }
+        kept.retain(|s| s.value.to_bits() != STALE_MARKER);
         // Columns first, with each series' labels and identity built once;
         // then each predicate (label matcher) once per distinct label value.
         let mut batch = series_batch(
@@ -324,6 +331,35 @@ mod tests {
         ];
         let rows = selector.window_batch(10_000, &samples).unwrap();
         assert_eq!(points(&rows), [(9_900, 10.0)]);
+    }
+
+    /// A stale marker is never a row: a range window drops it and keeps the
+    /// samples around it, an ordinary NaN included; an instant selector
+    /// whose latest sample is a stale marker has no row (the series ended),
+    /// not the sample before it.
+    #[test]
+    fn stale_markers_are_not_rows() {
+        let stale = f64::from_bits(STALE_MARKER);
+        let (dag, window) = window_over(latency_ms(), 1_000, TimeRangeKind::Range);
+        let selector = RawSampleSelector::new(&dag, &window).unwrap();
+        let samples = [
+            sample("latency_ms", "a", 9_200, 3.0),
+            sample("latency_ms", "a", 9_400, stale),
+            sample("latency_ms", "a", 9_600, f64::NAN),
+            sample("latency_ms", "a", 9_800, 5.0),
+        ];
+        let rows = points(&selector.window_batch(10_000, &samples).unwrap());
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!((rows[0], rows[2]), ((9_200, 3.0), (9_800, 5.0)));
+        assert!(rows[1].1.is_nan() && rows[1].1.to_bits() != STALE_MARKER);
+
+        let (dag, window) = window_over(latency_ms(), 1_000, TimeRangeKind::Instant);
+        let selector = RawSampleSelector::new(&dag, &window).unwrap();
+        let ended = [
+            sample("latency_ms", "a", 9_500, 5.0),
+            sample("latency_ms", "a", 9_900, stale),
+        ];
+        assert_eq!(selector.window_batch(10_000, &ended).unwrap().num_rows(), 0);
     }
 
     /// A window over a table `Scan` has no metric to route samples by.

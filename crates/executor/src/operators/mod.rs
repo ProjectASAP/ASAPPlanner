@@ -38,6 +38,7 @@ pub(crate) mod vector_binary;
 pub(crate) mod vector_window;
 pub use aggregate::Reduction;
 pub use series_window::SubquerySteps;
+pub(crate) use series_window::STALE_MARKER;
 pub use sort::SortKey;
 pub use summary::{RowWeight, SummaryEvaluation};
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

@@ -13,7 +13,9 @@ pub struct SubquerySteps {
     pub at_ms: Option<i64>,
 }
 
-pub(super) const STALE_MARKER: u64 = 0x7ff0_0000_0000_0002;
+/// The bits of the Prometheus stale marker, a NaN that Remote Write
+/// carries when a series ends. It is not a sample.
+pub(crate) const STALE_MARKER: u64 = 0x7ff0_0000_0000_0002;
 const MAX_SUBQUERY_STEPS: i64 = 100_000;
 
 impl Operator {
