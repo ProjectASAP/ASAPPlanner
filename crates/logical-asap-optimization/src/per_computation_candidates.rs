@@ -945,7 +945,7 @@ pub(crate) fn partitions_over(
 /// included) ends it. The metric's type is not read here: whether its
 /// samples are non-negative is plan selection's question
 /// ([`WeightDomain::SamplesOfMetric`]).
-fn samples_of_metric(node: &OperatorNode) -> Option<String> {
+pub(crate) fn samples_of_metric(node: &OperatorNode) -> Option<String> {
     match node.non_asap()? {
         NonASAPOp::Scan {
             source: Source::TimeSeries { metric },
