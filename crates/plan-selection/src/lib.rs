@@ -5301,6 +5301,25 @@ mod tests {
         }
     }
 
+    /// `topk(k, irate(m[w]))`, now a heavy-hitter ranking as `rate`'s is,
+    /// still plans: Stages 1-3 compose its candidates and select one.
+    #[test]
+    fn a_direct_irate_ranking_plans() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        for function in ["rate", "irate"] {
+            let query = format!("topk(10, {function}(data_total[5m]))");
+            let candidates = all_candidates(&query, &target);
+            let data = with_metric_types(data(), &[("data_total", MetricType::Counter)]);
+            let selection = select_plan(
+                &candidates,
+                &[entry_with(target.clone(), repeating(10_000))],
+                &data,
+                PlanningModels::builtin(),
+            );
+            assert!(selection.is_ok(), "{query}: {selection:?}");
+        }
+    }
+
     /// A candidate that ties the selected one is rejected for losing on
     /// enumeration order, not as costlier.
     #[test]
