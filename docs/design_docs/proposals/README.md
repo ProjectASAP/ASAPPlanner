@@ -11,4 +11,5 @@ extensions. A design document is not a promise of downstream runtime support.
 - [Operator sharing](operator-sharing.md)
 - [Decoupling operators from scalar expressions](decoupling_op_and_expr.md)
 - [ASAPPlanner layering](planner-layering.md)
+- [Joint planning search](joint-planning-search.md)
 - [Schema and physical data for ASAP primitives](asap-primitive-schema.md)
