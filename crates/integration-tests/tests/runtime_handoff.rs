@@ -165,8 +165,8 @@ async fn installable_plan_has_its_pane_chains_expanded() {
         .stored_outputs
         .iter()
         .map(|o| {
-            assert_eq!(o.pane.width_ms, 600_000);
-            o.pane.end_offset_ms
+            assert_eq!(o.inputs.raw_sample_windows[0].width_ms, 600_000);
+            o.inputs.raw_sample_windows[0].end_offset_ms
         })
         .collect();
     offsets.sort();

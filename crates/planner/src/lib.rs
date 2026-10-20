@@ -37,7 +37,7 @@ pub use asap_plan_selection::pass::{
 mod installable;
 pub use installable::{
     plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery, SelectedPlanReport,
-    StoredOutput, StoredOutputBuild,
+    StoredCoverage, StoredOutput, StoredOutputBuild, StoredOutputInputs,
 };
 
 // What a deployment runtime needs to build a `UserInput` and read an
@@ -52,6 +52,7 @@ pub use asap_plan_selection::{
 pub use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPNodeId, RawSampleWindow,
 };
+pub use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
 pub use asap_types::ir::schema::{SketchAlgorithm, SketchParams, StatisticKind};
 pub use asap_types::workload::PlanningWorkload;
 
