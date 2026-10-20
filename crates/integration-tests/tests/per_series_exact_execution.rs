@@ -1,7 +1,8 @@
 //! Exact per-series range reductions over raw samples execute natively
 //! (issue #770): exact `quantile/sum/avg/min/max/count_over_time` reduces
 //! each series' samples in the window with a per-entity `Aggregate`, which
-//! the executor compiles and runs.
+//! the executor compiles and runs. The window's rows come from
+//! `RawSampleSelector`, as a runtime feeds them.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -11,11 +12,13 @@ use asap_executor::physical_planner::{
     compile_candidate, frontier_from_timing, promql_rows, InputContract,
 };
 use asap_executor::runtime::Scope;
-use asap_executor::series_labels_of_output_row;
-use asap_executor::values::{Batch, Value};
+use asap_executor::values::Value;
+use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::ir::operator::Reduction;
-use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOperatorPayload};
+use asap_types::ir::physical_export::{
+    compile_physical_asap_dag, PhysicalASAPOperatorPayload, RawSampleWindow,
+};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{
     apply_materialization_timings, MaterializationAssignment, NonASAPOp, OperatorNode, TimingMemo,
@@ -23,9 +26,11 @@ use asap_types::ir::{
 
 mod physical_common;
 
+/// Evaluation time; every query's window is `(240 s, 300 s]`.
 const EVALUATION_MS: i64 = 300_000;
-/// Raw `x` samples per series `instance`, all inside the last minute.
-const SAMPLES: [(&str, &[f64]); 2] = [("a", &[1.0, 4.0, 2.0, 7.0]), ("b", &[10.0, 30.0, 20.0])];
+/// The bits of the Prometheus stale marker, which Remote Write carries
+/// when a series ends.
+const STALE_MARKER: f64 = f64::from_bits(0x7ff0_0000_0000_0002);
 
 /// `query` lowered exactly, with series identity: a per-entity `Aggregate`
 /// over the window's raw samples, as the exact plan that reduces raw samples
@@ -47,55 +52,82 @@ fn per_entity_plan(query: &str) -> Rc<OperatorNode> {
     root
 }
 
-/// Execute `plan` at query time over `SAMPLES`: each series'
-/// `instance` and its value.
-fn execute(plan: &Rc<OperatorNode>) -> Vec<(String, f64)> {
+/// A raw sample of `x` for series `instance` at `timestamp_ms`.
+fn sample(instance: &str, timestamp_ms: i64, value: f64) -> Sample {
+    Sample {
+        labels: BTreeMap::from([
+            ("__name__".to_string(), "x".to_string()),
+            ("instance".to_string(), instance.to_string()),
+        ]),
+        timestamp_ms,
+        value,
+    }
+}
+
+/// `values` of series `instance`, 10 s apart from 250 s, inside the window.
+fn series(instance: &str, values: &[f64]) -> Vec<Sample> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, value)| sample(instance, 250_000 + 10_000 * i as i64, *value))
+        .collect()
+}
+
+/// Run `query`'s exact per-entity plan at query time over `samples`, fed
+/// through the window's `RawSampleSelector`: each answered series'
+/// `instance` and value.
+fn execute(query: &str, samples: &[Sample]) -> Vec<(String, f64)> {
     let timed = apply_materialization_timings(
-        plan,
+        &per_entity_plan(query),
         &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )
     .unwrap();
     let dag = compile_physical_asap_dag(&timed).unwrap();
-    let [range] = dag
-        .nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::TimeRange { .. })
-            )
-        })
-        .collect::<Vec<_>>()[..]
-    else {
-        panic!("one range selector");
+    let node = |matches: fn(&PhysicalASAPOperatorPayload) -> bool| {
+        let found: Vec<_> = dag
+            .nodes
+            .iter()
+            .filter(|node| matches(&node.payload))
+            .collect();
+        let [node] = found[..] else {
+            panic!("{query}: one node expected, found {}", found.len());
+        };
+        node
     };
+    let range = node(|payload| {
+        matches!(
+            payload,
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::TimeRange { .. })
+        )
+    });
+    let scan = node(|payload| {
+        matches!(
+            payload,
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
+        )
+    });
+    let window = RawSampleWindow {
+        time_range_node_id: range.id,
+        width_ms: 60_000,
+        end_offset_ms: 0,
+        scan_node_id: scan.id,
+    };
+    let rows = RawSampleSelector::new(&dag, &window)
+        .unwrap()
+        .window_batch(EVALUATION_MS, samples)
+        .unwrap();
     let schema = Arc::new(range.output_schema.clone());
     let compiled = compile_candidate(
         &dag,
-        BTreeMap::from([(range.id as u64, InputContract::bounded(schema.clone()))]),
+        BTreeMap::from([(range.id as u64, InputContract::bounded(schema))]),
         &[dag.roots[0] as u64],
         &frontier_from_timing(&dag).unwrap(),
     )
     .unwrap();
-    let rows = SAMPLES
-        .iter()
-        .flat_map(|(instance, values)| {
-            let labels = BTreeMap::from([
-                ("__name__".to_string(), "x".to_string()),
-                ("instance".to_string(), instance.to_string()),
-            ]);
-            let schema = schema.clone();
-            values.iter().enumerate().map(move |(i, value)| {
-                promql_rows::series_row(&schema, &labels, 250_000 + 10_000 * i as i64, *value)
-                    .unwrap()
-            })
-        })
-        .collect();
-    let input = Batch::try_new(schema.clone(), rows).unwrap();
     let result = physical_common::execute(
         &compiled.query,
-        BTreeMap::from([(range.id as u64, input)]),
+        BTreeMap::from([(range.id as u64, rows)]),
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
             revision: 1,
@@ -119,11 +151,27 @@ fn execute(plan: &Rc<OperatorNode>) -> Vec<(String, f64)> {
     answers
 }
 
+/// Asserts `query` over `samples` answers `expected`, a NaN matching a NaN.
+fn assert_answers(query: &str, samples: &[Sample], expected: &[(&str, f64)]) {
+    let answers = execute(query, samples);
+    let same = answers.len() == expected.len()
+        && answers
+            .iter()
+            .zip(expected)
+            .all(|((a, x), (b, y))| a == b && (x == y || (x.is_nan() && y.is_nan())));
+    assert!(same, "{query}: {answers:?}, expected {expected:?}");
+}
+
 // Each range function's exact per-entity plan compiles and gives, per
 // series, the function of that series' window samples, without the metric
 // name. Series `a` holds 1, 4, 2, 7 and `b` holds 10, 30, 20.
 #[test]
 fn exact_per_series_range_functions_execute() {
+    let samples = [
+        series("a", &[1.0, 4.0, 2.0, 7.0]),
+        series("b", &[10.0, 30.0, 20.0]),
+    ]
+    .concat();
     for (query, a, b) in [
         ("sum_over_time(x[1m])", 14.0, 60.0),
         ("avg_over_time(x[1m])", 3.5, 20.0),
@@ -133,11 +181,78 @@ fn exact_per_series_range_functions_execute() {
         // Ranks interpolate: a's median sits halfway between 2 and 4.
         ("quantile_over_time(0.5, x[1m])", 3.0, 20.0),
     ] {
-        let answers = execute(&per_entity_plan(query));
-        assert_eq!(
-            answers,
-            [("a".to_string(), a), ("b".to_string(), b)],
-            "{query}"
-        );
+        assert_answers(query, &samples, &[("a", a), ("b", b)]);
     }
+}
+
+// A stale marker ends a series and is not a sample, as in PromQL: over 3,
+// stale, 5 the count is 2, the sum 8 and the lowest rank 3, not 3, NaN and
+// NaN.
+#[test]
+fn a_stale_marker_is_not_a_sample() {
+    let samples = series("a", &[3.0, STALE_MARKER, 5.0]);
+    for (query, expected) in [
+        ("count_over_time(x[1m])", 2.0),
+        ("sum_over_time(x[1m])", 8.0),
+        ("avg_over_time(x[1m])", 4.0),
+        ("min_over_time(x[1m])", 3.0),
+        ("max_over_time(x[1m])", 5.0),
+        ("quantile_over_time(0, x[1m])", 3.0),
+    ] {
+        assert_answers(query, &samples, &[("a", expected)]);
+    }
+    // A series whose only sample is a stale marker has no sample to reduce.
+    let only_stale = series("a", &[STALE_MARKER]);
+    assert_answers("count_over_time(x[1m])", &only_stale, &[]);
+}
+
+// An ordinary NaN is a sample, as in PromQL: it counts, it makes the sum and
+// mean NaN, min and max skip it, and a quantile ranks it lowest.
+#[test]
+fn a_nan_sample_is_a_sample() {
+    let samples = series("a", &[1.0, f64::NAN, 3.0]);
+    for (query, expected) in [
+        ("count_over_time(x[1m])", 3.0),
+        ("sum_over_time(x[1m])", f64::NAN),
+        ("avg_over_time(x[1m])", f64::NAN),
+        ("min_over_time(x[1m])", 1.0),
+        ("max_over_time(x[1m])", 3.0),
+        // Sorted NaN, 1, 3: rank 0.5 × 2 = 1 is the 1.
+        ("quantile_over_time(0.5, x[1m])", 1.0),
+    ] {
+        assert_answers(query, &samples, &[("a", expected)]);
+    }
+}
+
+// φ follows PromQL: 0 and 1 are the extremes, below 0 is -Inf and above 1
+// is +Inf.
+#[test]
+fn quantile_bounds_follow_promql() {
+    let samples = series("a", &[20.0, 40.0, 10.0, 30.0]);
+    for (phi, expected) in [
+        ("0", 10.0),
+        ("1", 40.0),
+        ("-1", f64::NEG_INFINITY),
+        ("2", f64::INFINITY),
+    ] {
+        let query = format!("quantile_over_time({phi}, x[1m])");
+        assert_answers(&query, &samples, &[("a", expected)]);
+    }
+}
+
+// The window `(240 s, 300 s]` is left-open: a sample exactly at 240 s is
+// outside, one at 300 s inside. A series with no sample inside (`c`, whose
+// samples sit at 200 s and on the left edge) has no answer.
+#[test]
+fn window_edges_and_an_empty_window() {
+    let samples = vec![
+        sample("a", 240_000, 1000.0),
+        sample("a", 270_000, 2.0),
+        sample("a", 300_000, 4.0),
+        sample("c", 200_000, 7.0),
+        sample("c", 240_000, 7.0),
+    ];
+    assert_answers("count_over_time(x[1m])", &samples, &[("a", 2.0)]);
+    assert_answers("sum_over_time(x[1m])", &samples, &[("a", 6.0)]);
+    assert_answers("quantile_over_time(1, x[1m])", &samples, &[("a", 4.0)]);
 }
