@@ -718,9 +718,9 @@ input.
 
 ## Summary operator formulas
 
-Costing incremental maintenance of continuously-ingested summaries was removed
-with the summary maintenance lifecycle; Stage 2 materialization (#509) will
-define it. The formulas below give per-operation work and state size.
+Stage 2 materialization (#509) decides whether a summary is built at ingestion
+or at query time, and Stage 3 prices that choice. The formulas below give
+per-operation work and state size.
 
 ### Ranking complete physical implementations
 

@@ -17,7 +17,6 @@ are unchanged. #453 separately defines the integration API surface.
 | `CandidateLogicalASAPDAGs::group_for(target)` | `CandidateLogicalASAPDAGs::candidates_for_target(target)` | Look up one target's candidate set |
 | `SelectedGroup` | `TargetSubDAGSelection` | Selected choice and usage information for one target; the choice may be absent |
 | `GlobalSelection::groups()` | `GlobalSelection::target_selections()` | Iterate decisions, not alternative sets |
-| `MaterializeSummaryMaintenanceLifecycleError` | `SummaryMaintenanceLifecycleAssemblyError` | Failure assembling a DAG or deriving maintenance decisions |
 | Error variant `Materialize` | `AssembleDAG` | Wrap an underlying `RealizationError` from DAG assembly |
 | Internal `materialize_inner` / `materialize_residual` | `assemble_target` / `assemble_residual` | Assemble selected nodes, not runtime materialized views |
 | Internal assembly cache `materialized` | `assembled_nodes` | Preserve shared node identity (now `Rc<OperatorNode>`, see below) |
@@ -27,12 +26,12 @@ Downstream Rust integrations using these symbols must migrate. No serialized
 plan schema changes. SQL grouping and physical materialization keep their names.
 
 The earlier #445 renames (`TargetSubDAGCandidates`,
-`RankedTargetSubDAGCandidates`, `assemble_selected_dag`, and its lifecycle-aware
-counterpart) are prerequisites, not additional changes here.
+`RankedTargetSubDAGCandidates`, `assemble_selected_dag`) are prerequisites, not
+additional changes here.
 
 The workflow remains one selection call per workload followed by one assembly
-call per query root. The summary-maintenance lifecycle API named above was later
-removed; Stage 2 materialization (#509) owns maintenance decisions.
+call per query root. Stage 2 materialization (#509) decides when each summary is
+built, and Stage 3 its retention.
 
 ## Later: unified operator IR (operator flattening)
 

@@ -1,7 +1,6 @@
 //! Materialization decides placement, not answers: the same selected DAG
 //! timed with its states `NotMaterialized` (everything at query time) and
 //! `MatAtIngestion` (states in precompute) executes to the same result.
-//! Ported from the removed summary-maintenance-lifecycle end-to-end tests.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
