@@ -344,7 +344,7 @@ mod tests {
                     .map(|i| {
                         let series = g.next() % 4;
                         let value = match g.next() % 9 {
-                            0 => f64::from_bits(0x7ff0_0000_0000_0002),
+                            0 => f64::from_bits(crate::operators::STALE_MARKER),
                             n => (n as f64) * 1.5,
                         };
                         vec![

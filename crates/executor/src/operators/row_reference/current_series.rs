@@ -64,7 +64,7 @@ pub(super) fn execute<'a>(
             let Value::Float64(sample) = rows[index][value] else {
                 unreachable!()
             };
-            if sample.to_bits() == 0x7ff0_0000_0000_0002 {
+            if sample.to_bits() == crate::operators::STALE_MARKER {
                 continue;
             }
             workspace.grow(row_bytes(&rows[index]))?;
