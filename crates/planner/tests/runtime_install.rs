@@ -606,3 +606,59 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
     assert_eq!(next.panes_built, 1, "four panes reused from the cache");
     assert_eq!(next.answers_per_query, next.reference_answers_per_query);
 }
+
+/// An exact per-series quantile under a group average (issue #770), on a
+/// deployment that keeps raw samples: Stage 3 selects the exact plan, which
+/// reads each series' raw samples in the window at query time, and the
+/// executor runs it. Series `a` (1..=10) and `b` (10, 20, ..., 100) are in
+/// `east`, `c` (constantly 5) in `west`; a sample of each before the window
+/// is not read. Per series, p99 interpolates between its two largest
+/// samples (rank 0.99 × 9 = 8.91): 9.91 for `a`, 99.1 for `b`, 5 for `c`.
+#[tokio::test]
+async fn an_exact_per_series_quantile_runs_from_raw_samples() {
+    let workload: PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "avg by (region) (quantile_over_time(0.99, latency_ms[100s]))",
+              "demand": {"fixed_interval": 60000},
+              "requirements": {},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 3.0}},
+              "sources": {"latency_ms": {"series_count": 3, "sample_interval": 10000}}}}"#,
+    )
+    .unwrap();
+    let plan_json = plan_json_for(workload, &DeploymentCapabilities::default()).await;
+    let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    assert!(installed.stored_outputs.is_empty(), "the exact plan");
+    assert_eq!(installed.query_time_raw_windows.len(), 1);
+    // Ten samples per series in the window, one every 10 s, and one before it.
+    let mut samples = Vec::new();
+    for (instance, region, value) in [
+        ("a", "east", (|step| step as f64) as fn(i64) -> f64),
+        ("b", "east", |step| 10.0 * step as f64),
+        ("c", "west", |_| 5.0),
+    ] {
+        for step in 0..=10 {
+            let mut sample = sample(
+                "latency_ms",
+                instance,
+                EVALUATION_MS - 105_000 + 10_000 * step,
+                if step == 0 { 1e9 } else { value(step) },
+            );
+            sample
+                .labels
+                .insert("region".to_string(), region.to_string());
+            samples.push(sample);
+        }
+    }
+    let run = run_data_plane(&plan_json, &samples, EVALUATION_MS, &mut PaneStore::new());
+    let answered = &run.answers_per_query[0];
+    assert_eq!(answered.len(), 2, "{answered:?}");
+    for ((labels, value), (region, expected)) in answered
+        .iter()
+        .zip([("east", (9.91 + 99.1) / 2.0), ("west", 5.0)])
+    {
+        assert_eq!(labels["region"], region);
+        assert!((value - expected).abs() < 1e-9, "{region}: {value}");
+    }
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}

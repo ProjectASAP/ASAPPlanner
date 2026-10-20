@@ -10,7 +10,9 @@ use crate::{
     values::{Batch, SchemaRef},
     Error,
 };
-use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlannerReduction};
+use planner_types::ir::operator::{
+    agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction as PlannerReduction,
+};
 use planner_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
@@ -338,9 +340,10 @@ fn compile_internal(
                 )?;
                 continue;
             }
-            // An exact per-series range reduction with no exact accumulator
-            // form (`distinct_over_time`, `l2_over_time`, `entropy_over_time`)
-            // reduces each series' raw samples in the window natively.
+            // An exact per-series range reduction over raw samples
+            // (`quantile/sum/avg/min/max/count/distinct/l2/entropy_over_time`)
+            // reduces each series' raw samples in the window natively. Stage 3
+            // selects no other (`agg_has_exact_per_entity_kernel`).
             if let Payload::NonASAP(NonASAPOp::Aggregate {
                 reduction: PlannerReduction::PerEntity,
                 measures,
@@ -362,13 +365,27 @@ fn compile_internal(
                     Some(column) => *column,
                     None => named_column(input, &ColumnRef::SampleValue)?,
                 };
+                if !agg_has_exact_per_entity_kernel(measure) {
+                    return Err(invalid(format!(
+                        "node {id}: per-entity aggregate {measure:?} has no native implementation"
+                    )));
+                }
                 let reduction = match measure {
+                    AggIntent::Count { .. } => Reduction::Count,
+                    AggIntent::Sum { .. } => Reduction::Sum(value),
+                    AggIntent::Avg { .. } => Reduction::Avg(value),
+                    AggIntent::Min { .. } => Reduction::Min(value),
+                    AggIntent::Max { .. } => Reduction::Max(value),
+                    AggIntent::Quantile { q, .. } => Reduction::Quantile {
+                        column: value,
+                        q: *q,
+                    },
                     AggIntent::Cardinality { .. } => Reduction::Cardinality(vec![value]),
                     AggIntent::FrequencyL2 { .. } => Reduction::FrequencyL2(value),
                     AggIntent::FrequencyEntropy { .. } => Reduction::FrequencyEntropy(value),
                     _ => {
                         return Err(invalid(format!(
-                            "node {id}: per-entity aggregate requires an explicit entity binding"
+                            "node {id}: per-entity kernel of {measure:?} is listed but not mapped"
                         )))
                     }
                 };
@@ -380,7 +397,7 @@ fn compile_internal(
                     .collect();
                 let aggregate =
                     Operator::aggregate(input.clone(), groups, vec![("value".into(), reduction)])?;
-                // A PromQL sample is Float64; the distinct count is Int64.
+                // A PromQL sample is Float64; a count is Int64.
                 let reduced = aggregate.schema();
                 let project = Operator::project(
                     reduced.clone(),

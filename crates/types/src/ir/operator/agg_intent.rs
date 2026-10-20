@@ -695,6 +695,26 @@ pub fn agg_is_exact(op: &AggIntent) -> bool {
     )
 }
 
+/// Whether the executor reduces each series' raw samples exactly for an
+/// `Aggregate` of `op` with `Reduction::PerEntity` (a PromQL
+/// `quantile/sum/avg/min/max/count/distinct/l2/entropy_over_time` over raw
+/// samples). The executor compiles only these, and Stage 3 rejects a plan
+/// holding any other exact per-entity aggregate, so both read this one list.
+pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
+    matches!(
+        op,
+        AggIntent::Count { .. }
+            | AggIntent::Sum { .. }
+            | AggIntent::Avg { .. }
+            | AggIntent::Min { .. }
+            | AggIntent::Max { .. }
+            | AggIntent::Quantile { .. }
+            | AggIntent::Cardinality { .. }
+            | AggIntent::FrequencyL2 { .. }
+            | AggIntent::FrequencyEntropy { .. }
+    )
+}
+
 /// Accuracy parameter as a fractional ε (`0.0` for exact ops), unpacked from
 /// the typed `AccuracyTarget` on Quantile / Cardinality / Count / TopK.
 pub fn agg_accuracy(op: &AggIntent) -> f64 {
