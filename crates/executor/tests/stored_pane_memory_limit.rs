@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 const SERIES: u32 = 1_000;
 const PANES: usize = 12;
+/// Samples per state: past 1,024 a k = 200 KLL holds its whole item buffer.
+const SAMPLES: u32 = 1_100;
 
 /// One pane of `SERIES` KLL states (k = 200, about 11 kB charged each, so
 /// about 11 MB per pane), keyed by series.
@@ -57,7 +59,11 @@ fn pane_of(series_count: u32) -> (Arc<Schema>, Batch) {
     let mut updater = StateColumnUpdater::new(&family).unwrap();
     updater.ensure_groups(series_count as usize).unwrap();
     for series in 0..series_count {
-        updater.update(series, f64::from(series), 0).unwrap();
+        for sample in 0..SAMPLES {
+            updater
+                .update(series, f64::from(series) + f64::from(sample), 0)
+                .unwrap();
+        }
     }
     let names = (0..series_count)
         .map(|series| format!("s{series}"))

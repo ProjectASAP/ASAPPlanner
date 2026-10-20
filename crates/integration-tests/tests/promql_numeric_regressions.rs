@@ -137,10 +137,13 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     post_asap_dag(&node);
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.
+    // The sketch reads its minimum and maximum exactly, so the interpolated
+    // order statistics are interior ones.
     let alpha = (0.01 - 8.0 * f64::EPSILON) / 2.01;
+    let values = [-2., -1., 1.011, 2.];
     let estimate = |q| {
         let mut sketch = asap_sketchlib::DdSketch::new(alpha);
-        for value in [-1., 1.011] {
+        for value in values {
             sketch.try_add(&value).unwrap();
         }
         interpolated_quantile(&sketch, q)
@@ -151,7 +154,11 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     assert!(
         numerator.is_finite() && denominator.is_finite() && denominator != 0. && got.is_normal()
     );
-    let exact_quantile = |q: f64| -(1. - q) + 1.011 * q;
+    let exact_quantile = |q: f64| {
+        let rank = q * (values.len() - 1) as f64;
+        let (lower, upper) = (rank.floor() as usize, rank.ceil() as usize);
+        values[lower] * (1. - rank.fract()) + values[upper] * rank.fract()
+    };
     let want = exact_quantile(0.5) / exact_quantile(0.9);
     let error = (got - want).abs() / want.abs();
     assert!(
