@@ -169,7 +169,8 @@ function uniqueIds(list, where, errors) {
 // it is not priced.
 const FAILED_CHECK_CAUSES = [
   'failure_probability_resize_failed', 'accuracy_target_missed',
-  'count_min_weights_not_proven_non_negative', 'no_accuracy_guarantee',
+  'count_min_weights_not_proven_non_negative', 'per_entity_aggregate_not_executable',
+  'no_accuracy_guarantee',
   'raw_data_not_retained', 'latency_bound_exceeded', 'over_cluster_capacity',
 ];
 // Every `stage3_plan_selection.rejected[].cause` Stage 3 writes: the failed

@@ -20,8 +20,8 @@ pub mod pane_chain;
 pub mod query;
 
 pub use agg_intent::{
-    agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile, AggIntent,
-    MathFunc, TimeFunc,
+    agg_accuracy, agg_has_exact_per_entity_kernel, agg_is_exact, agg_is_mergeable,
+    default_cardinality, default_quantile, AggIntent, MathFunc, TimeFunc,
 };
 pub use operator_properties::{
     AtModifier, BinaryOpKind, ColState, ConcatDiscriminatorKey, DataModel, GroupKeys, GroupSide,

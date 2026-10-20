@@ -43,7 +43,7 @@
 //     summary), and every other shown candidate under `rejected` with
 //     its `cause`: a failed check (`failure_probability_resize_failed`,
 //     `accuracy_target_missed`, `count_min_weights_not_proven_non_negative`,
-//     `no_accuracy_guarantee`, `raw_data_not_retained`,
+//     `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`, `raw_data_not_retained`,
 //     `latency_bound_exceeded`, `over_cluster_capacity`) or a loss under
 //     the cost model (`costlier`, `slower`, `more_memory`,
 //     `not_lowest_latency_on_pareto_front`, `dominated`,

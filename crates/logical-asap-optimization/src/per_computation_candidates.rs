@@ -2798,7 +2798,7 @@ fn substitute_measure(
             // non-null (a nullable input prunes this candidate), so it counts
             // the rows the sum reads.
             let read = measure_input(&sum_intent, input, filter.as_ref())?;
-            let mut sum = finalized(&ExactKind::Sum, &sum_intent, read.clone())?;
+            let sum = finalized(&ExactKind::Sum, &sum_intent, read.clone())?;
             let count = finalized(
                 &ExactKind::Count,
                 &AggIntent::Count {
@@ -2809,36 +2809,31 @@ fn substitute_measure(
             if input.result_kind == OperatorResultKind::Relation {
                 return sql_avg(reduction, filter.is_some(), sum, count);
             }
-            // `avg` is Float64 whatever the summed type, as `Avg`'s output is.
-            // A per-series sum keeps the input's labels, so its value is the
-            // sample-value column; a grouped one ends with it.
-            let value = match reduction {
-                Reduction::PerEntity => resolve_column_ref(&ColumnRef::SampleValue, &sum.schema)
-                    .ok()
-                    .and_then(|column| sum.schema.fields.get(column)),
-                Reduction::Reduce(_) => sum.schema.fields.last(),
+            // `avg` is Float64 whatever the summed type, as `Avg`'s output is,
+            // and a PromQL binary operator reads Float64 sample values. A
+            // grouped sum or count ends with its value, cast when not Float64
+            // (a count is Int64). A per-series sum keeps the input's labels,
+            // so its value is the sample-value column; a per-series count is
+            // Float64.
+            let (sum, count) = match reduction {
+                Reduction::Reduce(by) => (
+                    last_as_float64(by.len(), sum)?,
+                    last_as_float64(by.len(), count)?,
+                ),
+                Reduction::PerEntity => {
+                    let value = resolve_column_ref(&ColumnRef::SampleValue, &sum.schema)
+                        .ok()
+                        .and_then(|column| sum.schema.fields.get(column));
+                    if value.map(|field| &field.dtype)
+                        != Some(&FieldDataType::Plain(DataType::Float64))
+                    {
+                        return Err(PerComputationCandidateError::Unsupported(
+                            "non-Float64 per-series avg",
+                        ));
+                    }
+                    (sum, count)
+                }
             };
-            if value.map(|field| &field.dtype) != Some(&FieldDataType::Plain(DataType::Float64)) {
-                let Reduction::Reduce(by) = reduction else {
-                    return Err(PerComputationCandidateError::Unsupported(
-                        "non-Float64 per-series avg",
-                    ));
-                };
-                let mut cols = key_items(by.len());
-                cols.push(ProjectItem {
-                    alias: None,
-                    expr: ScalarExpr::Cast {
-                        expr: Box::new(ScalarExpr::Column(by.len())),
-                        to: DataType::Float64,
-                        try_cast: false,
-                    },
-                });
-                sum = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
-                    cols,
-                    qualifier: None,
-                    child: sum,
-                }))?;
-            }
             OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::BinaryOp {
                 operator: BinaryOperator {
                     checked_relative_division: false,
@@ -2853,6 +2848,35 @@ fn substitute_measure(
             }))?
         }
     })
+}
+
+/// `node`, a grouped aggregate's `keys` group keys and then its value, with
+/// the value cast to Float64 unless it already is one.
+fn last_as_float64(
+    keys: usize,
+    node: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    if node.schema.fields.last().map(|field| &field.dtype)
+        == Some(&FieldDataType::Plain(DataType::Float64))
+    {
+        return Ok(node);
+    }
+    let mut cols = key_items(keys);
+    cols.push(ProjectItem {
+        alias: None,
+        expr: ScalarExpr::Cast {
+            expr: Box::new(ScalarExpr::Column(keys)),
+            to: DataType::Float64,
+            try_cast: false,
+        },
+    });
+    Ok(OperatorNode::new_shared(Operator::NonASAP(
+        NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: node,
+        },
+    ))?)
 }
 
 /// SQL `avg` from its finalized `sum` and `count`: joined on the group keys
