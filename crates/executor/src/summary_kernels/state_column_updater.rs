@@ -48,8 +48,9 @@ enum GroupStates {
     /// A keyed frequency sketch (Count-Min or Count Sketch with a heap) per
     /// group.
     Keyed {
-        /// An empty state of the family's shape, cloned for each new group.
-        empty: WeightedFrequency,
+        /// An empty state of the family's shape, cloned for each new group
+        /// (boxed: much larger than the other kinds' fields).
+        empty: Box<WeightedFrequency>,
         /// The states, by group.
         states: Vec<WeightedFrequency>,
     },
@@ -94,7 +95,7 @@ impl StateColumnUpdater {
             {
                 let (algorithm, width, depth, capacity) = WeightedFrequency::configuration(kind)?;
                 GroupStates::Keyed {
-                    empty: WeightedFrequency::new(algorithm, width, depth, capacity)?,
+                    empty: Box::new(WeightedFrequency::new(algorithm, width, depth, capacity)?),
                     states: Vec::new(),
                 }
             }
@@ -233,7 +234,7 @@ impl StateColumnUpdater {
                 bytes
             }
             GroupStates::Keyed { empty, states } => {
-                states.push(empty.clone());
+                states.push(empty.as_ref().clone());
                 empty.approx_memory_bytes()
             }
             GroupStates::Hydra { .. } => {

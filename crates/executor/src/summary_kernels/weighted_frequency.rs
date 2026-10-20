@@ -32,7 +32,7 @@ enum Sketch {
 pub fn check_shape(algorithm: FrequencyAlgorithm, width: usize, depth: usize) -> Result<(), Error> {
     let shape = match algorithm {
         FrequencyAlgorithm::Cms => CountMinSketch::check_shape(depth, width),
-        FrequencyAlgorithm::CountSketch if depth % 2 == 0 => {
+        FrequencyAlgorithm::CountSketch if depth.is_multiple_of(2) => {
             Err(format!("Count Sketch depth {depth} is not odd"))
         }
         FrequencyAlgorithm::CountSketch => CountSketch::check_shape(depth, width),
