@@ -1,139 +1,335 @@
-# Joint Planning Search: Pruning the Whole-Workload Candidate Space
+# Joint planning search: exact reductions, bounds, and heuristic fallbacks
 
-This document designs how ASAPPlanner selects one plan for a whole workload without building every whole-workload candidate. It builds on the planning stages in [planner-layering.md](planner-layering.md) and changes how Stage 1 to Stage 3 search, not what they decide.
+Status: proposal; no new pruning rule is implemented by this document. Audience: planner designers and implementers.
+
+ASAPPlanner must search a workload's candidate plans without retaining or pricing every combination. The design keeps the decisions in [planner-layering.md](planner-layering.md), and changes how those decisions are explored. It incorporates the [optimizer survey in #671](https://github.com/ProjectASAP/ASAPPlanner/issues/671#issuecomment-6137638876) and revises the original exactness claims in [#776](https://github.com/ProjectASAP/ASAPPlanner/pull/776).
+
+**Decision:** build a streaming, memoized branch-and-bound search with conservative interaction analysis. Enable a pruning rule only when its preconditions establish that it preserves the optimum. Use greedy search to find incumbents and order exploration; discarding alternatives by a heuristic is a separately reported approximation mode. A memo, dynamic programming, or a MILP solver does not by itself make workload sharing exact.
 
 ## Contents
 
-- [Problem](#problem)
-- [Goals and non-goals](#goals-and-non-goals)
-- [Where the candidates come from](#where-the-candidates-come-from)
-- [Design](#design)
-  - [1. Independent components](#1-independent-components)
-  - [2. Per-query validity before composition](#2-per-query-validity-before-composition)
-  - [3. Lower-bound dominance](#3-lower-bound-dominance)
-  - [4. Local materialization choice](#4-local-materialization-choice)
-  - [5. Sharing that never costs more](#5-sharing-that-never-costs-more)
-  - [6. Streaming selection and a search budget](#6-streaming-selection-and-a-search-budget)
-- [Cost model 3](#cost-model-3)
-- [What the selection report shows](#what-the-selection-report-shows)
-- [Validation](#validation)
-- [Relation to other search approaches](#relation-to-other-search-approaches)
+- [Problem and scope of the guarantee](#problem-and-scope-of-the-guarantee)
+- [Lessons from the survey](#lessons-from-the-survey)
+- [Review of the original six rules](#review-of-the-original-six-rules)
+- [Search representation and interaction analysis](#search-representation-and-interaction-analysis)
+- [Exact pruning rules and their proof conditions](#exact-pruning-rules-and-their-proof-conditions)
+- [Bounds and branch-and-bound](#bounds-and-branch-and-bound)
+- [Composition under the three cost models](#composition-under-the-three-cost-models)
+- [Heuristics and what they give up](#heuristics-and-what-they-give-up)
+- [Search procedure and stopping contract](#search-procedure-and-stopping-contract)
+- [MILP as a relaxation and an alternative search](#milp-as-a-relaxation-and-an-alternative-search)
+- [Validation and implementation order](#validation-and-implementation-order)
+- [References](#references)
 
-## Problem
+## Problem and scope of the guarantee
 
-Planning a workload jointly lets queries share computation: one summary answers several queries, identical sub-expressions run once, panes are reused across evaluations. Today the planner finds the best joint plan by enumerating every whole-workload candidate and pricing each one, and it keeps all of them in memory.
+The original motivating measurement was a growing prefix of one 10-query ASAPQuery mixed workload:
 
-That does not scale past a handful of queries. Planning a growing prefix of one 10-query workload of ASAPQuery's random mixed workloads:
-
-| Queries | Time | Peak memory |
+| Queries | Planning time | Peak memory |
 | ---: | ---: | ---: |
 | 3 | 0.4 s | 0.14 GB |
 | 4 | 5 s | 1.5 GB |
 | 5 | 129 s | 24.7 GB |
-| 6 | stopped at ~228 s | ~100 GB |
+| 6 | stopped around 228 s | around 100 GB |
 
-Each added query multiplies the work by roughly 20. None of the 30 workloads of that set plan jointly, and neither does the Kubernetes recording-rule set. Planned one query at a time, every query plans in milliseconds, but sharing across queries is lost.
+These are motivating observations, not performance guarantees for this proposal. The Cartesian product of per-target alternatives, subsets of sharing opportunities, and materialization assignments makes enumeration exponential. Streaming reduces retained candidates; it does not remove that time complexity. No exact algorithm here promises seconds on every workload.
 
-## Goals and non-goals
+Let `F` be the finite set of complete plans the reference generator admits for a fixed workload, rule inventory, parameter inventory, deployment capabilities, and evidence snapshot. For scalar minimization, exact search returns a feasible `P*` with `C(P*) = min(C(P) for P in F)`. For a Pareto request, it returns the complete nondominated objective set, with explicitly defined handling of equivalent plans.
 
-**Goals**
+This guarantee has three separate boundaries:
 
-- Joint planning of realistic workloads (tens of queries) in seconds and under a few GB.
-- **The same answer as exhaustive search.** Every pruning step below is exact under an additive cost: it only discards candidates that cannot be selected. The selected plan's cost equals the exhaustive search's.
-- When a search must stop early, it says so. Truncation is never silent.
+- **Search completeness:** no plan in `F` that could improve the requested result is lost. It says nothing about rewrites, sketch parameters, or window realizations absent from `F`.
+- **Model optimality:** `C` is the configured planner objective. An exact search can still choose a slow runtime plan when its cost or cardinality model is inaccurate. Empirical estimates are inputs to that model, not measured-runtime guarantees.
+- **Validity:** accepted plans must satisfy the existing semantic, output-accuracy, capability, and executability contracts. An empirical accuracy acceptance is exact relative to that declared evidence policy, not a new theoretical error guarantee.
 
-**Non-goals**
+Fix query recurrence, time ranges, pricing, measured costs, accuracy evidence, and tie handling for a search. A changed model invalidates cached costs and proof certificates. Nonfinite or unknown estimates never justify pruning. Unsupported cost models fall back to a weaker bound, including zero for a nonnegative scalar objective.
 
-- Changing what the stages decide: candidate generation rules, sharing rules, materializations, accuracy and cost checks stay as they are.
-- A solver-based formulation (MILP). That remains an option; see the last section.
-- Re-planning or incremental planning when the workload changes.
+**Tie contract:** preserving optimal cost need not preserve the same candidate ID. Define a deterministic total ranking for the new search, with stable reference rank for exact ties. The legacy relative-tolerance comparison is not transitive; stable IDs alone cannot reproduce its sequential winner after reordering. If legacy winner identity is required, replay the reference-order comparison for all potentially winning near-tie candidates, or keep that path exhaustive until an equivalent rule is proved. A Pareto report must say whether it preserves all equivalent plan identities or only one representative per objective vector. Changing the tie policy is a compatibility decision, not an exact-search optimization.
 
-## Where the candidates come from
+## Lessons from the survey
 
-The number of whole-workload candidates is the product of three factors:
-
-| Stage | Factor | Grows as |
+| Approach | Useful idea for ASAPPlanner | Exactness boundary |
 | --- | --- | --- |
-| Stage 1, Pass 1 | One per-computation candidate per target, combined across targets | product of the targets' candidate counts |
-| Stage 1, Pass 2 | Sharing alternatives of each composed candidate: identical expressions, summary capability, window composition, rollup, top-k reuse | subsets of the sharing opportunities |
-| Stage 2 | One materialization per summary build: at ingestion, at query time, at query time kept across evaluations | three per build |
+| System R-style DP; DPccp/DPhyp [1] | Memoize subproblems; exploit sparse interaction graphs; retain properties a parent needs. | A single cheapest subplan is safe only with optimal substructure. DPccp's cross-product-free join space is a restriction, not proof that arbitrary workload sharing is separable. |
+| Volcano/Cascades [2] | Groups of equivalent computations, required physical properties, cost limits, and memoized exploration. | A memo shares optimizer work. It does not automatically decide runtime sharing, materialization, or a correct state key. |
+| MQO and view selection [3, 4] | Model build-once/read-many decisions jointly; use greedy materialization as a practical incumbent. | Greedy MQO is heuristic. Approximation guarantees for a particular data-cube lattice or benefit function do not transfer to arbitrary ASAP DAGs. |
+| MILP [5] | Explicit coupled decisions, relaxations as lower bounds, solver incumbents and gaps. | Exact only for the encoded choices and objective. Linear cost approximations and omitted sharing modes can change the optimum. |
+| Rule passes and bounded/randomized search | Cheap simplification, branch ordering, and a predictable planning budget. | Restricting exploration is heuristic unless omitted alternatives are proved dominated. PostgreSQL explicitly documents this tradeoff for GEQO [6]. |
 
-Most of these candidates can never win. Either they lose to another candidate of the same query regardless of sharing, or their choices in one part of the workload do not affect any other part.
+The survey's `global_selection` discussion describes an earlier implementation, not an API this design assumes still exists. The proposal branch's current stage pipeline is documented in [`stage1_to_stage3.rs`](../../../crates/plan-selection/src/pass/stage1_to_stage3.rs); sharing rules in [`asap_aware_cse.rs`](../../../crates/logical-asap-optimization/src/asap_aware_cse.rs); and resource aggregation and ranking in [`plan-selection/src/lib.rs`](../../../crates/plan-selection/src/lib.rs). Audit those contracts when implementing each rule. The architecture below is an ASAPPlanner design derived from the survey, not a guarantee supplied by those papers.
 
-## Design
+## Review of the original six rules
 
-Six steps, applied in this order. Steps 1 to 5 are exact. Step 6 bounds the work and reports when it does.
+| Original rule | Correct classification | Required change |
+| --- | --- | --- |
+| Split queries by possible sharing | Conditionally exact. | Include every possible sharing/reuse edge and shared resource-accounting factor. Independent computation alone is insufficient with global budgets. |
+| Check each query's validity early | Exact for a rejection invariant under every remaining completion. | Defer failures that resizing, replacement, sharing, or later lowering can repair. Missing evidence for a provisional expression is not such a proof. |
+| Prune if `alone(c) - shareable(c) > best_alone(q)` | **Not generally exact**, even with additive operator costs. | A saving on one query is not a bound on the effect on all consumers. Replace with a workload branch bound or a completion-preserving replacement proof. |
+| Choose the cheapest materialization for unshared builds | Conditionally exact. | Prove isolation from other choices, including ancestors, shared inputs, memory/disk budgets, recurrence, and output lifetime. Otherwise keep a frontier. |
+| Always apply identical-expression sharing | Semantically safe only through the existing sharing legality checks; cost dominance is conditional. | Distinguish canonical representation from executing once. Retention, parallelism, copying, synchronization, and physical properties can favor recomputation. |
+| Stream candidates and stop at a budget | Streaming is exact if enumeration and selection are equivalent. Early stopping is not generally exact. | Keep unresolved work represented in the lower bound; report a feasible incumbent, gap, and completion status. |
 
-### 1. Independent components
+### Why the standalone subtraction rule is unsafe
 
-Two queries interact only through sharing. A Pass 2 rule can link them only if they read the same source and have a sharing opportunity between them: an identical sub-expression, a summary able to answer both, a rollup, or a top-k reuse.
+Consider two queries. Query A can choose candidate `c`, containing a shareable producer costing 10 and private work costing 6, or candidate `a`, costing 5. Query B alone costs 100. A permitted cross-query rewrite can answer B from `c`'s producer with 1 unit of adapter work; the producer is offered through `c`, and that rewrite is lost if `c` is removed.
 
-- Build a graph with one vertex per query and an edge for each possible sharing opportunity.
-- Plan each connected component on its own.
-- Because cost is additive across queries that share nothing, the workload's best plan is the union of each component's best plan.
+The old test uses `alone(c) = 16`, `shareable(c) = 10`, and `best_alone(A) = 5`. It discards `c` because `16 - 10 > 5`. Yet the joint plan using `c` costs `10 + 6 + 1 = 17`, versus `5 + 100 = 105` without that opportunity. The missing quantity is the benefit to B, not the part of A's own bill it might avoid. A reference generator that independently offers the producer even after replacing A might admit a different repair; that repair must be demonstrated, not assumed. Rollup rules that only reuse an already present finer computation make this distinction relevant.
 
-A workload over many metrics, such as a set of recording rules, splits into many small components. ASAPQuery's mixed workloads read two metrics, so they split into at most two components per workload.
+Even without this donor effect, whole-workload memory constraints can invalidate a standalone replacement that uses more memory. More generally, marginal cost cannot be assigned independently to each query when a shared build is paid once.
 
-### 2. Per-query validity before composition
+## Search representation and interaction analysis
 
-Some checks depend on one query's candidate only:
+### Memo groups and boundary state
 
-- whether the deployment supports the candidate's summaries;
-- whether the executor can run it;
-- whether its accuracy guarantee, or the deployment's evidence, meets the query's target.
+A memo group represents a computation with the same observable semantics. Its alternatives describe exact or summary implementations, their output guarantees, and legal physical realizations. Similar source names, matching hashes, or equal output column names do not establish equivalence.
 
-These run on each query's candidates before they are combined. Today they run in Stage 3, after composition, so invalid candidates still multiply the product.
+A search state records the unresolved choices and the interface through which already chosen work can affect them. Include, when observable:
 
-### 3. Lower-bound dominance
+- source identity, predicates, grouping, value/weight semantics, schema and row identity;
+- summary family, parameters, composed output guarantees, and consumer requirements;
+- evaluation frequencies, aligned windows, offsets, pane layout, and retention horizons;
+- ingestion/query phase, retained versus temporary output, storage medium, and required physical properties;
+- offered shared producers and consumer bindings, their adapters, and which costs are already counted;
+- boundary resource demands and active source-retention horizons needed for later composition.
 
-For each candidate *c* of query *q*:
+Consumers with different accuracy targets may need a shared producer sized for all of them. Sharing opportunities can be partial, overlap, or arise after an earlier rewrite. The state cannot be just a query ID, a count of consumers, or a scalar cost.
 
-- **alone(c):** the cost of *c* planned by itself, with its best materialization.
-- **shareable(c):** an upper bound on what sharing can save *c*. This is the cost of the parts of *c* that another query in the component could share.
+Two states may reuse a cached optimum only when every future completion observes the same interface and the same cost/evidence context. Hashes only find possible matches; verify structural and semantic equality. A bounded cache may evict entries and recompute later without losing exactness; a bounded beam discards search alternatives and does lose it.
 
-No joint plan containing *c* costs *q* less than **alone(c) − shareable(c)**. So *c* is discarded when
+### Conservative interaction hypergraph
 
-> alone(c) − shareable(c) > min over the other candidates c′ of q of alone(c′).
+Represent decisions as variables, and interactions as factors/hyperedges. Examples are a producer and all its potential readers, a summary shared by three consumers, a raw source's retention charge, and a workload resource constraint. Pairwise projection is sufficient to find connected components if it conservatively includes all members of every hyperedge.
 
-This also decides which sharing candidates are kept: a candidate whose sharing could still make it win stays, and every other candidate goes. A candidate with nothing to share has shareable(c) = 0, so only the query's cheapest candidates survive.
+Build potential sharing from **all alternatives and the registered rewrite closure**, not from the independent winner of each query. Include identical expression, capability, rollup, top-k, window/pane reuse, and within-query dependencies. A common metric name is neither necessary nor sufficient: aliases can name one source, and different predicates can prevent sharing.
 
-### 4. Local materialization choice
+Each sharing rule must expose a conservative summary of the sources, producers, consumers, and properties it might connect. If the analyzer cannot rule out an interaction, keep the decisions connected. New rules default to “may interact” until their interaction summary is implemented. False positives cost planning time; false negatives invalidate exactness.
 
-A summary build that no other query reads affects only its own query's cost. Its materialization is chosen locally: the cheapest of the three. Only builds read by several queries are chosen jointly. The Stage 2 factor shrinks from three per build to three per shared build.
+Whole-workload factors can sometimes be composed after solving computational components, but are not ignored. For example, raw disk retention is the **maximum** requested horizon per source in the current cost model, not the sum of each query's standalone disk use. Preserve that source interface or join its components. The analyzer must be conservative over transformations that introduce a new compatible window or producer, not merely direct matches in the initial graph.
 
-### 5. Sharing that never costs more
+## Exact pruning rules and their proof conditions
 
-Running an identical sub-expression once is never more expensive than running it twice. So the identical-expression rule is always applied, and its subsets are not enumerated.
+Here “exact” means the stated conditions are satisfied. It is a correctness property, not a promise that a rule removes many candidates or makes the workload fast.
 
-Two kinds of sharing can cost more, and keep both alternatives:
+The safest first implementation keeps exhaustive generation semantics and enables only duplicate elimination, completed-plan rejection, and an initially zero lower bound. Those preserve the result without assuming useful sharing savings. Component splitting, local DP, and forced sharing require additional certificates and remain disabled when their preconditions are unknown. Streaming is an execution strategy, not a new pruning theorem.
 
-- **Summary capability.** A shared summary is sized for its strictest reader, which can make it larger than either reader's own summary.
-- **Rollup.** Answering a coarse query from a finer summary can cost more than a summary of its own.
+### E1. Remove duplicate search states and equivalent complete plans
 
-### 6. Streaming selection and a search budget
+If two states have the same full interface, remaining legal choices, and resource/cost obligations, expand one and reuse its result for the other. Canonical node IDs or traversal order must not affect identity. Preserve alias/provenance information required by explanations and tie handling.
 
-- **Streaming.** Candidates are priced as they are generated, and only the best so far is kept. For cost model 3, the Pareto front is kept instead. The full candidate lists are kept only when a developer tool asks for them.
-- **Budget.** A budget on candidates priced, or on time, guards against a component that is still too large after steps 1 to 5.
-- **When the budget runs out:** selection returns the best plan found so far and marks the result as truncated, with how much of the space was searched. The default budget is large, so workloads that fit are never truncated.
+**Proof:** each discarded state has exactly the same completions and costs as its representative. This avoids repeated optimizer work without forcing shared runtime execution. Registering a legal common expression in a memo is different from deciding to materialize it once.
 
-## Cost model 3
+### E2. Reject permanently invalid branches
 
-Cost model 3 (the deployment's own cluster) is not additive: memory, disk and cores are hard limits, and the objective chooses among the candidates that fit. Steps 1 to 6 apply with these changes:
+Prune when no remaining completion can meet semantics, deployment capability, executability, or the query's output-accuracy policy. Examples are a fixed operator with no supported implementation and no remaining replacement, or a fixed unrepairable type error. A fixed raw-data requirement with raw retention forbidden is another example, provided no unresolved materialization can remove the query-time read.
 
-- **Step 1:** each component keeps its Pareto front over memory, disk and latency, not a single best plan. The workload's plans are the combinations of component fronts that fit the limits.
-- **Step 3:** a candidate is dominated only if another candidate of the same query is at least as good on every dimension, after the sharing bound.
+Per-query checks may run early only for this invariant subset. Otherwise carry obligations forward: shared resizing can improve accuracy; a different family can supply evidence; ingestion materialization can remove a raw read; later lowering can change an operator shape. Recheck final shared output guarantees and executor support on completed plans.
 
-## What the selection report shows
+Constraint propagation is another exact case: remove a domain value only after proving it has no support in a required constraint, even in a relaxation of the other decisions. An empty domain then rejects the branch. Pairwise arc consistency can be a cheap necessary check, but passing it does not prove that a globally feasible completion exists.
 
-- The components found.
-- For each query: how many candidates steps 2 and 3 discarded, and why.
-- For each component: how many candidates were priced, and whether the search was truncated.
+**Proof:** the branch's feasible completion set is empty. Treating absent evidence as rejection of a completed plan can follow the existing policy; treating it as permanent rejection before all relevant transformations is a different and generally unsafe step.
 
-## Validation
+### E3. Prune by an admissible workload lower bound
 
-- **Equivalence.** On the planner-layering examples, and on randomly generated workloads small enough to search exhaustively, the selected plan's cost equals the exhaustive search's. Each step is tested on its own.
-- **Scale.** Every workload of ASAPQuery's random mixed workloads, and the Kubernetes recording-rule set, plan jointly. The target is seconds and under 1 GB each. The report records time and peak memory.
+For a partial state `S`, compute `LB(S)` such that `LB(S) <= min C(P)` over its feasible completions. If a fully validated incumbent has objective `U`, discard `S` when its bound cannot beat the incumbent under the chosen tie rule. The default conservative scalar comparison is strict `LB(S) > U`, with numerical margins described below.
 
-## Relation to other search approaches
+A currently composed partial plan's cost is **not** automatically a lower bound: later sharing can remove work, and later rewrites can change the physical implementation. Only irrevocable, nonnegative charges can be accumulated without a proof of the remainder. The next section defines progressively stronger relaxations.
 
-A solver-based selection (MILP over candidate, sharing and materialization choices) could replace steps 3 to 6 later. Steps 1 and 2 would still apply, because they shrink the problem any solver receives. This design keeps the enumeration's exact semantics and makes it scale first.
+**Proof:** every completion costs at least the bound, so none improves the incumbent. Prune also when a conservative lower bound on a hard resource exceeds its limit. A sum that double-counts possibly shared memory or CPU is not a valid resource lower bound.
+
+### E4. Replace a state by a contextually dominating state
+
+For every completion of state B, there must be a feasible completion of A that preserves each query's output contract, exposes compatible boundary producers/properties, and is no worse on the requested objective and constrained resources. Then B can be removed. In a complete-plan comparison there is no unresolved context; use the actual whole-plan ranking directly.
+
+A practical sufficient certificate for partial states is the same boundary interface and a resource/cost vector no larger in every coordinate consumed by the monotone composition function. Keep alternatives with different useful orderings, summary capabilities, source horizons, recurrence/retention requirements, or accuracy guarantees unless the substitution proof covers those differences. A cheaper standalone candidate with fewer reusable outputs is not a dominating state.
+
+**Proof:** mapping every potentially winning completion of B to a no-worse completion of A preserves the optimum. Equal vectors are deduplicable only under the declared representative/tie policy. Context-free per-query Pareto pruning is not justified just because several metrics are recorded.
+
+### E5. Solve truly independent components separately
+
+If `F = F1 × ... × Fk`, feasibility factors, and `C(P) = sum Ci(Pi)`, choose a scalar optimum independently in each component. Potential interactions must have been analyzed conservatively as above.
+
+When feasibility is globally coupled, keep sufficient component alternatives and combine them through a global resource DP or search. A scalar cheapest plan per component can be infeasible in combination. If source-retention horizons or other properties cross the boundary, retain those properties or merge the components before applying the rule.
+
+**Proof:** the product of independent local optima minimizes the separable sum. With constraints, the same proof applies only after conditioning on a sufficient resource/boundary assignment. Merely reading different metrics does not prove independent capacity constraints.
+
+### E6. Eliminate local materialization choices only behind a complete interface
+
+An unshared build may still share a raw scan, overlap ancestor working memory, change required raw retention, or affect the latency path. Fix its boundary inputs, outputs, lifetimes, and physical requirements first. With no remaining interactions and a scalar separable objective, choose the cheapest legal local realization. With resource tradeoffs or an observable output property, retain the nondominated alternatives for that interface.
+
+For example, local option A costs 1 and uses 10 memory units, while B costs 2 and uses 1. Under a memory limit of 2, discarding B for A is incorrect even when no other query reads this build. A subtree DP is exact only after all externally visible dependencies are represented in its state.
+
+### E7. Force identical-expression sharing only with a physical dominance proof
+
+The existing [`ir/cse` legality checks](../../../crates/types/src/ir/cse.rs) establish which expressions may share without changing results; structural equality alone is insufficient for some unkeyed outputs. They do not prove that every shared physical realization is cheaper.
+
+A sufficient restricted case is a pure deterministic computation with the same inputs, evaluation domain, schema, precision, and required properties; executing it once preserves consumer scheduling, and every relevant build/read/storage/latency/resource charge is no larger. No extra retention, copying, synchronization, or incompatible placement may be introduced. Under that cost model, remove duplicate execution choices. Otherwise retain shared and recomputed alternatives, while still memoizing their common semantics.
+
+**Counterexample:** two evaluations can each compute a temporary result in memory 1, while a shared retained realization holds that result across a much longer horizon or must span multiple time slices. Saving CPU does not dominate retained memory. Different media, concurrency, and consumer schedules also require comparison.
+
+### E8. Condition on a separator, then optimize the remainder
+
+The survey's “enumerate shared nodes, then DP the rest” is exact when the separator fixes **all** coupling: producer choices, consumer bindings, sizes/guarantees, materialization, windows/retention, shared raw charges, and relevant resource interfaces. Given that assignment, solve conditionally independent residual subproblems and compose their resource profiles.
+
+Keeping only a shared node's presence bit is insufficient. Use variable elimination or tree-decomposition DP with full separator states. Complexity depends on domain sizes and induced width of the entire interaction graph, not simply the number of shared nodes or queries. Global resource constraints can enlarge the interface. This is an optional second search engine after conservative branch-and-bound, not a prerequisite for the first implementation.
+
+## Bounds and branch-and-bound
+
+### Safe bounds before sophisticated costing
+
+Start with bounds whose validity is easy to audit:
+
+1. **Zero:** valid for the configured nonnegative scalar objective. Weak but safe; reject negative or undefined inputs rather than assuming positivity.
+2. **Mandatory exclusive work:** charge a proven lower bound for operations that every completion must execute and cannot share or replace. Charge each distinct operation once. Set potentially shareable producers, adapters with unknown implementations, and unresolved materializations to zero.
+3. **Independent relaxed subproblems:** drop selected coupling constraints, allow conflicting choices to coexist, and optimize the remaining relaxed domains. The relaxation must contain every legal completion. Only sum terms whose accounting prevents double-counting; a sum of standalone query optima generally does not meet that requirement.
+4. **LP relaxation:** encode candidate/build/binding choices and valid cost/resource under-estimators, then relax integer decisions to continuous ones. The relaxation optimum is a bound on the encoded exact objective when every original feasible plan maps into the relaxed model. A surrogate cost with no one-sided relation supplies no certified bound.
+
+If a “sharing saving” is used, it must upper-bound the **total workload** saving under all completions, include benefits to other consumers, and count overlapping savings conservatively. That proof is harder than using an explicit relaxation. Do not implement the original per-query subtraction as an exact shortcut.
+
+An admissible bound need not be consistent between parent and child states for branch-and-bound correctness. A weak or zero bound can mean exhaustive exploration. Prefer a cheaply evaluated bound unless stronger pruning pays for its own planning overhead.
+
+### Incumbents and resource bounds
+
+Construct an initial feasible plan using standalone choices, then try compatible sharing and local improvement. A heuristic is useful here: each validated plan is a legitimate upper bound, even if it is far from optimal. If standalone choices violate a global budget, they are not an incumbent; search for a feasible one and report none if no plan has yet been found.
+
+For cluster constraints, derive lower bounds on peak memory, disk, and cores using the same accounting contracts as the final model. Drop positive terms or relax dependencies when safe; do not add mutually exclusive configurations. A latency bound can come from an unavoidable dependency path with lower-bounded operator costs, not from summing work that can run in parallel.
+
+For a requested Pareto front, an incumbent front may prune a branch only when every completion is dominated under the final strict-dominance/equality policy. A componentwise lower-bound vector helps: a feasible incumbent strictly dominating that bound dominates all completions under monotone aggregation. Equality is insufficient if equal-vector plan identities must be returned. A bound gap on one scalar objective does not certify an entire Pareto front.
+
+### Numerical comparisons and ties
+
+Current scalar ranking uses relative floating-point tolerance and retains an earlier candidate on a tie. Honor the tie contract above; do not let a different summation order create artificial dominance. Lower-bound arithmetic must round conservatively downward, or carry a justified error interval and prune only when its lower endpoint is strictly worse than the incumbent's upper endpoint, allowing for the ranking tolerance. An arbitrary epsilon is not a proof of numerical safety. Near ties and unknown bounds stay in the search. Stable ranks suffice for exact ties under a total ordering; the legacy tolerance case requires the additional compatibility handling described above.
+
+## Composition under the three cost models
+
+The implementation's `ResourceUsage` is the authority; cost model numbers are not evidence of additivity. In particular, model 1 can include a shared raw-retention disk charge and model 2 explicitly prices peaks.
+
+| Model | Final choice | State needed for safe composition |
+| --- | --- | --- |
+| 1: `UsageOverTime` | Price CPU, scans, average memory, and configured disk use. | Charge each physical producer and execution frequency once; preserve per-source raw-retention horizons and other nonadditive accounting. Scalar component optima require proven separability, including the active prices. |
+| 2: `ProvisionedCapacity` | Price peak memory, peak cores, and disk. | Keep peak/resource alternatives. Follow the current model's overlap assumptions; summing standalone price is not generally valid. |
+| 3: `ClusterCapacity` | Reject memory/disk/core violations; choose lowest latency, least memory, or a Pareto front. | Carry constrained dimensions including **cores**, objective tie dimensions, and any boundary source/physical properties needed by composition. A front only over memory, disk, and latency can discard the sole core-feasible plan. |
+
+A vector is sufficient only with a proved monotone composition rule for that interface. Under the current conservative all-evaluations-overlap memory model, some memory terms add. Disk retention combines by maximum per source; other retained state terms add. Worst-query latency combines by maximum for independent query groups, but changing a shared producer changes consumer paths. If a later model uses actual scheduling, an aggregate peak number may no longer suffice; retain a lifetime profile or disable that reduction.
+
+For truly independent components with additive resource coordinates, combine their frontiers by resource DP (or exact enumeration) and discard dominated combined states. Use the same boundary signature during dominance comparisons. Exact continuous/large-integer frontiers may be large: rounding to buckets or capping a frontier is heuristic unless it has a separately proved approximation guarantee. Peak cores can be a feasibility dimension even when the displayed final front is over memory, disk, and latency only.
+
+## Heuristics and what they give up
+
+These are useful strategies, but their role must be explicit:
+
+| Strategy | Safe use in an exact search | Approximate use that loses completeness |
+| --- | --- | --- |
+| Best standalone / greedy MQO / local improvement | Produce and validate incumbents. | Return the heuristic winner without finishing or certifying the remaining search. |
+| Estimated savings, learned cost, query “difficulty” | Choose variable and alternative order; keep every unresolved branch. | Prune on a predicted saving or a learned lower bound without a validity certificate. |
+| Per-query top-k, beam search, capped memo/front | Retain all alternatives externally and revisit them, or use only for ordering. | Drop all but k alternatives, potentially losing a donor producer or resource tradeoff. |
+| Split by metric, observed sharing, or connected components of current winners | Schedule exploration in groups. | Assume those groups cannot interact under unexamined alternatives. |
+| Always share equal expressions; always use the cheapest local materialization | Apply only after E6/E7 conditions are proved. | Force those choices on CPU-only intuition while ignoring retention and resource effects. |
+| Epsilon-dominance, resource buckets, coarser sketch/window parameters | Order candidates or supply a known relaxation with one-sided bounds. | Remove near-equivalent states or configurations; exactness then holds only for a deliberately restricted domain, if at all. |
+| Time, candidate, or memory budget | Pause with the full unresolved frontier represented; resume later. | Discard unresolved branches and claim completion, or report a gap that ignores dropped work. |
+
+Greedy benefit does not automatically have diminishing returns here: resizing for additional consumers, overlapping reuse choices, and raw-input alternatives can create complements and conflicts. Do not quote a `1 - 1/e` approximation factor without proving the necessary objective and constraint structure for this model. Randomized search must record its seed; reproducibility is not optimality.
+
+## Search procedure and stopping contract
+
+The initial implementation uses depth-first branch-and-bound with a memo and lazy candidate construction. Best-first search can be added later, but keeping every frontier state in RAM can recreate the original memory problem. Depth-first search must retain the bounds of pending siblings and not silently drop work under memory pressure.
+
+```text
+freeze workload, rewrite/parameter inventory, deployment inputs, and evidence
+build conservative interaction analysis and candidate groups lazily
+validate heuristic completions to seed an incumbent (or no incumbent yet)
+search(partial state):
+    reuse a memo result only under an equivalent full interface
+    reject permanently invalid branches (E2)
+    bound all legal completions with a conservative relaxation
+    reject branches certified infeasible or unable to improve (E3/E4)
+    if complete:
+        run the authoritative validity, resource, and ranking checks
+        update the incumbent or requested Pareto front
+    otherwise:
+        choose an unresolved decision; enumerate all legal alternatives lazily
+        explore promising alternatives first; record bounds for pending siblings
+        stop or suspend only with the unresolved work represented in the report
+```
+
+Completeness must hold across all stages. A streaming Stage 3 is insufficient if Stage 1 first constructs a whole Cartesian product or Stage 2 first constructs every materialization. Share unchanged IR through immutable references; instantiate full physical plans only when needed. Diagnostic candidate dumps are an opt-in stream with their own storage limits, not mandatory retained search state.
+
+Do not enumerate a full product to calculate a search percentage. After duplicate elimination and context-dependent rewriting, its size may be unknown. Report concrete counts and bounds rather than a fabricated fraction.
+
+For scalar minimization report:
+
+- the fixed rule/parameter/model/evidence versions and whether the candidate universe was restricted;
+- feasible incumbent and its objective `U`, or “no feasible plan found”;
+- a global lower bound `L`, or “bound unavailable”; when an incumbent exists, `L` must cover it and every unresolved branch, so use `min(U, all unresolved bounds)`;
+- additive gap `U - L`; relative gap `(U - L) / abs(U)` when `U != 0`; an explicit zero-objective convention rather than division by zero;
+- status: optimum certified, stopped with incumbent, stopped without incumbent, or infeasibility proved;
+- stop reason, time/peak memory, generated/expanded/pruned counts, rule-specific certificates, memo hits, and remaining work;
+- whether a heuristic **discarded** states, as distinct from merely ordering them. Include those states in a valid bound or mark the gap unavailable.
+
+A budget can end with an optimality certificate if all remaining bounds rule out improvement; exhaustion is not required. Conversely, “no feasible plan found” after a budget is not proof of infeasibility. A Pareto request reports front completeness separately from the status of any selected representative. Gap claims are with respect to the frozen planner model and `F`, not real runtime or a larger omitted rewrite space.
+
+## MILP as a relaxation and an alternative search
+
+A facility-selection-shaped model is a useful starting point: choose one complete query alternative per query, activate required producer configurations once, and bind every consumer to a compatible producer or recomputation alternative. Include adapters and consumer-specific readout costs; require the relevant provider whenever its consumer is selected; exclude cycles and incompatible bindings. Producer configurations must encode family, size, window, phase, and retention, not merely “a summary exists.”
+
+For a finite configuration inventory, binary choices can encode exact costs for those configurations without approximating the cost curve. The formulation is exact relative to `F` only if every legal generated plan is representable and every accepted solver solution is legal. Prove those two mappings on the oracle workloads. A compact model containing only some sharing patterns solves a different, restricted problem.
+
+Hard constraints must include memory, disk, cores, and per-query accuracy/latency requirements where configured. For example, one raw-source retention variable can represent the maximum selected horizon using constraints for every active reader and a nonnegative disk price; additional constraints or a canonical minimum assignment are needed when the price is zero and the horizon affects feasibility/reporting. Critical-path latency and peak memory need explicit encodings consistent with the current model, not a sum substituted for them. Reprice and validate extracted plans through the existing selection path.
+
+Relaxing a faithful formulation supplies lower bounds for E3. An integer solver provides incumbents and bounds for its model, subject to numerical tolerances. Piecewise approximations, continuous sketch sizing, and unsupported nonlinear costs require one-sided error bounds before their solver gap certifies anything about the original objective. A final original-model reprice validates the incumbent; it does not turn an invalid surrogate lower bound into a certificate.
+
+Prototype MILP beside the separator/branch-and-bound engine on small exact instances, and compare objective, feasibility, bound strength, planning time, and memory. Do not make a solver dependency mandatory before the simpler exact reductions have measured benefits.
+
+## Validation and implementation order
+
+### Acceptance criteria
+
+Use an independently retained exhaustive enumerator as the small-instance oracle. Freeze its candidate universe and compare optimum objective, feasibility, and the full requested Pareto vector set. Compare winner IDs only under the explicit stable tie contract. Search-node counts and memory are measurements, not equivalence evidence.
+
+Each implemented pruning rule must have:
+
+1. a statement of its preconditions and a proof or replacement witness;
+2. a failing-before counterexample for the unsafe version, plus a positive case where the safe rule prunes;
+3. exhaustive equivalence tests with the rule alone and in combination;
+4. counters showing its actual planning-time and memory benefit;
+5. a safe fallback when its assumptions are unknown.
+
+### Required adversarial workloads
+
+| Fixture | Property it tests |
+| --- | --- |
+| Donor producer costs 10, private work 6, standalone alternative 5; another consumer costs 100 or reads producer for 1. | Rejects the old standalone subtraction rule; preserves donor-dependent reuse. |
+| Unshared choices `(cost 1, memory 10)` and `(cost 2, memory 1)`, memory budget 2. | Cheapest-local pruning must retain the feasible tradeoff. |
+| Two disconnected computation groups each choose cheap/high-memory versus dear/low-memory. | Global capacity requires frontier combination, not independent scalar winners. |
+| Equal displayed memory/disk/latency, different core requirements, one over the core limit. | Cores remain a partial-state feasibility dimension. |
+| Same raw source with horizons 5 and 10; a rewrite exposes another compatible reader. | Per-source maximum is charged once; interaction analysis covers rewrite closure. |
+| A shared producer meets a stricter reader only after resizing; an unsupported provisional form has a supported replacement. | Provisional validity failures are deferred; completed output accuracy is rechecked. |
+| Same expression but different recurrence, lifetime, or physical property; sharing increases retained state. | Semantic equality alone cannot force a physical shared realization. |
+| Three consumers, partial sharing subsets, overlapping rollup/capability/pane opportunities. | Pairwise savings and consumer counts do not stand in for full boundary state. |
+| Structurally similar DAGs with different predicates, weights, unique keys, or guarantees; injected hash collisions. | Memo equality and CSE legality are checked beyond hashes. |
+| Multiple traversal orders, equal costs, zero costs, near floating-point ties, and unknown model terms. | Stable ranking, conservative bounds, and no pruning from undefined estimates. |
+| Stops before the first feasible plan, after an incumbent, and while pending branches have lower bounds below it. | Honest completion/infeasibility status and global bound accounting. |
+| Exact/approximate scalar search and full Pareto reporting with the same incumbent. | A scalar certificate is not mistaken for complete Pareto enumeration. |
+
+Generate small workloads with mixed recurrence, parameter sizes, accuracy evidence, capacities, and sharing patterns; for every visited branch check `LB <= oracle best completion` when a feasible completion exists. Also compare reported resource lower bounds with oracle completions and validate replacement witnesses. Test that changing a registered sharing rule or an evidence snapshot invalidates affected caches. For bounded search, increasing the expansion budget must never worsen the best objective in a deterministic resumed run; certificates must remain valid at every stop.
+
+### Implementation sequence
+
+| Step | Deliverable and guarantee | Measurement |
+| --- | --- | --- |
+| 1 | Lazy generation and streaming scalar/Pareto selection, unchanged feasible universe, explicit legacy-compatible or total-order tie handling, budget statuses. | Time to first feasible plan, total time, retained candidates, peak memory. |
+| 2 | Duplicate-state memoization, permanent-invalidity checks, and initial zero/exclusive-work bounds. | Rule-specific pruning, bound cost, cache hits, oracle equality. |
+| 3 | Conservative interaction analysis; separable components or exact component-frontier composition. | Component/separator sizes, frontier sizes, capacity cases, analysis cost. |
+| 4 | Validated heuristic incumbents and stronger relaxation bounds; all heuristics used for ordering first. | Bound versus incumbent trajectory, time to certificate, expansion count. |
+| 5 | Conditional local DP and sharing dominance only for proven interfaces; optional separator DP or MILP prototype. | Full oracle agreement, interface sizes, time/memory versus simpler search. |
+| 6 | Explicit approximate mode with beam/front caps or restricted domains, only if exact mode remains too expensive. | Optimality gap against the oracle, available certificates, reproducible budget/seed. |
+
+Run the planner-layering Examples 1–4, ASAPQuery's 30 mixed workloads, and the Kubernetes recording-rule workload. Report both exhaustive small-instance quality and large-instance scaling, including timeouts, missing coverage, and no-feasible-plan outcomes. “Tens of queries in seconds under a few GB” is a benchmark target; a giant interaction component or resource frontier may defeat it. Distinguish candidate-generation coverage, pruning speed, cost-model accuracy, and runtime correctness rather than attributing all four to search quality.
+
+## References
+
+1. [Moerkotte and Neumann, VLDB 2006: optimal bushy join trees without cross products](https://www.vldb.org/conf/2006/p930-moerkotte.pdf). Connected-subgraph enumeration within a defined join space; it does not justify deleting cross-query sharing choices.
+2. [Graefe, 1995: The Cascades Framework for Query Optimization](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf). Memoization, properties, and guided search.
+3. [Roy, Seshadri, Sudarshan, and Bhobe, SIGMOD 2000: Efficient and Extensible Algorithms for Multi Query Optimization](https://www.cse.iitb.ac.in/~sudarsha/Pubs-dir/mqo-sigmod00.pdf). Practical cost-based MQO heuristics, including greedy materialization.
+4. [The #671 survey and view-selection references](https://github.com/ProjectASAP/ASAPPlanner/issues/671#issuecomment-6137638876). Background and candidate directions, not proofs of this proposal's pruning rules.
+5. [Trummer and Koch: Solving the Join Ordering Problem via Mixed Integer Linear Programming](https://arxiv.org/abs/1511.02071). A finite join-order formulation with approximated costs; distinguish solver optimality from original-model optimality.
+6. [PostgreSQL documentation: genetic query optimization](https://www.postgresql.org/docs/17/runtime-config-query.html#RUNTIME-CONFIG-QUERY-GEQO). An explicit example of trading exhaustive search for planning time.
