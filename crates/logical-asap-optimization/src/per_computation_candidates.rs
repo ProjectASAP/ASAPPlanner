@@ -1660,8 +1660,10 @@ fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<Propaga
 /// values are or estimate, or `None`: [`samples_of_metric`]'s strict rule
 /// over a composed candidate. An exact sum accumulator, a renaming and a
 /// heap estimate whose update weights carry the
-/// [`WeightDomain::SamplesOfMetric`] requirement keep it; anything else
-/// (rate, arithmetic, other functions) ends it.
+/// [`WeightDomain::SamplesOfMetric`] requirement keep it, and so does a
+/// quantile estimate of those values: it is one of them, or between two of
+/// them, so it shares their sign. Anything else (rate, arithmetic, other
+/// functions) ends it. Only the sign of the values is read from it.
 fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
     match &node.operator {
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap()? {
@@ -1669,6 +1671,23 @@ fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
                 family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
                 child,
                 filter: None,
+                ..
+            } => estimates_samples_of(child),
+            _ => None,
+        },
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query: SketchStatistic::Quantile { .. },
+        }) => match summary_input.asap()? {
+            ASAPOp::SummaryAgg {
+                input:
+                    SummaryUpdate {
+                        item: None,
+                        weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+                        ..
+                    },
+                filter: None,
+                child,
                 ..
             } => estimates_samples_of(child),
             _ => None,

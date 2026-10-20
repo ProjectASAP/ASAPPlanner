@@ -290,8 +290,8 @@ query's window comes from its text (range and offset). These facts are separate:
 `DataWorkload` holds `arrival` (`DataArrival`: `AtRest`, `Ingesting` or
 `Mixed` with `rows_per_second`, or `Unknown`) and `sources`, a map from
 PromQL metric or SQL table name to `SourceFacts`: `series_count`,
-`metric_type`, `sample_interval` (PromQL and MetricsQL), `stream_norms` and
-`max_distinct_per_evaluation`. Every fact is declared: the planner has no
+`metric_type`, `values_non_negative`, `sample_interval` (PromQL and
+MetricsQL), `stream_norms` and `max_distinct_per_evaluation`. Every fact is declared: the planner has no
 clock, so a caller drops facts that no longer hold before planning. Plan
 selection bounds a query's number of values `G`, and its input row count,
 by the `series_count` of the sources it reads, counting each branch of an

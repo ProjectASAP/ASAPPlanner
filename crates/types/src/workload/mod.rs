@@ -510,6 +510,14 @@ pub struct SourceFacts {
     /// undeclared metric's samples may take any value.
     #[serde(default)]
     pub metric_type: Option<MetricType>,
+    /// Whether every sample of the metric is non-negative (default `false`:
+    /// unknown). A counter's samples always are; this declares it for a
+    /// gauge, such as a latency or a queue length. The deployment must
+    /// ensure it. Plan selection reads it as the sign of the metric's
+    /// samples, which a relative-error bound needs to carry through a
+    /// `sum` or `avg`. Omitted from JSON when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub values_non_negative: bool,
     /// PromQL and MetricsQL only: how often each series of the metric
     /// receives a sample (default: unknown). A bare instant selector over
     /// the metric reads the latest sample within it; lowering such a
@@ -1168,6 +1176,7 @@ mod tests {
                     SourceFacts {
                         series_count: Some(10_000),
                         metric_type: Some(MetricType::Counter),
+                        values_non_negative: true,
                         sample_interval: Some(DurationMs(15_000)),
                         stream_norms: Some(StreamNorms {
                             l1: Some(1e9),
@@ -1187,6 +1196,7 @@ mod tests {
                 "sources": {"requests_total": {
                     "series_count": 10000,
                     "metric_type": "counter",
+                    "values_non_negative": true,
                     "sample_interval": 15000,
                     "stream_norms": {"l1": 1e9, "l2": null},
                     "max_distinct_per_evaluation": 100

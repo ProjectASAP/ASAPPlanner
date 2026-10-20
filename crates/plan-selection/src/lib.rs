@@ -1723,6 +1723,17 @@ pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDo
     domain.confirmed(|metric| declared_counter(data, metric))
 }
 
+/// Whether `data` declares every sample of `metric` non-negative: the
+/// metric is declared a counter, or a metric (a gauge, say) with
+/// [`SourceFacts::values_non_negative`](asap_types::workload::SourceFacts::values_non_negative).
+fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
+    declared_counter(data, metric)
+        || data
+            .sources
+            .get(metric)
+            .is_some_and(|facts| facts.values_non_negative)
+}
+
 /// Whether `data` declares `metric` a counter. A declared type does not
 /// expire, so its evidence is not checked.
 fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
@@ -1844,9 +1855,10 @@ fn bind_statistics(
 /// metric's samples, from its declared type.
 fn workload_statistic(statistic: &str, series: Option<u64>, data: &DataWorkload) -> Option<f64> {
     // The sign of one metric's samples: proven (1) when the metric is
-    // declared a counter; no type is inferred from its name.
+    // declared a counter or declared non-negative; nothing is inferred from
+    // its name.
     if let Some(metric) = parse_samples_sign_statistic(statistic) {
-        return declared_counter(data, metric).then_some(1.0);
+        return declared_non_negative(data, metric).then_some(1.0);
     }
     if statistic == INPUT_ROW_COUNT {
         return series.map(|rows| rows as f64);
@@ -5215,6 +5227,66 @@ mod tests {
                 .find(|c| c.id == selection.selected)
                 .unwrap();
             assert_eq!(has_summary_estimate(selected), sketch_wins, "{selection:?}");
+        }
+    }
+
+    /// The candidates of `query` that build a DDSketch.
+    fn ddsketch_candidates(candidates: &[PhysicalCandidate]) -> Vec<String> {
+        candidates
+            .iter()
+            .filter(|c| {
+                c.dag.nodes.iter().any(|node| {
+                    matches!(&node.payload,
+                        Payload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+                            if kind.algorithm() == &SketchAlgorithm::DDSketch)
+                })
+            })
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    /// A per-series DDSketch quantile is within a relative error, which
+    /// carries through `avg` and `sum` only over non-negative values, and
+    /// through `max` whatever their sign. With `x` declared a gauge whose
+    /// samples are non-negative, the DDSketch candidate of
+    /// `avg by (region) (quantile_over_time(0.99, x[100s]))` (and of its `sum`)
+    /// is valid and accepted with a relative-error guarantee; without the
+    /// declaration it is rejected. `max` is valid either way (issue #772).
+    #[test]
+    fn a_non_negative_gauge_carries_a_ddsketch_relative_bound_through_avg() {
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.01)
+            .accuracy_metric(AccuracyMetric::Relative);
+        for (outer, needs_sign) in [("avg", true), ("sum", true), ("max", false)] {
+            let query = format!("{outer} by (region) (quantile_over_time(0.99, x[100s]))");
+            let candidates = all_candidates(&query, &target);
+            let ddsketch = ddsketch_candidates(&candidates);
+            assert!(!ddsketch.is_empty(), "{query}");
+            for values_non_negative in [true, false] {
+                let mut data = with_metric_types(data(), &[("x", MetricType::Gauge)]);
+                data.sources.get_mut("x").unwrap().values_non_negative = values_non_negative;
+                let selection = select_plan(
+                    &candidates,
+                    &[entry_with(target.clone(), repeating(10_000))],
+                    &data,
+                    PlanningModels::builtin(),
+                )
+                .unwrap();
+                for id in &ddsketch {
+                    let accepted = selection.accepted.get(id);
+                    if values_non_negative || !needs_sign {
+                        let [accepted] = accepted.map(Vec::as_slice).unwrap_or_default() else {
+                            panic!("{query}, {id} not valid: {:?}", selection.rejected);
+                        };
+                        assert_eq!(accepted.accepted_metric, Some(AccuracyMetric::Relative));
+                        assert!(!accepted.accepted_regardless_of_guarantee);
+                    } else {
+                        assert!(accepted.is_none(), "{query}, {id}: {accepted:?}");
+                        let rejection = selection.rejected.iter().find(|r| &r.id == id).unwrap();
+                        assert!(rejection.cause.failed_a_check(), "{rejection:?}");
+                    }
+                }
+            }
         }
     }
 
