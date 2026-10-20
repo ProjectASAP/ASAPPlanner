@@ -2,7 +2,7 @@
 
 Status: proposal; no new pruning rule is implemented by this document. Audience: planner designers and implementers.
 
-ASAPPlanner must search a workload's candidate plans without retaining or pricing every combination. The design keeps the decisions in [planner-layering.md](planner-layering.md), and changes how those decisions are explored. It incorporates the [optimizer survey in #671](https://github.com/ProjectASAP/ASAPPlanner/issues/671#issuecomment-6137638876) and revises the original exactness claims in [#776](https://github.com/ProjectASAP/ASAPPlanner/pull/776).
+ASAPPlanner must search a workload's candidate plans without retaining or pricing every combination. The design keeps the decisions in [planner-layering.md](planner-layering.md), and changes how those decisions are explored. It builds on the [optimizer survey in #671](https://github.com/ProjectASAP/ASAPPlanner/issues/671#issuecomment-6137638876).
 
 **Decision:** build a streaming, memoized branch-and-bound search with conservative interaction analysis. Enable a pruning rule only when its preconditions establish that it preserves the optimum. Use greedy search to find incumbents and order exploration; discarding alternatives by a heuristic is a separately reported approximation mode. A memo, dynamic programming, or a MILP solver does not by itself make workload sharing exact.
 
@@ -10,7 +10,6 @@ ASAPPlanner must search a workload's candidate plans without retaining or pricin
 
 - [Problem and scope of the guarantee](#problem-and-scope-of-the-guarantee)
 - [Lessons from the survey](#lessons-from-the-survey)
-- [Review of the original six rules](#review-of-the-original-six-rules)
 - [Search representation and interaction analysis](#search-representation-and-interaction-analysis)
 - [Exact pruning rules and their proof conditions](#exact-pruning-rules-and-their-proof-conditions)
 - [Bounds and branch-and-bound](#bounds-and-branch-and-bound)
@@ -23,7 +22,7 @@ ASAPPlanner must search a workload's candidate plans without retaining or pricin
 
 ## Problem and scope of the guarantee
 
-The original motivating measurement was a growing prefix of one 10-query ASAPQuery mixed workload:
+A motivating measurement was a growing prefix of one 10-query ASAPQuery mixed workload:
 
 | Queries | Planning time | Peak memory |
 | ---: | ---: | ---: |
@@ -56,26 +55,7 @@ Fix query recurrence, time ranges, pricing, measured costs, accuracy evidence, a
 | MILP [5](https://arxiv.org/abs/1511.02071) | Explicit coupled decisions, relaxations as lower bounds, solver incumbents and gaps. | Exact only for the encoded choices and objective. Linear cost approximations and omitted sharing modes can change the optimum. |
 | Rule passes and bounded/randomized search | Cheap simplification, branch ordering, and a predictable planning budget. | Restricting exploration is heuristic unless omitted alternatives are proved dominated. PostgreSQL explicitly documents this tradeoff for GEQO [6](https://www.postgresql.org/docs/17/runtime-config-query.html#RUNTIME-CONFIG-QUERY-GEQO). |
 
-The survey's `global_selection` discussion describes an earlier implementation, not an API this design assumes still exists. The proposal branch's current stage pipeline is documented in [`stage1_to_stage3.rs`](../../../crates/plan-selection/src/pass/stage1_to_stage3.rs); sharing rules in [`asap_aware_cse.rs`](../../../crates/logical-asap-optimization/src/asap_aware_cse.rs); and resource aggregation and ranking in [`plan-selection/src/lib.rs`](../../../crates/plan-selection/src/lib.rs). Audit those contracts when implementing each rule. The architecture below is an ASAPPlanner design derived from the survey, not a guarantee supplied by those papers.
-
-## Review of the original six rules
-
-| Original rule | Correct classification | Required change |
-| --- | --- | --- |
-| Split queries by possible sharing | Conditionally exact. | Include every possible sharing/reuse edge and shared resource-accounting factor. Independent computation alone is insufficient with global budgets. |
-| Check each query's validity early | Exact for a rejection invariant under every remaining completion. | Defer failures that resizing, replacement, sharing, or later lowering can repair. Missing evidence for a provisional expression is not such a proof. |
-| Prune if `alone(c) - shareable(c) > best_alone(q)` | **Not generally exact**, even with additive operator costs. | A saving on one query is not a bound on the effect on all consumers. Replace with a workload branch bound or a completion-preserving replacement proof. |
-| Choose the cheapest materialization for unshared builds | Conditionally exact. | Prove isolation from other choices, including ancestors, shared inputs, memory/disk budgets, recurrence, and output lifetime. Otherwise keep a frontier. |
-| Always apply identical-expression sharing | Semantically safe only through the existing sharing legality checks; cost dominance is conditional. | Distinguish canonical representation from executing once. Retention, parallelism, copying, synchronization, and physical properties can favor recomputation. |
-| Stream candidates and stop at a budget | Streaming is exact if enumeration and selection are equivalent. Early stopping is not generally exact. | Keep unresolved work represented in the lower bound; report a feasible incumbent, gap, and completion status. |
-
-### Why the standalone subtraction rule is unsafe
-
-Consider two queries. Query A can choose candidate `c`, containing a shareable producer costing 10 and private work costing 6, or candidate `a`, costing 5. Query B alone costs 100. A permitted cross-query rewrite can answer B from `c`'s producer with 1 unit of adapter work; the producer is offered through `c`, and that rewrite is lost if `c` is removed.
-
-The old test uses `alone(c) = 16`, `shareable(c) = 10`, and `best_alone(A) = 5`. It discards `c` because `16 - 10 > 5`. Yet the joint plan using `c` costs `10 + 6 + 1 = 17`, versus `5 + 100 = 105` without that opportunity. The missing quantity is the benefit to B, not the part of A's own bill it might avoid. A reference generator that independently offers the producer even after replacing A might admit a different repair; that repair must be demonstrated, not assumed. Rollup rules that only reuse an already present finer computation make this distinction relevant.
-
-Even without this donor effect, whole-workload memory constraints can invalidate a standalone replacement that uses more memory. More generally, marginal cost cannot be assigned independently to each query when a shared build is paid once.
+The implementation boundaries are documented in [`stage1_to_stage3.rs`](../../../crates/plan-selection/src/pass/stage1_to_stage3.rs); sharing rules in [`asap_aware_cse.rs`](../../../crates/logical-asap-optimization/src/asap_aware_cse.rs); and resource aggregation and ranking in [`plan-selection/src/lib.rs`](../../../crates/plan-selection/src/lib.rs). Audit those contracts when implementing each rule. The following sections define the search state, pruning conditions, and execution procedure for ASAPPlanner.
 
 ## Search representation and interaction analysis
 
@@ -144,6 +124,8 @@ A practical sufficient certificate for partial states is the same boundary inter
 
 **Proof:** mapping every potentially winning completion of B to a no-worse completion of A preserves the optimum. Equal vectors are deduplicable only under the declared representative/tie policy. Context-free per-query Pareto pruning is not justified just because several metrics are recorded.
 
+**Example: preserve benefits to other queries.** Query A can use a producer costing 10 plus private work costing 6, or an independent alternative costing 5. Query B costs 100 independently, but a permitted reuse rewrite can answer it from A's producer with 1 unit of adapter work. Keeping the producer gives a joint cost of `10 + 6 + 1 = 17`; removing that opportunity gives `5 + 100 = 105`. A replacement of A must preserve B's access to that producer, or account for the loss in the whole-workload comparison. The producer's own cost is not an upper bound on the saving it enables for other consumers.
+
 ### E5. Solve truly independent components separately
 
 If `F = F1 × ... × Fk`, feasibility factors, and `C(P) = sum Ci(Pi)`, choose a scalar optimum independently in each component. Potential interactions must have been analyzed conservatively as above.
@@ -183,7 +165,7 @@ Start with bounds whose validity is easy to audit:
 3. **Independent relaxed subproblems:** drop selected coupling constraints, allow conflicting choices to coexist, and optimize the remaining relaxed domains. The relaxation must contain every legal completion. Only sum terms whose accounting prevents double-counting; a sum of standalone query optima generally does not meet that requirement.
 4. **LP relaxation:** encode candidate/build/binding choices and valid cost/resource under-estimators, then relax integer decisions to continuous ones. The relaxation optimum is a bound on the encoded exact objective when every original feasible plan maps into the relaxed model. A surrogate cost with no one-sided relation supplies no certified bound.
 
-If a “sharing saving” is used, it must upper-bound the **total workload** saving under all completions, include benefits to other consumers, and count overlapping savings conservatively. That proof is harder than using an explicit relaxation. Do not implement the original per-query subtraction as an exact shortcut.
+If a “sharing saving” is used, it must upper-bound the **total workload** saving under all completions, include benefits to other consumers, and count overlapping savings conservatively. That proof is harder than using an explicit relaxation. Use workload-level bounds rather than subtracting a query-local sharing estimate from its standalone cost.
 
 An admissible bound need not be consistent between parent and child states for branch-and-bound correctness. A weak or zero bound can mean exhaustive exploration. Prefer a cheaply evaluated bound unless stronger pruning pays for its own planning overhead.
 
@@ -288,7 +270,7 @@ Use an independently retained exhaustive enumerator as the small-instance oracle
 Each implemented pruning rule must have:
 
 1. a statement of its preconditions and a proof or replacement witness;
-2. a failing-before counterexample for the unsafe version, plus a positive case where the safe rule prunes;
+2. an adversarial case where its preconditions do not hold, plus a positive case where the rule prunes;
 3. exhaustive equivalence tests with the rule alone and in combination;
 4. counters showing its actual planning-time and memory benefit;
 5. a safe fallback when its assumptions are unknown.
@@ -297,7 +279,7 @@ Each implemented pruning rule must have:
 
 | Fixture | Property it tests |
 | --- | --- |
-| Donor producer costs 10, private work 6, standalone alternative 5; another consumer costs 100 or reads producer for 1. | Rejects the old standalone subtraction rule; preserves donor-dependent reuse. |
+| Donor producer costs 10, private work 6, standalone alternative 5; another consumer costs 100 or reads producer for 1. | Preserves donor-dependent reuse when evaluating candidate replacements. |
 | Unshared choices `(cost 1, memory 10)` and `(cost 2, memory 1)`, memory budget 2. | Cheapest-local pruning must retain the feasible tradeoff. |
 | Two disconnected computation groups each choose cheap/high-memory versus dear/low-memory. | Global capacity requires frontier combination, not independent scalar winners. |
 | Equal displayed memory/disk/latency, different core requirements, one over the core limit. | Cores remain a partial-state feasibility dimension. |
