@@ -4,12 +4,11 @@ Status: proposal; no new pruning rule is implemented by this document. Audience:
 
 ASAPPlanner must search a workload's candidate plans without retaining or pricing every combination. The design keeps the decisions in [planner-layering.md](planner-layering.md), and changes how those decisions are explored. It builds on the [optimizer survey in #671](https://github.com/ProjectASAP/ASAPPlanner/issues/671#issuecomment-6137638876).
 
-**Decision:** build a streaming, memoized branch-and-bound search with conservative interaction analysis. Enable a pruning rule only when its preconditions establish that it preserves the optimum. Use greedy search to find incumbents and order exploration; discarding alternatives by a heuristic is a separately reported approximation mode. A memo, dynamic programming, or a MILP solver does not by itself make workload sharing exact.
-
 ## Contents
 
 - [Problem and scope of the guarantee](#problem-and-scope-of-the-guarantee)
-- [Lessons from the survey](#lessons-from-the-survey)
+- [Survey of optimizer search approaches](#survey-of-optimizer-search-approaches)
+- [Implications for ASAPPlanner and proposed approach](#implications-for-asapplanner-and-proposed-approach)
 - [Search representation and interaction analysis](#search-representation-and-interaction-analysis)
 - [Exact pruning rules and their proof conditions](#exact-pruning-rules-and-their-proof-conditions)
 - [Bounds and branch-and-bound](#bounds-and-branch-and-bound)
@@ -45,7 +44,47 @@ Fix query recurrence, time ranges, pricing, measured costs, accuracy evidence, a
 
 **Tie contract:** preserving optimal cost need not preserve the same candidate ID. Define a deterministic total ranking for the new search, with stable reference rank for exact ties. The legacy relative-tolerance comparison is not transitive; stable IDs alone cannot reproduce its sequential winner after reordering. If legacy winner identity is required, replay the reference-order comparison for all potentially winning near-tie candidates, or keep that path exhaustive until an equivalent rule is proved. A Pareto report must say whether it preserves all equivalent plan identities or only one representative per objective vector. Changing the tie policy is a compatibility decision, not an exact-search optimization.
 
-## Lessons from the survey
+## Survey of optimizer search approaches
+
+The approaches below differ in what they enumerate, what they memoize, and which alternatives they discard. Their guarantees apply to their specified plan spaces and cost models. This survey presents those mechanisms before choosing how to use them in ASAPPlanner.
+
+### Bottom-up dynamic programming: System R, DPccp, and DPhyp
+
+[System R](https://research.ibm.com/publications/access-path-selection-in-a-relational-database-management-system) builds plans for progressively larger relation subsets. For each subproblem it retains cheap alternatives and useful physical properties, notably interesting orders that can reduce later sorting costs. The classic search concentrates on left-deep join plans. The recurrence relies on optimal substructure: once the subset and relevant properties are fixed, a more expensive equivalent subplan need not be reconsidered in every parent.
+
+[DPccp](https://www.vldb.org/conf/2006/p930-moerkotte.pdf) enumerates connected subgraphs and their connected complements to generate bushy join trees without cross products. [DPhyp](https://15721.courses.cs.cmu.edu/spring2020/papers/20-optimizer2/p539-moerkotte.pdf) extends the graph treatment to hypergraphs and more complex join predicates. These methods reduce enumeration work by exploiting query structure; they do not make arbitrary plan spaces polynomial. Their exactness is relative to the join alternatives and properties they retain.
+
+### Top-down memoization: Volcano and Cascades
+
+[Volcano/Cascades](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf) organizes equivalent expressions into memo groups. Transformation rules add equivalent expressions; implementation rules supply physical alternatives. Optimization requests include required properties, so the same logical group can have different winners for different contexts. A parent requests child implementations, combines their costs, and can stop exploring an alternative when a valid cost limit rules it out.
+
+The memo avoids optimizing the same subproblem repeatedly. Branch-and-bound avoids completing alternatives that cannot improve a known result. These mechanisms depend on sufficient property keys and valid bounds; storing equivalent expressions together does not itself decide whether their runtime results should be computed once and shared.
+
+### Ordered rule passes: DataFusion
+
+[DataFusion's optimizer documentation](https://datafusion.apache.org/library-user-guide/query-optimizer.html) describes logical optimizer rules, configurable rule sets, and repeated passes. Rules simplify expressions, push predicates and projections, and rewrite plan structure. Physical optimization is a separate phase concerned with executable plans and their requirements.
+
+Rule application can reduce work without explicitly searching every equivalent plan. A pass limit or fixed point describes when rewriting stops; it is not a certificate that the globally cheapest plan has been examined. Correctness of each rewrite and completeness of cost-based search are separate properties. A rule pipeline can also serve as preprocessing for an enumerator or memo-based search.
+
+### Joint sharing and materialization: multi-query optimization
+
+[Multi-query optimization by Roy et al.](https://arxiv.org/abs/cs/9910021) extends optimizer reasoning to common subexpressions across queries. A shared expression can be built once, materialized, and read by several consumers. Its benefit depends on the readers, their alternatives, and the cost of materialization and reuse. The paper presents Volcano-based and greedy cost-based heuristics rather than a general exhaustive-optimum guarantee.
+
+[Materialized-view selection in data cubes](https://dsf.berkeley.edu/cs286/papers/datacube-sigmod1996.pdf) studies which aggregate views to retain under a space constraint, exploiting relationships between views in a lattice. Its greedy results rely on that problem's benefit and constraint structure. General workload DAGs can have overlapping sharing opportunities and incompatible configurations, so the same approximation guarantee requires a separate proof.
+
+### Mathematical optimization: MILP
+
+[Trummer and Koch](https://arxiv.org/abs/1511.02071) encode join-order and implementation decisions as binary variables with constraints restricting legal plans. Their formulation searches left-deep plans and approximates operation costs with linear functions. A solver can return a feasible incumbent, a bound, and an optimality gap for the formulation.
+
+This separates the combinatorial search from its implementation, but the encoding must cover the intended alternatives and resource constraints. Solver optimality concerns the encoded objective. Cost approximations and omitted physical choices determine how that result relates to the original planning problem.
+
+### Bounded and randomized search
+
+Greedy choice, local improvement, beam search, and randomized exploration limit the planning effort spent on large spaces. [PostgreSQL documents GEQO](https://www.postgresql.org/docs/17/runtime-config-query.html#RUNTIME-CONFIG-QUERY-GEQO) as a heuristic alternative for large join problems that can produce plans inferior to exhaustive search.
+
+These techniques can find useful plans quickly. Used only to order a complete search or provide feasible incumbents, they do not remove its eventual optimality guarantee. Used to discard alternatives or stop without a certificate, they trade completeness for planning time.
+
+## Implications for ASAPPlanner and proposed approach
 
 | Approach | Useful idea for ASAPPlanner | Exactness boundary |
 | --- | --- | --- |
@@ -55,13 +94,15 @@ Fix query recurrence, time ranges, pricing, measured costs, accuracy evidence, a
 | MILP [5](https://arxiv.org/abs/1511.02071) | Explicit coupled decisions, relaxations as lower bounds, solver incumbents and gaps. | Exact only for the encoded choices and objective. Linear cost approximations and omitted sharing modes can change the optimum. |
 | Rule passes and bounded/randomized search | Cheap simplification, branch ordering, and a predictable planning budget. | Restricting exploration is heuristic unless omitted alternatives are proved dominated. PostgreSQL explicitly documents this tradeoff for GEQO [6](https://www.postgresql.org/docs/17/runtime-config-query.html#RUNTIME-CONFIG-QUERY-GEQO). |
 
+**Decision:** build a streaming, memoized branch-and-bound search with conservative interaction analysis. Enable a pruning rule only when its preconditions establish that it preserves the optimum. Use greedy search to find incumbents and order exploration; discarding alternatives by a heuristic is a separately reported approximation mode. A memo, dynamic programming, or a MILP solver does not by itself make workload sharing exact.
+
 The implementation boundaries are documented in [`stage1_to_stage3.rs`](../../../crates/plan-selection/src/pass/stage1_to_stage3.rs); sharing rules in [`asap_aware_cse.rs`](../../../crates/logical-asap-optimization/src/asap_aware_cse.rs); and resource aggregation and ranking in [`plan-selection/src/lib.rs`](../../../crates/plan-selection/src/lib.rs). Audit those contracts when implementing each rule. The following sections define the search state, pruning conditions, and execution procedure for ASAPPlanner.
 
 ## Search representation and interaction analysis
 
 ### Memo groups and boundary state
 
-A memo group represents a computation with the same observable semantics. Its alternatives describe exact or summary implementations, their output guarantees, and legal physical realizations. Similar source names, matching hashes, or equal output column names do not establish equivalence.
+**Memo group** is established database-optimizer terminology: a group of logically equivalent expressions in the optimizer's memo. See [Graefe's Cascades paper, Section 2](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf) and [CockroachDB's optimizer documentation, “Memo”](https://github.com/cockroachdb/cockroach/blob/master/pkg/sql/opt/doc.go#memo). Here, a group represents a computation with the same observable semantics. Its alternatives describe exact or summary implementations, their output guarantees, and legal physical realizations. Similar source names, matching hashes, or equal output column names do not establish equivalence.
 
 A search state records the unresolved choices and the interface through which already chosen work can affect them. Include, when observable:
 
@@ -315,3 +356,8 @@ Run the planner-layering Examples 1–4, ASAPQuery's 30 mixed workloads, and the
 4. [The #671 survey and view-selection references](https://github.com/ProjectASAP/ASAPPlanner/issues/671#issuecomment-6137638876). Background and candidate directions, not proofs of this proposal's pruning rules.
 5. [Trummer and Koch: Solving the Join Ordering Problem via Mixed Integer Linear Programming](https://arxiv.org/abs/1511.02071). A finite join-order formulation with approximated costs; distinguish solver optimality from original-model optimality.
 6. [PostgreSQL documentation: genetic query optimization](https://www.postgresql.org/docs/17/runtime-config-query.html#RUNTIME-CONFIG-QUERY-GEQO). An explicit example of trading exhaustive search for planning time.
+7. [Selinger et al., SIGMOD 1979: Access Path Selection in a Relational Database Management System](https://research.ibm.com/publications/access-path-selection-in-a-relational-database-management-system). System R's cost-based access-path and join planning.
+8. [Moerkotte and Neumann, SIGMOD 2008: Dynamic Programming Strikes Back](https://15721.courses.cs.cmu.edu/spring2020/papers/20-optimizer2/p539-moerkotte.pdf). Hypergraph-based join enumeration with DPhyp.
+9. [Apache DataFusion: Query Optimizer](https://datafusion.apache.org/library-user-guide/query-optimizer.html). Logical rule passes and optimizer customization.
+10. [Harinarayan, Rajaraman, and Ullman, SIGMOD 1996: Implementing Data Cubes Efficiently](https://dsf.berkeley.edu/cs286/papers/datacube-sigmod1996.pdf). Materialized-view selection over a data-cube lattice.
+11. [CockroachDB optimizer package documentation: Memo](https://github.com/cockroachdb/cockroach/blob/master/pkg/sql/opt/doc.go#memo). Defines memo groups and illustrates equivalent join expressions in the same group.
