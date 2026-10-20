@@ -940,9 +940,10 @@ pub(crate) fn partitions_over(
 }
 
 /// The metric whose raw samples, or plain sums of them, are every value
-/// `node` outputs, or `None`. Only a time-series scan, a time range over it
-/// and a plain `sum` keep that; any other operator (rate and arithmetic
-/// included) ends it. The metric's type is not read here: whether its
+/// `node` outputs, or `None`. Only a time-series scan, a time range over it,
+/// an `offset`-only time shift (it moves the window, not the samples) and a
+/// plain `sum` keep that; any other operator (rate and arithmetic included)
+/// ends it. The metric's type is not read here: whether its
 /// samples are non-negative is plan selection's question
 /// ([`WeightDomain::SamplesOfMetric`]).
 pub(crate) fn samples_of_metric(node: &OperatorNode) -> Option<String> {
@@ -952,6 +953,7 @@ pub(crate) fn samples_of_metric(node: &OperatorNode) -> Option<String> {
             ..
         } => Some(metric.clone()),
         NonASAPOp::TimeRange { child, .. } => samples_of_metric(child),
+        NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => samples_of_metric(child),
         NonASAPOp::Aggregate {
             measures, child, ..
         } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {

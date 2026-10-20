@@ -3875,9 +3875,14 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
-        for function in ["increase", "rate", "irate"] {
-            let query = format!("topk(10, sum by (job) ({function}(data_total[5m])))");
-            let candidates = all_candidates(&query, &target);
+        // An `offset` moves the window, not the samples' sign.
+        for query in [
+            "topk(10, sum by (job) (increase(data_total[5m])))",
+            "topk(10, sum by (job) (rate(data_total[5m])))",
+            "topk(10, sum by (job) (irate(data_total[5m])))",
+            "topk(10, sum by (job) (rate(data_total[5m] offset 1h)))",
+        ] {
+            let candidates = all_candidates(query, &target);
             let count_min: Vec<&str> = candidates
                 .iter()
                 .filter(|c| count_min_builds(c).contains(&SketchAlgorithm::CmsWithHeap))
@@ -5257,8 +5262,14 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.01)
             .accuracy_metric(AccuracyMetric::Relative);
-        for (outer, needs_sign) in [("avg", true), ("sum", true), ("max", false)] {
-            let query = format!("{outer} by (region) (quantile_over_time(0.99, x[100s]))");
+        // An `offset` moves the window, not the samples' sign.
+        for (outer, window, needs_sign) in [
+            ("avg", "x[100s]", true),
+            ("sum", "x[100s]", true),
+            ("max", "x[100s]", false),
+            ("avg", "x[100s] offset 1h", true),
+        ] {
+            let query = format!("{outer} by (region) (quantile_over_time(0.99, {window}))");
             let candidates = all_candidates(&query, &target);
             let ddsketch = ddsketch_candidates(&candidates);
             assert!(!ddsketch.is_empty(), "{query}");
