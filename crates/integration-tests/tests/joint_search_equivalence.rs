@@ -668,3 +668,94 @@ fn components_follow_shared_sources() {
         .collect();
     assert_eq!(components, vec![vec![0, 2, 3], vec![1]]);
 }
+
+/// A deployment that keeps no raw data, as the MVP benchmark runs: a plan
+/// is valid only when every scan runs at ingestion time.
+fn no_raw_data() -> asap_logical_asap_optimization::DeploymentCapabilities {
+    asap_logical_asap_optimization::DeploymentCapabilities {
+        raw_data_retained: false,
+        ..asap_logical_asap_optimization::DeploymentCapabilities::default()
+    }
+}
+
+/// Without raw data, the default search builds no Stage 2 assignment that
+/// scans raw data at query time and enumerates no Pass 2 candidate whose
+/// every assignment does: seeded random workloads, under every cost model,
+/// select the exhaustive search's plan (or both find none), and some
+/// assignments and candidates are actually left out.
+#[test]
+fn without_raw_data_random_workloads_select_the_exhaustive_plan() {
+    let deployment = no_raw_data();
+    let models = cost_models(1);
+    let (mut searched, mut skipped) = (0, 0);
+    for seed in 1..=60u64 {
+        let workload = random_workload_over(seed, &["m", "n"]);
+        let roots = lower_promql_roots(&workload).unwrap();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                roots.iter().cloned().enumerate().collect(),
+            )
+            .unwrap();
+        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
+            continue;
+        }
+        searched += 1;
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap();
+        let settings = &models[seed as usize % models.len()];
+        let models = PlanningModels::builtin()
+            .with_plan_selection(settings)
+            .with_deployment_capabilities(&deployment);
+        let run = assert_equivalent(&format!("seed {seed}"), &roots, &entries, &data, models);
+        if let Ok(selection) = &run.stage3_plan_selection {
+            skipped += selection.search.raw_scan_assignments_skipped;
+        }
+    }
+    assert!(
+        searched >= 20,
+        "only {searched} workloads were small enough"
+    );
+    assert!(skipped > 0, "no assignment was left out");
+}
+
+/// Examples 1 and 2 and Pattern B, in a deployment that keeps no raw data,
+/// under every cost model.
+#[test]
+fn without_raw_data_planner_layering_examples_select_the_exhaustive_plan() {
+    let deployment = no_raw_data();
+    let example1 = example1();
+    let (example2, catalog) = example2();
+    let pattern_b = pattern_b();
+    for (label, workload, roots) in [
+        (
+            "example 1",
+            &example1,
+            lower_promql_roots(&example1).unwrap(),
+        ),
+        (
+            "example 2",
+            &example2,
+            lower_sql_roots(&example2, &catalog).unwrap(),
+        ),
+        (
+            "pattern B",
+            &pattern_b,
+            lower_promql_roots(&pattern_b).unwrap(),
+        ),
+    ] {
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap_or_default();
+        for settings in cost_models(64) {
+            let models = PlanningModels::builtin()
+                .with_plan_selection(&settings)
+                .with_deployment_capabilities(&deployment);
+            assert_equivalent(
+                &format!("{label} without raw data under {:?}", settings.cost_model),
+                &roots,
+                &entries,
+                &data,
+                models,
+            );
+        }
+    }
+}

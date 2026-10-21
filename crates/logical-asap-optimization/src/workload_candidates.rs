@@ -81,7 +81,7 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
     per_computation: &'a PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
 ) -> impl Iterator<Item = Stage1Candidate> + 'a {
-    stage1_logical_asap_optimization_skipping(per_computation, entries, |_| None)
+    stage1_logical_asap_optimization_skipping(per_computation, entries, |_| None, |_| true)
 }
 
 /// [`stage1_logical_asap_optimization`] without the Pass 1 choices
@@ -89,10 +89,15 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
 /// `invalid_prefix(choice)` is `Some(n)` when every choice that agrees with
 /// `choice` on its first `n` digits is invalid (`Some(0)`: every choice),
 /// so enumeration skips them all at once; `None` when `choice` is valid.
+/// Neither are the candidates `viable` rejects, nor the identical-expression
+/// Pass 2 candidates of one it rejects: `viable(roots)` is `false` only
+/// when no implementation of `roots`, nor of any of its identical-expression
+/// candidates, can be valid ([`Pass2List::push`]).
 pub fn stage1_logical_asap_optimization_skipping<'a, Id: Clone>(
     per_computation: &'a PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
     mut invalid_prefix: impl FnMut(&[usize]) -> Option<usize> + 'a,
+    viable: impl Fn(&[QueryRoot]) -> bool + 'a,
 ) -> impl Iterator<Item = Stage1Candidate> + 'a {
     let evaluation_grid_ms: Vec<Option<u64>> = entries
         .iter()
@@ -125,6 +130,7 @@ pub fn stage1_logical_asap_optimization_skipping<'a, Id: Clone>(
                 &this,
                 &evaluation_grid_ms,
                 from,
+                &viable,
             ));
         }
         position += 1;
@@ -140,12 +146,13 @@ pub fn stage1_candidates_of_choice<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
     choice: &[usize],
+    viable: &dyn Fn(&[QueryRoot]) -> bool,
 ) -> Vec<Stage1Candidate> {
     let evaluation_grid_ms: Vec<Option<u64>> = entries
         .iter()
         .map(QueryWorkloadEntry::evaluation_grid_ms)
         .collect();
-    choice_candidates(per_computation, choice, &evaluation_grid_ms, 0)
+    choice_candidates(per_computation, choice, &evaluation_grid_ms, 0, viable)
 }
 
 /// [`stage1_candidates_of_choice`] with each query's evaluation grid, its
@@ -155,18 +162,28 @@ fn choice_candidates<Id: Clone>(
     choice: &[usize],
     evaluation_grid_ms: &[Option<u64>],
     from: usize,
+    viable: &dyn Fn(&[QueryRoot]) -> bool,
 ) -> Vec<Stage1Candidate> {
     let roots = compose_logical_candidate(per_computation, choice)
         .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
-    let pass2 = match &roots {
-        Ok(roots) => pass2_candidates(roots, evaluation_grid_ms),
-        Err(_) => Vec::new(),
+    let (pass2, composed_viable) = match &roots {
+        Ok(roots) => {
+            let composed_viable = viable(roots);
+            (
+                pass2_candidates(roots, evaluation_grid_ms, composed_viable, viable),
+                composed_viable,
+            )
+        }
+        Err(_) => (Vec::new(), true),
     };
-    let mut candidates = vec![Stage1Candidate {
-        choice: choice.to_vec(),
-        roots,
-        pass2: None,
-    }];
+    let mut candidates = Vec::new();
+    if composed_viable {
+        candidates.push(Stage1Candidate {
+            choice: choice.to_vec(),
+            roots,
+            pass2: None,
+        });
+    }
     for Pass2 {
         rules,
         sharing_candidates,
@@ -223,13 +240,21 @@ impl Pass2 {
 /// enumeration order, each distinct candidate once. `evaluation_grid_ms[q]`
 /// is the grid query `q`'s evaluations fall on, if it repeats at a fixed
 /// interval ([`QueryWorkloadEntry::evaluation_grid_ms`]).
-fn pass2_candidates(roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) -> Vec<Pass2> {
+fn pass2_candidates(
+    roots: &[QueryRoot],
+    evaluation_grid_ms: &[Option<u64>],
+    composed_viable: bool,
+    viable: &dyn Fn(&[QueryRoot]) -> bool,
+) -> Vec<Pass2> {
     let mut found = Pass2List {
         seen: vec![flatten(roots).0],
         out: Vec::new(),
+        viable,
     };
     let none = Rules::default();
-    found.identical_expression(&none, roots);
+    if composed_viable {
+        found.identical_expression(&none, roots);
+    }
     found.window_composition(&none, roots, evaluation_grid_ms);
     found.reuse(&none, roots);
     let candidates = capability_sharing_candidates(roots);
@@ -247,8 +272,9 @@ fn pass2_candidates(roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) -> 
         };
         match pass2_candidate.roots {
             Ok(roots) => {
-                found.push(&rules, Vec::new(), &roots);
-                found.identical_expression(&rules, &roots);
+                if found.push(&rules, Vec::new(), &roots) {
+                    found.identical_expression(&rules, &roots);
+                }
                 found.window_composition(&rules, &roots, evaluation_grid_ms);
             }
             // Listed as a candidate that cannot be composed; the other
@@ -261,21 +287,34 @@ fn pass2_candidates(roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) -> 
 
 /// Pass 2 candidates found so far, and the flattened DAG of every candidate
 /// listed (the Pass 1 candidate's included), so each is listed once.
-struct Pass2List {
+struct Pass2List<'v> {
     seen: Vec<asap_types::ir::flat::FlatDag>,
     out: Vec<Pass2>,
+    /// Whether a candidate, or any of its identical-expression candidates,
+    /// can have a valid implementation; always `true` for the exhaustive
+    /// search.
+    viable: &'v dyn Fn(&[QueryRoot]) -> bool,
 }
 
-impl Pass2List {
+impl Pass2List<'_> {
+    /// List the candidate with roots `roots` unless an equal one is listed
+    /// or it is not viable. `false` when it is not viable: neither it nor
+    /// its identical-expression candidates can be valid, so the caller
+    /// skips them. Sharing identical nodes never makes a build eligible
+    /// for a materialization it was not eligible for, since the shared
+    /// node is read by every reader of the nodes it replaces.
     fn push(
         &mut self,
         rules: &Rules,
         sharing_candidates: Vec<SharingCandidate>,
         roots: &[QueryRoot],
-    ) {
+    ) -> bool {
+        if !(self.viable)(roots) {
+            return false;
+        }
         let flat = flatten(roots).0;
         if self.seen.contains(&flat) {
-            return;
+            return true;
         }
         self.seen.push(flat);
         self.out.push(Pass2 {
@@ -283,6 +322,7 @@ impl Pass2List {
             sharing_candidates,
             roots: Ok(roots.to_vec()),
         });
+        true
     }
 
     /// The identical-expression Pass 2 candidates of `roots`, which the
@@ -322,8 +362,9 @@ impl Pass2List {
             };
             match pass2_candidate.roots {
                 Ok(roots) => {
-                    self.push(&rules, Vec::new(), &roots);
-                    self.identical_expression(&rules, &roots);
+                    if self.push(&rules, Vec::new(), &roots) {
+                        self.identical_expression(&rules, &roots);
+                    }
                 }
                 Err(error) => self.out.push(Pass2::failed(&rules, error)),
             }
@@ -367,8 +408,9 @@ impl Pass2List {
                 .extend(pass2_candidate.rollup_candidates);
             match pass2_candidate.roots {
                 Ok(roots) => {
-                    self.push(&rules, Vec::new(), &roots);
-                    self.identical_expression(&rules, &roots);
+                    if self.push(&rules, Vec::new(), &roots) {
+                        self.identical_expression(&rules, &roots);
+                    }
                     self.topk_reuse(&rules, &roots);
                 }
                 Err(error) => self.out.push(Pass2::failed(&rules, error)),
@@ -394,8 +436,9 @@ impl Pass2List {
                 .extend(pass2_candidate.topk_reuse_candidates);
             match pass2_candidate.roots {
                 Ok(roots) => {
-                    self.push(&rules, Vec::new(), &roots);
-                    self.identical_expression(&rules, &roots);
+                    if self.push(&rules, Vec::new(), &roots) {
+                        self.identical_expression(&rules, &roots);
+                    }
                 }
                 Err(error) => self.out.push(Pass2::failed(&rules, error)),
             }
@@ -488,16 +531,20 @@ mod tests {
         let every = pass1(stage1_logical_asap_optimization(&inventory, &[]).collect());
         // Every choice whose first digit is 1 is invalid.
         let skipped = pass1(
-            stage1_logical_asap_optimization_skipping(&inventory, &[], |choice| {
-                (choice[0] == 1).then_some(1)
-            })
+            stage1_logical_asap_optimization_skipping(
+                &inventory,
+                &[],
+                |choice| (choice[0] == 1).then_some(1),
+                |_| true,
+            )
             .collect(),
         );
         let expected: Vec<_> = every.iter().filter(|c| c[0] != 1).cloned().collect();
         assert_eq!(skipped, expected);
         assert!(skipped.len() < every.len());
         assert_eq!(
-            stage1_logical_asap_optimization_skipping(&inventory, &[], |_| Some(0)).count(),
+            stage1_logical_asap_optimization_skipping(&inventory, &[], |_| Some(0), |_| true)
+                .count(),
             0
         );
     }
@@ -522,6 +569,7 @@ mod tests {
         let mut found = Pass2List {
             seen: vec![flatten(&roots).0],
             out: Vec::new(),
+            viable: &|_| true,
         };
         found.reuse(&Rules::default(), &roots);
         let [failed] = found.out.as_slice() else {
