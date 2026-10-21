@@ -14,7 +14,7 @@
 //!   its exact accumulator states (`ExactAccumulator`; `[Sum, Count]` for
 //!   `avg`) when they can be built, otherwise plain `Exact`. Whether they are
 //!   materialized is decided in Stage 2.
-//! - A computation that fuses a target with the target beneath it is the
+//! - A computation that fuses a target with the targets beneath it is the
 //!   outer target's [`FusedComputation`], which absorbs the ones beneath and
 //!   has its own candidates: the whole-expression top-k over a per-item
 //!   `sum` or `count` (`Summary` of a heap family) and the nested sum, a
@@ -54,9 +54,10 @@
 //! - `Summary`: `SummaryAgg` → `SummaryEstimate`.
 //! - `Exact` (or a measure that is no target): a single-measure `Aggregate`.
 //!
-//! A fused computation's candidate reads the absorbed target's input instead:
+//! A fused computation's candidate reads the absorbed targets' input instead:
 //! the whole-expression top-k is one heap `SummaryAgg` keyed by the ranked
-//! item → `SummaryEstimate`; the nested sum is `SummaryAgg` with the exact
+//! item → `SummaryEstimate` (over a grouped sum of per-series sums or counts,
+//! it reads the per-series target's input, the raw samples); the nested sum is `SummaryAgg` with the exact
 //! `Sum` family grouped by the outer keys → `FinalizeExactAccumulator`.
 //!
 //! The substituted output keeps the aggregate's column names. The measures
@@ -289,7 +290,8 @@ pub struct FusedComputation {
     /// it absorbs: the one directly beneath, then, for a whole-expression
     /// heap over the raw samples beneath a grouped sum of per-series sums or
     /// counts (`topk(k, sum by (G) (sum_over_time(m[W])))`), the per-series
-    /// target beneath that.
+    /// target beneath that, then the targets any of these targets' own fused
+    /// computations absorb. None of them is computed when this is picked.
     pub absorbs: Vec<usize>,
     /// How the fused computation is computed: exact or a summary. Empty
     /// when Pass 1 pruned every one ([`Self::pruned`]); the fusion is then
@@ -709,7 +711,42 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
     add_whole_expression_targets(&mut targets, &consumers);
     prune_topk_heaps_over_one_row_per_item(&mut targets);
     add_nested_sum_targets(&mut targets, &consumers);
+    close_absorptions(&mut targets);
     Ok(PerComputationCandidates { roots, targets })
+}
+
+/// Adds to each fused computation's `absorbs` the targets its absorbed
+/// targets' own fused computations absorb, transitively: none of them is
+/// computed when the fused computation is picked, so enumeration keeps only
+/// their first choice ([`PerComputationCandidates::absorbed_choice_varies`])
+/// and [`PerComputationCandidates::combinations`] counts exactly those.
+fn close_absorptions(targets: &mut [ComputationTarget]) {
+    loop {
+        let mut changed = false;
+        for t in 0..targets.len() {
+            let Some(fused) = &targets[t].fused else {
+                continue;
+            };
+            let beneath: Vec<usize> = fused
+                .absorbs
+                .iter()
+                .filter_map(|&a| targets[a].fused.as_ref())
+                .flat_map(|inner| inner.absorbs.iter().copied())
+                .filter(|b| !fused.absorbs.contains(b))
+                .collect();
+            if let Some(fused) = targets[t].fused.as_mut().filter(|_| !beneath.is_empty()) {
+                for b in beneath {
+                    if !fused.absorbs.contains(&b) {
+                        fused.absorbs.push(b);
+                    }
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+    }
 }
 
 /// Nested-sum merge: a grouped `sum` over the value of a `sum` target
@@ -744,8 +781,8 @@ fn add_nested_sum_targets(
         else {
             continue;
         };
-        // A target with a fused computation is never absorbed: the inner sum
-        // must not have one of its own.
+        // Merges do not stack: the inner sum must not have a fused
+        // computation of its own.
         if consumers.get(&Rc::as_ptr(child)).map(Vec::len) != Some(1)
             || !targets[inner].having.is_empty()
             || targets[inner].fused.is_some()
@@ -4672,26 +4709,70 @@ mod tests {
                 "an absorbed target has a fused computation"
             );
         }
-        let mut enumerated = 0;
-        let mut choice = vec![0; inventory.targets.len()];
-        loop {
-            if !inventory.absorbed_choice_varies(&choice) {
-                enumerated += 1;
-            }
-            let mut carry = true;
-            for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
-                *digit += 1;
-                if *digit < target.choice_count() {
-                    carry = false;
-                    break;
-                }
-                *digit = 0;
-            }
-            if carry {
-                break;
+        let enumerated = enumerated_choices(&inventory);
+        assert_eq!(inventory.combinations(), enumerated);
+    }
+
+    /// The shapes a heap over the raw samples cannot answer do not get one:
+    /// `bottomk` stays a sort and limit (no top-k target), and a grouped sum
+    /// `without` labels or by the metric name (which the per-series sum drops)
+    /// gets no heap that absorbs the per-series sum and reads the samples.
+    #[test]
+    fn grouped_range_sums_a_samples_heap_cannot_rank_get_no_fused_heap() {
+        let is_topk = |t: &ComputationTarget| {
+            matches!(
+                t.aggregate.non_asap(),
+                Some(NonASAPOp::Aggregate { measures, .. })
+                    if matches!(measures.as_slice(), [AggIntent::TopK { .. }])
+            )
+        };
+        let bottom = inventory("bottomk(3, sum by (region) (sum_over_time(m[1m])))");
+        assert!(
+            !bottom.targets.iter().any(is_topk),
+            "bottomk has no top-k target"
+        );
+        for query in [
+            "topk(3, sum without (instance) (sum_over_time(m[1m])))",
+            "topk(3, sum by (__name__) (sum_over_time(m[1m])))",
+        ] {
+            let inventory = inventory(query);
+            for target in inventory.targets.iter().filter(|t| is_topk(t)) {
+                assert!(
+                    target.fused.as_ref().is_none_or(|f| f.absorbs.len() == 1),
+                    "{query}: {:?}",
+                    target.fused
+                );
             }
         }
-        assert_eq!(inventory.combinations(), enumerated);
+    }
+
+    /// A fused computation picked leaves every target beneath it uncomputed,
+    /// also one that an absorbed target's own merge absorbs: Pass 1 closes
+    /// `absorbs` over those, so enumeration keeps only their first choice and
+    /// `combinations` still counts exactly the choices kept. Here the top-k
+    /// heap is made to absorb the grouped sum only, whose merge absorbs the
+    /// per-series sum.
+    #[test]
+    fn a_fused_computation_absorbs_what_its_absorbed_targets_merges_absorb() {
+        let mut inventory = inventory("topk(10, sum by (job) (sum_over_time(m[1m])))");
+        let topk = topk_target(&inventory);
+        let fused = inventory.targets[topk]
+            .fused
+            .as_mut()
+            .expect("a fused heap");
+        let grouped = fused.absorbs[0];
+        fused.absorbs.truncate(1);
+        let per_series = inventory.targets[grouped]
+            .fused
+            .as_ref()
+            .expect("the grouped sum's merge")
+            .absorbs[0];
+        close_absorptions(&mut inventory.targets);
+        assert_eq!(
+            inventory.targets[topk].fused.as_ref().unwrap().absorbs,
+            vec![grouped, per_series]
+        );
+        assert_eq!(inventory.combinations(), enumerated_choices(&inventory));
     }
 
     /// `combinations` counts each choice once: picking a fused
@@ -4711,25 +4792,7 @@ mod tests {
         let n = target.choices.candidates.len();
         let whole = fused.candidates.len();
         let m = inventory.targets[inner].choices.candidates.len();
-        let mut enumerated = 0;
-        let mut choice = vec![0; inventory.targets.len()];
-        loop {
-            if !inventory.absorbed_choice_varies(&choice) {
-                enumerated += 1;
-            }
-            let mut carry = true;
-            for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
-                *digit += 1;
-                if *digit < target.choice_count() {
-                    carry = false;
-                    break;
-                }
-                *digit = 0;
-            }
-            if carry {
-                break;
-            }
-        }
+        let enumerated = enumerated_choices(&inventory);
         assert!(whole > 0 && m > 1, "{n} {whole} {m}");
         assert_eq!(inventory.combinations(), n * m + whole);
         assert_eq!(inventory.combinations(), 6);

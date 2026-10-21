@@ -794,7 +794,7 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
             // A sum of per-series counter values, or of per-series sums or
             // counts of raw samples (`sum by (G) (sum_over_time(m[W]))`): a
             // weighted ranking of the groups.
-            let weighted_counter_ranking = matches!(
+            let weighted_group_ranking = matches!(
                 &child,
                 Unresolved::Aggregate {
                     measures,
@@ -817,7 +817,7 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
                 measures.as_slice(),
                 [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
             ));
-            if descending && (weighted_counter_ranking || direct_counter_ranking) {
+            if descending && (weighted_group_ranking || direct_counter_ranking) {
                 return Ok(outer_aggregate(
                     keys,
                     AggIntent::TopK {

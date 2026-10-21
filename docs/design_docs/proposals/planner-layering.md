@@ -304,8 +304,8 @@ aggregations are separate targets: in `sum by (job) (rate(x[1m]))`, the
 per-series `rate` and the per-`job` `sum` are each a target, and their options
 multiply.
 
-A computation that fuses a target with the one directly beneath it is the
-outer target's **fused computation**, which absorbs the target beneath: the
+A computation that fuses a target with the targets beneath it is the
+outer target's **fused computation**, which absorbs those targets: the
 whole-expression top-*k* over a per-item `sum` or `count` (one heap summary
 over the inner aggregate's input), and the nested sum, a grouped `sum` over a
 `sum` (one exact Sum accumulator over the inner sum's input). Its options are
