@@ -46,7 +46,8 @@
 //! build serving all its readers, sized with each parameter's largest value
 //! among them ([`size_for_all_readers`]: each consumer sized alone, the shared
 //! build the per-parameter maximum, a KLL's failure probability the
-//! minimum), and every guarantee above it is composed again, so plan
+//! minimum and its `k` the largest after each is resized to that minimum),
+//! and every guarantee above it is composed again, so plan
 //! selection checks each consumer against the shared state. Members of
 //! equal size are the identical-expression rule's; builds that are not
 //! shared are untouched, and a consumer never changes family.

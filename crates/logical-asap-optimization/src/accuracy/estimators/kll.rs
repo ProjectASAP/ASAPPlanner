@@ -180,6 +180,34 @@ pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> Ske
     }
 }
 
+/// The `k` of one KLL shared by two readers sized alone at `(k, δ)` and
+/// `(k2, δ2)`: each `k` resized to the smaller failure probability at no
+/// larger rank error ([`with_failure_probability`]), then the larger. The
+/// shared build states its guarantee at that smaller δ, where a `k` sized
+/// for a larger δ has a larger rank error, so the larger `k` alone could
+/// miss its reader's ε.
+pub(crate) fn shared_k(
+    k: u32,
+    failure_probability: Option<f64>,
+    k2: u32,
+    failure_probability2: Option<f64>,
+) -> u32 {
+    let delta = failure_probability
+        .unwrap_or(KLL_CALIBRATED_FAILURE_PROBABILITY)
+        .min(failure_probability2.unwrap_or(KLL_CALIBRATED_FAILURE_PROBABILITY));
+    let resized = |k, failure_probability| match with_failure_probability(
+        &SketchParams::Kll {
+            k,
+            failure_probability,
+        },
+        delta,
+    ) {
+        SketchParams::Kll { k, .. } => k,
+        _ => k,
+    };
+    resized(k, failure_probability).max(resized(k2, failure_probability2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
