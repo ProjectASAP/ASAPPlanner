@@ -2,7 +2,7 @@
 //! the frontends' roots, enumerating every whole-workload candidate.
 
 use asap_frontend_promql::lower_promql_query_workload;
-use asap_plan_selection::pass::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
+use asap_plan_selection::pass::{run_stage1_to_stage3_with, PlanningModels, Stage1ToStage3Run};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
@@ -33,11 +33,12 @@ fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
         )),
     };
     let roots = lower_promql_query_workload(&workload).expect("lowers");
-    run_stage1_to_stage3(
+    run_stage1_to_stage3_with(
         roots.into_iter().enumerate().collect(),
         &workload.query_workload.entries().collect::<Vec<_>>(),
         &workload.data_workload.unwrap(),
         PlanningModels::builtin(),
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .expect("Pass 1 accepts the query")
 }

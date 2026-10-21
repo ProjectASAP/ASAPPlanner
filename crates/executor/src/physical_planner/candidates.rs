@@ -372,11 +372,12 @@ mod tests {
         let root = promql_rows::with_series_identity(&root).unwrap();
         // The logical plan the planner pipeline selects, materialized at
         // ingestion time.
-        let run = asap_plan_selection::run_stage1_to_stage3(
+        let run = asap_plan_selection::run_stage1_to_stage3_with(
             vec![(0, planner_types::ir::QueryRoot::Operator(root))],
             &workload.query_workload.entries().collect::<Vec<_>>(),
             workload.data_workload.as_ref().unwrap(),
             asap_plan_selection::PlanningModels::builtin(),
+            asap_plan_selection::Stage1ToStage3Search::exhaustive(),
         )
         .unwrap();
         let [planner_types::ir::QueryRoot::Operator(selected)] = run.selected_logical().unwrap()

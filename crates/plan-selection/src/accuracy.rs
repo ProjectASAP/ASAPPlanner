@@ -55,6 +55,16 @@ pub trait AccuracyModel {
     ) -> bool {
         false
     }
+
+    /// Whether [`Self::accepts_output_regardless_of_guarantee`] may accept
+    /// some output. Plan selection discards a query's candidate before
+    /// composition for a missing or unknown guarantee only when this is
+    /// `false`: otherwise the model might accept the same plan with larger
+    /// summaries, which sharing with another query can give it. The default
+    /// is `true`, which keeps every such candidate.
+    fn may_accept_regardless_of_guarantee(&self) -> bool {
+        true
+    }
 }
 
 /// The planner's built-in analytical rules as an [`AccuracyModel`]: the
@@ -68,6 +78,10 @@ pub struct BuiltinAccuracyModel;
 impl AccuracyModel for BuiltinAccuracyModel {
     fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
         analytical::satisfies(guarantee, target)
+    }
+
+    fn may_accept_regardless_of_guarantee(&self) -> bool {
+        false
     }
 }
 
@@ -95,6 +109,16 @@ pub trait AccuracyEvidenceProvider {
     fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
         None
     }
+
+    /// Whether this provider may return any evidence: an operand domain or
+    /// an output guarantee. Plan selection discards a query's candidate
+    /// before composition for a missing or unknown guarantee only when this
+    /// is `false`: otherwise evidence might exist for the same plan with
+    /// larger summaries, which sharing with another query can give it. The
+    /// default is `true`, which keeps every such candidate.
+    fn may_provide_evidence(&self) -> bool {
+        true
+    }
 }
 
 /// No deployment evidence: every operand domain and output guarantee is
@@ -102,4 +126,8 @@ pub trait AccuracyEvidenceProvider {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoAccuracyEvidence;
 
-impl AccuracyEvidenceProvider for NoAccuracyEvidence {}
+impl AccuracyEvidenceProvider for NoAccuracyEvidence {
+    fn may_provide_evidence(&self) -> bool {
+        false
+    }
+}

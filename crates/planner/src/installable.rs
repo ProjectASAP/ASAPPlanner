@@ -40,7 +40,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::{NodePriceSource, OperatorKind, Selection};
+use asap_plan_selection::{NodePriceSource, OperatorKind, SearchReport, Selection};
 use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
 use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPDAGDocument,
@@ -188,6 +188,10 @@ pub struct SelectedPlanReport {
     /// The resources Stage 3 predicts it uses, for a runtime to report
     /// against what it measures; `None` when Stage 3 recorded no cost.
     pub predicted_usage: Option<PredictedUsage>,
+    /// What the search checked and discarded on the way
+    /// (`Selection::search`); empty when not recorded.
+    #[serde(default)]
+    pub search: SearchReport,
 }
 
 /// What Stage 3 predicts the selected plan uses, per second of wall time
@@ -1091,6 +1095,7 @@ fn report_of(
                 })
                 .collect(),
         }),
+        search: selection.search.clone(),
     }
 }
 

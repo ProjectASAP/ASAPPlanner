@@ -149,7 +149,7 @@ async fn corr_filter_is_a_measure_filter() {
 #[tokio::test]
 async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
-    let run = asap_plan_selection::run_stage1_to_stage3(
+    let run = asap_plan_selection::run_stage1_to_stage3_with(
         vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
         &[asap_types::workload::QueryWorkloadEntry {
             query: Default::default(),
@@ -163,6 +163,7 @@ async fn corr_survives_exact_plan_compilation() {
         }],
         &Default::default(),
         asap_plan_selection::PlanningModels::builtin(),
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .unwrap();
     let [asap_types::ir::QueryRoot::Operator(plan)] = run.selected_logical().unwrap() else {

@@ -36,9 +36,13 @@
 //! per-query tumbling panes only; sliding windows, Exponential Histograms
 //! and a pane width shared across queries are not planned yet.
 //!
-//! Every combination is enumerated and plan selection prices every
-//! candidate; nothing is capped. A search that avoids building every
-//! candidate is future work (issue #671 surveys the options).
+//! The search follows `docs/design_docs/proposals/joint-planning-search.md`.
+//! Each query's own candidates are checked before composition (step 2,
+//! [`query_candidates`](super::query_candidates)), and a whole-workload
+//! choice that picks a discarded one is not composed. Every other
+//! candidate is priced as it is built and only the best so far is kept
+//! (step 6; under cost model 3's `pareto-front`, the front so far), unless
+//! the caller asks to keep every candidate ([`Stage1ToStage3Search`]).
 
 use std::rc::Rc;
 
@@ -46,14 +50,18 @@ use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 
+use super::query_candidates::QueryCandidates;
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::PlanningModels;
-use crate::{select_plan, Selection, SelectionError};
+use crate::{
+    CalibrationFit, PlanSelector, QuerySearchReport, Rejection, Selection, SelectionError,
+};
 use asap_logical_asap_optimization::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError, PerComputationCandidates,
 };
 use asap_logical_asap_optimization::workload_candidates::{
-    stage1_logical_asap_optimization, Pass2Candidate, Stage1Candidate,
+    stage1_logical_asap_optimization, stage1_logical_asap_optimization_skipping, Pass2Candidate,
+    Stage1Candidate,
 };
 use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
 
@@ -80,7 +88,8 @@ pub struct PrunedCandidate {
 }
 
 /// The output of Stage 1, Stage 2 and Stage 3 for one workload
-/// ([`run_stage1_to_stage3`]).
+/// ([`run_stage1_to_stage3`]). The candidate lists are filled only when the
+/// search keeps every candidate ([`Stage1ToStage3Search::keep_every_candidate`]).
 #[derive(Debug)]
 pub struct Stage1ToStage3Run<Id> {
     /// Stage 1, Pass 1: the per-computation candidates, with the roots they
@@ -92,17 +101,22 @@ pub struct Stage1ToStage3Run<Id> {
     pub combinations: usize,
     /// Stage 1: every whole-workload logical candidate, in enumeration
     /// order: each composed Pass 1 candidate, followed by its Pass 2
-    /// candidates (those with [`LogicalCandidate::pass2`]).
+    /// candidates (those with [`LogicalCandidate::pass2`]). Empty unless
+    /// every candidate is kept.
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
     /// Stage 2: the physical candidates of each Stage 1 candidate that
     /// composed and was implemented, one per materialization assignment:
-    /// `P<n>` (nothing materialized), then `P<n>-m<k>`, from `L<n>`.
+    /// `P<n>` (nothing materialized), then `P<n>-m<k>`, from `L<n>`. Empty
+    /// unless every candidate is kept.
     pub stage2_physical_asap_optimization: Vec<PhysicalCandidate>,
     /// Stage 2: the Stage 1 candidates Stage 2 could not implement, with the
-    /// reasons.
+    /// reasons. Empty unless every candidate is kept.
     pub stage2_pruned: Vec<PrunedCandidate>,
     /// Stage 3: plan selection over the Stage 2 candidates.
     pub stage3_plan_selection: Result<Selection, SelectionError>,
+    /// Stage 3: the selected physical candidate, as Stage 2 built it
+    /// ([`Self::selected`]).
+    pub stage3_selected: Option<PhysicalCandidate>,
     /// Stage 3: the selected candidate's logical roots, with the weight
     /// requirements it confirmed made proofs ([`Self::selected_logical`]).
     pub stage3_selected_logical: Option<Vec<QueryRoot>>,
@@ -111,10 +125,7 @@ pub struct Stage1ToStage3Run<Id> {
 impl<Id> Stage1ToStage3Run<Id> {
     /// The selected physical candidate, if selection succeeded.
     pub fn selected(&self) -> Option<&PhysicalCandidate> {
-        let selected = &self.stage3_plan_selection.as_ref().ok()?.selected;
-        self.stage2_physical_asap_optimization
-            .iter()
-            .find(|p| &p.id == selected)
+        self.stage3_selected.as_ref()
     }
 
     /// The composed roots of the logical candidate the selected physical
@@ -126,17 +137,60 @@ impl<Id> Stage1ToStage3Run<Id> {
     }
 }
 
-/// Run Stage 1 → Stage 2 → Stage 3 over the frontends' `roots`, enumerating every
-/// whole-workload candidate. `entries[i]` is the workload entry of
-/// `roots[i]`: its accuracy target, latency bound, recurrence and
-/// predictability. Only a Pass 1 failure is
-/// an error; a candidate that does not compose or cannot be implemented is
-/// listed with its reason, and a failed selection is reported in the run.
+/// How [`run_stage1_to_stage3_with`] searches, and what it keeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stage1ToStage3Search {
+    /// Keep every Stage 1 and Stage 2 candidate and every Stage 3 rejection
+    /// in the run, for a developer tool that shows them; default `false`:
+    /// only the best so far is kept.
+    pub keep_every_candidate: bool,
+    /// Compose every whole-workload choice, without checking each query's
+    /// own candidates first: the exhaustive search the pruned one is tested
+    /// against; default `false`.
+    pub exhaustive: bool,
+}
+
+impl Stage1ToStage3Search {
+    /// The exhaustive search keeping every candidate: what the planner did
+    /// before the search was pruned.
+    pub fn exhaustive() -> Self {
+        Self {
+            keep_every_candidate: true,
+            exhaustive: true,
+        }
+    }
+}
+
+/// Run Stage 1 → Stage 2 → Stage 3 over the frontends' `roots` with the
+/// default search ([`Stage1ToStage3Search::default`]: each query's
+/// candidates checked first, only the best kept). `entries[i]` is the
+/// workload entry of `roots[i]`: its accuracy target, latency bound,
+/// recurrence and predictability. Only a Pass 1 failure is an error; a
+/// failed selection is reported in the run.
 pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
+) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
+    run_stage1_to_stage3_with(
+        roots,
+        entries,
+        data,
+        models,
+        Stage1ToStage3Search::default(),
+    )
+}
+
+/// [`run_stage1_to_stage3`] with the search `search`. Keeping every
+/// candidate, a candidate that does not compose or cannot be implemented is
+/// listed with its reason.
+pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
+    roots: Vec<(Id, QueryRoot)>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    search: Stage1ToStage3Search,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
     let per_computation = generate_per_computation_candidates(roots)?;
     Ok(run_stage1_to_stage3_from_pass1(
@@ -144,11 +198,12 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
         entries,
         data,
         models,
+        search,
     ))
 }
 
-/// [`run_stage1_to_stage3`] after Pass 1: enumerates every Stage 1
-/// candidate of `per_computation` (the Pass 1 inventory of the frontends'
+/// [`run_stage1_to_stage3_with`] after Pass 1: searches the Stage 1
+/// candidates of `per_computation` (the Pass 1 inventory of the frontends'
 /// roots, [`stage1_logical_asap_optimization`]) without the summaries the
 /// deployment does not support
 /// ([`PerComputationCandidates::without_unsupported_summaries`]), so a
@@ -160,18 +215,60 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
+    search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
     let per_computation =
         per_computation.without_unsupported_summaries(models.deployment_capabilities);
-    let stage1 = stage1_logical_asap_optimization(&per_computation, entries).collect();
-    run_stage2_and_stage3(per_computation, stage1, entries, data, models)
+    if search.exhaustive {
+        let stage1 = stage1_logical_asap_optimization(&per_computation, entries);
+        let calibration = calibration(
+            stage1_logical_asap_optimization(&per_computation, entries),
+            entries,
+            data,
+            models,
+        );
+        let run = search_stage2_and_stage3(
+            &per_computation,
+            stage1,
+            entries,
+            data,
+            models,
+            search.keep_every_candidate,
+            Vec::new(),
+            calibration,
+        );
+        return run.with_inventory(per_computation);
+    }
+    let queries = QueryCandidates::check(&per_computation, entries, data, models);
+    let stage1 = stage1_logical_asap_optimization_skipping(&per_computation, entries, |choice| {
+        queries.invalid_prefix(choice)
+    });
+    // The calibration is fitted over every candidate, as the exhaustive
+    // search fits it, the discarded ones included.
+    let calibration = calibration(
+        stage1_logical_asap_optimization(&per_computation, entries),
+        entries,
+        data,
+        models,
+    );
+    let run = search_stage2_and_stage3(
+        &per_computation,
+        stage1,
+        entries,
+        data,
+        models,
+        search.keep_every_candidate,
+        queries.reports(),
+        calibration,
+    );
+    run.with_inventory(per_computation)
 }
 
 /// Stage 2 and Stage 3 over `stage1`, the Stage 1 candidates of
 /// `per_computation` in enumeration order (all of them, or the ones a caller
-/// enumerated): candidate `n` (from 1) is `L<n>`, implemented as `P<n>`
-/// with nothing materialized and as `P<n>-m<k>` (`k` from 1) for each other
-/// materialization assignment.
+/// enumerated), keeping every candidate: candidate `n` (from 1) is `L<n>`,
+/// implemented as `P<n>` with nothing materialized and as `P<n>-m<k>` (`k`
+/// from 1) for each other materialization assignment.
 ///
 /// It does not prune: `per_computation` must already be pruned for
 /// `models.deployment_capabilities`
@@ -188,11 +285,120 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
+    let calibration = calibration(stage1.iter(), entries, data, models);
+    search_stage2_and_stage3(
+        &per_computation,
+        stage1.into_iter(),
+        entries,
+        data,
+        models,
+        true,
+        Vec::new(),
+        calibration,
+    )
+    .with_inventory(per_computation)
+}
+
+/// The calibration fit of the formulas to the deployment's measured cost
+/// table over `stage1`'s physical candidates
+/// ([`PlanSelector::needs_calibration`]), numbered as Stage 2 numbers
+/// them; `Ok(None)` without a measured table, when no fit is needed.
+fn calibration<S: std::borrow::Borrow<Stage1Candidate>>(
+    stage1: impl Iterator<Item = S>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<Option<CalibrationFit>, SelectionError> {
+    let selector = PlanSelector::new(entries, data, models, false)?;
+    if !selector.needs_calibration() {
+        return Ok(None);
+    }
+    let mut fit = CalibrationFit::default();
+    for (index, candidate) in stage1.enumerate() {
+        let Ok(roots) = &candidate.borrow().roots else {
+            continue;
+        };
+        let number = index + 1;
+        let id = format!("L{number}");
+        let Ok(implemented) =
+            optimize_physical_asap(&id, roots, entries, data, models.deployment_capabilities)
+        else {
+            continue;
+        };
+        for (k, mut p) in implemented.into_iter().enumerate() {
+            p.id = match k {
+                0 => format!("P{number}"),
+                k => format!("P{number}-m{k}"),
+            };
+            fit.add(selector.calibration_fit(&p)?);
+        }
+    }
+    Ok(Some(fit))
+}
+
+/// A [`Stage1ToStage3Run`] before it takes the Pass 1 inventory, which the
+/// search borrows.
+struct Searched {
+    combinations: usize,
+    logical: Vec<LogicalCandidate>,
+    physical: Vec<PhysicalCandidate>,
+    pruned: Vec<PrunedCandidate>,
+    selection: Result<Selection, SelectionError>,
+    selected: Option<PhysicalCandidate>,
+    selected_logical: Option<Vec<QueryRoot>>,
+}
+
+impl Searched {
+    fn with_inventory<Id>(
+        self,
+        per_computation: PerComputationCandidates<Id>,
+    ) -> Stage1ToStage3Run<Id> {
+        Stage1ToStage3Run {
+            stage1_pass1_per_computation: per_computation,
+            combinations: self.combinations,
+            stage1_logical_asap_optimization: self.logical,
+            stage2_physical_asap_optimization: self.physical,
+            stage2_pruned: self.pruned,
+            stage3_plan_selection: self.selection,
+            stage3_selected: self.selected,
+            stage3_selected_logical: self.selected_logical,
+        }
+    }
+}
+
+/// Stage 2 and Stage 3 over `stage1`, each Stage 1 candidate implemented
+/// and its physical candidates offered to Stage 3 as it is enumerated.
+/// Keeping every candidate lists them all; otherwise only the roots of
+/// the Stage 1 candidates whose physical candidates Stage 3 still keeps are
+/// held. `queries` is each query's own-candidate report, for the selection.
+fn search_stage2_and_stage3<Id>(
+    per_computation: &PerComputationCandidates<Id>,
+    stage1: impl Iterator<Item = Stage1Candidate>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    keep_every_candidate: bool,
+    queries: Vec<QuerySearchReport>,
+    calibration: Result<Option<CalibrationFit>, SelectionError>,
+) -> Searched {
     let combinations = per_computation.combinations();
     let mut logical: Vec<LogicalCandidate> = Vec::new();
     let mut physical = Vec::new();
     let mut pruned = Vec::new();
-    for (index, candidate) in stage1.into_iter().enumerate() {
+    // Keeping only the best: the roots of the Stage 1 candidates Stage 3
+    // keeps a candidate of.
+    let mut kept_roots: Vec<(String, Vec<QueryRoot>)> = Vec::new();
+    let mut selector =
+        PlanSelector::new(entries, data, models, keep_every_candidate).and_then(|mut selector| {
+            if let Some(fit) = calibration? {
+                selector.set_calibration(fit);
+            }
+            Ok(selector)
+        });
+    for (index, candidate) in stage1.enumerate() {
+        if selector.is_err() && !keep_every_candidate {
+            break;
+        }
         let number = index + 1;
         let id = format!("L{number}");
         if let Ok(roots) = &candidate.roots {
@@ -204,47 +410,91 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
                             0 => format!("P{number}"),
                             k => format!("P{number}-m{k}"),
                         };
-                        physical.push(p);
+                        if let Ok(stage3) = &mut selector {
+                            if let Err(error) = stage3.offer(&p) {
+                                selector = Err(error);
+                            }
+                        }
+                        if keep_every_candidate {
+                            physical.push(p);
+                        }
                     }
                 }
-                Err(error) => pruned.push(PrunedCandidate {
+                Err(error) if keep_every_candidate => pruned.push(PrunedCandidate {
                     from_logical: id.clone(),
                     reason: error.to_string(),
                 }),
+                Err(_) => {}
             }
         }
-        logical.push(LogicalCandidate {
-            id,
-            choice: candidate.choice,
-            roots: candidate.roots,
-            pass2: candidate.pass2,
-        });
+        // Keeping every candidate, the selected roots are found in `logical`.
+        if let (Ok(stage3), false) = (&selector, keep_every_candidate) {
+            kept_roots.retain(|(from, _)| stage3.keeps_from_logical(from));
+            if let Ok(roots) = &candidate.roots {
+                if stage3.keeps_from_logical(&id) {
+                    kept_roots.push((id.clone(), roots.clone()));
+                }
+            }
+        }
+        if keep_every_candidate {
+            logical.push(LogicalCandidate {
+                id,
+                choice: candidate.choice,
+                roots: candidate.roots,
+                pass2: candidate.pass2,
+            });
+        }
     }
-    let selection = select_plan(&physical, entries, data, models);
+    let finished = selector.and_then(PlanSelector::finish);
+    let (selection, selected) = match finished {
+        Ok((mut selection, selected)) => {
+            selection.search.queries = queries;
+            (Ok(selection), Some(selected))
+        }
+        Err(SelectionError::NoValidCandidate(mut rejected)) => {
+            // A query whose every own candidate was discarded leaves no
+            // candidate to reject: its first discard says why.
+            for (query, report) in queries.iter().enumerate() {
+                if report.discarded.len() as u64 == report.candidates_checked {
+                    if let Some(discarded) = report.discarded.first() {
+                        rejected.push(Rejection {
+                            id: format!("q{}", query + 1),
+                            cause: discarded.cause,
+                            reason: format!("q{}: {}", query + 1, discarded.reason),
+                        });
+                    }
+                }
+            }
+            (Err(SelectionError::NoValidCandidate(rejected)), None)
+        }
+        Err(error) => (Err(error), None),
+    };
     let targets = &crate::accuracy_targets(entries);
-    let selected_logical = selection.as_ref().ok().and_then(|selection| {
-        let from = &physical
-            .iter()
-            .find(|p| p.id == selection.selected)?
-            .from_logical;
-        let roots = logical
-            .iter()
-            .find(|l| &l.id == from)?
-            .roots
-            .as_ref()
-            .ok()?;
+    let selected_logical = selected.as_ref().and_then(|selected| {
+        let roots = match keep_every_candidate {
+            true => logical
+                .iter()
+                .find(|l| l.id == selected.from_logical)?
+                .roots
+                .as_ref()
+                .ok()?,
+            false => kept_roots
+                .iter()
+                .find(|(id, _)| *id == selected.from_logical)
+                .map(|(_, roots)| roots)?,
+        };
         // As Stage 3 sized it for its queries' failure probabilities.
         let sized = crate::resize_for_failure_probability(roots, targets, data).ok()?;
         Some(crate::with_confirmed_weights(&sized, data))
     });
-    Stage1ToStage3Run {
-        stage3_selected_logical: selected_logical,
-        stage1_pass1_per_computation: per_computation,
+    Searched {
         combinations,
-        stage1_logical_asap_optimization: logical,
-        stage2_physical_asap_optimization: physical,
-        stage2_pruned: pruned,
-        stage3_plan_selection: selection,
+        logical,
+        physical,
+        pruned,
+        selection,
+        selected,
+        selected_logical,
     }
 }
 

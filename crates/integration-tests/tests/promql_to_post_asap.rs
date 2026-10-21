@@ -706,7 +706,7 @@ fn ddsketch_ratio_selection(
     evidence: &dyn AccuracyEvidenceProvider,
 ) -> (Vec<PhysicalCandidate>, Selection) {
     let root = lower_promql(query, planned).unwrap();
-    let run = asap_plan_selection::run_stage1_to_stage3(
+    let run = asap_plan_selection::run_stage1_to_stage3_with(
         vec![(0, QueryRoot::Operator(root))],
         &[asap_types::workload::QueryWorkloadEntry {
             query: Default::default(),
@@ -720,6 +720,7 @@ fn ddsketch_ratio_selection(
         }],
         &DataWorkload::default(),
         PlanningModels::builtin().with_evidence(evidence),
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .unwrap();
     let ratios = run

@@ -81,6 +81,19 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
     per_computation: &'a PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
 ) -> impl Iterator<Item = Stage1Candidate> + 'a {
+    stage1_logical_asap_optimization_skipping(per_computation, entries, |_| None)
+}
+
+/// [`stage1_logical_asap_optimization`] without the Pass 1 choices
+/// `invalid_prefix` rejects, nor their Pass 2 candidates.
+/// `invalid_prefix(choice)` is `Some(n)` when every choice that agrees with
+/// `choice` on its first `n` digits is invalid (`Some(0)`: every choice),
+/// so enumeration skips them all at once; `None` when `choice` is valid.
+pub fn stage1_logical_asap_optimization_skipping<'a, Id: Clone>(
+    per_computation: &'a PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    mut invalid_prefix: impl FnMut(&[usize]) -> Option<usize> + 'a,
+) -> impl Iterator<Item = Stage1Candidate> + 'a {
     let evaluation_grid_ms: Vec<Option<u64>> = entries
         .iter()
         .map(QueryWorkloadEntry::evaluation_grid_ms)
@@ -91,49 +104,89 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
     std::iter::from_fn(move || {
         while queue.is_empty() {
             let current = choice.as_mut()?;
-            let skip = per_computation.absorbed_choice_varies(current);
-            let this = current.clone();
-            if !next_choice(per_computation, current) {
-                choice = None;
-            }
-            if skip {
+            let digits = current.len();
+            if per_computation.absorbed_choice_varies(current) {
+                if !next_choice(per_computation, current, digits) {
+                    choice = None;
+                }
                 continue;
             }
-            let roots = compose_logical_candidate(per_computation, &this)
-                .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
-            let from = position + queue.len();
-            let pass2 = match &roots {
-                Ok(roots) => pass2_candidates(roots, &evaluation_grid_ms),
-                Err(_) => Vec::new(),
-            };
-            queue.push_back(Stage1Candidate {
-                choice: this.clone(),
-                roots,
-                pass2: None,
-            });
-            for Pass2 {
-                rules,
-                sharing_candidates,
-                roots,
-            } in pass2
-            {
-                queue.push_back(Stage1Candidate {
-                    choice: this.clone(),
-                    roots,
-                    pass2: Some(Pass2Candidate {
-                        from_pass1_position: from,
-                        shared_builds: rules.shared_builds,
-                        pane_candidates: rules.pane_candidates,
-                        rollup_candidates: rules.rollup_candidates,
-                        topk_reuse_candidates: rules.topk_reuse_candidates,
-                        sharing_candidates,
-                    }),
-                });
+            let invalid = invalid_prefix(current);
+            let this = current.clone();
+            if !next_choice(per_computation, current, invalid.unwrap_or(digits)) {
+                choice = None;
             }
+            if invalid.is_some() {
+                continue;
+            }
+            let from = position + queue.len();
+            queue.extend(choice_candidates(
+                per_computation,
+                &this,
+                &evaluation_grid_ms,
+                from,
+            ));
         }
         position += 1;
         queue.pop_front()
     })
+}
+
+/// The Stage 1 candidates of one Pass 1 `choice`, in enumeration order: the
+/// composed candidate, then its Pass 2 candidates. `entries[q]` is query
+/// `q`'s workload entry, as in [`stage1_logical_asap_optimization`]; Pass 2
+/// candidates record position 0 as their Pass 1 candidate's.
+pub fn stage1_candidates_of_choice<Id: Clone>(
+    per_computation: &PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    choice: &[usize],
+) -> Vec<Stage1Candidate> {
+    let evaluation_grid_ms: Vec<Option<u64>> = entries
+        .iter()
+        .map(QueryWorkloadEntry::evaluation_grid_ms)
+        .collect();
+    choice_candidates(per_computation, choice, &evaluation_grid_ms, 0)
+}
+
+/// [`stage1_candidates_of_choice`] with each query's evaluation grid, its
+/// Pass 2 candidates recording `from` as their Pass 1 candidate's position.
+fn choice_candidates<Id: Clone>(
+    per_computation: &PerComputationCandidates<Id>,
+    choice: &[usize],
+    evaluation_grid_ms: &[Option<u64>],
+    from: usize,
+) -> Vec<Stage1Candidate> {
+    let roots = compose_logical_candidate(per_computation, choice)
+        .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
+    let pass2 = match &roots {
+        Ok(roots) => pass2_candidates(roots, evaluation_grid_ms),
+        Err(_) => Vec::new(),
+    };
+    let mut candidates = vec![Stage1Candidate {
+        choice: choice.to_vec(),
+        roots,
+        pass2: None,
+    }];
+    for Pass2 {
+        rules,
+        sharing_candidates,
+        roots,
+    } in pass2
+    {
+        candidates.push(Stage1Candidate {
+            choice: choice.to_vec(),
+            roots,
+            pass2: Some(Pass2Candidate {
+                from_pass1_position: from,
+                shared_builds: rules.shared_builds,
+                pane_candidates: rules.pane_candidates,
+                rollup_candidates: rules.rollup_candidates,
+                topk_reuse_candidates: rules.topk_reuse_candidates,
+                sharing_candidates,
+            }),
+        });
+    }
+    candidates
 }
 
 /// A Pass 2 candidate: what the rules other than the identical-expression
@@ -350,11 +403,19 @@ impl Pass2List {
     }
 }
 
-/// Mixed-radix increment of `choice`, each digit over its target's
-/// candidates and then its fused computation's: the last target varies fastest.
-/// `false` when a carry out of the first target ends the enumeration.
-fn next_choice<Id>(inventory: &PerComputationCandidates<Id>, choice: &mut [usize]) -> bool {
-    for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
+/// Mixed-radix increment of `choice`'s first `prefix` digits, each digit
+/// over its target's candidates and then its fused computation's, with the
+/// digits after them reset to 0: the next choice that differs from it in
+/// those digits, the last target varying fastest (`prefix =
+/// choice.len()`: the next choice). `false` when a carry out of the first
+/// target ends the enumeration.
+fn next_choice<Id>(
+    inventory: &PerComputationCandidates<Id>,
+    choice: &mut [usize],
+    prefix: usize,
+) -> bool {
+    choice[prefix..].fill(0);
+    for (digit, target) in choice[..prefix].iter_mut().zip(&inventory.targets).rev() {
         *digit += 1;
         if *digit < target.choice_count() {
             return true;
@@ -391,6 +452,54 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect()
+    }
+
+    /// Skipping an invalid prefix skips exactly the choices that agree with
+    /// it there, and keeps the others in enumeration order; a prefix of
+    /// length 0 skips every choice.
+    #[test]
+    fn skipping_enumeration_drops_only_the_invalid_prefixes() {
+        let queries = vec![
+            "sum by (job) (sum_over_time(m[5m]))".to_string(),
+            "quantile_over_time(0.99, n[5m])".to_string(),
+        ];
+        let roots = queries
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let target = asap_types::ir::properties::AccuracyTarget::max_error(0.05);
+                let root = lower_promql(q, target);
+                (
+                    i,
+                    QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
+                )
+            })
+            .collect();
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        assert!(inventory.targets.len() >= 2);
+        assert!(inventory.targets[0].choice_count() >= 2);
+        let pass1 = |candidates: Vec<Stage1Candidate>| -> Vec<Vec<usize>> {
+            candidates
+                .into_iter()
+                .filter(|c| c.pass2.is_none())
+                .map(|c| c.choice)
+                .collect()
+        };
+        let every = pass1(stage1_logical_asap_optimization(&inventory, &[]).collect());
+        // Every choice whose first digit is 1 is invalid.
+        let skipped = pass1(
+            stage1_logical_asap_optimization_skipping(&inventory, &[], |choice| {
+                (choice[0] == 1).then_some(1)
+            })
+            .collect(),
+        );
+        let expected: Vec<_> = every.iter().filter(|c| c[0] != 1).cloned().collect();
+        assert_eq!(skipped, expected);
+        assert!(skipped.len() < every.len());
+        assert_eq!(
+            stage1_logical_asap_optimization_skipping(&inventory, &[], |_| Some(0)).count(),
+            0
+        );
     }
 
     /// Rollup and exact top-k reuse candidates multiply (every subset of
