@@ -772,7 +772,7 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
     };
     assert_eq!(selected(&[])["selected"], "P2");
     let usage = &selected(&[])["costs"]["P3-m1"]["usage"];
-    assert_eq!(usage["average_memory_bytes"], 106_608_000_000.0);
+    assert_eq!(usage["average_memory_bytes"], 5_232_000_000.0);
     assert_eq!(
         usage["latency_per_query"],
         serde_json::json!([{ "compaction_ms": 0.0, "query_ms": 7.0 }])
@@ -800,8 +800,10 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
 /// at AWS Fargate's us-east-1 prices, in US dollars per second: the
 /// whole-window KLL (P2) is still selected, at $2.36124e-8/s (its 2.1
 /// CPU-ms/s at $1.1244e-8 per CPU-ms; it keeps no memory), and the panes
-/// maintained at ingestion time (P3-m1) cost about $1.2262e-4/s, almost all
-/// for their 106.6 GB kept in memory. A costlier candidate's reason shows
+/// maintained at ingestion time (P3-m1) cost about $6.0237e-6/s, almost all
+/// for their 5.232 GB kept in memory (six panes of 1,000,000 series, each a
+/// KLL of 872 bytes: its fixed 744 and an item array grown for its 4
+/// samples). A costlier candidate's reason shows
 /// such small costs in scientific notation.
 #[test]
 fn aws_fargate_preset_prices_example_4_in_dollars() {
@@ -819,7 +821,7 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
         )
     };
     close(cost("P2"), 2.36124e-8, 1e-9);
-    close(cost("P3-m1"), 1.2262e-4, 1e-4);
+    close(cost("P3-m1"), 6.0237e-6, 1e-4);
     // A dollar cost below 0.001 is shown in scientific notation, not as 0.000.
     let p1 = selection["rejected"]
         .as_array()
@@ -839,7 +841,7 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
 /// query-time result retained). For Pattern B with KLL only and query-time
 /// results retained: no DDSketch candidate is offered, and Stage 1's
 /// `pass1_pruned` says why; the KLL panes gain B3, built at query time and
-/// kept (`P3-m2`, 8,884.53 cost/s); the whole-window KLL (`P2`) is still
+/// kept (`P3-m2`, 436.53 cost/s); the whole-window KLL (`P2`) is still
 /// selected. Without raw data, every query-time scan is invalid and B1
 /// (`P3-m1`) is selected. A deployment with an unknown field is refused.
 #[test]
@@ -892,7 +894,10 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     );
     let selection = &kll_kept["stage3_plan_selection"];
     assert_eq!(selection["selected"], "P2");
-    assert_eq!(selection["costs"]["P3-m2"]["cost_per_second"], 8884.53);
+    let kept_cost = selection["costs"]["P3-m2"]["cost_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!((kept_cost - 436.53).abs() < 1e-9, "{kept_cost}");
 
     let no_raw = generate_example(
         "planner-layering-3b",

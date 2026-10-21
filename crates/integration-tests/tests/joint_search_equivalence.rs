@@ -169,12 +169,12 @@ fn planner_layering_examples_select_the_exhaustive_plan() {
         &cost_models(64),
     );
     let pattern_b = pattern_b();
-    // 64 GB rejects Pattern B's ingestion-time panes (124 GB).
+    // 4 GB rejects Pattern B's ingestion-time panes (6.1 GB).
     assert_equivalent_under(
         "pattern B",
         &pattern_b,
         &lower_promql_roots(&pattern_b).unwrap(),
-        &cost_models(64),
+        &cost_models(4),
     );
     let (label, once) = &pattern_a_variants()[0];
     let roots = lower_promql_roots(once).unwrap();
