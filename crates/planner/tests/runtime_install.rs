@@ -1217,3 +1217,163 @@ async fn every_topk_form_answers_whole_series() {
         assert_full_series_answers(&run, expected);
     }
 }
+
+/// The MVP benchmark's p99 query: the per-series p99 of a gauge over 100 s,
+/// averaged per (region, service, job), every second, within 0.05 at
+/// failure probability 0.3, over 1,000 `data` series sampled every 100 ms,
+/// with `data` declared non-negative or not.
+fn p99_avg_workload(values_non_negative: bool) -> PlanningWorkload {
+    serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
+              "query": "avg by (region, service, job) (quantile_over_time(0.99, data[100s]))",
+              "demand": {{"fixed_interval": 1000}},
+              "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.3,
+                  "accuracy_scope": "whole_result"}}}},
+              "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 10000.0}}}},
+              "sources": {{"data": {{"series_count": 1000, "metric_type": "gauge",
+                  "sample_interval": 100, "values_non_negative": {values_non_negative}}}}}}}}}"#
+    ))
+    .unwrap()
+}
+
+/// [`p99_avg_workload`] planned for a deployment that keeps no raw samples.
+async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, String> {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    plan_installable(UserInput::new(
+        &p99_avg_workload(values_non_negative),
+        FrontendInput::Promql { histograms: None },
+        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+    ))
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Without raw samples, the only valid plan of the p99 query keeps one
+/// DDSketch per series in one-second panes built at ingestion and merges
+/// the window's panes at query time (P5-m1). A quantile of merged panes is
+/// still one of the samples, so a declared non-negative gauge carries the
+/// sketch's relative bound through `avg`: P5-m1 is selected, its answers
+/// equal the query-time reference's and are within 5% of the exact
+/// averages.
+#[tokio::test]
+async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_through_avg() {
+    let plan = plan_p99_avg(true).await.expect("a valid plan");
+    let selection = plan.selection.as_ref().expect("Stage 3's report");
+    assert_eq!(selection.selected_candidate_id, "P5-m1");
+    assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
+    assert!(
+        plan.query_time_raw_windows.is_empty(),
+        "no raw samples read"
+    );
+    // The query's guarantee, with `data`'s declared sign and its 1,000
+    // series bound as Stage 3 binds them: a relative error of at most 0.05
+    // at failure probability at most 0.3 (DDSketch's bound is
+    // deterministic).
+    let root = plan.queries[0].root_node_id;
+    let guarantee = plan
+        .dag
+        .dag
+        .nodes
+        .iter()
+        .find(|node| node.id == root)
+        .and_then(|node| node.guarantee.clone())
+        .expect("the query's guarantee");
+    let sign =
+        asap_logical_asap_optimization::accuracy::composition::samples_sign_statistic("data");
+    let bound = guarantee.bind(&|statistic| match statistic {
+        "input_row_count" => Some(1_000.0),
+        _ => (statistic == sign).then_some(1.0),
+    });
+    assert_eq!(
+        bound.spec.accuracy_metric,
+        asap_types::ir::properties::AccuracyMetric::Relative
+    );
+    let error = bound.spec.error.evaluate().expect("a numeric bound");
+    assert!(error <= 0.05, "{error}");
+    let failure = bound
+        .spec
+        .failure_probability
+        .evaluate()
+        .expect("a numeric failure probability");
+    assert!(failure <= 0.3, "{failure}");
+
+    // Eight non-negative series, one sample every 100 ms over the last
+    // 110 s: two per (region, service, job) group.
+    let evaluation_ms = EVALUATION_MS;
+    let mut samples = Vec::new();
+    let mut per_group: BTreeMap<(String, String, String), Vec<Vec<f64>>> = BTreeMap::new();
+    for series in 0..8 {
+        let region = format!("r{}", series % 2);
+        let service = format!("s{}", series / 4);
+        let job = "j".to_string();
+        let mut window = Vec::new();
+        for step in 0..1_100i64 {
+            let timestamp_ms = evaluation_ms - 110_000 + 50 + step * 100;
+            let value = 10.0 * (series + 1) as f64 + ((step * 37 + series * 11) % 997) as f64;
+            samples.push(Sample {
+                labels: BTreeMap::from([
+                    ("__name__".to_string(), "data".to_string()),
+                    ("region".to_string(), region.clone()),
+                    ("service".to_string(), service.clone()),
+                    ("job".to_string(), job.clone()),
+                    ("instance".to_string(), format!("i{series}")),
+                ]),
+                timestamp_ms,
+                value,
+            });
+            if timestamp_ms > evaluation_ms - 100_000 {
+                window.push(value);
+            }
+        }
+        per_group
+            .entry((region, service, job))
+            .or_default()
+            .push(window);
+    }
+    let run = run_data_plane(
+        &serde_json::to_string(&plan).unwrap(),
+        &samples,
+        evaluation_ms,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+    let answers = &run.answers_per_query[0];
+    assert_eq!(answers.len(), per_group.len());
+    for (labels, value) in answers {
+        let key = (
+            labels["region"].clone(),
+            labels["service"].clone(),
+            labels["job"].clone(),
+        );
+        // The exact answer: the mean of the group's per-series p99s, each
+        // PromQL's interpolated quantile of the series' window.
+        let exact = per_group[&key]
+            .iter()
+            .map(|window| {
+                let mut sorted = window.clone();
+                sorted.sort_by(f64::total_cmp);
+                let rank = 0.99 * (sorted.len() - 1) as f64;
+                let (low, high) = (rank.floor() as usize, rank.ceil() as usize);
+                sorted[low] + (sorted[high] - sorted[low]) * (rank - low as f64)
+            })
+            .sum::<f64>()
+            / per_group[&key].len() as f64;
+        assert!(
+            (value - exact).abs() <= 0.05 * exact,
+            "{labels:?}: {value} vs exact {exact}"
+        );
+    }
+}
+
+/// Without the declaration nothing proves `data`'s samples non-negative, so
+/// the merged panes' relative bound does not carry through `avg`: P5-m1 is
+/// rejected, and with no raw samples no plan is valid.
+#[tokio::test]
+async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
+    let error = plan_p99_avg(false).await.expect_err("no valid plan");
+    assert!(error.contains("P5-m1"), "{error}");
+}

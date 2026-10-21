@@ -1674,8 +1674,9 @@ fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<Propaga
 /// over a composed candidate. An exact sum accumulator, a renaming and a
 /// heap estimate whose update weights carry the
 /// [`WeightDomain::SamplesOfMetric`] requirement keep it, and so does a
-/// quantile estimate of those values: it is one of them, or between two of
-/// them, so it shares their sign. Anything else (rate, arithmetic, other
+/// quantile estimate of those values, built over the raw window or merged
+/// from its tumbling panes: it is one of them, or between two of them, so it
+/// shares their sign. Anything else (rate, arithmetic, other
 /// functions) ends it. Only the sign of the values is read from it.
 fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
     match &node.operator {
@@ -1689,12 +1690,29 @@ fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
             _ => None,
         },
         // Only a φ in [0, 1] picks one of the values; outside it the answer
-        // is -Inf or +Inf, whatever their sign.
+        // is -Inf or +Inf, whatever their sign. Merged tumbling panes of one
+        // definition ([`merged_chain`]) are read through their `PaneChain`:
+        // a quantile of the merged state is still one of the panes'
+        // samples, or between two of them.
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
             query: SketchStatistic::Quantile { q },
-        }) if (0.0..=1.0).contains(q) => match summary_input.asap()? {
+        }) if (0.0..=1.0).contains(q) => match merged_chain(summary_input)
+            .unwrap_or(summary_input)
+            .asap()?
+        {
             ASAPOp::SummaryAgg {
+                input:
+                    SummaryUpdate {
+                        item: None,
+                        weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+                        ..
+                    },
+                filter: None,
+                child,
+                ..
+            }
+            | ASAPOp::PaneChain {
                 input:
                     SummaryUpdate {
                         item: None,
@@ -4422,6 +4440,75 @@ mod tests {
             "quantile_over_time(2, m[1m])",
         ] {
             assert!(estimate_of(query).is_none(), "{query}: a sketch is offered");
+        }
+    }
+
+    /// A quantile read from merged tumbling panes of a metric's samples is
+    /// still one of the samples (or between two), so it carries their sign
+    /// as the same quantile over the raw window does; φ outside [0, 1]
+    /// still carries none.
+    #[test]
+    fn a_quantile_of_merged_panes_shares_its_samples_sign() {
+        let inventory = inventory("quantile_over_time(0.99, m[100s])");
+        let estimate = (0..inventory.targets.len())
+            .flat_map(|t| composed_with(&inventory, t))
+            .find_map(|(_, root)| {
+                OperatorNode::reachable(&root)
+                    .into_iter()
+                    .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryEstimate { .. })))
+            })
+            .expect("a sketch estimate");
+        let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
+            unreachable!()
+        };
+        let Some(ASAPOp::SummaryAgg {
+            child: range,
+            family,
+            input,
+            reduction,
+            grouping,
+            filter,
+        }) = summary_input.asap()
+        else {
+            panic!("{summary_input:?}")
+        };
+        let chain = Rc::new(
+            OperatorNode::new(Operator::ASAP(ASAPOp::PaneChain {
+                child: Rc::clone(range.children()[0]),
+                family: family.clone(),
+                input: input.clone(),
+                reduction: reduction.clone(),
+                grouping: grouping.clone(),
+                filter: filter.clone(),
+                pane_width_ms: 10_000,
+                pane_count: 10,
+            }))
+            .unwrap(),
+        );
+        let merged = Rc::new(
+            OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
+                children: vec![chain],
+            }))
+            .unwrap(),
+        );
+        let read = |q: f64| {
+            OperatorNode::with_schema(
+                Operator::ASAP(ASAPOp::SummaryEstimate {
+                    summary_input: Rc::clone(&merged),
+                    query: SketchStatistic::Quantile { q },
+                }),
+                estimate.schema.clone(),
+            )
+        };
+        assert_eq!(estimates_samples_of(&read(0.99)).as_deref(), Some("m"));
+        assert_eq!(
+            fold_stats(&Reduction::by(vec![]), &Rc::new(read(0.99)))
+                .unwrap()
+                .sign_statistic,
+            Some(samples_sign_statistic("m"))
+        );
+        for q in [-1.0, 2.0] {
+            assert_eq!(estimates_samples_of(&read(q)), None, "q = {q}");
         }
     }
 
