@@ -39,6 +39,9 @@
 //     metric or null when exact or accepted regardless of guarantee,
 //     whether the deployment's accuracy model accepted it directly,
 //     whatever its guarantee says (`accepted_regardless_of_guarantee`),
+//     the cause the guarantee check would have rejected it with when it was
+//     accepted only so (`guarantee_check_rejection`, e.g.
+//     `no_accuracy_guarantee`; null otherwise),
 //     the sketches read and a one-line
 //     summary), and every other shown candidate under `rejected` with
 //     its `cause`: a failed check (`failure_probability_resize_failed`,
@@ -120,6 +123,11 @@
 // `non_repeating_query_horizon_seconds` and `measured_operation_costs`;
 // an omitted field takes its default). It replaces `--cost-model`, the
 // `--cluster-*` flags and `--measured-operation-costs`.
+// `--ignore-accuracy-guarantees` sets the settings'
+// `ignore_accuracy_guarantees` (also with `--plan-selection-settings`):
+// Stage 3 accepts every query output regardless of its accuracy guarantee,
+// so candidates are compared on cost alone; executability checks still
+// apply.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
@@ -163,7 +171,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--deployment-capabilities <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
+[--plan-selection-settings <file>] [--ignore-accuracy-guarantees] [--deployment-capabilities <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) a run enumerates.
@@ -255,6 +263,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut out = None;
     let mut measured_operation_costs_path: Option<String> = None;
     let mut plan_selection_settings_path: Option<String> = None;
+    let mut ignore_accuracy_guarantees = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value"));
@@ -310,6 +319,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--out" => out = Some(value()?),
             "--measured-operation-costs" => measured_operation_costs_path = Some(value()?),
             "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
+            "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -384,7 +394,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         None => MeasuredOperationCosts::default(),
     };
-    let plan_selection = match &plan_selection_settings_path {
+    let mut plan_selection: PlanSelectionSettings = match &plan_selection_settings_path {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?;
@@ -397,6 +407,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             ..default_settings
         },
     };
+    plan_selection.ignore_accuracy_guarantees |= ignore_accuracy_guarantees;
     let from_file = match &workload_path {
         Some(path) if example.is_none() && queries.is_empty() => {
             let text =
@@ -715,6 +726,7 @@ fn plan_selection_json(
                         "target_metric": accepted.target_metric,
                         "accepted_metric": accepted.accepted_metric,
                         "accepted_regardless_of_guarantee": accepted.accepted_regardless_of_guarantee,
+                        "guarantee_check_rejection": accepted.guarantee_check_rejection,
                         "sketches": accepted.sketches,
                         "summary": accepted.to_string(),
                     })

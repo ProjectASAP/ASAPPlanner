@@ -1377,3 +1377,201 @@ async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_throug
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
     assert!(error.contains("P5-m1"), "{error}");
 }
+
+/// `avg by (g) (quantile_over_time(0.99, x[100s]))` every 10 s at rank
+/// error 0.01 and δ 0.01, over 100 ingesting `x` series sampled every
+/// second: ASAPQuery's random mixed workload query. Stage 1 has no
+/// analytical rule for an average of quantile estimates, so every sketch
+/// candidate has no guarantee.
+fn average_of_p99s_workload() -> PlanningWorkload {
+    serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "avg by (g) (quantile_over_time(0.99, x[100s]))",
+              "demand": {"fixed_interval": 10000},
+              "requirements": {"accuracy": {"accuracy_metric": "rank", "max_error": 0.01,
+                  "failure_probability": 0.01, "accuracy_scope": "per_value"}},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 100.0}},
+              "sources": {"x": {"series_count": 100, "sample_interval": 1000}}}}"#,
+    )
+    .unwrap()
+}
+
+/// Raw `x` samples of series `a` and `b` in group `g="1"` and `c` in group
+/// `g="2"`, one every second from 200 s before `EVALUATION_MS` to it, off
+/// the second boundaries: series `i`'s value is `100 × i + 1..=101`, all
+/// positive, which DDSketch needs at run time (nothing declares it here).
+fn grouped_samples() -> Vec<Sample> {
+    let mut samples = Vec::new();
+    for (i, (instance, g)) in [("a", "1"), ("b", "1"), ("c", "2")].iter().enumerate() {
+        for step in 0..200 {
+            samples.push(Sample {
+                labels: BTreeMap::from([
+                    ("__name__".to_string(), "x".to_string()),
+                    ("instance".to_string(), instance.to_string()),
+                    ("g".to_string(), g.to_string()),
+                ]),
+                timestamp_ms: EVALUATION_MS - 199_500 + step * 1_000,
+                value: (100 * i) as f64 + 1.0 + ((step * 37 + 11 * i as i64) % 101) as f64,
+            });
+        }
+    }
+    samples
+}
+
+/// The exact answer of `avg by (g) (quantile_over_time(0.99, x[100s]))` at
+/// `EVALUATION_MS` over [`grouped_samples`]: PromQL's p99 (linear
+/// interpolation at rank `0.99 × (n − 1)`) of each series' samples in
+/// `(EVALUATION_MS − 100 s, EVALUATION_MS]`, averaged per group.
+fn exact_average_of_p99s(samples: &[Sample]) -> BTreeMap<String, f64> {
+    let mut per_series: BTreeMap<(String, String), Vec<f64>> = BTreeMap::new();
+    for s in samples
+        .iter()
+        .filter(|s| EVALUATION_MS - 100_000 < s.timestamp_ms && s.timestamp_ms <= EVALUATION_MS)
+    {
+        per_series
+            .entry((s.labels["g"].clone(), s.labels["instance"].clone()))
+            .or_default()
+            .push(s.value);
+    }
+    let mut per_group: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for ((g, _), mut values) in per_series {
+        values.sort_by(f64::total_cmp);
+        let rank = 0.99 * (values.len() - 1) as f64;
+        let (low, high) = (rank.floor() as usize, rank.ceil() as usize);
+        let p99 = values[low] + (values[high] - values[low]) * (rank - low as f64);
+        per_group.entry(g).or_default().push(p99);
+    }
+    per_group
+        .into_iter()
+        .map(|(g, p99s)| (g, p99s.iter().sum::<f64>() / p99s.len() as f64))
+        .collect()
+}
+
+/// Issue #774: without raw samples retained, every candidate of an average
+/// of p99s fails a check (the exact ones scan raw samples at query time,
+/// the sketch ones have no guarantee), so planning fails. With
+/// `ignore_accuracy_guarantees` loaded from the settings JSON, the cheapest
+/// sketch plan is selected, the report marks its output as accepted without
+/// a guarantee, and it runs: equal to its query-time reference and within a
+/// loose tolerance of the exact answer.
+#[tokio::test]
+async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
+    let workload = average_of_p99s_workload();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan = |settings: PlanSelectionSettings| {
+        let workload = workload.clone();
+        let capabilities = capabilities.clone();
+        async move {
+            plan_installable(UserInput::new(
+                &workload,
+                FrontendInput::Promql { histograms: None },
+                PlanningModels::builtin()
+                    .with_deployment_capabilities(&capabilities)
+                    .with_plan_selection(&settings),
+            ))
+            .await
+        }
+    };
+    // Without the setting, no candidate is valid.
+    let error = plan(PlanSelectionSettings::default())
+        .await
+        .expect_err("no candidate is valid without the setting");
+    assert!(error.to_string().contains("no valid candidate"), "{error}");
+    // With it, loaded from JSON as a deployment passes it.
+    let settings: PlanSelectionSettings =
+        serde_json::from_str(r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
+    assert!(settings.ignore_accuracy_guarantees);
+    let installed = plan(settings).await.expect("a sketch plan is selected");
+    // A per-series KLL or DDSketch plan.
+    let families: Vec<String> = installed
+        .dag
+        .dag
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. },
+            ) => Some(format!("{family:?}")),
+            _ => None,
+        })
+        .collect();
+    // Its sketches (beside the average's exact sum and count) are KLL or
+    // DDSketch.
+    let sketches: Vec<&String> = families
+        .iter()
+        .filter(|f| f.starts_with("Sketch"))
+        .collect();
+    assert!(
+        !sketches.is_empty()
+            && sketches
+                .iter()
+                .all(|f| f.contains("Kll") || f.contains("DDSketch")),
+        "{families:?}"
+    );
+    // The report marks the query's output as accepted without a guarantee.
+    let report = installed.selection.as_ref().expect("Stage 3's report");
+    assert_eq!(report.queries_accepted_without_guarantee, vec![0]);
+    // It runs, equal to its query-time reference ...
+    let plan_json = serde_json::to_string(&installed).unwrap();
+    let samples = grouped_samples();
+    let run = run_data_plane(
+        &plan_json,
+        &samples,
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+    // ... and within 5 (of values spanning 100 per series) of the exact
+    // average of p99s, per group.
+    let exact = exact_average_of_p99s(&samples);
+    let answered: BTreeMap<String, f64> = run.answers_per_query[0]
+        .iter()
+        .map(|(labels, value)| (labels["g"].clone(), *value))
+        .collect();
+    assert_eq!(
+        answered.keys().collect::<Vec<_>>(),
+        exact.keys().collect::<Vec<_>>()
+    );
+    for (g, value) in &answered {
+        assert!(
+            (value - exact[g]).abs() <= 5.0,
+            "g={g}: {value} vs exact {}",
+            exact[g]
+        );
+    }
+}
+
+/// The MVP benchmark's p99 query over an undeclared gauge, which has no
+/// valid plan with the built-in model, gets one with
+/// `ignore_accuracy_guarantees`, and the report marks its output as
+/// accepted without a guarantee.
+#[tokio::test]
+async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let settings = PlanSelectionSettings {
+        ignore_accuracy_guarantees: true,
+        ..PlanSelectionSettings::default()
+    };
+    let plan = plan_installable(UserInput::new(
+        &p99_avg_workload(false),
+        FrontendInput::Promql { histograms: None },
+        PlanningModels::builtin()
+            .with_deployment_capabilities(&capabilities)
+            .with_plan_selection(&settings),
+    ))
+    .await
+    .expect("a plan is selected");
+    let report = plan.selection.as_ref().expect("Stage 3's report");
+    assert_eq!(report.queries_accepted_without_guarantee, vec![0]);
+    assert!(
+        plan.query_time_raw_windows.is_empty(),
+        "no raw samples read"
+    );
+}

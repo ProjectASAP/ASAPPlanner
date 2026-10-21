@@ -28,7 +28,8 @@ use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
 use crate::accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
+    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
+    NoAccuracyEvidence,
 };
 use crate::{PlanSelectionSettings, Selection, SelectionError};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
@@ -41,6 +42,7 @@ pub use stage1_to_stage3::{
 };
 
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;
+static IGNORE_ACCURACY_GUARANTEES: IgnoreAccuracyGuarantees = IgnoreAccuracyGuarantees;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<PlanSelectionSettings> =
     std::sync::LazyLock::new(PlanSelectionSettings::default);
@@ -62,7 +64,9 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 pub struct PlanningModels<'a> {
     /// Decides whether a candidate's accuracy guarantee meets its query's
     /// target, and whether the deployment accepts an output regardless of
-    /// its guarantee; [`BuiltinAccuracyModel`] by default.
+    /// its guarantee; [`BuiltinAccuracyModel`] by default. Planning reads it
+    /// through [`Self::effective_accuracy`], which
+    /// [`PlanSelectionSettings::ignore_accuracy_guarantees`] overrides.
     pub accuracy: &'a dyn AccuracyModel,
     /// Deployment facts the guarantees need (operand domains, observed
     /// guarantees); [`NoAccuracyEvidence`] by default.
@@ -100,6 +104,18 @@ impl<'a> PlanningModels<'a> {
             evidence: &NO_ACCURACY_EVIDENCE,
             plan_selection: &DEFAULT_PLAN_SELECTION,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
+        }
+    }
+
+    /// The accuracy model planning uses: [`IgnoreAccuracyGuarantees`] when
+    /// the plan selection settings set
+    /// [`PlanSelectionSettings::ignore_accuracy_guarantees`], overriding
+    /// `accuracy`; otherwise `accuracy`.
+    pub fn effective_accuracy(&self) -> &'a dyn AccuracyModel {
+        if self.plan_selection.ignore_accuracy_guarantees {
+            &IGNORE_ACCURACY_GUARANTEES
+        } else {
+            self.accuracy
         }
     }
 

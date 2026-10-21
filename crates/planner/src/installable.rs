@@ -192,6 +192,13 @@ pub struct SelectedPlanReport {
     /// (`Selection::search`); empty when not recorded.
     #[serde(default)]
     pub search: SearchReport,
+    /// The workload queries (entry indices) whose output Stage 3 accepted
+    /// only because the accuracy model accepts it regardless of its
+    /// guarantee (e.g. `PlanSelectionSettings::ignore_accuracy_guarantees`):
+    /// the guarantee check would have rejected it. Empty when every
+    /// output's guarantee meets its target; omitted from JSON then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queries_accepted_without_guarantee: Vec<usize>,
 }
 
 /// What Stage 3 predicts the selected plan uses, per second of wall time
@@ -1058,7 +1065,17 @@ fn report_of(
     installed_node_ids: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 ) -> SelectedPlanReport {
     let cost = selection.costs.get(&selection.selected);
+    let queries_accepted_without_guarantee = selection
+        .accepted
+        .get(&selection.selected)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, accepted)| accepted.guarantee_check_rejection.is_some())
+        .map(|(query, _)| query)
+        .collect();
     SelectedPlanReport {
+        queries_accepted_without_guarantee,
         selected_candidate_id: selection.selected.clone(),
         cost_per_second: cost.and_then(|cost| cost.cost_per_second),
         predicted_usage: cost.map(|cost| PredictedUsage {
