@@ -1808,3 +1808,166 @@ async fn a_ddsketch_over_signed_samples_runs_within_alpha() {
     });
     assert_p99s_within_alpha(&plan, &samples, &per_group, max);
 }
+
+/// The ASAPQuery workloads' counter top-k query `topk(10, sum by (job)
+/// (<f>(data_total[5m])))` for `f` `increase` or `rate`, every minute
+/// within 0.05 at failure probability 0.3, over 24 `data_total` counter
+/// series sampled every 10 s.
+fn counter_topk_workload(function: &str) -> PlanningWorkload {
+    let query = format!("topk(10, sum by (job) ({function}(data_total[5m])))");
+    serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
+              "query": {query:?},
+              "demand": {{"fixed_interval": 60000}},
+              "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.3}}}},
+              "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100000.0}}}},
+              "sources": {{"data_total": {{"series_count": 10000, "metric_type": "counter",
+                  "sample_interval": 100}}}}}}}}"#
+    ))
+    .unwrap()
+}
+
+/// The per-second rate of series `instance` (1 or 2) of job `job` (1..=12)
+/// in [`counter_samples`]: distinct for every series and every job's sum.
+fn counter_rate(job: i64, instance: i64) -> f64 {
+    job as f64 + 0.1 * instance as f64
+}
+
+/// `data_total` samples of 12 jobs with 2 series each, every 10 s from
+/// 595 s before `EVALUATION_MS`: each a counter growing linearly at
+/// [`counter_rate`], so its 5-minute `increase` is 300 × its rate (the
+/// samples 5 s inside each window end extrapolate to them exactly).
+fn counter_samples() -> Vec<Sample> {
+    let mut samples = Vec::new();
+    for job in 1..=12 {
+        for instance in 1..=2 {
+            for step in 0..60 {
+                let mut s = sample(
+                    "data_total",
+                    &format!("{job}-{instance}"),
+                    EVALUATION_MS - 595_000 + step * 10_000,
+                    counter_rate(job, instance) * (5 + step * 10) as f64,
+                );
+                s.labels.insert("job".into(), format!("j{job:02}"));
+                samples.push(s);
+            }
+        }
+    }
+    samples
+}
+
+/// Issue: with guarantees ignored and no raw samples, the counter top-k
+/// queries selected exact per-series panes followed by a query-time
+/// CountSketchWithHeap top-k the executor cannot compile ("invalid keyed
+/// evaluation shape or capacity"). The selected plan must be one the
+/// executor compiles; it runs, equal to its query-time reference and to the
+/// exact top 10 jobs (jobs 3..=12, each the sum of its two series).
+#[tokio::test]
+async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let settings = PlanSelectionSettings {
+        ignore_accuracy_guarantees: true,
+        ..PlanSelectionSettings::default()
+    };
+    for (function, seconds) in [("increase", 300.0), ("rate", 1.0)] {
+        let plan = plan_installable(UserInput::new(
+            &counter_topk_workload(function),
+            FrontendInput::Promql { histograms: None },
+            PlanningModels::builtin()
+                .with_deployment_capabilities(&capabilities)
+                .with_plan_selection(&settings),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("{function}: {error}"));
+        // An exact plan: no heap over the per-job sums, which have one row
+        // per job.
+        assert!(
+            !plan.dag.dag.nodes.iter().any(|node| matches!(
+                &node.payload,
+                asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                    ASAPOp::SummaryAgg {
+                        family: asap_executor::planner::ir::schema::FieldDataType::Sketch(..),
+                        ..
+                    }
+                )
+            )),
+            "{function}"
+        );
+        // The plan compiles as a runtime compiles it.
+        plan.check_compiles().unwrap();
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        let run = run_data_plane(
+            &plan_json,
+            &counter_samples(),
+            EVALUATION_MS,
+            &mut SummaryStore::new(),
+        );
+        assert_eq!(
+            run.answers_per_query, run.reference_answers_per_query,
+            "{function}"
+        );
+        let expected: Vec<(String, f64)> = (3..=12)
+            .map(|job| {
+                (
+                    format!("j{job:02}"),
+                    (counter_rate(job, 1) + counter_rate(job, 2)) * seconds,
+                )
+            })
+            .collect();
+        let mut answered: Vec<(String, f64)> = run.answers_per_query[0]
+            .iter()
+            .map(|(labels, value)| (labels["job"].clone(), *value))
+            .collect();
+        answered.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(answered.len(), expected.len(), "{function}: {answered:?}");
+        for ((job, value), (want_job, want)) in answered.iter().zip(&expected) {
+            assert_eq!(job, want_job, "{function}");
+            assert!(
+                (value - want).abs() <= 1e-9 * want,
+                "{function} {job}: {value} vs {want}"
+            );
+        }
+    }
+}
+
+/// `InstallablePlan::check_compiles` reports what the Planner's executor
+/// refuses: the counter top-k plan with its answer column's type changed
+/// from Float64 to Utf8 does not compile, with the executor's reason.
+#[tokio::test]
+async fn check_compiles_reports_the_executors_error() {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let mut plan = plan_installable(UserInput::new(
+        &counter_topk_workload("rate"),
+        FrontendInput::Promql { histograms: None },
+        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+    ))
+    .await
+    .unwrap();
+    plan.check_compiles().unwrap();
+    let root = plan.queries[0].root_node_id;
+    let node = plan
+        .dag
+        .dag
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == root)
+        .unwrap();
+    let answer = node
+        .output_schema
+        .fields
+        .iter_mut()
+        .find(|field| field.name == "topk_10")
+        .unwrap();
+    answer.dtype = asap_executor::planner::ir::schema::FieldDataType::Plain(
+        asap_executor::planner::ir::schema::DataType::Utf8,
+    );
+    let error = plan.check_compiles().unwrap_err();
+    assert!(error.starts_with("query run: "), "{error}");
+}

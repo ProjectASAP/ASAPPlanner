@@ -21,7 +21,10 @@
 //!   grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
 //! - Summary candidates are unsized; they are sized after Pass 2 sharing.
 //! - Candidates are pruned only when provably unable to meet the accuracy
-//!   requirement, and each pruned candidate keeps its [`PruneReason`].
+//!   requirement or to run, or when the exact candidate provably dominates
+//!   them (a PromQL top-k's heap over its instant vector, one row per item:
+//!   [`PruneReason::TopKHeapOverOneRowPerItem`]); each pruned candidate
+//!   keeps its [`PruneReason`].
 //! - A measure filter or `HAVING` prunes nothing. The target records the
 //!   measure filter (applied as `SummaryAgg.filter`) and one [`HavingEntry`]
 //!   per consumer `Filter` directly above the aggregate: a key-only predicate
@@ -178,6 +181,14 @@ pub enum PruneReason {
     /// +Inf: no sketch estimates that, and the executor's sketches refuse
     /// such a φ, so only the exact answer remains.
     QuantileOutsideUnitInterval,
+    /// A PromQL top-k's heap (Count-Min or CountSketch with a heap) over its
+    /// own input, an instant vector with one row per ranked series or
+    /// group: the heap reads every row and adds
+    /// nothing to it, so an exact top-k over the same rows, which keeps only
+    /// `k` of them, is exact and no costlier. Only the whole-expression heap
+    /// over the inner aggregate's input, where an item's rows repeat, is
+    /// offered ([`FusedComputation`]).
+    TopKHeapOverOneRowPerItem,
 }
 
 /// Unranked candidates of one measure and the candidates pruned for it.
@@ -671,6 +682,7 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
         }
     }
     add_whole_expression_targets(&mut targets, &consumers);
+    prune_topk_heaps_over_one_row_per_item(&mut targets);
     add_nested_sum_targets(&mut targets, &consumers);
     Ok(PerComputationCandidates { roots, targets })
 }
@@ -852,6 +864,46 @@ fn add_whole_expression_targets(
             candidates: heaps,
             pruned: Vec::new(),
         });
+    }
+}
+
+/// Prunes the own heap candidates of each PromQL top-k
+/// ([`PruneReason::TopKHeapOverOneRowPerItem`]); a fused whole-expression
+/// heap ([`add_whole_expression_targets`]) has already moved out of them.
+fn prune_topk_heaps_over_one_row_per_item(targets: &mut [ComputationTarget]) {
+    for target in targets.iter_mut() {
+        let Some(NonASAPOp::Aggregate {
+            measures, child, ..
+        }) = target.aggregate.non_asap()
+        else {
+            continue;
+        };
+        if !matches!(measures.get(target.measure), Some(AggIntent::TopK { .. })) {
+            continue;
+        }
+        // A PromQL top-k ranks an instant vector: one row per series or
+        // group. (A SQL top-k keeps its heaps.)
+        if !reads_only_time_series(child) {
+            continue;
+        }
+        target
+            .choices
+            .prune(PruneReason::TopKHeapOverOneRowPerItem, |candidate| {
+                matches!(
+                    candidate,
+                    ComputationCandidate::Summary(
+                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                    )
+                )
+            });
+    }
+}
+
+/// Whether every scan below `node` reads a time series (PromQL rows).
+fn reads_only_time_series(node: &OperatorNode) -> bool {
+    match node.non_asap() {
+        Some(NonASAPOp::Scan { source, .. }) => matches!(source, Source::TimeSeries { .. }),
+        _ => node.children().iter().all(|c| reads_only_time_series(c)),
     }
 }
 

@@ -39,15 +39,16 @@ use asap_frontend_sql::{lower_sql_dialect, SqlError};
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
 pub use asap_plan_selection::pass::{
-    optimize, run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError,
-    PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
+    optimize, run_stage1_to_stage3, ExecutorCompileCheck, OptimizationInput, OptimizationPass,
+    OptimizeError, PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass,
+    Stage1ToStage3Run,
 };
 
 mod installable;
 pub use installable::{
-    plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery, PredictedNodeUsage,
-    PredictedQueryUsage, PredictedUsage, SelectedPlanReport, StoredCoverage, StoredOutput,
-    StoredOutputBuild, StoredOutputInputs,
+    plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery,
+    PlannerExecutorCompileCheck, PredictedNodeUsage, PredictedQueryUsage, PredictedUsage,
+    SelectedPlanReport, StoredCoverage, StoredOutput, StoredOutputBuild, StoredOutputInputs,
 };
 
 // What a deployment runtime needs to build a `UserInput` and read an
