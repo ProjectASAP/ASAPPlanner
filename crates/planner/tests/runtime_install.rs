@@ -13,7 +13,7 @@ use asap_executor::values::{Batch, Value};
 use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
-    OptimizationInput, OptimizationPass, OptimizeError, OperatorKind, PhysicalASAPDAG, PlanOutput,
+    OperatorKind, OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
     PlanSelectionSettings, PlanningModels, PlanningWorkload, SelectionBox, Stage1ToStage3Pass,
     StoredOutput, StoredOutputBuild, UserInput,
 };
@@ -516,7 +516,9 @@ async fn the_plan_carries_stage3s_predicted_usage() {
     let installed: BTreeSet<_> = plan.dag.dag.nodes.iter().map(|node| node.id).collect();
     for node in &usage.per_node {
         assert!(
-            node.installed_node_ids.iter().all(|id| installed.contains(id)),
+            node.installed_node_ids
+                .iter()
+                .all(|id| installed.contains(id)),
             "{node:?}"
         );
     }
@@ -527,7 +529,10 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         .unwrap();
     assert_eq!(chain.installed_node_ids.len(), 6, "{chain:?}");
     let stored: BTreeSet<_> = plan.stored_outputs.iter().map(|o| o.node_id).collect();
-    assert!(chain.installed_node_ids.iter().all(|id| stored.contains(id)));
+    assert!(chain
+        .installed_node_ids
+        .iter()
+        .all(|id| stored.contains(id)));
     let root = plan.queries[0].root_node_id;
     assert!(usage
         .per_node

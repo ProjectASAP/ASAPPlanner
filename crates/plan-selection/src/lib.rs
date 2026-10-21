@@ -7644,24 +7644,30 @@ mod tests {
     /// A measured update time for the candidate's KLL prices that build
     /// from it (rows × measured ns, counted in operations of
     /// `ms_per_cpu_op`) and reports `Measured`; every other node keeps its
-    /// formulas, reports `Analytical`, and is scaled by the calibration
-    /// factor, measured ÷ formula time of the build: 250 ns against the
-    /// formula's one 1-ns operation per row.
+    /// formulas, reports `Analytical`, and has its CPU scaled by the
+    /// calibration factor, measured ÷ formula time of the build: 250 ns
+    /// against the formula's one 1-ns operation per row.
     #[test]
     fn a_measured_entry_prices_its_node_and_calibrates_the_others() {
         let (candidate, build, sketch) = kll_build();
+        // Scanning is free here, so each node's time is its CPU, which the
+        // factor scales (it leaves scanned bytes unscaled).
+        let cpu_time_only = |mut settings: PlanSelectionSettings| {
+            settings.resource_speed.ms_per_scanned_byte = 0.0;
+            settings
+        };
         let before = price(
             &candidate.dag,
             &recurrences(1),
             &data(),
-            &PlanSelectionSettings::default(),
+            &cpu_time_only(PlanSelectionSettings::default()),
         )
         .unwrap();
-        let settings = measured(vec![sketch_entry(
+        let settings = cpu_time_only(measured(vec![sketch_entry(
             OperatorKind::SummaryAgg,
             sketch.clone(),
             250.0,
-        )]);
+        )]));
         let after = price(&candidate.dag, &recurrences(1), &data(), &settings).unwrap();
         for (id, node) in &after.per_node {
             let was = before.per_node[id].cpu_core_seconds_per_second;
