@@ -693,10 +693,12 @@ pub enum WeightDomain {
     },
     /// An open requirement, not a proof: the weights are raw samples of
     /// `metric`, or plain sums of them (no rate, no other arithmetic), so they
-    /// are non-negative exactly when `metric` is a counter. Logical
-    /// optimization records it without reading the data workload; plan
-    /// selection confirms it from the declared metric types
-    /// ([`SourceFacts::metric_type`](crate::workload::SourceFacts::metric_type)).
+    /// are non-negative when every sample of `metric` is: `metric` is
+    /// declared a counter, or declared non-negative. Logical optimization
+    /// records it without reading the data workload; plan selection confirms
+    /// it from the declared source facts
+    /// ([`SourceFacts::metric_type`](crate::workload::SourceFacts::metric_type),
+    /// [`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative)).
     /// Unconfirmed, it counts as not proven.
     SamplesOfMetric {
         metric: String,
@@ -715,18 +717,29 @@ pub enum WeightDomain {
 }
 
 impl WeightDomain {
-    /// The domain once `is_counter` has answered an open requirement
-    /// ([`SamplesOfMetric`](Self::SamplesOfMetric) or
-    /// [`CounterDerivativeOfMetric`](Self::CounterDerivativeOfMetric)):
-    /// proven when the metric is a counter
-    /// ([`NonNegativeWeightProof::CounterSamples`] or
-    /// [`NonNegativeWeightProof::ResetAwareCounterDerivative`]), else
+    /// The domain once the declared facts have answered an open requirement.
+    /// [`SamplesOfMetric`](Self::SamplesOfMetric) is proven when the metric
+    /// is a counter ([`NonNegativeWeightProof::CounterSamples`]) or else
+    /// declared non-negative
+    /// ([`NonNegativeWeightProof::DeclaredNonNegativeSamples`]);
+    /// [`CounterDerivativeOfMetric`](Self::CounterDerivativeOfMetric) only
+    /// when it is a counter
+    /// ([`NonNegativeWeightProof::ResetAwareCounterDerivative`]). Otherwise
     /// unknown. Any other domain is returned unchanged.
-    pub fn confirmed(&self, is_counter: impl Fn(&str) -> bool) -> WeightDomain {
+    pub fn confirmed(
+        &self,
+        is_counter: impl Fn(&str) -> bool,
+        is_declared_non_negative: impl Fn(&str) -> bool,
+    ) -> WeightDomain {
         match self {
             WeightDomain::SamplesOfMetric { metric } if is_counter(metric) => {
                 WeightDomain::NonNegative {
                     proof: NonNegativeWeightProof::CounterSamples,
+                }
+            }
+            WeightDomain::SamplesOfMetric { metric } if is_declared_non_negative(metric) => {
+                WeightDomain::NonNegative {
+                    proof: NonNegativeWeightProof::DeclaredNonNegativeSamples,
                 }
             }
             WeightDomain::CounterDerivativeOfMetric { metric } if is_counter(metric) => {
@@ -757,6 +770,12 @@ pub enum NonNegativeWeightProof {
     /// gives it on confirming a
     /// [`WeightDomain::SamplesOfMetric`] requirement.
     CounterSamples,
+    /// Raw samples of a metric declared non-negative
+    /// ([`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative)),
+    /// such as a gauge, or plain sums of them. Plan selection gives it on
+    /// confirming a [`WeightDomain::SamplesOfMetric`] requirement for a
+    /// metric not declared a counter.
+    DeclaredNonNegativeSamples,
     /// A constant weight greater than 0, such as `Constant(2.0)`: every row
     /// adds the same positive amount, so no weight is negative.
     PositiveConstant,
