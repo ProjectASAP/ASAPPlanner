@@ -14,8 +14,10 @@ use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 #[test]
-#[ignore = "the whole-expression heap's SummaryEstimate{TopK} output is not the keyed-evaluation \
-            shape the physical planner builds (#579)"]
+#[ignore = "the whole-expression heap keeps the outer top-k's keys indexed against the absorbed \
+            aggregate, so the physical planner rejects its keyed evaluation shape (#639); the \
+            unconfirmed Count-Min heap also has no non-negative weight proof until plan selection \
+            confirms one"]
 fn planner_weighted_topk_binds_at_either_deployment_phase() {
     assert_weighted_binding(SketchAlgorithm::CmsWithHeap);
     assert_weighted_binding(SketchAlgorithm::CountSketchWithHeap);

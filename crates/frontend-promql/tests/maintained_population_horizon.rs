@@ -22,7 +22,7 @@ fn population_preserves_selector_horizon() {
         panic!()
     };
     assert_eq!(spec.lookback_ms, 1_000);
-    support::post_asap_dag(&candidate);
+    support::physical_asap_dag(&candidate);
     let NonASAPOp::Aggregate { child: source, .. } = root.expect_non_asap() else {
         panic!()
     };

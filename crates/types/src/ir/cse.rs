@@ -223,13 +223,6 @@ impl InternTable {
     }
 }
 
-/// Count of *unique* nodes reachable from `root` (pointer identity,
-/// following [`OperatorNode::children`]): the real size of the DAG, not a
-/// tree-walk count that re-counts a shared descendant once per parent.
-pub fn dag_node_count(root: &Rc<OperatorNode>) -> usize {
-    OperatorNode::reachable(root).len()
-}
-
 /// Input pointer → (input `Rc`, interned result). The input `Rc` is retained
 /// so its address cannot be freed and reused by a fresh allocation while the
 /// memo still maps it.
@@ -662,52 +655,6 @@ mod tests {
         );
     }
 
-    // ── dag_node_count ───────────────────────────────────────────────────
-
-    #[test]
-    fn dag_node_count_is_the_naive_count_when_nothing_is_shared() {
-        assert_eq!(dag_node_count(&scan()), 1);
-        assert_eq!(dag_node_count(&quantile_agg(vec![1], Some(2), 0.5)), 2);
-        assert_eq!(
-            dag_node_count(&scalar_of_vector()),
-            3,
-            "follows scalar references"
-        );
-    }
-
-    #[test]
-    fn dag_node_count_deduplicates_an_internally_shared_sub_dag() {
-        let root = compare(
-            quantile_agg(vec![1], Some(2), 0.5),
-            quantile_agg(vec![1], Some(2), 0.5),
-        );
-        assert_eq!(
-            dag_node_count(&root),
-            5,
-            "fixture sanity: nothing shared yet"
-        );
-        let shared = share_common_sub_dags(vec![("q", root)]);
-        let [(_, root)] = shared.as_slice() else {
-            panic!("expected 1 root");
-        };
-        assert_eq!(
-            dag_node_count(root),
-            3,
-            "BinaryOp + one Aggregate + its Scan"
-        );
-    }
-
-    #[test]
-    fn dag_node_count_deduplicates_across_two_workload_roots() {
-        let (ra, rb) = two_roots(
-            quantile_agg(vec![1], Some(2), 0.5),
-            quantile_agg(vec![1], Some(2), 0.5),
-        );
-        assert!(Rc::ptr_eq(&ra, &rb), "fixture sanity: the two roots merged");
-        assert_eq!(dag_node_count(&ra), 2);
-        assert_eq!(dag_node_count(&rb), 2);
-    }
-
     #[test]
     fn dedup_gates_sharing_the_same_as_aggregate() {
         // `Dedup { cols }` adds `cols` as a unique key, so two identical
@@ -753,7 +700,7 @@ mod tests {
             panic!("expected BinaryOp root");
         };
         assert!(Rc::ptr_eq(lhs, rhs));
-        assert_eq!(dag_node_count(&shared[0].1), 3);
+        assert_eq!(OperatorNode::reachable(&shared[0].1).len(), 3);
     }
 
     // Comparing a shareable node whose equal-but-unshareable children form a

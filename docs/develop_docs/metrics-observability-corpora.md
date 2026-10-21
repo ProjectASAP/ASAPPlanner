@@ -43,7 +43,10 @@ o11y-bench, and awesome-prometheus-alerts. They are not duplicated here.
   PromQL.
 - `metrics_observability.rs` is the executable corpus test. It runs the
   PromQL parser/lowerer and Stage 1 (logical ASAP-aware optimization) on each
-  query, and prints the current measurements.
+  query, and prints the current measurements. Each corpus also has a coverage
+  ratchet: the test fails when fewer queries get an ASAP candidate, or more
+  fail Stage 1, than the counts committed in the test. Raise the ratchet when
+  coverage improves.
 - `summarize_misses.py` is an optional report formatter. It consumes the
   test's opt-in `POST_ASAP_MISS` lines and groups misses by coarse root shape.
 

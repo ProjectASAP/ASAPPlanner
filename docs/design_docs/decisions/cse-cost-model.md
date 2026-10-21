@@ -103,7 +103,7 @@ does not prune them.
 
 ## Defaults
 
-`cse_recompute_cost`'s default is a structural-size proxy: `cse::dag_node_count`,
+`cse_recompute_cost`'s default is a structural-size proxy: `OperatorNode::reachable(root).len()`,
 the number of *unique* nodes in the sub-DAG's DAG (deduplicated by `Rc`
 pointer identity), not a raw serialization length. This distinction matters
 here specifically — a `CseCandidate`'s sub-DAG is, by definition, something

@@ -363,7 +363,7 @@ fn stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary() {
 
 /// Pass 1 offers a specialized entropy summary for Q2 and a norm summary for Q3.
 #[test]
-#[ignore = "needs Pass 1 specialized entropy and L2 summary families (no PR yet)"]
+#[ignore = "needs Pass 1 specialized entropy and L2 summary families (#444)"]
 fn stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries() {
     let run = pipeline();
     for q in [1, 2] {
@@ -564,7 +564,7 @@ fn stage3_plan_selection_has_no_theta_candidate() {
 
 /// A UnivMon estimate has a guarantee, so plan selection judges it against its target instead of rejecting it for having none.
 #[test]
-#[ignore = "needs a UnivMon entropy accuracy model; L2 and the distinct count have one"]
+#[ignore = "needs a UnivMon entropy accuracy model (#788); L2 and the distinct count have one"]
 fn stage3_plan_selection_judges_univmon_with_an_accuracy_model() {
     let run = pipeline();
     let invalid = run.invalid();
@@ -877,7 +877,7 @@ async fn stage3_plan_selection_accepts_sql_univmon_l2_beside_its_exact_populatio
 
 /// One materialized UnivMon for all three costs no more than three separate UnivMons.
 #[test]
-#[ignore = "needs a UnivMon entropy accuracy model and materializing the shared UnivMon (#604): not materialized, it is charged once per consuming query"]
+#[ignore = "needs a UnivMon entropy accuracy model (#788): without one, the shared UnivMon candidate is left unpriced"]
 fn stage3_plan_selection_shared_univmon_costs_no_more_than_three() {
     let run = pipeline();
     let cost = |c: &Logical| run.cost(&run.physical_of(c).next().unwrap().id);

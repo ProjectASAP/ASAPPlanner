@@ -78,9 +78,9 @@ it.
 
 | Invariant | Test | Status |
 |---|---|---|
-| Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time` | passes: B1 and the monthly variant's maintained panes |
+| Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time`; the monthly variant in `stage2_physical_asap_optimization_monthly_ingestion_time_upstream_is_ingestion_time` | passes: B1 and the monthly variant's maintained panes; the monthly test is ignored as slow (run in release by hand) |
 | With data at rest, no node runs at ingestion time | `stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes |
-| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min |
+| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers`; the monthly variant in `stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min; the monthly test is ignored as slow (run in release by hand) |
 
 ### Pattern A
 
@@ -101,9 +101,7 @@ it.
 | Until B3: the tumbling KLL candidate yields B1 and B2, both priced within the 200 ms latency bound (implementer test) | `stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2` | passes |
 | B1 builds at ingestion time; its merge and estimate run at query time | `stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time` | passes |
 | B3 runs nothing at ingestion time | `stage2_physical_asap_optimization_b_b3_keeps_query_time_windows` | passes |
-| The sliding KLL yields exactly ingestion time and query time, kept | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (no PR yet) |
-| B2 costs at least B1 and B3 | `stage3_plan_selection_b_rebuilding_every_window_costs_most` | ignored: cost model 1 contradicts it. With query-time results retained, B3 keeps 4 panes for 8,884.5 cost/s and B1 6 for 13,326.5, while B2 rebuilds them for 2.183. Needs a rewrite relative to the cost model |
-| With the built-in models, B1 is the cheapest of the three | `stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows` | ignored: cost model 1 contradicts it. B1 keeps 6 panes of 1M per-series KLLs (about 107 GB) for 13,326.5 cost/s; B2 rebuilds them for 2.183, and the whole-window KLL (P2, 2.100) is selected. Needs B3 and a rewrite relative to the cost model |
+| The sliding KLL yields exactly ingestion time and query time, kept | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (#522) |
 | Each cost model chooses what its deployment pays for: cost model 1 the whole-window KLL; cost model 2 the exact plan (smallest peak memory); cost model 3 with lowest latency B1 in 256 GB, and the whole-window KLL in 64 GB, where B1 is invalid on peak memory | `stage3_plan_selection_b_cost_models_choose_differently` | passes |
 | Under cost model 3, the Pareto front over peak memory, disk and latency is {exact, whole-window KLL, B1} and B1 is selected; B2 is dominated by the whole-window KLL; least memory selects the exact plan | `stage3_plan_selection_b_pareto_front_over_memory_disk_and_latency` | passes |
 

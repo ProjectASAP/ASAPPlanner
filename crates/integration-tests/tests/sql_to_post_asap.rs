@@ -20,8 +20,8 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
+use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::logical_candidates;
-use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::{EdgeRole, PhysicalASAPNodeId, PhysicalASAPOperatorPayload};
 use asap_types::ir::properties::AccuracyTarget;
@@ -226,7 +226,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
             family,
             &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         );
-        let dag = post_asap_dag(&root);
+        let dag = physical_asap_dag(&root);
         assert_eq!(
             dag.nodes
                 .iter()
@@ -374,7 +374,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         .guarantee
         .as_ref()
         .is_some_and(|value| value.is_exact()));
-    let dag = post_asap_dag(&root);
+    let dag = physical_asap_dag(&root);
     let join_id = dag
         .nodes
         .iter()
@@ -522,7 +522,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     }
     assert_eq!(retained_read_predicate, Some(expected_read_predicate));
 
-    let dag = post_asap_dag(&root);
+    let dag = physical_asap_dag(&root);
     let expected_wire = wire_pred(retained_read_predicate.as_ref().unwrap());
     assert!(dag.nodes.iter().any(|node| matches!(
         &node.payload,
@@ -695,7 +695,7 @@ async fn map_projection_export_keeps_the_map_over_an_avg_of_exact_states() {
         &catalog(), SqlDialect::ClickhouseSQL, AccuracyTarget::exact(),
     ).await.unwrap();
     let root = realize(&pre, AccuracyTarget::exact());
-    let dag = post_asap_dag(&root);
+    let dag = physical_asap_dag(&root);
     assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
         PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Project { cols, .. })
         if cols.iter().any(|item| matches!(&item.expr, ScalarExpr::FunctionCall { name, .. } if name == "map"))

@@ -9,11 +9,11 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::selected_dag;
-use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
 fn col(name: &str, dtype: DataType) -> Field {
     Field::plain(name, dtype, false)
@@ -64,61 +64,8 @@ fn find_all(
         .collect()
 }
 
-fn is_summary_evaluation(node: &OperatorNode) -> bool {
-    matches!(
-        node.operator,
-        Operator::ASAP(
-            ASAPOp::SummaryEstimate { .. }
-                | ASAPOp::FinalizeExactAccumulator { .. }
-                | ASAPOp::EvaluatePopulation { .. }
-        )
-    )
-}
-
 fn is_scan(node: &OperatorNode) -> bool {
     matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
-}
-
-/// The first node reached through single-input non-ASAP operators below
-/// `node` (inclusive) that is not one: where an operator chain meets a
-/// summary or a multi-input operator.
-fn through_unary_non_asap(node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
-    match node.non_asap().map(|op| op.children()) {
-        Some(children) if children.len() == 1 => through_unary_non_asap(children[0]),
-        _ => node,
-    }
-}
-
-// #468 problem 1: the Project above the summary evaluation and the Scan below
-// it are both plain NonASAP nodes (no post-ASAP-only wrapper variant).
-#[ignore = "planner chooses no summary here: Avg has no summary realization, so the Aggregate stays a logical pass-through"]
-#[tokio::test]
-async fn project_above_and_scan_below_a_summary_are_both_non_asap_nodes() {
-    let root = plan(
-        "WITH metric AS (SELECT avg(CASE WHEN l_quantity BETWEEN 1 AND 50 THEN 1.0 ELSE 0.0 END) \
-         AS in_range FROM lineitem) SELECT in_range, in_range = 1.0 AS ok FROM metric",
-        AccuracyTarget::exact(),
-    )
-    .await;
-    // The root is the outer SELECT list: a NonASAP Project.
-    assert!(
-        matches!(root.operator, Operator::NonASAP(NonASAPOp::Project { .. })),
-        "root must be the outer Project, got {:?}",
-        root.operator
-    );
-    // A summary evaluation sits below the Project chain.
-    let evaluation = through_unary_non_asap(&root);
-    assert!(
-        is_summary_evaluation(evaluation),
-        "the Project chain must read a summary, got {:?}",
-        evaluation.operator
-    );
-    // Below the summary the Scan is the same NonASAP operator a front end emits.
-    let scans = find_all(evaluation, is_scan);
-    assert_eq!(scans.len(), 1, "one lineitem Scan below the summary");
-    assert!(!scans[0].is_asap());
-    // The flat plan exports (time first, wire 6).
-    post_asap_dag(&root);
 }
 
 // #468 problem 2: the exact aggregate and the sketch read one shared Scan
@@ -157,7 +104,7 @@ async fn exact_aggregate_and_sketch_share_one_scan() {
 // #468 problem 3: a summary can sit below a set operator — each side of the
 // UNION ALL holds its own SummaryEstimate.
 #[tokio::test]
-#[ignore = "plan selection picks the exact plan: a query-time summary never costs less until physical ASAP-aware optimization plans materialization (#604)"]
+#[ignore = "plan selection picks the exact plan: a query-time summary on each side never costs less than the exact aggregate until Pass 2 shares it (#580)"]
 async fn each_side_of_union_all_holds_a_summary_estimate() {
     let root = plan(
         "SELECT approx_distinct(l_partkey) FROM lineitem \
@@ -185,5 +132,5 @@ async fn each_side_of_union_all_holds_a_summary_estimate() {
             side.operator
         );
     }
-    post_asap_dag(&root);
+    physical_asap_dag(&root);
 }

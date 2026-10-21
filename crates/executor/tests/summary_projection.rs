@@ -19,10 +19,10 @@ use planner_types::ir::ASAPOp;
 use planner_types::ir::NonASAPOp;
 use std::{collections::BTreeMap, sync::Arc};
 
-// A Post-ASAP projection may reorder/rename summary columns; recovery must retain
+// A projection over a summary may reorder/rename its columns; recovery must retain
 // the family and pass through the same immutable state, without decoding the payload.
 #[test]
-fn post_asap_summary_projection_survives_recovery() {
+fn summary_projection_survives_recovery() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let schema = Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],

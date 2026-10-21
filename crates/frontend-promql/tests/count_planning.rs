@@ -8,7 +8,7 @@ use asap_types::ir::schema::{
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
-use support::{logical_candidates, lower_promql, post_asap_dag, selected_dag};
+use support::{logical_candidates, lower_promql, physical_asap_dag, selected_dag};
 
 /// Whether `node` reads a Hydra state (one sketch shared by every group).
 fn reads_hydra(node: &Rc<OperatorNode>) -> bool {
@@ -24,7 +24,7 @@ fn reads_hydra(node: &Rc<OperatorNode>) -> bool {
 }
 
 #[test]
-#[ignore = "Pass 1 offers no Hydra state for a grouped count yet (#605)"]
+#[ignore = "Pass 1 offers no Hydra state for a grouped count yet (#703)"]
 fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     // Hydra hashes a non-null item per row: the series identity (PromQL
@@ -99,7 +99,7 @@ fn frequency_count_candidates_use_unit_weights() {
             ) {
                 continue;
             }
-            let dag = post_asap_dag(node);
+            let dag = physical_asap_dag(node);
             assert!(
                 dag.nodes.iter().any(|node| matches!(
                     &node.payload,
@@ -233,7 +233,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     let dag = candidates
         .iter()
         .find_map(|node| {
-            let dag = post_asap_dag(node);
+            let dag = physical_asap_dag(node);
             dag.nodes
                 .iter()
                 .any(|node| {

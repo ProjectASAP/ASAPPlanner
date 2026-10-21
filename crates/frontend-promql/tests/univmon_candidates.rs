@@ -8,7 +8,7 @@ use asap_types::ir::properties::AccuracyMetric;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use support::{logical_candidates, lower_promql, post_asap_dag, run_stage1_to_stage3};
+use support::{logical_candidates, lower_promql, physical_asap_dag, run_stage1_to_stage3};
 
 /// The summary evaluation over a UnivMon state that `root` reads, if any.
 fn univmon_estimate(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
@@ -113,7 +113,7 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
                 assert!(local_guarantee(family, query).is_none());
             }
         }
-        post_asap_dag(root);
+        physical_asap_dag(root);
     }
 }
 

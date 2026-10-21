@@ -76,6 +76,5 @@ mod tests {
         // must not hardcode "PromQL".
         let msg = PromqlError::UnsupportedFeature("subquery".into()).to_string();
         assert_eq!(msg, "unsupported feature: subquery");
-        assert!(!msg.contains("PromQL"), "got: {msg}");
     }
 }

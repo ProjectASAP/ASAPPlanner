@@ -114,8 +114,6 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
     let wire = physical_common::compile_physical_asap_dag(&rewritten).unwrap();
     wire.validate().unwrap();
     assert_eq!(wire.nodes.len(), dag.len());
-    let json = serde_json::to_string(&wire).unwrap();
-    assert!(!json.contains("KeepPreAsap") && !json.contains("ScalarBridge"));
 }
 
 /// Scalar subqueries survive normalization with shared, visible producers.

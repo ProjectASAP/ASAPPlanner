@@ -1188,6 +1188,12 @@ mod tests {
     use super::*;
     use asap_devtools::planning_stages::run_planning_stages;
 
+    /// The exhaustive search's default `--max-combinations` is 10^4.
+    #[test]
+    fn exhaustive_default_candidate_limit_is_ten_thousand() {
+        assert_eq!(MAX_COMBINATIONS, 10_000);
+    }
+
     /// With no valid candidate, the document is still written: `selected`
     /// is null and every rejection is listed.
     #[test]

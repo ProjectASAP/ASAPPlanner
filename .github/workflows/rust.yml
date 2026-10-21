@@ -108,6 +108,30 @@ jobs:
       env:
         RUSTC_WRAPPER: sccache
 
+    # The viewer's Python tests run its JavaScript in V8 through py_mini_racer;
+    # the ones that plan a query run target/debug/stage_pipeline, which the
+    # workspace test build above already linked for devtools' tests.
+    # A pinned Python and Node: the runner's system Python refuses a global
+    # pip install (PEP 668).
+    - name: Install Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Run the DAG viewer's Python tests
+      working-directory: tools/dag-viewer
+      run: |
+        python3 -m pip install py-mini-racer==0.6.0
+        python3 -m unittest -v test_viewer test_server
+
+    - name: Run the DAG viewer's Node tests
+      run: node --test tools/dag-viewer/stages.test.mjs
+
     # A PromQL-only runtime builds asap-planner without DataFusion or MetricsQL.
     - name: Check and test asap-planner with the PromQL frontend alone
       run: |

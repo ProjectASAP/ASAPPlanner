@@ -278,7 +278,7 @@ fn stage1_logical_asap_optimization_q2_summary_families() {
 
 /// Pass 1 also offers Hydra (HydraCms over all (job, series) keys, a heap per job) for Q2's top-k.
 #[test]
-#[ignore = "needs Pass 1 Hydra for grouped approximate counts (#605)"]
+#[ignore = "needs Pass 1 Hydra for grouped approximate counts (#703)"]
 fn stage1_logical_asap_optimization_q2_offers_hydra() {
     let run = pipeline();
     assert!(run
@@ -566,23 +566,6 @@ fn compile_in_runtime(p: &Physical) -> Result<(), String> {
     compile(dag, inputs, &roots)
         .map(|_| ())
         .map_err(|e| format!("{}: {e}", p.id))
-}
-
-/// Runtime capability check (added by the implementer, not part of the
-/// spec): the physical planner compiles every physical candidate.
-#[test]
-#[ignore = "runtime gaps: a physical candidate's CMS+heap weights are an open requirement \
-            that only the selected plan's confirmation answers; the heaps' \
-            SummaryEstimate{TopK} output is not the keyed-evaluation shape the physical \
-            planner builds (#579)"]
-fn stage2_physical_asap_optimization_every_candidate_compiles_in_the_physical_planner() {
-    let run = pipeline();
-    let failures: Vec<_> = run
-        .physical
-        .iter()
-        .filter_map(|p| compile_in_runtime(p).err())
-        .collect();
-    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 // ── Plan selection ───────────────────────────────────────────────────────

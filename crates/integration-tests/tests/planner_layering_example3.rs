@@ -338,7 +338,7 @@ fn stage1_logical_asap_optimization_b_pass1_offers_exact_and_kll() {
 
 /// Each Pass 1 option gets three window forms: none, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows.
 #[test]
-#[ignore = "needs Pass 2 window composition: sliding windows (no PR yet); tumbling windows pass in \
+#[ignore = "needs Pass 2 window composition: sliding windows (#522); tumbling windows pass in \
             stage1_logical_asap_optimization_b_window_composition_adds_tumbling_per_mergeable_option"]
 fn stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option() {
     let run = run_b();
@@ -444,7 +444,7 @@ fn stage1_logical_asap_optimization_b_window_parameters_are_legal() {
 
 /// A sliding window with L = W reads one completed window (no merge); tumbling windows merge W / length of them.
 #[test]
-#[ignore = "needs Pass 2 window composition: sliding windows (no PR yet); tumbling merges pass in \
+#[ignore = "needs Pass 2 window composition: sliding windows (#522); tumbling merges pass in \
             stage1_logical_asap_optimization_b_window_composition_adds_tumbling_per_mergeable_option"]
 fn stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it() {
     let run = run_b();

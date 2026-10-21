@@ -9,8 +9,8 @@
 
 use std::rc::Rc;
 
+use asap_integration_tests::physical_export::{at_ingestion, physical_asap_dag, timed};
 use asap_integration_tests::planning::logical_candidates;
-use asap_integration_tests::post_asap::{at_ingestion, post_asap_dag, timed};
 use asap_types::ir::operator::agg_intent::{default_quantile, AggIntent};
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -322,7 +322,7 @@ fn physical_export_carries_explicit_timing_for_a_composed_plan() {
     let composed = composed(&root);
     // Timing is explicit in the wire-6 DAG: the root finalizes the exact
     // `max` state over the quantile evaluation, at query time.
-    let wire = post_asap_dag(&composed);
+    let wire = physical_asap_dag(&composed);
     let wire_root = wire.nodes.iter().find(|n| n.id == wire.roots[0]).unwrap();
     assert!(matches!(
         wire_root.payload,

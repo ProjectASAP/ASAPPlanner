@@ -497,7 +497,7 @@ fn exact_state_and_family_validation() {
 
 // Planner binding rejects unknown computation instead of accepting a fallback.
 #[test]
-fn bind_post_asap_before_execution() {
+fn bind_physical_asap_dag_before_execution() {
     use asap_executor::dag::planner::bind;
     use planner_types::ir::properties::ExecutionDataState;
     use planner_types::ir::scalar::{ArithmeticOpKind, ScalarValue};
@@ -567,7 +567,7 @@ fn bind_post_asap_before_execution() {
     };
     let native = bind(&dag, sources(), &[1]).unwrap();
     assert_eq!(floats(&run(&native, 1, query()), 0), vec![3.]);
-    // A literal Fallback needs no deployment input.
+    // A literal `Values` source needs no deployment input.
     let literal = bind(&dag, BTreeMap::new(), &[1]).unwrap();
     assert_eq!(floats(&run(&literal, 1, query()), 0), vec![3.]);
     dag.nodes[1].payload = PhysicalASAPOperatorPayload::ASAP(ASAPOp::Extension {
