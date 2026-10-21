@@ -227,6 +227,7 @@ use asap_types::ir::schema::sketch::KLL_MAX_K;
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
+    EXACT_ACCUMULATOR_STATE_BYTES,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot,
@@ -4107,6 +4108,9 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 /// - UnivMon: per layer, a `rows × cols` Count-Sketch of 8-byte counters and
 ///   a heap of `heap_size` 24-byte entries.
 ///
+/// An exact accumulator's state is the executor's per-group state,
+/// [`EXACT_ACCUMULATOR_STATE_BYTES`] for every kind.
+///
 /// Update operations per input row: one counter per row of depth for
 /// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
 /// for UnivMon, the same per layer it updates ([`univmon_expected_layers`]);
@@ -4114,6 +4118,7 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 fn summary_shape(family: &FieldDataType) -> (f64, u64) {
     match family {
         FieldDataType::Sketch(kind, _) => sketch_shape(kind.params()),
+        FieldDataType::ExactAggregate(..) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
         _ => (1.0, 8),
     }
 }
@@ -6091,6 +6096,25 @@ mod tests {
             aggregate_cost("l2_over_time(x[5m])"),
             aggregate_cost("quantile_over_time(0.99, x[5m])")
         );
+    }
+
+    /// An exact accumulator's state is priced at the executor's per-group
+    /// state, 56 bytes for every kind (a counter's state alone is 48), so a
+    /// pane chain of exact sums keeps 56 bytes per pane and group.
+    #[test]
+    fn exact_state_is_priced_at_the_executors_state_size() {
+        use asap_types::ir::schema::{ExactKind, ExactParams};
+        for (kind, params) in [
+            (ExactKind::Sum, ExactParams::Sum),
+            (ExactKind::Increase, ExactParams::Increase),
+            (ExactKind::Rate, ExactParams::Rate),
+        ] {
+            assert_eq!(
+                summary_shape(&FieldDataType::ExactAggregate(kind, params)),
+                (1.0, 56)
+            );
+        }
+        assert_eq!(asap_types::ir::schema::EXACT_ACCUMULATOR_STATE_BYTES, 56);
     }
 
     /// A DDSketch is sized for values over nine decades: 1,037 bins at

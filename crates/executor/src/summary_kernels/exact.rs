@@ -444,6 +444,16 @@ mod tests {
         keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
     }
 
+    /// The planner prices one exact state at the bytes a column of them
+    /// holds per group: one `ScalarState`.
+    #[test]
+    fn the_planner_prices_an_exact_state_at_its_size() {
+        assert_eq!(
+            std::mem::size_of::<ScalarState>() as u64,
+            planner_types::ir::schema::EXACT_ACCUMULATOR_STATE_BYTES
+        );
+    }
+
     fn decode(payload: &Payload) -> Result<ExactAccumulator, rmp_serde::decode::Error> {
         rmp_serde::from_slice(&rmp_serde::to_vec_named(payload).unwrap())
     }
