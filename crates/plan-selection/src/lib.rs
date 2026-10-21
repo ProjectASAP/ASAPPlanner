@@ -3248,7 +3248,7 @@ fn price_at_scale(
                 // ingestion time, the rows of a window one second of
                 // arriving rows does not bound.
                 let input_rows = StateInputRows {
-                    rows_per_state: (!ingestion).then(|| input.rows / group_count.max(1)),
+                    rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                     non_negative: raw_data_samples_non_negative(),
                 };
                 let (depth, state_bytes) = summary_shape(family, input_rows);
@@ -3289,12 +3289,12 @@ fn price_at_scale(
                 // evaluations, whose scan Stage 2 bounds to its newest pane,
                 // the only one it builds).
                 let rows_per_pane = match (ingestion, node.materialization) {
-                    (true, _) => input.rows * *pane_width_ms / 1_000,
+                    (true, _) => (input.rows * *pane_width_ms).div_ceil(1_000),
                     (false, Materialization::MatAtQueryKeptAcrossEvaluations(_)) => input.rows,
-                    (false, _) => input.rows / u64::from(*pane_count).max(1),
+                    (false, _) => input.rows.div_ceil(u64::from(*pane_count).max(1)),
                 };
                 let input_rows = StateInputRows {
-                    rows_per_state: Some(rows_per_pane / group_count.max(1)),
+                    rows_per_state: Some(rows_per_pane.div_ceil(group_count.max(1))),
                     non_negative: raw_data_samples_non_negative(),
                 };
                 let (depth, state_bytes) = summary_shape(family, input_rows);
@@ -4175,8 +4175,9 @@ fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u6
 /// not a summary sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct StateInputRows {
-    /// Input rows one state folds; `None` when unknown, which sizes it for
-    /// every value it can be assumed to see.
+    /// Input rows one state folds, the average over its states rounded up;
+    /// `None` when unknown, which sizes it for every value it can be assumed
+    /// to see.
     rows_per_state: Option<u64>,
     /// Whether every value folded is proven non-negative (raw data samples of
     /// sources declared non-negative), so a DDSketch fills no negative store.
@@ -4308,9 +4309,12 @@ const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
 const DDSKETCH_GROW_CHUNK_BINS: u64 = 128;
 
 /// Bytes of one `asap_sketchlib` DDSketch with relative accuracy `alpha`
-/// over `input_rows`: its struct (144 bytes), plus, for the positive store
-/// and, unless the values are proven non-negative, the negative store, 8
-/// bytes per allocated bin. A store allocates one 128-bin chunk around its
+/// over `input_rows`: its struct (144 bytes), plus 8 bytes per allocated bin
+/// of each bucket store its values can fill. The library allocates a store
+/// at the first value of its sign (a value too small to index goes to a
+/// zero count, in no store), so one store is charged when the values are
+/// proven non-negative or a state folds at most one row, and two
+/// otherwise. A store allocates one 128-bin chunk around its
 /// first value, then 128-bin chunks on each side as values reach past
 /// it: `128 · (1 + 2 · ⌈(spanned − 128)⁺ / 256⌉)` bins, where `spanned`
 /// is the bins its values can touch, at most one per value and at most
@@ -4325,7 +4329,12 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
         .saturating_sub(DDSKETCH_GROW_CHUNK_BINS)
         .div_ceil(2 * DDSKETCH_GROW_CHUNK_BINS);
     let store_bytes = 8 * DDSKETCH_GROW_CHUNK_BINS * (1 + 2 * side_chunks);
-    let stores = if input_rows.non_negative { 1 } else { 2 };
+    let at_most_one_row = input_rows.rows_per_state.is_some_and(|rows| rows <= 1);
+    let stores = if input_rows.non_negative || at_most_one_row {
+        1
+    } else {
+        2
+    };
     std::mem::size_of::<asap_sketchlib::sketches::DdSketch>() as u64 + stores * store_bytes
 }
 
@@ -6391,8 +6400,9 @@ mod tests {
 
     /// The DDSketch state the model prices is what `asap_sketchlib`
     /// allocates: one 128-bin chunk per store for a few samples, more for
-    /// samples spanning more bins, and no negative store for values
-    /// declared non-negative.
+    /// samples spanning more bins, no negative store for values declared
+    /// non-negative, and one store for one row of either sign. A state
+    /// assumed to fold no row is charged one store, as for one row.
     #[test]
     fn ddsketch_state_bytes_match_the_library() {
         let alpha = 0.05;
@@ -6406,6 +6416,23 @@ mod tests {
         };
         assert_eq!(library_ddsketch_bytes(alpha, &pareto), 1_168);
         assert_eq!(ddsketch_state_bytes(alpha, non_negative(Some(10))), 1_168);
+        // One row fills at most one store, whatever its sign: the library
+        // allocates a store at the first value of its sign.
+        let signed_rows = |rows_per_state| StateInputRows {
+            rows_per_state: Some(rows_per_state),
+            non_negative: false,
+        };
+        for value in [-2.0, 2.0] {
+            assert_eq!(
+                ddsketch_state_bytes(alpha, signed_rows(1)),
+                library_ddsketch_bytes(alpha, &[value])
+            );
+        }
+        // Two rows, one of each sign, fill both stores.
+        assert_eq!(
+            ddsketch_state_bytes(alpha, signed_rows(2)),
+            library_ddsketch_bytes(alpha, &[-2.0, 2.0])
+        );
         // Signed values fill both stores.
         let signed: Vec<f64> = pareto.iter().map(|v| -v).chain(pareto.clone()).collect();
         let signed_rows = StateInputRows {
