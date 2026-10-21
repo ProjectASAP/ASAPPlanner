@@ -41,7 +41,7 @@ workload itself.
 
 ## Expected candidates per stage
 
-| Stage | Doc | Planner (SQL workload, `stage_pipeline --example planner-layering-2`) |
+| Stage | Doc | Planner (SQL workload, `stage_pipeline --example planner-layering-2 --enforce-accuracy-guarantees`) |
 |---|---|---|
 | Query-language frontends | One summary-free DAG: `Distinct`, `Entropy`, `L2` over `flows.src_ip`, last 1 m | Same. Q1 is a distinct count; Q2 is `Entropy` and Q3 is `L2` over the per-source counts, each with an exact population count for the empty-input NULL. |
 | Logical ASAP-aware optimization, Pass 1 | Each computation: exact, a specialized summary, UnivMon. 3 × 3 × 3 = **27** | Q1: exact, HLL, KMV, UnivMon (no Theta: `asap_sketchlib` has no Theta sketch). Q2, Q3: exact, UnivMon (no specialized entropy or norm summary). 4 × 2 × 2 = **16** |

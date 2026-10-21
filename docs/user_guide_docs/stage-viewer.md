@@ -320,7 +320,7 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | `--max-error`, `--failure-probability` | Accuracy (ε, δ) for every query; without them the queries are exact |
 | `--accuracy-metric <metric>` | The error metric of that accuracy: `absolute`, `absolute_stream_l1`, `absolute_stream_l2`, `relative` or `rank`. Without it, a plan is accepted in whatever metric meets ε (and δ). |
 | `--sample-interval-ms <ms>` | Sample interval of every metric the PromQL queries read (default 15000) |
-| `--example <name>` | A built-in example instead of queries: `planner-layering-1`, `-2`, `-3a` or `-3b`; add `--exhaustive` to see every plan its story describes |
+| `--example <name>` | A built-in example instead of queries: `planner-layering-1`, `-2`, `-3a` or `-3b`; add `--exhaustive --enforce-accuracy-guarantees` to see every plan its story describes and the plans it rejects for their guarantees |
 | `--cost-model <model>` | How plan selection compares valid plans: `usage-over-time` (cost model 1, the default: CPU, scanned bytes and memory over time, priced per second), `provisioned-capacity` (cost model 2: peak memory, peak CPU cores and disk, priced) or `cluster-capacity` (cost model 3: no prices) |
 | `--cluster-memory-bytes <n>`, `--cluster-disk-bytes <n>`, `--cluster-cpu-cores <n>` | Cost model 3 only: the cluster's limits; a plan over one is invalid. The CPU limit is optional. |
 | `--cluster-objective <objective>` | Cost model 3 only: `lowest-latency`, `least-memory` or `pareto-front` (the plans no other plan beats on latency, memory and disk; the lowest-latency one is selected) |

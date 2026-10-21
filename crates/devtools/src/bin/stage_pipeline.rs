@@ -1,5 +1,6 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
-//     --example planner-layering-1 --exhaustive --out planner-layering-example1.json
+//     --example planner-layering-1 --exhaustive --enforce-accuracy-guarantees \
+//     --out planner-layering-example1.json
 // (also planner-layering-2: #509 Example 2, three SQL flow statistics;
 // planner-layering-3a and planner-layering-3b: #509 Example 3, Patterns A
 // and B; 3a has 972 candidates, all priced, 64 shown by default)
