@@ -343,8 +343,10 @@ impl AggregateCore for WeightedFrequency {
             .ok_or("weighted frequency state type mismatch")?;
         Ok(Box::new(self.merge(other)?))
     }
+    /// This adapter's fields plus sketchlib's count of the sketch, which
+    /// includes the sketch's own struct.
     fn approx_memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        std::mem::size_of::<Self>() - std::mem::size_of::<Sketch>()
             + match &self.sketch {
                 Sketch::Cms(s) => s.memory_bytes(),
                 Sketch::CountSketch(s) => s.memory_bytes(),
@@ -357,6 +359,21 @@ impl AggregateCore for WeightedFrequency {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The charge is sketchlib's count of the sketch plus this adapter's own
+    // fields, each struct counted once.
+    #[test]
+    fn memory_charge_counts_the_sketch_once() {
+        let state = WeightedFrequency::new(FrequencyAlgorithm::Cms, 64, 3, 4).unwrap();
+        let Sketch::CmsHeap(sketch) = &state.sketch else {
+            unreachable!()
+        };
+        assert_eq!(
+            state.approx_memory_bytes(),
+            std::mem::size_of::<WeightedFrequency>() - std::mem::size_of::<Sketch>()
+                + sketch.memory_bytes()
+        );
+    }
 
     // Merge uses the same Float64 state representation and rejects other shapes.
     #[test]

@@ -82,8 +82,10 @@ impl AggregateCore for DatasketchesKLLAccumulator {
         self.inner.count() == 0
     }
 
+    /// sketchlib's count of what the sketch holds now (its struct
+    /// included); the item buffer grows with the stream.
     fn approx_memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>().saturating_add(self.inner.memory_bytes())
+        self.inner.memory_bytes()
     }
 }
 
@@ -118,6 +120,20 @@ mod tests {
         let kll = DatasketchesKLLAccumulator::new(200);
         assert!(kll.estimate(&SketchStatistic::Quantile { q: 1.5 }).is_err());
         assert!(kll.estimate(&SketchStatistic::Cardinality).is_err());
+    }
+
+    // The charge is sketchlib's count of what the sketch holds, the struct
+    // counted once: it starts small and grows with the stream.
+    #[test]
+    fn memory_charge_is_the_library_count() {
+        let mut kll = DatasketchesKLLAccumulator::new(200);
+        assert_eq!(kll.approx_memory_bytes(), kll.inner.memory_bytes());
+        let empty = kll.approx_memory_bytes();
+        for v in 0..10_000 {
+            kll.update(f64::from(v));
+        }
+        assert_eq!(kll.approx_memory_bytes(), kll.inner.memory_bytes());
+        assert!(kll.approx_memory_bytes() > empty);
     }
 
     // States of different k do not merge.
