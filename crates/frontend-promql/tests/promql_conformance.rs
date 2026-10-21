@@ -833,6 +833,23 @@ fn topk_over_nested_sum_preserves_weighted_topk_accuracy() {
 }
 
 #[test]
+fn topk_over_a_per_series_counter_derivative_is_a_heavy_hitter_ranking() {
+    // `topk(k, rate|increase|irate(m[w]))` ranks each series' derivative: a
+    // heavy-hitter TopK intent directly over the per-series derivative, for
+    // `irate` as for `rate` and `increase`.
+    for function in ["rate", "increase", "irate"] {
+        let qe = ok(&format!("topk(3, {function}(node_cpu_seconds_total[5m]))"));
+        let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
+            panic!("{function}: expected a TopK aggregate, got {qe:?}");
+        };
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::TopK { k: 3, .. }]),
+            "{function}: {measures:?}"
+        );
+    }
+}
+
+#[test]
 fn outer_aggregate_over_nested_aggregate_nests() {
     // `max(sum by (job) (rate(m[5m])))` — an outer cross-series reduction over a
     // nested per-group reduction over a per-series rate: three stacked levels the

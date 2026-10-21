@@ -41,7 +41,8 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   compares cost.
 - **Pruning.** A candidate that cannot meet the target is moved to the
   target's pruned list with a `PruneReason` (`RequiresExact`,
-  `NullableAvgInput`, `UnsupportedByDeployment`); it is never silently
+  `NullableAvgInput`, `UnsupportedByDeployment`,
+  `QuantileOutsideUnitInterval`); it is never silently
   dropped. Pass 1 prunes only what it can prove; accuracy that depends on
   data facts is left to Stage 3.
 - **Fused computations.** `FusedComputation { absorbs, candidates, pruned }`
