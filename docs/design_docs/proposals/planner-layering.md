@@ -552,6 +552,15 @@ or value being summarized together with its grouping. The summary input data doe
 not include the window; the window-composition rule compares windows
 separately.
 
+A PromQL scan projects only the labels its query uses, so two scans of one
+metric read the same rows with different columns (`quantile by (host, job)`
+and `quantile by (job)` over `data`). The identical-expression rule treats them
+as one input: the implementation widens every scan of the metric without label
+matchers to the union of those labels. Time ranges, time shifts, and per-series
+summaries without a filter (with the nodes that read their state) keep the
+wider rows; every other consumer reads its own columns through a projection.
+These candidates are kept only when they share a scan.
+
 The examples behind these rules:
 
 * **Summary-capability rule ([Example 2](#example-2-one-summary-for-several-computations--the-summary-capability-rule-in-pass-2)).** One UnivMon over `src_ip` from

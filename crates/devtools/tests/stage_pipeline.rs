@@ -1452,7 +1452,7 @@ const QUANTILE_BY_WORKLOAD: &str = r#"{"query_workload": {"language": "promql", 
 
 /// Every plan that answers an instant `quantile by (G)` exactly compiles,
 /// so Stage 3 prices the exact baseline next to the sketches: no physical
-/// plan (1,107 of them today) is rejected as `executor_cannot_compile`, and accepted
+/// plan (3,357 of them today) is rejected as `executor_cannot_compile`, and accepted
 /// plans answer Q3 and Q4 exactly.
 #[test]
 fn exact_grouped_quantile_plans_compile_and_are_compared() {
@@ -1563,4 +1563,118 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
         .as_str()
         .unwrap();
     assert!((cost(separate) - 0.1530).abs() < 1e-4, "{}", cost(separate));
+}
+
+/// #840's workload: Q1 and Q2 window `data` (1 m and 5 m), Q3 and Q4 read
+/// its latest samples by (host, job) and by job. The four scans project
+/// different labels, yet all read the same rows: the identical-expression
+/// rule widens them to every label the queries use, so Q1–Q4 share one
+/// scan (and Q3 and Q4 one time range), each query keeping its own
+/// columns. Built once per evaluation, the shared scan reads the 5 m
+/// window once, 200,000 samples, at one per 10 s evaluation. It does not
+/// pay here (0.2064/s against 0.1700/s for separate scans): the scan
+/// carries Q3's labels, and Q3 and Q4 filter the 5 m of rows for their
+/// latest samples instead of scanning 15 s. Sharing Q1 and Q2's scan alone
+/// is selected (0.1533/s).
+#[test]
+fn scans_projecting_different_labels_are_shared() {
+    let query = |q: &str| {
+        serde_json::json!({
+            "query": q,
+            "demand": {"fixed_interval": 10000},
+            "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
+            "predictability": {"predictable": {"known_at": null}},
+        })
+    };
+    let workload = serde_json::json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [
+                query("quantile_over_time(0.5, data[1m])"),
+                query("quantile_over_time(0.9, data[5m])"),
+                query("quantile by (host, job) (0.5, data)"),
+                query("quantile by (job) (0.5, data)"),
+            ],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 666.67}},
+            "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}},
+        },
+    });
+    let path = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_union_labels_workload.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, workload.to_string()).unwrap();
+    let document = document_of(&[
+        "--exhaustive",
+        "--max-displayed",
+        "100000",
+        "--workload",
+        path.to_str().unwrap(),
+    ]);
+    std::fs::remove_file(path).unwrap();
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    let shared = physical
+        .iter()
+        .find(|c| {
+            c["display_name"]
+                == "Q1 Kll · Q2 Kll · Q3 Kll · Q4 Kll · shared Scan (Q1, Q2, Q3, Q4), \
+                    TimeRange (Q3, Q4) · query time, shared: Scan, TimeRange"
+        })
+        .expect("Q1–Q4 share one scan");
+    let id = shared["id"].as_str().unwrap();
+    let dag: PhysicalASAPDAG = serde_json::from_value(shared["dag"].clone()).unwrap();
+    let scans: Vec<_> = dag
+        .nodes
+        .iter()
+        .filter(|n| n.payload.kind_name() == "Scan")
+        .collect();
+    let [scan] = &scans[..] else {
+        panic!("one scan: {scans:?}")
+    };
+    let field_names: Vec<&str> = scan
+        .output_schema
+        .fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(
+        field_names,
+        ["ts", "value", "host", "job", "$promql_series_identity"]
+    );
+    let cost = &document["stage3_plan_selection"]["costs"][id];
+    let scan_cost = &cost["per_node"][scan.id.to_string()];
+    assert_eq!(scan_cost["multiplier"], 1, "{scan_cost}");
+    // 10,000 series × 20 samples in 5 m, once per 10 s evaluation.
+    let detail = scan_cost["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("scan 200000 samples; x 0.1000/s"),
+        "{detail}"
+    );
+    let selection = &document["stage3_plan_selection"];
+    let cost_of = |label: &str| {
+        let id = physical
+            .iter()
+            .find(|c| c["display_name"] == label)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap();
+        selection["costs"][id]["cost_per_second"].as_f64().unwrap()
+    };
+    let shared = cost["cost_per_second"].as_f64().unwrap();
+    let separate = cost_of("Q1 Kll · Q2 Kll · Q3 Kll · Q4 Kll");
+    assert!((shared - 0.2064).abs() < 1e-3, "{shared}");
+    assert!((separate - 0.1700).abs() < 1e-3, "{separate}");
+    let selected = selection["selected"].as_str().unwrap();
+    let selected_label = physical.iter().find(|c| c["id"] == selected).unwrap()["display_name"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        selected_label,
+        "Q1 Kll · Q2 Kll · Q3 Kll · Q4 Kll · shared Scan (Q1, Q2) · query time, shared: Scan"
+    );
 }

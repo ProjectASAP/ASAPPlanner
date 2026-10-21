@@ -836,8 +836,27 @@ fn a_shared_summary_is_combined_with_a_rollup() {
             .unwrap()
             .pass2
             .as_ref();
+        // A build is shared by the summary-capability rule, or by the
+        // identical-expression rule over scans widened to one label set.
+        let builds_shared_by_identical_expression =
+            |p: &asap_logical_asap_optimization::workload_candidates::Pass2Candidate| {
+                p.sharing_candidates
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c.nodes[0].asap(),
+                            Some(
+                                asap_types::ir::ASAPOp::SummaryAgg { .. }
+                                    | asap_types::ir::ASAPOp::PaneChain { .. }
+                            )
+                        )
+                    })
+                    .count()
+            };
         (
-            pass2.map_or(0, |p| p.shared_builds.len()),
+            pass2.map_or(0, |p| {
+                p.shared_builds.len() + builds_shared_by_identical_expression(p)
+            }),
             pass2.map_or(0, |p| p.rollup_candidates.len()),
         )
     };
