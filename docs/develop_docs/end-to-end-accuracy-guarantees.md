@@ -155,14 +155,25 @@ For quantile and rank queries, the built-in contract follows Apache
 DataSketches' empirical 99th-percentile single-sided normalized rank-error fit:
 
 ```text
-epsilon_rank = 2.296 / k^0.9723
-k = ceil((2.296 / requested_epsilon)^(1 / 0.9723))
-delta = 0.01
+epsilon_rank = 2.296 / k^0.9723                      # delta >= 0.01
+epsilon_rank = 2.296 / k^0.9723 * delta_scale(delta)  # delta < 0.01
+delta_scale(delta) = z(1 - delta/2) / z(1 - 0.01/2)   # standard normal quantiles
+k = ceil((2.296 / (requested_epsilon / delta_scale(delta)))^(1 / 0.9723))
 ```
 
-A tighter `delta` needs a stronger implementation-specific or amplification
-contract and otherwise fails closed. The coefficients are specific to the
-cited implementation contract. See
+Below `delta = 0.01` the calibration is scaled by the Gaussian quantile ratio
+(`kll::delta_scale`; 1.277 at 0.001, 1.510 at 1e-4). That is a model, not a
+measurement, so the guarantee names a separate contract
+(`apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b`). The
+coefficients were fitted on Apache DataSketches' C++ KLL, pinned below. The
+executor runs `asap_sketchlib`'s own KLL. That library's tests check it
+against the DataSketches maximum-rank-error characterization
+`2.446 / k^0.9433` at a per-trial failure probability of 0.01, not against this
+single-sided fit or its δ scaling.
+
+A KLL shared by readers with different failure probabilities is sized at the
+smallest one. Each reader's `k` is first resized to it at no larger rank
+error (`kll::shared_k`), and the largest is kept. See
 [Apache DataSketches KLL accuracy](https://datasketches.apache.org/docs/KLL/KLLAccuracyAndSize.html)
 and its
 [C++ contract pinned at `a9b42755072b`](https://github.com/apache/datasketches-cpp/blob/a9b42755072b079fd90b29b9851adc121015c58e/kll/include/kll_sketch.hpp).
