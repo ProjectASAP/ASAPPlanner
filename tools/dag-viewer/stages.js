@@ -274,16 +274,29 @@ function validateStagePipeline(doc) {
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
 // `max_error`, `failure_probability`, `accuracy_scope`) as one line, e.g. "ε=0.01, δ=0.001
-// (rank)" or "ε=0.01 (metric not set; default relative)"; "exact" for
-// zero error with certainty; "" for a malformed target. `defaultMetric` is the
-// query's default metric the document shows for a target without one.
+// (rank)", "ε=0.01 (metric not set; default relative)" or "ε=0.05, δ=0.05
+// (relative; groups ≥ 5% of records)"; "exact" for zero error with
+// certainty; "" for a malformed target. `defaultMetric` is the query's default
+// metric the document shows for a target without one. The scope is shown
+// unless it is the default, the whole result.
 function accuracyText(target, defaultMetric) {
   if (!target || typeof target !== 'object') return '';
   if (target.max_error === 0 && target.failure_probability === 0) return 'exact';
   const delta = target.failure_probability !== undefined && target.failure_probability !== null
     ? `, δ=${target.failure_probability}` : '';
   const metric = target.accuracy_metric || `metric not set${defaultMetric ? `; default ${defaultMetric}` : ''}`;
-  return `ε=${target.max_error}${delta} (${metric})`;
+  const scope = scopeText(target.accuracy_scope);
+  return `ε=${target.max_error}${delta} (${metric}${scope ? `; ${scope}` : ''})`;
+}
+
+// An `AccuracyScope` as words: "" for the whole result (the default),
+// "per value", or "groups ≥ 5% of records" for
+// `{"groups_with_record_share_at_least": 0.05}`.
+function scopeText(scope) {
+  if (scope === 'per_value') return 'per value';
+  const share = scope && typeof scope === 'object' ? scope.groups_with_record_share_at_least : undefined;
+  if (typeof share === 'number') return `groups ≥ ${+(share * 100).toPrecision(6)}% of records`;
+  return '';
 }
 
 // What Stage 3 accepted for a valid candidate's queries (`accepted[id]`:

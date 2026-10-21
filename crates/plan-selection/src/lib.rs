@@ -1888,14 +1888,17 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
 /// `candidate` with each summary's per-value failure probability enlarged
 /// for its queries' targets (#669b), before pricing, so that cost reflects
 /// the deeper sketch. A query with a target with failure probability `δ`,
-/// over `n` approximate inputs ([`approximate_inputs`]) and `G` values per
-/// evaluation ([`values_per_result`]; 1 for a per-value target), needs each
-/// input to fail with probability at most `δ / (n · G)`: `n · G` such
-/// failures union-bound to `δ` over the whole result. A summary several
-/// queries read takes the smallest. The parameters that depend on it are
-/// enlarged ([`with_failure_probability`]; classic HLL's precision from its
-/// source's distinct bound), and the guarantees above are composed again.
-/// A query whose `G` is unbound enlarges nothing: its whole-result target
+/// over `n` approximate inputs ([`approximate_inputs`]) and covering `V`
+/// values per evaluation ([`AccuracyScope::values_covered`]: 1 for a
+/// per-value target, at most `⌊1 / share⌋` for one over the groups holding
+/// a record share, `G` ([`values_per_result`]) for the whole result), needs
+/// each input to fail with probability at most `δ / (n · V)`: `n · V` such
+/// failures union-bound to `δ` over the values the target covers. A summary
+/// several queries read takes the smallest, i.e. the strictest scope. The
+/// parameters that depend on it are enlarged ([`with_failure_probability`];
+/// classic HLL's precision from its source's distinct bound), and the
+/// guarantees above are composed again. A query whose `V` is unbound (a
+/// whole-result target of an unbound `G`) enlarges nothing: its target
 /// stays unmet. Stage 1 sizes for ε and reads no data workload; only this
 /// stage binds `G`. `Err` is the reason the candidate is rejected when its
 /// resized summaries do not rebuild into a plan.
@@ -1952,10 +1955,9 @@ pub fn resize_for_failure_probability(
         else {
             continue;
         };
-        let values = match target.accuracy_scope {
-            AccuracyScope::PerValue => Some(1),
-            AccuracyScope::WholeResult => values_per_result(root, series_read(root, data)),
-        };
+        let values = target
+            .accuracy_scope
+            .values_covered(values_per_result(root, series_read(root, data)));
         let Some(values) = values else { continue };
         let inputs = approximate_inputs(root);
         let share = delta / (inputs.len() as f64 * values as f64);
@@ -2134,14 +2136,11 @@ fn guarantee_check(
     data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> Result<Option<AccuracyMetric>, CheckFailure> {
-    // A guarantee per value is stated over the whole result's `G`
-    // values for a whole-result target.
+    // A guarantee per value is stated over the values the target's scope
+    // covers: the whole result's `G`, or at most `⌊1 / share⌋` groups.
     let series = series_read(root, data);
     let values = values_per_result(root, series);
-    let over_scope = |g: AccuracyGuarantee| match target.accuracy_scope {
-        AccuracyScope::WholeResult => g.over_whole_result(values),
-        AccuracyScope::PerValue => g,
-    };
+    let over_scope = |g: AccuracyGuarantee| g.over_scope(target.accuracy_scope, values);
     let guarantee = bound_root_guarantee(root, series, data, models).map(over_scope);
     let meets = |g: &AccuracyGuarantee| models.effective_accuracy().satisfies(g, target);
     // The deployment's evidence is read only when the theoretical
@@ -2199,7 +2198,9 @@ fn guarantee_check(
                      of values one evaluation returns is not bound (no declared series \
                      count for a source a PromQL vector reads; no bound on a SQL result's \
                      groups yet), so it does not meet whole-result target {target:?}, and \
-                     the deployment has no evidence that it meets it"
+                     the deployment has no evidence that it meets it (a target on the groups \
+                     holding a share of the records, `groups_with_record_share_at_least`, \
+                     covers a bound number of values)"
                 )
             }
             Some(g) => format!(
@@ -5458,6 +5459,74 @@ mod tests {
                     panic!("{params:?}")
                 };
                 assert_eq!(failure_probability, Some(0.001));
+            }
+        }
+    }
+
+    /// The KLL failure probability each selected sketch is sized for.
+    fn kll_failure_probabilities(roots: &[QueryRoot]) -> Vec<Option<f64>> {
+        kll_params(roots)
+            .into_iter()
+            .map(|params| match params {
+                SketchParams::Kll {
+                    failure_probability,
+                    ..
+                } => failure_probability,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// A target on the groups holding at least 5% of the records covers at
+    /// most 20 of them, so each sketch is sized for δ / 20 and the target is
+    /// met even when the number of values the result returns is unbound
+    /// (here a source with no declared series count), where a whole-result
+    /// target stays unmet. With 10 000 series declared it still needs only
+    /// δ / 20, not the whole result's δ / 10 000.
+    #[test]
+    fn a_record_share_target_sizes_each_sketch_for_one_over_share_groups() {
+        let (candidates, five_percent) =
+            per_series_kll(AccuracyScope::GroupsWithRecordShareAtLeast(0.05));
+        for data in [with_series(None), data()] {
+            let selection = select_plan(
+                &candidates,
+                &[entry_with(five_percent.clone(), repeating(10_000))],
+                &data,
+                PlanningModels::builtin(),
+            )
+            .expect("a KLL candidate meets the 5% target");
+            assert_eq!(
+                kll_failure_probabilities(&selection.plan),
+                vec![Some(0.01 / 20.0)]
+            );
+        }
+    }
+
+    /// One summary read by queries over different scopes is sized for the
+    /// strictest: every group (here `G` = 10 000 series) is stricter than
+    /// groups holding at least 1% of the records (100 groups), which is
+    /// stricter than 5% (20 groups), which is stricter than one value.
+    #[test]
+    fn a_shared_summary_is_sized_for_its_strictest_scope() {
+        let (candidates, per_value) = per_series_kll(AccuracyScope::PerValue);
+        let root = candidates[0].roots[0].clone();
+        let roots = [root.clone(), root];
+        let scoped = |scope| per_value.clone().accuracy_scope(scope);
+        let one_percent = scoped(AccuracyScope::GroupsWithRecordShareAtLeast(0.01));
+        let five_percent = scoped(AccuracyScope::GroupsWithRecordShareAtLeast(0.05));
+        let every_group = scoped(AccuracyScope::WholeResult);
+        for (pair, delta) in [
+            ([per_value.clone(), five_percent.clone()], 0.01 / 20.0),
+            ([five_percent.clone(), one_percent.clone()], 0.01 / 100.0),
+            ([one_percent, every_group], 0.01 / 10_000.0),
+        ] {
+            for targets in [pair.clone(), [pair[1].clone(), pair[0].clone()]] {
+                let resized = resize_for_failure_probability(&roots, &targets, &data()).unwrap();
+                assert_eq!(
+                    kll_failure_probabilities(&resized),
+                    vec![Some(delta); 2],
+                    "{targets:?}"
+                );
             }
         }
     }
