@@ -507,8 +507,10 @@ fn stage3_plan_selection_b_selects_cheapest_valid() {
 /// With nothing materialized, the 1-min KLL panes are all rebuilt at every
 /// evaluation: they read the same 5 minutes of samples and update the same
 /// states as one whole-window KLL, and merging five panes per series adds
-/// 1M × 5 operations a minute. So whole-window KLL is selected at 2.100 per
-/// second and the panes cost 2.183; exact costs 2.400. DDSketch, whole or in
+/// 1M × 5 operations a minute. Each evaluation also holds its states while
+/// it runs: the whole window's 1M KLLs, or the five panes' 5M smaller ones,
+/// for the evaluation's latency. So whole-window KLL is selected at 2.363 per
+/// second and the panes cost 3.611; exact costs 2.458. DDSketch, whole or in
 /// panes, misses the rank target.
 #[test]
 fn stage3_plan_selection_b_panes_rebuilt_at_query_time_add_the_merge() {
@@ -527,8 +529,8 @@ fn stage3_plan_selection_b_panes_rebuilt_at_query_time_add_the_merge() {
     };
     let whole = cost(with("Kll", false)).unwrap();
     let panes = cost(with("Kll", true)).unwrap();
-    assert!((whole - 2.1).abs() < 1e-9, "{whole}");
-    assert!((panes - (2.1 + 5e6 * 1e-6 / 60.0)).abs() < 1e-9, "{panes}");
+    assert!((whole - 2.362_500_025_2).abs() < 1e-9, "{whole}");
+    assert!((panes - 3.611_233_350_8).abs() < 1e-9, "{panes}");
     assert_eq!(
         run.selection.selected,
         run.physical_of(with("Kll", false)).next().unwrap().id

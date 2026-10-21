@@ -58,8 +58,8 @@ evaluations) is offered when the deployment declares
 adds `MatAtQueryKeptAcrossEvaluations` for a tumbling-pane chain that builds
 one new pane per evaluation. Pattern A's shared EH needs window segments shared across
 queries (#628, #634), so A1–A3 do not exist yet. B3's
-4 kept panes plus the newest cost 436.53 per second under cost model 1,
-between B2 (2.183) and B1 (654.53).
+4 kept panes plus the newest cost 436.59 per second under cost model 1,
+between B2 (3.611) and B1 (654.54).
 
 ## Invariants and tests
 
@@ -111,7 +111,7 @@ it.
   more of the same work. B2 also rebuilds more per evaluation than B1 and B3,
   but it keeps nothing between evaluations, so B2 ≥ B1, B3 holds only under a
   model that charges rebuilds more than kept state. Cost model 1 does not:
-  B2 costs 2.183 per second, B3 436.5 and B1 654.5 (see the table
+  B2 costs 3.611 per second, B3 436.6 and B1 654.5 (see the table
   above).
 * A1 ≤ A2 as given, and B1 ≤ B3, depend on the cost model (cost model 1, 2
   or 3). The doc's reasons are

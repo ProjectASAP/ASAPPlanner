@@ -19744,8 +19744,13 @@
       ]
     },
     "costs": {
+<<<<<<< HEAD
       "P201-m79+P1-m3": {
         "cost_per_second": 4.498463275329851e-6,
+=======
+      "P199-m19+P1-m3": {
+        "cost_per_second": 4.566015517643547e-6,
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -19761,14 +19766,14 @@
             "price_source": "analytical"
           },
           "10": {
-            "cost_per_second": 1.1243999999999999e-10,
-            "detail": "operator: pass 10000 rows; x 1.0000/s",
+            "cost_per_second": 1.1244027977060526e-10,
+            "detail": "operator: pass 10000 rows; x 1.0000/s; holds 80 bytes for 3.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "11": {
-            "cost_per_second": 1.1243999999999999e-10,
-            "detail": "build exact Sum accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s",
+            "cost_per_second": 1.1245958394236862e-10,
+            "detail": "build exact Sum accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s; holds 5600 bytes for 3.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -19779,8 +19784,8 @@
             "price_source": "analytical"
           },
           "13": {
-            "cost_per_second": 1.1243999999999999e-10,
-            "detail": "build exact Count accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s",
+            "cost_per_second": 1.1245958394236862e-10,
+            "detail": "build exact Count accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s; holds 5600 bytes for 3.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -19791,20 +19796,20 @@
             "price_source": "analytical"
           },
           "15": {
-            "cost_per_second": 1.1244e-12,
-            "detail": "operator: pass 100 rows; x 1.0000/s",
+            "cost_per_second": 1.1245958394236862e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 56 bytes for 3.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "16": {
-            "cost_per_second": 1.1244e-12,
-            "detail": "operator: pass 100 rows; x 1.0000/s",
+            "cost_per_second": 1.1245958394236862e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 56 bytes for 3.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "17": {
-            "cost_per_second": 1.1244e-12,
-            "detail": "operator: pass 100 rows; x 1.0000/s",
+            "cost_per_second": 1.1245958394236862e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 56 bytes for 3.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -19815,26 +19820,32 @@
             "price_source": "analytical"
           },
           "19": {
-            "cost_per_second": 1.1243999999999999e-10,
-            "detail": "operator: pass 10000 rows; x 1.0000/s",
+            "cost_per_second": 1.1244028069075196e-10,
+            "detail": "operator: pass 10000 rows; x 1.0000/s; holds 80 bytes for 3.1 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "2": {
+<<<<<<< HEAD
             "cost_per_second": 5.0598e-12,
             "detail": "merge 9000 states into 100; x 0.0500/s",
             "multiplier": 1,
+=======
+            "cost_per_second": 1.0119605925744772e-11,
+            "detail": "merge 9000 states into 100; x 0.1000/s; holds 5600 bytes for 0.0 ms",
+            "multiplier": 2,
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "price_source": "analytical"
           },
           "20": {
-            "cost_per_second": 1.1243999999999999e-10,
-            "detail": "operator: pass 10000 rows; x 1.0000/s",
+            "cost_per_second": 1.1244028069075196e-10,
+            "detail": "operator: pass 10000 rows; x 1.0000/s; holds 80 bytes for 3.1 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "21": {
-            "cost_per_second": 1.1243999999999999e-10,
-            "detail": "build exact Sum accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s",
+            "cost_per_second": 1.1245964835263787e-10,
+            "detail": "build exact Sum accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s; holds 5600 bytes for 3.1 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -19845,8 +19856,8 @@
             "price_source": "analytical"
           },
           "23": {
-            "cost_per_second": 1.1243999999999999e-10,
-            "detail": "build exact Count accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s",
+            "cost_per_second": 1.1245964835263787e-10,
+            "detail": "build exact Count accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s; holds 5600 bytes for 3.1 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -19857,29 +19868,39 @@
             "price_source": "analytical"
           },
           "25": {
-            "cost_per_second": 1.1244e-12,
-            "detail": "operator: pass 100 rows; x 1.0000/s",
+            "cost_per_second": 1.124484207225591e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 24 bytes for 3.1 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "26": {
-            "cost_per_second": 1.1244e-12,
-            "detail": "operator: pass 100 rows; x 1.0000/s",
+            "cost_per_second": 1.124484207225591e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 24 bytes for 3.1 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "27": {
-            "cost_per_second": 1.1244e-12,
-            "detail": "operator: pass 100 rows; x 1.0000/s",
+            "cost_per_second": 1.124484207225591e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 24 bytes for 3.1 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "28": {
+<<<<<<< HEAD
+=======
+            "cost_per_second": 3.3772846508368844e-8,
+            "detail": "merge 3000000 states into 10000; x 1.0000/s; holds 11680000 bytes for 3.0 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "29": {
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "cost_per_second": 1.1243999999999999e-10,
             "detail": "estimate 10000 groups x 1; x 1.0000/s",
             "multiplier": 1,
             "price_source": "analytical"
           },
+<<<<<<< HEAD
           "29": {
             "cost_per_second": 1.1243999999999999e-10,
             "detail": "operator: pass 10000 rows; x 1.0000/s",
@@ -19895,6 +19916,23 @@
           "30": {
             "cost_per_second": 1.1243999999999999e-10,
             "detail": "build exact Sum accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s",
+=======
+          "3": {
+            "cost_per_second": 1.1244e-13,
+            "detail": "finalize 100 accumulators; x 0.1000/s",
+            "multiplier": 2,
+            "price_source": "analytical"
+          },
+          "30": {
+            "cost_per_second": 1.1244027977060526e-10,
+            "detail": "operator: pass 10000 rows; x 1.0000/s; holds 80 bytes for 3.0 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "31": {
+            "cost_per_second": 1.1245958394236862e-10,
+            "detail": "build exact Sum accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s; holds 5600 bytes for 3.0 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -19904,9 +19942,15 @@
             "multiplier": 1,
             "price_source": "analytical"
           },
+<<<<<<< HEAD
           "32": {
             "cost_per_second": 1.1243999999999999e-10,
             "detail": "build exact Count accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s",
+=======
+          "33": {
+            "cost_per_second": 1.1245958394236862e-10,
+            "detail": "build exact Count accumulator into 100 states: 10000 rows x depth 1; x 1.0000/s; holds 5600 bytes for 3.0 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -19923,18 +19967,27 @@
             "price_source": "analytical"
           },
           "35": {
-            "cost_per_second": 1.1244e-12,
-            "detail": "operator: pass 100 rows; x 1.0000/s",
+            "cost_per_second": 1.1245958394236862e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 56 bytes for 3.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "36": {
-            "cost_per_second": 1.1244e-12,
-            "detail": "operator: pass 100 rows; x 1.0000/s",
+            "cost_per_second": 1.1245958394236862e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 56 bytes for 3.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "37": {
+<<<<<<< HEAD
+=======
+            "cost_per_second": 1.1245958394236862e-12,
+            "detail": "operator: pass 100 rows; x 1.0000/s; holds 56 bytes for 3.0 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "38": {
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "cost_per_second": 8.32056e-9,
             "detail": "scan 100000 samples; x 1.0000/s",
             "multiplier": 1,
@@ -19953,17 +20006,27 @@
             "price_source": "analytical"
           },
           "4": {
-            "cost_per_second": 5.622e-14,
-            "detail": "build exact Sum accumulator into 100 states: 100 rows x depth 1; x 0.0500/s",
+            "cost_per_second": 5.6222995077520607e-14,
+            "detail": "build exact Sum accumulator into 100 states: 100 rows x depth 1; x 0.0500/s; holds 5600 bytes for 0.0 ms",
             "multiplier": 1,
             "price_source": "analytical"
           },
           "40": {
+<<<<<<< HEAD
+=======
+            "cost_per_second": 2.0240411428344247e-8,
+            "detail": "merge 1800000 states into 10000; x 1.0000/s; holds 560000 bytes for 1.9 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "41": {
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "cost_per_second": 1.1243999999999999e-10,
             "detail": "finalize 10000 accumulators; x 1.0000/s",
             "multiplier": 1,
             "price_source": "analytical"
           },
+<<<<<<< HEAD
           "41": {
             "cost_per_second": 7.870799999999999e-10,
             "detail": "sort 10000 rows in 100 partitions; x 1.0000/s",
@@ -19979,6 +20042,23 @@
           "43": {
             "cost_per_second": 4.4976e-12,
             "detail": "operator: pass 400 rows; x 1.0000/s",
+=======
+          "42": {
+            "cost_per_second": 7.870938448953628e-10,
+            "detail": "sort 10000 rows in 100 partitions; x 1.0000/s; holds 6400 bytes for 1.9 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "43": {
+            "cost_per_second": 4.497738448953628e-12,
+            "detail": "limit to 400 rows; x 1.0000/s; holds 64 bytes for 1.9 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "44": {
+            "cost_per_second": 4.497738448953628e-12,
+            "detail": "operator: pass 400 rows; x 1.0000/s; holds 64 bytes for 1.9 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -19994,9 +20074,15 @@
             "multiplier": 1,
             "price_source": "analytical"
           },
+<<<<<<< HEAD
           "46": {
             "cost_per_second": 4.497599999999999e-10,
             "detail": "merge 1200000 states into 10000; x 0.0333/s",
+=======
+          "47": {
+            "cost_per_second": 4.4978749889095613e-10,
+            "detail": "merge 1200000 states into 10000; x 0.0333/s; holds 560000 bytes for 1.3 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -20006,9 +20092,15 @@
             "multiplier": 1,
             "price_source": "analytical"
           },
+<<<<<<< HEAD
           "48": {
             "cost_per_second": 2.6235999999999996e-11,
             "detail": "sort 10000 rows in 100 partitions; x 0.0333/s",
+=======
+          "49": {
+            "cost_per_second": 2.6236314273039495e-11,
+            "detail": "sort 10000 rows in 100 partitions; x 0.0333/s; holds 6400 bytes for 1.3 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -20025,8 +20117,19 @@
             "price_source": "analytical"
           },
           "50": {
+<<<<<<< HEAD
             "cost_per_second": 1.4991999999999998e-13,
             "detail": "operator: pass 400 rows; x 0.0333/s",
+=======
+            "cost_per_second": 1.4992314273039499e-13,
+            "detail": "limit to 400 rows; x 0.0333/s; holds 64 bytes for 1.3 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "51": {
+            "cost_per_second": 1.4992314273039499e-13,
+            "detail": "operator: pass 400 rows; x 0.0333/s; holds 64 bytes for 1.3 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -20042,9 +20145,15 @@
             "multiplier": 1,
             "price_source": "analytical"
           },
+<<<<<<< HEAD
           "53": {
             "cost_per_second": 5.059799999999999e-10,
             "detail": "merge 900000 states into 10000; x 0.0500/s",
+=======
+          "54": {
+            "cost_per_second": 5.06011612560153e-10,
+            "detail": "merge 900000 states into 10000; x 0.0500/s; holds 560000 bytes for 1.0 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -20054,6 +20163,7 @@
             "multiplier": 1,
             "price_source": "analytical"
           },
+<<<<<<< HEAD
           "55": {
             "cost_per_second": 3.9354e-11,
             "detail": "sort 10000 rows in 100 partitions; x 0.0500/s",
@@ -20069,6 +20179,23 @@
           "57": {
             "cost_per_second": 4.4976e-13,
             "detail": "operator: pass 800 rows; x 0.0500/s",
+=======
+          "56": {
+            "cost_per_second": 3.935436128640175e-11,
+            "detail": "sort 10000 rows in 100 partitions; x 0.0500/s; holds 6400 bytes for 1.0 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "57": {
+            "cost_per_second": 4.497636128640175e-13,
+            "detail": "limit to 800 rows; x 0.0500/s; holds 64 bytes for 1.0 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "58": {
+            "cost_per_second": 4.497636128640175e-13,
+            "detail": "operator: pass 800 rows; x 0.0500/s; holds 64 bytes for 1.0 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -20091,8 +20218,19 @@
             "price_source": "analytical"
           },
           "60": {
+<<<<<<< HEAD
             "cost_per_second": 4.497599999999999e-10,
             "detail": "merge 1200000 states into 10000; x 0.0333/s",
+=======
+            "cost_per_second": 8.018522580509185e-8,
+            "detail": "build exact Rate accumulator in 120 panes of 30000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 67760000 bytes",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "61": {
+            "cost_per_second": 4.4978749889095613e-10,
+            "detail": "merge 1200000 states into 10000; x 0.0333/s; holds 560000 bytes for 1.3 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -20102,6 +20240,7 @@
             "multiplier": 1,
             "price_source": "analytical"
           },
+<<<<<<< HEAD
           "62": {
             "cost_per_second": 2.6235999999999996e-11,
             "detail": "sort 10000 rows in 100 partitions; x 0.0333/s",
@@ -20117,6 +20256,23 @@
           "64": {
             "cost_per_second": 1.4991999999999998e-13,
             "detail": "operator: pass 400 rows; x 0.0333/s",
+=======
+          "63": {
+            "cost_per_second": 2.623623570477962e-11,
+            "detail": "sort 10000 rows in 100 partitions; x 0.0333/s; holds 4800 bytes for 1.3 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "64": {
+            "cost_per_second": 1.4992235704779624e-13,
+            "detail": "limit to 400 rows; x 0.0333/s; holds 48 bytes for 1.3 ms",
+            "multiplier": 1,
+            "price_source": "analytical"
+          },
+          "65": {
+            "cost_per_second": 1.4992235704779624e-13,
+            "detail": "operator: pass 400 rows; x 0.0333/s; holds 48 bytes for 1.3 ms",
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -20127,9 +20283,15 @@
             "price_source": "analytical"
           },
           "8": {
+<<<<<<< HEAD
             "cost_per_second": 3.3772980849787585e-8,
             "detail": "merge 3000000 states into 10000; x 1.0000/s; holds 11680000 bytes for 3.1 ms",
             "multiplier": 1,
+=======
+            "cost_per_second": 6.754582735815643e-8,
+            "detail": "merge 3000000 states into 10000; x 2.0000/s; holds 11680000 bytes for 3.0 ms",
+            "multiplier": 2,
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
             "price_source": "analytical"
           },
           "9": {
@@ -20141,8 +20303,13 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
+<<<<<<< HEAD
           "average_memory_bytes": 3804065229.842604,
           "cpu_ops_per_second": 6947231.666666664,
+=======
+          "average_memory_bytes": 3804137502.0516796,
+          "cpu_ops_per_second": 12947686.666666672,
+>>>>>>> cdb47616 (fix(plan-selection): charge memory a query holds while it runs under cost model 1)
           "disk_bytes": 0,
           "latency_per_query": [
             {
