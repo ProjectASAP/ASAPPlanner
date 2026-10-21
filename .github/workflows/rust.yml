@@ -111,6 +111,18 @@ jobs:
     # The viewer's Python tests run its JavaScript in V8 through py_mini_racer;
     # the ones that plan a query run target/debug/stage_pipeline, which the
     # workspace test build above already linked for devtools' tests.
+    # A pinned Python and Node: the runner's system Python refuses a global
+    # pip install (PEP 668).
+    - name: Install Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
     - name: Run the DAG viewer's Python tests
       working-directory: tools/dag-viewer
       run: |
