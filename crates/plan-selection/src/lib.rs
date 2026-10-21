@@ -43,10 +43,14 @@
 //!   ([`NodeCost::multiplier`]) at the sum of their rates. Its consumers are
 //!   the queries whose sub-DAG reaches it and the materialized nodes above
 //!   it, counted without looking through a materialized node: a node below
-//!   one is computed when that node is. Stage 2 does not duplicate a shared
-//!   node, so a shared `NotMaterialized` input costs what reading it
-//!   separately does (#509 Example 4); it offers the node built once per
-//!   evaluation (`MatAtQuery`) as another candidate.
+//!   one is computed when that node is. Stage 2 keeps a shared node one
+//!   node (it copies it only for readers at two timings). A shared
+//!   `NotMaterialized` input costs what reading it separately does (#509
+//!   Example 4) only when every consumer reads the same window: a query-time `Scan` is priced over the longest window
+//!   read above it, so each consumer pays for that window, and a scan a 1 m
+//!   and a 5 m window share costs more than two separate scans. Stage 2
+//!   offers the highest shared node built once per evaluation (`MatAtQuery`)
+//!   as another candidate.
 //! * A `MatAtQuery` node is computed once for all the queries that reach
 //!   it, at their combined rate: queries repeating at the same interval are
 //!   evaluated together, so each distinct interval counts once.

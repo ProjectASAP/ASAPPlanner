@@ -68,8 +68,9 @@ fn validated_dag(value: &Value, queries: usize) {
 /// the committed fixture is current.
 #[test]
 fn example1_document_is_valid_and_committed_fixture_is_current() {
-    // Example 1's story is about which plans miss their accuracy target.
-    let document = generate(&["--enforce-accuracy-guarantees"]);
+    // Example 1's story is about which plans miss their accuracy target;
+    // its 72 physical candidates pass the default display cap (64).
+    let document = generate(&["--enforce-accuracy-guarantees", "--max-displayed", "100"]);
     let committed: Value = serde_json::from_str(
         &std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(COMMITTED))
             .unwrap(),
@@ -370,8 +371,9 @@ fn workload_above_the_candidate_limit_is_rejected() {
             "{stderr}"
         );
     }
-    // At Stage 1's 27 candidates, Stage 2's 57 physical candidates (30 maintain
-    // pane chains at ingestion time) pass the limit; they are counted, not built.
+    // At Stage 1's 27 candidates, Stage 2's 72 physical candidates (30 maintain
+    // pane chains at ingestion time, 15 build a shared input once per
+    // evaluation) pass the limit; they are counted, not built.
     let (status, stderr) = failure(&[
         "--exhaustive",
         "--example",
@@ -388,7 +390,7 @@ fn workload_above_the_candidate_limit_is_rejected() {
         "{stderr}"
     );
     // At the limit, it plans every candidate.
-    let document = generate(&["--max-combinations", "57"]);
+    let document = generate(&["--max-combinations", "72", "--max-displayed", "100"]);
     assert_eq!(
         document["stage1_logical_asap_optimization"]["combinations"],
         27
@@ -398,7 +400,7 @@ fn workload_above_the_candidate_limit_is_rejected() {
             .as_array()
             .unwrap()
             .len(),
-        57
+        72
     );
 }
 
@@ -518,7 +520,7 @@ fn planning_stages_without_a_limit_plan_every_candidate() {
     let workload = example1();
     let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
     assert_eq!(run.stage1_logical_asap_optimization.len(), 27);
-    assert_eq!(run.stage2_physical_asap_optimization.len(), 57);
+    assert_eq!(run.stage2_physical_asap_optimization.len(), 72);
     let limited = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), Some(26));
     assert!(matches!(
         limited,
@@ -1388,9 +1390,9 @@ fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
     assert!(ids.contains(selection["selected"].as_str().unwrap()));
     let counts = selection["rejected_by_cause"].as_object().unwrap();
     let total: u64 = counts.values().map(|n| n.as_u64().unwrap()).sum();
-    // 972 candidates: one selected, the rest rejected for a failed check or
-    // a loss under the cost model.
-    assert_eq!(total, 971);
+    // 2,187 candidates: one selected, the rest rejected for a failed check
+    // or a loss under the cost model.
+    assert_eq!(total, 2186);
     // The shown valid ones (priced) are the cheapest of all valid ones.
     let costs = selection["costs"].as_object().unwrap();
     assert!(costs.len() >= 2, "{costs:?}");
@@ -1449,7 +1451,7 @@ const QUANTILE_BY_WORKLOAD: &str = r#"{"query_workload": {"language": "promql", 
 
 /// Every plan that answers an instant `quantile by (G)` exactly compiles,
 /// so Stage 3 prices the exact baseline next to the sketches: no physical
-/// plan (882 of them today) is rejected as `executor_cannot_compile`, and accepted
+/// plan (1,107 of them today) is rejected as `executor_cannot_compile`, and accepted
 /// plans answer Q3 and Q4 exactly.
 #[test]
 fn exact_grouped_quantile_plans_compile_and_are_compared() {
@@ -1492,4 +1494,72 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
         })
         .count();
     assert!(exact_q3_q4 > 0);
+}
+
+/// Two windowed quantiles over one metric (Q1 over 1 m, Q2 over 5 m, both
+/// every 10 s): with a shared scan, Stage 2 also offers the scan built once
+/// per evaluation (`query time, shared: Scan`). It reads the 5 m window
+/// once (≈0.1360/s) instead of once per reader (0.2200/s), and beats the
+/// separate scans (0.1528/s).
+#[test]
+fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
+    let query = |q: &str| {
+        serde_json::json!({
+            "query": q,
+            "demand": {"fixed_interval": 10000},
+            "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
+            "predictability": {"predictable": {"known_at": null}},
+        })
+    };
+    let workload = serde_json::json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [
+                query("quantile_over_time(0.5, data[1m])"),
+                query("quantile_over_time(0.9, data[5m])"),
+            ],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 666.67}},
+            "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}},
+        },
+    });
+    let path = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_shared_scan_workload.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, workload.to_string()).unwrap();
+    let document = document_of(&[
+        "--exhaustive",
+        "--max-displayed",
+        "1000",
+        "--workload",
+        path.to_str().unwrap(),
+    ]);
+    std::fs::remove_file(path).unwrap();
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    let label = |id: &str| {
+        physical.iter().find(|c| c["id"] == id).unwrap()["display_name"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let selection = &document["stage3_plan_selection"];
+    let cost = |id: &str| selection["costs"][id]["cost_per_second"].as_f64().unwrap();
+    let selected = selection["selected"].as_str().unwrap();
+    assert_eq!(
+        label(selected),
+        "Q1 Kll · Q2 Kll · shared Scan (Q1, Q2) · query time, shared: Scan"
+    );
+    assert!((cost(selected) - 0.136).abs() < 1e-3, "{}", cost(selected));
+    let separate = physical
+        .iter()
+        .find(|c| c["display_name"] == "Q1 Kll · Q2 Kll")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    assert!((cost(separate) - 0.1528).abs() < 1e-4, "{}", cost(separate));
 }

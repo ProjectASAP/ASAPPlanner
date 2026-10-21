@@ -494,11 +494,16 @@ fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
 /// series' samples in time order; continuously ingesting PromQL data is
 /// taken to arrive in that order, so they are maintained too. Each pane
 /// chain is maintained or not independently: a logical candidate with `c`
-/// chains has `2^c` physical candidates.
+/// chains has `2^c` physical candidates. A shared input (the highest node
+/// both queries read: the scan, or the time range above it) is also built
+/// once per evaluation (`MatAtQuery`), which adds one candidate: the one
+/// with every chain at query time, since a chain maintained at ingestion
+/// time leaves one query reading the input at query time.
 #[test]
 fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
     let run = pipeline();
     let mut counter_maintained = 0;
+    let mut shared_once = 0;
     for p in &run.physical {
         for n in &p.dag().nodes {
             match materialization(p, n.id) {
@@ -519,11 +524,34 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
                         counter_maintained += 1;
                     }
                 }
-                other => panic!("{}: {:?} is {other:?}", p.id, n.id),
+                MaterializationOption::MatAtQuery => {
+                    let (q1, q2) = roots(&p.query_roots);
+                    assert!(
+                        closure(p.dag(), q1).contains(&n.id)
+                            && closure(p.dag(), q2).contains(&n.id),
+                        "{}: {:?} is built once for both queries",
+                        p.id,
+                        n.id
+                    );
+                    assert!(
+                        matches!(
+                            relational(p.dag().payload(n.id)).as_deref(),
+                            Some("scan" | "time_range")
+                        ),
+                        "{}: {:?} is the shared input",
+                        p.id,
+                        n.id
+                    );
+                    shared_once += 1;
+                }
             }
         }
     }
     assert!(counter_maintained > 0, "Q1's rate panes are maintained");
+    assert_eq!(
+        shared_once, 15,
+        "one per logical candidate with a shared input"
+    );
     let expected: usize = run
         .logical
         .iter()
@@ -534,11 +562,11 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
                 .into_iter()
                 .filter(|&id| matches!(c.dag.payload(id), Operator::ASAP(ASAPOp::PaneChain { .. })))
                 .count();
-            1 << chains
+            (1 << chains) + usize::from(c.shared_input())
         })
         .sum();
     assert_eq!(run.physical.len(), expected);
-    assert_eq!(run.physical.len(), 57);
+    assert_eq!(run.physical.len(), 72);
 }
 
 /// Compile `p` in the physical planner (the runtime capability check), with
@@ -583,9 +611,10 @@ fn stage3_plan_selection_selects_one_and_explains_the_rest() {
 #[test]
 fn stage3_plan_selection_selects_exact_q2_and_rejects_both_heaps() {
     let run = pipeline();
+    let selected = run.physical(&run.selection.selected);
     assert_eq!(
-        run.selection.selected,
-        physical_with(&run, Q2Option::Exact).id
+        classify(selected.dag(), &selected.query_roots).0,
+        Q2Option::Exact
     );
     let invalid = run.invalid();
     // Only heap candidates are invalid (with or without a shared input).
@@ -631,22 +660,32 @@ fn stage3_plan_selection_count_min_needs_the_counter_declaration() {
     );
 }
 
-/// A shared NotMaterialized input is charged once per consumer, so the
-/// shared-input candidates cost what the independent one does; their totals
-/// differ from it only by floating-point rounding (the same charges summed
-/// in another grouping), which plan selection treats as a tie, so the
-/// independent candidate, enumerated first, is selected.
+/// A shared NotMaterialized input is charged once per consumer, and both
+/// queries read the same 1 m window, so the shared-input candidates cost
+/// what the independent one does; their totals differ from it only by
+/// floating-point rounding (the same charges summed in another grouping).
+/// Built once per evaluation (`MatAtQuery`), the shared input is read once:
+/// the shared time range (the doc's "Raw with a shared input") is selected,
+/// at 5.33 instead of 7.94 per second.
 #[test]
-fn stage3_plan_selection_shared_input_ties_up_to_rounding() {
+fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
     let run = pipeline();
     let independent = physical_with(&run, Q2Option::Exact);
     let base = run.cost(&independent.id).unwrap();
+    let exact_shared = |p: &&Physical| {
+        whole_windows(p.dag()) && classify(p.dag(), &p.query_roots) == (Q2Option::Exact, true)
+    };
+    let built_once = |p: &Physical| {
+        p.dag()
+            .nodes
+            .iter()
+            .any(|n| materialization(p, n.id) == MaterializationOption::MatAtQuery)
+    };
     let shared: Vec<_> = run
         .physical
         .iter()
-        .filter(|p| {
-            whole_windows(p.dag()) && classify(p.dag(), &p.query_roots) == (Q2Option::Exact, true)
-        })
+        .filter(exact_shared)
+        .filter(|p| !built_once(p))
         .map(|p| (p.id.clone(), run.cost(&p.id).unwrap()))
         .collect();
     assert!(!shared.is_empty());
@@ -661,10 +700,24 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding() {
             (total - base).abs() <= 1e-9 * base,
             "{id}: {total} vs {base}"
         );
-        let rejection = run.selection.rejected.iter().find(|r| &r.id == id).unwrap();
-        assert!(rejection.reason.contains("tied"), "{}", rejection.reason);
     }
-    assert_eq!(run.selection.selected, independent.id);
+    let selected = run.physical(&run.selection.selected);
+    assert!(exact_shared(&selected) && built_once(selected));
+    let time_range = selected
+        .dag()
+        .nodes
+        .iter()
+        .find(|n| materialization(selected, n.id) == MaterializationOption::MatAtQuery)
+        .unwrap();
+    assert_eq!(
+        relational(&time_range.payload).as_deref(),
+        Some("time_range")
+    );
+    let cost = run.cost(&selected.id).unwrap();
+    assert!(
+        (cost - 5.3311).abs() < 1e-3 && (base - 7.9402).abs() < 1e-3,
+        "{cost} vs {base}"
+    );
 }
 
 /// Tumbling panes rebuilt at every evaluation cost more than the whole
@@ -700,7 +753,9 @@ fn stage3_plan_selection_selects_cheapest_valid() {
     assert_selects_cheapest_valid(&pipeline());
 }
 
-/// Every node of a valid candidate is charged once per query that reads it: nothing is materialized, so a shared node is recomputed for each.
+/// Every node of a valid candidate is charged once per consumer that reads
+/// it: a shared `NotMaterialized` node is recomputed for each query, and a
+/// materialized one is computed once.
 #[test]
 fn stage3_plan_selection_charges_each_node_per_consuming_query() {
     assert_each_node_charged_per_consuming_query(&pipeline());
