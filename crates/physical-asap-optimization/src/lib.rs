@@ -130,6 +130,11 @@ pub struct PhysicalCandidate {
     /// the builds left `NotMaterialized`. A build one query reads at
     /// ingestion time and another at query time appears once per copy.
     pub materialization: BTreeMap<PhysicalASAPNodeId, Materialization>,
+    /// The option chosen for each summary build of its logical candidate,
+    /// in discovery order (query by query, each query's builds as a walk
+    /// from its root meets them): what [`optimize_physical_asap_assigned`]
+    /// rebuilds it from.
+    pub assignment: Vec<Materialization>,
 }
 
 impl PhysicalCandidate {
@@ -312,56 +317,106 @@ pub fn optimize_physical_asap(
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
     check_panes_on_range_steps(&mat_candidates, entries)?;
-    let mut candidates = Vec::new();
-    for assignment in materialization_assignments(&mat_candidates) {
-        let materialized: Vec<_> = mat_candidates
-            .iter()
-            .zip(&assignment)
-            .filter(|(_, m)| **m != Materialization::NotMaterialized)
-            .map(|(mat_candidate, m)| (mat_candidate, *m))
-            .collect();
-        let mut options = MaterializationAssignment::with_default(Materialization::NotMaterialized);
-        for (mat_candidate, materialization) in &materialized {
-            options.set(&mat_candidate.node, *materialization);
+    materialization_assignments(&mat_candidates)
+        .map(|assignment| {
+            assigned_candidate(from_logical, &implemented, &mat_candidates, assignment)
+        })
+        .collect()
+}
+
+/// Stage 2 for one CandidateLogicalASAPDAG and one materialization
+/// assignment: the physical candidate [`optimize_physical_asap`] lists for
+/// it. `choose(readers)` gives the option for each summary build in
+/// discovery order, `readers` being the queries that read it. `None` when
+/// a chosen option is not one of the build's, or the assignment
+/// materializes a build at ingestion time above one at query time.
+pub fn optimize_physical_asap_assigned(
+    from_logical: &str,
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+    choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
+) -> Result<Option<PhysicalCandidate>, PhysicalASAPOptimizationError> {
+    let mut memo = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
+    check_panes_on_range_steps(&mat_candidates, entries)?;
+    let mut assignment = Vec::with_capacity(mat_candidates.len());
+    for mat_candidate in &mat_candidates {
+        match choose(&mat_candidate.readers) {
+            Some(m) if mat_candidate.options().contains(&m) => assignment.push(m),
+            _ => return Ok(None),
         }
-        let operators: Vec<Rc<OperatorNode>> = implemented
-            .iter()
-            .flat_map(|root| root_operators(root).into_iter().cloned())
-            .collect();
-        let (split, options) = split_shared_by_timing(&operators, &options);
-        let replaced: HashMap<_, _> = operators
-            .iter()
-            .map(Rc::as_ptr)
-            .zip(split.iter().cloned())
-            .collect();
-        let split_roots = map_roots(&implemented, &mut |node| {
-            Ok(replaced[&Rc::as_ptr(node)].clone())
-        })?;
-        let mut timing = TimingMemo::new();
-        let timed = map_roots(&split_roots, &mut |node| {
-            Ok(apply_materialization_timings(node, &options, &mut timing)?)
-        })?;
-        let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
-        let materialization = dag
-            .nodes
-            .iter()
-            .filter(|n| {
-                matches!(
-                    n.payload,
-                    Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
-                )
-            })
-            .map(|n| (n.id, n.materialization))
-            .collect();
-        candidates.push(PhysicalCandidate {
-            id: String::new(),
-            from_logical: from_logical.to_string(),
-            roots: timed,
-            dag,
-            materialization,
-        });
     }
-    Ok(candidates)
+    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
+    let below = candidates_below(&nodes);
+    let at_ingestion = |m: &Materialization| m.timing() == ExecutionTiming::IngestionTime;
+    let down_closed = assignment
+        .iter()
+        .enumerate()
+        .all(|(c, m)| !at_ingestion(m) || below[c].iter().all(|&v| at_ingestion(&assignment[v])));
+    if !down_closed {
+        return Ok(None);
+    }
+    assigned_candidate(from_logical, &implemented, &mat_candidates, assignment).map(Some)
+}
+
+/// The physical candidate of the implemented roots `implemented` with
+/// `assignment[c]` chosen for `mat_candidates[c]`.
+fn assigned_candidate(
+    from_logical: &str,
+    implemented: &[QueryRoot],
+    mat_candidates: &[MaterializationCandidate],
+    assignment: Vec<Materialization>,
+) -> Result<PhysicalCandidate, PhysicalASAPOptimizationError> {
+    let materialized: Vec<_> = mat_candidates
+        .iter()
+        .zip(&assignment)
+        .filter(|(_, m)| **m != Materialization::NotMaterialized)
+        .map(|(mat_candidate, m)| (mat_candidate, *m))
+        .collect();
+    let mut options = MaterializationAssignment::with_default(Materialization::NotMaterialized);
+    for (mat_candidate, materialization) in &materialized {
+        options.set(&mat_candidate.node, *materialization);
+    }
+    let operators: Vec<Rc<OperatorNode>> = implemented
+        .iter()
+        .flat_map(|root| root_operators(root).into_iter().cloned())
+        .collect();
+    let (split, options) = split_shared_by_timing(&operators, &options);
+    let replaced: HashMap<_, _> = operators
+        .iter()
+        .map(Rc::as_ptr)
+        .zip(split.iter().cloned())
+        .collect();
+    let split_roots = map_roots(implemented, &mut |node| {
+        Ok(replaced[&Rc::as_ptr(node)].clone())
+    })?;
+    let mut timing = TimingMemo::new();
+    let timed = map_roots(&split_roots, &mut |node| {
+        Ok(apply_materialization_timings(node, &options, &mut timing)?)
+    })?;
+    let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
+    let materialization = dag
+        .nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.payload,
+                Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+            )
+        })
+        .map(|n| (n.id, n.materialization))
+        .collect();
+    Ok(PhysicalCandidate {
+        id: String::new(),
+        from_logical: from_logical.to_string(),
+        roots: timed,
+        dag,
+        materialization,
+        assignment,
+    })
 }
 
 /// The number of physical candidates [`optimize_physical_asap`] returns for

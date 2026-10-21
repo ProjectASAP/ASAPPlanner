@@ -919,6 +919,62 @@ pub struct SearchReport {
     /// composition and the ones discarded there; empty when the search
     /// composed every choice (an exhaustive search, or [`select_plan`]).
     pub queries: Vec<QuerySearchReport>,
+    /// The independent components searched separately, whose selections
+    /// were combined (design method 5); empty when the workload was
+    /// searched as one, for the reason in [`Self::searched_as_one`].
+    pub components: Vec<ComponentReport>,
+    /// Why the workload was searched as one; `None` when its components
+    /// were searched separately.
+    pub searched_as_one: Option<SearchedAsOne>,
+    /// Under cost models 1 and 2, the cost per second of the cheapest
+    /// valid candidate priced more than rounding (1e-12 of it) above the
+    /// cheapest: how close the selection came to a tie. Candidates within
+    /// rounding of the cheapest cost the same. `None` when every valid
+    /// candidate costs the same, under cost model 3, or for a combination
+    /// of components.
+    pub runner_up_cost_per_second: Option<f64>,
+}
+
+/// One independent component of the workload: queries that read no source
+/// another component reads, so no Pass 2 rule, raw-data retention or
+/// node charge links them to another component.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ComponentReport {
+    /// Its queries, by index in the workload.
+    pub queries: Vec<usize>,
+    /// The physical candidates Stage 3 checked for it.
+    pub candidates_checked: u64,
+    /// The candidate selected for it, by its id in the component's search.
+    pub selected: String,
+}
+
+/// Why a workload was searched as one rather than component by component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchedAsOne {
+    /// Its queries all read sources that link them.
+    OneComponent,
+    /// The cost model's objective or limits are not a sum over components
+    /// (cost models 2 and 3: peak cores and cluster limits).
+    CostNotAdditive,
+    /// The caller asked for the exhaustive search or for every candidate.
+    EveryCandidateRequested,
+    /// The deployment's measured cost table calibrates the formulas by one
+    /// factor fitted over every candidate of the whole workload, which a
+    /// component's search does not see.
+    CalibratedOverTheWorkload,
+    /// A component's two cheapest plans are within the selection's tie
+    /// tolerance of the workload's cost, so only the joint search's
+    /// enumeration order decides between them.
+    NearTie,
+    /// The combined plan did not cost the sum of its components' (an
+    /// interaction the components missed); the joint search decides.
+    NotAdditive,
+    /// The combination of the components' selections is not a candidate
+    /// the joint search enumerates: the Pass 2 rules combine only some
+    /// rewrites (rollup and top-k reuse are not combined with summary
+    /// sharing or panes), and cap their candidates over the whole workload.
+    NotInJointSpace,
 }
 
 /// One query's own candidates, checked before composition: the query
@@ -1027,7 +1083,15 @@ pub struct PlanSelector<'a> {
     /// The factor that calibrates the formulas' CPU time to the measured
     /// table's ([`Self::set_calibration`]); 1 without a measured table.
     formula_scale: f64,
+    /// Under a price ranking, the cheapest price of the valid candidates
+    /// offered, and the cheapest more than [`ROUNDING`] above it.
+    cheapest: Option<f64>,
+    runner_up: Option<f64>,
 }
+
+/// Prices within this fraction of each other are the same sum of charges
+/// rounded differently (Stage 3's tie tolerance is 1e-9).
+const ROUNDING: f64 = 1e-12;
 
 /// A valid candidate the selector keeps: as Stage 2 built it, and sized
 /// for its queries' failure probabilities as Stage 3 priced it.
@@ -1069,6 +1133,8 @@ impl<'a> PlanSelector<'a> {
             rejected: Vec::new(),
             kept: Vec::new(),
             formula_scale: 1.0,
+            cheapest: None,
+            runner_up: None,
         })
     }
 
@@ -1192,6 +1258,7 @@ impl<'a> PlanSelector<'a> {
             self.reject(&candidate.id, cause, reason);
             return Ok(());
         }
+        self.track_runner_up(&cost);
         if !self.keep_every_candidate {
             let kept_cost = |kept: &KeptCandidate| &self.costs[&kept.built.id];
             let selectable = match self.ranking {
@@ -1306,10 +1373,34 @@ impl<'a> PlanSelector<'a> {
             pane_retention_ms,
             search: SearchReport {
                 candidates_checked: self.candidates_checked,
-                queries: Vec::new(),
+                runner_up_cost_per_second: self.runner_up,
+                ..SearchReport::default()
             },
         };
         Ok((selection, built))
+    }
+
+    /// Under a price ranking, fold the price of valid candidate `cost`
+    /// into the cheapest price and the runner-up ([`ROUNDING`]).
+    fn track_runner_up(&mut self, cost: &CandidateCost) {
+        let (Ranking::Price, Some(price)) = (self.ranking, cost.cost_per_second) else {
+            return;
+        };
+        let Some(cheapest) = self.cheapest else {
+            self.cheapest = Some(price);
+            return;
+        };
+        let rounding = ROUNDING * cheapest.abs();
+        let runner_up = if price < cheapest - rounding {
+            self.cheapest = Some(price);
+            cheapest
+        } else if price <= cheapest + rounding {
+            self.cheapest = Some(cheapest.min(price));
+            return;
+        } else {
+            price
+        };
+        self.runner_up = Some(self.runner_up.map_or(runner_up, |r| r.min(runner_up)));
     }
 
     /// Record that candidate `id` failed a check: every rejection when

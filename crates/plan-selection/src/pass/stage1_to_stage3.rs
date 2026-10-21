@@ -120,6 +120,10 @@ pub struct Stage1ToStage3Run<Id> {
     /// Stage 3: the selected candidate's logical roots, with the weight
     /// requirements it confirmed made proofs ([`Self::selected_logical`]).
     pub stage3_selected_logical: Option<Vec<QueryRoot>>,
+    /// Stage 1: the logical candidate the selected physical candidate
+    /// implements, with its roots as Stage 1 composed them (before Stage 3
+    /// sized them): what Stage 2 implemented.
+    pub stage1_selected: Option<LogicalCandidate>,
 }
 
 impl<Id> Stage1ToStage3Run<Id> {
@@ -211,6 +215,42 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
 /// [`combinations`](PerComputationCandidates::combinations), before
 /// enumerating.
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
+    per_computation: PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    search: Stage1ToStage3Search,
+) -> Stage1ToStage3Run<Id> {
+    let components = super::components::source_components(
+        &per_computation
+            .roots
+            .iter()
+            .map(|(_, root)| root.clone())
+            .collect::<Vec<_>>(),
+    );
+    let searched_as_one = match super::components::searched_as_one(&components, &models, search) {
+        Some(reason) => reason,
+        None => match super::components::search_components(
+            &per_computation,
+            &components,
+            entries,
+            data,
+            models,
+        ) {
+            Ok(run) => return run,
+            Err(reason) => reason,
+        },
+    };
+    let mut run = search_as_one(per_computation, entries, data, models, search);
+    if let Ok(selection) = &mut run.stage3_plan_selection {
+        selection.search.searched_as_one = Some(searched_as_one);
+    }
+    run
+}
+
+/// [`run_stage1_to_stage3_from_pass1`] over the whole workload as one
+/// component.
+fn search_as_one<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -346,6 +386,7 @@ struct Searched {
     selection: Result<Selection, SelectionError>,
     selected: Option<PhysicalCandidate>,
     selected_logical: Option<Vec<QueryRoot>>,
+    stage1_selected: Option<LogicalCandidate>,
 }
 
 impl Searched {
@@ -362,6 +403,7 @@ impl Searched {
             stage3_plan_selection: self.selection,
             stage3_selected: self.selected,
             stage3_selected_logical: self.selected_logical,
+            stage1_selected: self.stage1_selected,
         }
     }
 }
@@ -388,7 +430,7 @@ fn search_stage2_and_stage3<Id>(
     let mut pruned = Vec::new();
     // Keeping only the best: the roots of the Stage 1 candidates Stage 3
     // keeps a candidate of.
-    let mut kept_roots: Vec<(String, Vec<QueryRoot>)> = Vec::new();
+    let mut kept_roots: Vec<LogicalCandidate> = Vec::new();
     let mut selector =
         PlanSelector::new(entries, data, models, keep_every_candidate).and_then(|mut selector| {
             if let Some(fit) = calibration? {
@@ -430,11 +472,14 @@ fn search_stage2_and_stage3<Id>(
         }
         // Keeping every candidate, the selected roots are found in `logical`.
         if let (Ok(stage3), false) = (&selector, keep_every_candidate) {
-            kept_roots.retain(|(from, _)| stage3.keeps_from_logical(from));
-            if let Ok(roots) = &candidate.roots {
-                if stage3.keeps_from_logical(&id) {
-                    kept_roots.push((id.clone(), roots.clone()));
-                }
+            kept_roots.retain(|kept| stage3.keeps_from_logical(&kept.id));
+            if let (Ok(roots), true) = (&candidate.roots, stage3.keeps_from_logical(&id)) {
+                kept_roots.push(LogicalCandidate {
+                    id: id.clone(),
+                    choice: candidate.choice.clone(),
+                    roots: Ok(roots.clone()),
+                    pass2: candidate.pass2.clone(),
+                });
             }
         }
         if keep_every_candidate {
@@ -470,24 +515,22 @@ fn search_stage2_and_stage3<Id>(
         }
         Err(error) => (Err(error), None),
     };
-    let targets = &crate::accuracy_targets(entries);
-    let selected_logical = selected.as_ref().and_then(|selected| {
-        let roots = match keep_every_candidate {
-            true => logical
-                .iter()
-                .find(|l| l.id == selected.from_logical)?
-                .roots
-                .as_ref()
-                .ok()?,
-            false => kept_roots
-                .iter()
-                .find(|(id, _)| *id == selected.from_logical)
-                .map(|(_, roots)| roots)?,
+    let stage1_selected = selected.as_ref().and_then(|selected| {
+        let from = match keep_every_candidate {
+            true => &logical,
+            false => &kept_roots,
         };
-        // As Stage 3 sized it for its queries' failure probabilities.
-        let sized = crate::resize_for_failure_probability(roots, targets, data).ok()?;
-        Some(crate::with_confirmed_weights(&sized, data))
+        let found = from.iter().find(|l| l.id == selected.from_logical)?;
+        Some(LogicalCandidate {
+            id: found.id.clone(),
+            choice: found.choice.clone(),
+            roots: Ok(found.roots.as_ref().ok()?.clone()),
+            pass2: found.pass2.clone(),
+        })
     });
+    let selected_logical = stage1_selected
+        .as_ref()
+        .and_then(|l| selected_logical(l.roots.as_ref().ok()?, entries, data));
     Searched {
         combinations,
         logical,
@@ -496,7 +539,21 @@ fn search_stage2_and_stage3<Id>(
         selection,
         selected,
         selected_logical,
+        stage1_selected,
     }
+}
+
+/// `roots`, the selected candidate's Stage 1 roots, as Stage 3 sized them
+/// for their queries' failure probabilities, with the weight requirements
+/// it confirmed made proofs.
+pub(super) fn selected_logical(
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+) -> Option<Vec<QueryRoot>> {
+    let targets = &crate::accuracy_targets(entries);
+    let sized = crate::resize_for_failure_probability(roots, targets, data).ok()?;
+    Some(crate::with_confirmed_weights(&sized, data))
 }
 
 /// The planner pipeline behind the optimization-pass interface: the

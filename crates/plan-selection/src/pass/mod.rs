@@ -12,6 +12,7 @@
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
+mod components;
 mod query_candidates;
 mod stage1_to_stage3;
 
