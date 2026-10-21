@@ -809,17 +809,19 @@ mod ddsketch_domain {
     }
 
     /// Quantiles over 0, 0, 3, 5 and over signed samples are within alpha of
-    /// the sample at rank ⌈q·n⌉.
+    /// PromQL's interpolated quantile, at rank q (n − 1) between adjacent
+    /// order statistics: here each pair of neighbours shares a sign or
+    /// includes zero.
     #[test]
     fn quantiles_over_zero_and_signed_samples() {
         for (samples, expected) in [
             (
                 vec![0.0, 0.0, 3.0, 5.0],
-                [(0.25, 0.0), (0.5, 0.0), (0.75, 3.0), (1.0, 5.0)],
+                [(0.25, 0.0), (0.5, 1.5), (0.75, 3.5), (1.0, 5.0)],
             ),
             (
                 vec![-7.0, -3.0, 0.0, 4.0],
-                [(0.25, -7.0), (0.5, -3.0), (0.75, 0.0), (1.0, 4.0)],
+                [(0.25, -4.0), (0.5, -1.5), (0.75, 1.0), (1.0, 4.0)],
             ),
         ] {
             let mut updater = DDSketchAccumulatorUpdater::new(0.01);

@@ -83,9 +83,6 @@ pub struct WeightedFrequency {
     width: usize,
     depth: usize,
     capacity: usize,
-    /// The sum of every weight's magnitude, which bounds every counter's:
-    /// while it is finite no counter can overflow.
-    total_magnitude: f64,
 }
 
 impl std::fmt::Debug for WeightedFrequency {
@@ -93,7 +90,6 @@ impl std::fmt::Debug for WeightedFrequency {
         f.debug_struct("WeightedFrequency")
             .field("algorithm", &self.algorithm())
             .field("shape", &self.shape())
-            .field("total_magnitude", &self.total_magnitude)
             .finish()
     }
 }
@@ -176,7 +172,6 @@ impl WeightedFrequency {
             width,
             depth,
             capacity,
-            total_magnitude: 0.0,
         })
     }
 
@@ -193,12 +188,12 @@ impl WeightedFrequency {
 
     /// The weight rule: finite, and nonnegative for Count-Min.
     pub(crate) fn check_weight(&self, weight: f64) -> Result<(), String> {
-        if !weight.is_finite() || (self.algorithm() == FrequencyAlgorithm::Cms && weight < 0.0) {
-            return Err(
-                "weighted frequency requires finite weights; CMS additionally requires nonnegative weights".into(),
-            );
+        match self.algorithm() {
+            FrequencyAlgorithm::Cms => CountMinSketch::<Matrix, RegularPath>::check_weight(weight),
+            FrequencyAlgorithm::CountSketch => {
+                CountSketch::<Matrix, RegularPath>::check_weight(weight)
+            }
         }
-        Ok(())
     }
 
     /// Empties the state in place, keeping its algorithm and shape.
@@ -209,32 +204,48 @@ impl WeightedFrequency {
             Sketch::CmsHeap(s) => s.clear(),
             Sketch::CountSketchHeap(s) => s.clear(),
         }
-        self.total_magnitude = 0.0;
     }
 
     /// Adds `weight` to the identity tuple `values`. An error, and the state
     /// unchanged, for a weight [`Self::check_weight`] refuses, an identity
-    /// that is not Null, Bool, Int64, finite Float64 or Utf8, or a total
-    /// weight past `f64::MAX`.
+    /// that is not Null, Bool, Int64, finite Float64 or Utf8, or an update
+    /// that would carry a counter past `f64::MAX`.
     pub fn update(&mut self, values: &[Value], weight: f64) -> Result<(), Error> {
         let key = identity_key(values)?;
         self.update_key(&key, weight)
     }
 
+    /// Adds `weight` to `key`. A heap state keeps the old kernel's
+    /// membership: every resident is rescored after the counters change and
+    /// before `key` is offered, so the heap admits `key` against the
+    /// residents' current estimates, not the counts they had when last
+    /// touched.
     fn update_key(&mut self, key: &[u8], weight: f64) -> Result<(), Error> {
         self.check_weight(weight).map_err(Error::Operator)?;
-        let total = self.total_magnitude + weight.abs();
-        if !total.is_finite() {
-            return Err(Error::Operator("weighted frequency sum overflow".into()));
-        }
         let key = DataInput::Bytes(key);
+        // The weight passed `check_weight`, so sketchlib refuses only a
+        // counter carried past `f64::MAX`, leaving the sketch unchanged.
+        let overflow = |e: String| Error::Operator(format!("weighted frequency sum overflow: {e}"));
         match &mut self.sketch {
-            Sketch::Cms(s) => s.update_weighted(&key, weight),
-            Sketch::CountSketch(s) => s.update_weighted(&key, weight),
-            Sketch::CmsHeap(s) => s.update_weighted(&key, weight),
-            Sketch::CountSketchHeap(s) => s.update_weighted(&key, weight),
+            Sketch::Cms(s) => s.try_update_weighted(&key, weight).map_err(overflow)?,
+            Sketch::CountSketch(s) => s.try_update_weighted(&key, weight).map_err(overflow)?,
+            Sketch::CmsHeap(s) => {
+                s.count_min_sketch_mut()
+                    .try_update_weighted(&key, weight)
+                    .map_err(overflow)?;
+                s.rescore_heap();
+                let estimate = s.estimate(&key);
+                s.heap_mut().update(&key, estimate);
+            }
+            Sketch::CountSketchHeap(s) => {
+                s.count_sketch_mut()
+                    .try_update_weighted(&key, weight)
+                    .map_err(overflow)?;
+                s.rescore_heap();
+                let estimate = s.estimate(&key);
+                s.heap_mut().update(&key, estimate);
+            }
         }
-        self.total_magnitude = total;
         Ok(())
     }
 
@@ -306,10 +317,6 @@ impl WeightedFrequency {
         if self.algorithm() != other.algorithm() || self.shape() != other.shape() {
             return Err(Error::Invalid("weighted frequency shape mismatch".into()));
         }
-        let total = self.total_magnitude + other.total_magnitude;
-        if !total.is_finite() {
-            return Err(Error::Operator("weighted frequency merge overflow".into()));
-        }
         let mut merged = self.clone();
         match (&mut merged.sketch, &other.sketch) {
             (Sketch::Cms(s), Sketch::Cms(o)) => s.merge(o),
@@ -318,7 +325,11 @@ impl WeightedFrequency {
             (Sketch::CountSketchHeap(s), Sketch::CountSketchHeap(o)) => s.merge(o),
             _ => unreachable!("one algorithm and capacity is one kind of sketch"),
         }
-        merged.total_magnitude = total;
+        // Both inputs are left unchanged, so a merge past `f64::MAX` is
+        // refused by inspecting the copy.
+        if merged.counters().iter().any(|c| !c.is_finite()) {
+            return Err(Error::Operator("weighted frequency merge overflow".into()));
+        }
         Ok(merged)
     }
 }
@@ -359,6 +370,63 @@ impl AggregateCore for WeightedFrequency {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Top-k membership equals the old kernel's, which rescored every
+    // candidate after every update and kept the `capacity` best: on small,
+    // colliding sketches, an update also moves residents it did not touch,
+    // and after every update the retained keys are the reference model's
+    // (up to exact ties).
+    #[test]
+    fn membership_matches_rescoring_every_candidate_after_every_update() {
+        for algorithm in [FrequencyAlgorithm::Cms, FrequencyAlgorithm::CountSketch] {
+            let (width, depth, capacity) = (8, 3, 4);
+            let mut state = WeightedFrequency::new(algorithm, width, depth, capacity).unwrap();
+            // The reference: candidate keys, rescored from the same counters.
+            let mut reference: Vec<i64> = Vec::new();
+            let mut seed = 0x2545_f491_4f6c_dd1du64;
+            for step in 0..400 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let key = (seed % 24) as i64;
+                // Distinct fractional weights, so no two estimates tie.
+                let weight = 1.0 + (seed >> 40) as f64 / (1u64 << 24) as f64;
+                let weight = if algorithm == FrequencyAlgorithm::CountSketch && step % 3 == 0 {
+                    -weight
+                } else {
+                    weight
+                };
+                state.update(&[Value::Int64(key)], weight).unwrap();
+                if !reference.contains(&key) {
+                    reference.push(key);
+                }
+                let score = |k: i64| state.point_estimate(&[Value::Int64(k)]).unwrap();
+                reference.sort_by(|a, b| score(*b).total_cmp(&score(*a)));
+                reference.truncate(capacity);
+                // Keys that share every cell tie exactly, and the two
+                // models break ties differently, so membership is compared by
+                // the retained keys' current estimates.
+                let scores = |keys: &[i64]| {
+                    let mut scores: Vec<f64> = keys.iter().map(|&k| score(k)).collect();
+                    scores.sort_by(f64::total_cmp);
+                    scores
+                };
+                let got: Vec<i64> = state
+                    .rows(capacity)
+                    .into_iter()
+                    .map(|row| match row[0] {
+                        Value::Int64(k) => k,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                assert_eq!(
+                    scores(&got),
+                    scores(&reference),
+                    "{algorithm:?} after update {step}: {got:?} vs {reference:?}"
+                );
+            }
+        }
+    }
 
     // The charge is sketchlib's count of the sketch plus this adapter's own
     // fields, each struct counted once.
@@ -405,8 +473,9 @@ mod tests {
         assert!(matches!(rows[2][..], [Value::Int64(1), Value::Float64(score)] if score == -10.5));
     }
 
-    // Weights outside the rule, non-finite or unsupported identities and a
-    // total weight past f64::MAX are errors that leave the state unchanged.
+    // Weights outside the rule, non-finite or unsupported identities and an
+    // update carrying a counter past f64::MAX are errors that leave the state
+    // unchanged.
     #[test]
     fn invalid_updates_leave_the_state_unchanged() {
         let mut cms = WeightedFrequency::new(FrequencyAlgorithm::Cms, 64, 3, 4).unwrap();
@@ -414,9 +483,11 @@ mod tests {
         let snapshot =
             |s: &WeightedFrequency| (s.counters().to_vec(), format!("{:?}", s.rows(usize::MAX)));
         let before = snapshot(&cms);
-        for weight in [-1.0, f64::INFINITY, f64::NAN, f64::MAX] {
+        for weight in [-1.0, f64::INFINITY, f64::NAN] {
             assert!(cms.update(&[Value::Null], weight).is_err());
         }
+        // A counter carried past f64::MAX: the same key's cells again.
+        assert!(cms.update(&[Value::Int64(1)], f64::MAX).is_err());
         for identity in [
             Value::Float64(f64::NAN),
             Value::Float64(f64::INFINITY),

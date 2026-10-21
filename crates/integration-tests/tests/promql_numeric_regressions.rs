@@ -108,17 +108,7 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
 /// The PromQL quantile over a DDSketch: the linear interpolation at rank
 /// `q (n - 1)` between the sketch's two neighbouring order statistics.
 fn interpolated_quantile(sketch: &asap_sketchlib::DdSketch, q: f64) -> f64 {
-    let n = sketch.get_count();
-    // The `j`-th smallest (from 0): the sketch's value at rank `ceil(p n) = j + 1`.
-    let order_statistic = |j: u64| {
-        sketch
-            .get_value_at_quantile((j as f64 + 0.5) / n as f64)
-            .unwrap()
-    };
-    let rank = q * (n - 1) as f64;
-    let (lower, upper) = (rank.floor() as u64, rank.ceil() as u64);
-    let fraction = rank - lower as f64;
-    order_statistic(lower) * (1. - fraction) + order_statistic(upper) * fraction
+    sketch.quantile_interpolated(q).unwrap().unwrap()
 }
 
 /// A finite, nonzero approximate denominator does not certify a ratio bound.

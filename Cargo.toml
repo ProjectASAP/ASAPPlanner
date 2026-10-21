@@ -23,4 +23,8 @@ resolver = "2"
 arrow = { version = "58.4", default-features = false }
 # The hasher Arrow already uses, for the executor's hot interning maps.
 ahash = { version = "0.8", default-features = false, features = ["std", "runtime-rng"] }
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "eb04e7f243c1d5e5c346cd19842f2402d796b620" }
+# `planner-pin/0.4.0-plus`: release 0.4.0 (eb04e7f) plus the open sketchlib
+# PRs #245 (checked f64 updates, heap rescoring), #246 (KLL lazy-buffer
+# follow-ups), #247 (Count Sketch stack medians) and #248
+# (`DdSketch::quantile_interpolated`). Moves to a release once they merge.
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "63e565506426020c505ef0b84e0c91f450d09e7c" }

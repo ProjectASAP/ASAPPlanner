@@ -45,11 +45,16 @@ impl AggregateCore for DDSketchAccumulator {
     /// Quantiles, and the total sample count as a bare `PointCount`.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            SketchStatistic::Quantile { q } if (0.0..=1.0).contains(q) => self
+            // PromQL `quantile_over_time` and SQL `percentile_cont`
+            // interpolate between the order statistics at ranks ⌊q (n − 1)⌋
+            // and ⌈q (n − 1)⌉. The Planner never sends a q outside [0, 1]
+            // (Pass 1 prunes the sketch candidate,
+            // `QuantileOutsideUnitInterval`; the exact plan answers ±Inf),
+            // so sketchlib's error for one, NaN included, is passed on.
+            SketchStatistic::Quantile { q } => self
                 .inner
-                .get_value_at_quantile(*q)
+                .quantile_interpolated(*q)?
                 .ok_or_else(|| "DDSketch quantile of an empty population".into()),
-            SketchStatistic::Quantile { .. } => Err("quantile must be in [0, 1]".into()),
             SketchStatistic::PointCount { value: None, .. } => Ok(self.inner.get_count() as f64),
             other => Err(format!("DDSketch does not answer {other:?}").into()),
         }
@@ -95,18 +100,45 @@ mod tests {
         assert!(dd.estimate(&SketchStatistic::Cardinality).is_err());
     }
 
-    // The quantile at q reads the value of rank ⌈q·n⌉; q = 0 and q = 1 read
-    // the exact minimum and maximum.
+    // The quantile at q interpolates linearly between the order statistics
+    // at ranks ⌊q (n − 1)⌋ and ⌈q (n − 1)⌉, as PromQL `quantile_over_time`
+    // and SQL `percentile_cont` do: [20, 40] at q = 0.9 is 38 (nearest rank
+    // read 40), within α of the interpolated value; q = 0 and q = 1 read the
+    // exact minimum and maximum.
     #[test]
-    fn quantile_reads_rank_ceil_q_n() {
-        let mut dd = DDSketchAccumulator::new(0.01);
-        for v in [1.0, 2.0, 3.0, 4.0] {
+    fn quantile_interpolates_between_adjacent_order_statistics() {
+        let alpha = 0.01;
+        let mut dd = DDSketchAccumulator::new(alpha);
+        for v in [20.0, 40.0] {
             dd.inner.add(&v);
         }
         let at = |q| dd.estimate(&SketchStatistic::Quantile { q }).unwrap();
-        assert_eq!(at(0.0), 1.0);
-        assert!((at(0.5) - 2.0).abs() <= 0.01 * 2.0, "{}", at(0.5));
-        assert_eq!(at(0.9), 4.0);
-        assert_eq!(at(1.0), 4.0);
+        assert!((at(0.9) - 38.0).abs() <= alpha * 38.0, "{}", at(0.9));
+        assert_eq!(at(0.0), 20.0);
+        assert_eq!(at(1.0), 40.0);
+        let mut four = DDSketchAccumulator::new(alpha);
+        for v in [1.0, 2.0, 3.0, 4.0] {
+            four.inner.add(&v);
+        }
+        // Rank 0.5 · 3 = 1.5: halfway between 2 and 3.
+        let median = four
+            .estimate(&SketchStatistic::Quantile { q: 0.5 })
+            .unwrap();
+        assert!((median - 2.5).abs() <= alpha * 2.5, "{median}");
+    }
+
+    // The Planner never sends a φ outside [0, 1] (Pass 1 prunes the sketch
+    // candidate, `QuantileOutsideUnitInterval`, and the exact plan answers
+    // ±Inf), so the kernel refuses one; NaN likewise.
+    #[test]
+    fn quantile_outside_the_unit_interval_is_an_error() {
+        let mut dd = DDSketchAccumulator::new(0.01);
+        dd.inner.add(&1.0);
+        for q in [-0.1, 1.1, f64::NAN] {
+            assert!(
+                dd.estimate(&SketchStatistic::Quantile { q }).is_err(),
+                "{q}"
+            );
+        }
     }
 }
