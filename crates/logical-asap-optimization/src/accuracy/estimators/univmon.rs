@@ -368,6 +368,45 @@ pub(super) fn size_params(intent: &AggIntent, eps: f64, delta: f64) -> SketchPar
     }
 }
 
+/// The heap of one UnivMon shared by two readers with heaps `heap_size`
+/// and `heap_size2`, sized for a distinct count at the failure
+/// probabilities they record (`None`: not sized for one): each distinct
+/// reader's heap grown to the smaller failure probability at no larger
+/// relative error ([`with_failure_probability`]), then the larger. The
+/// shared build states its distinct guarantee at that smaller δ, where a
+/// heap sized for a larger δ has a larger error, so the larger heap alone
+/// could miss its reader's ε. A reader not sized for a distinct count keeps
+/// its heap.
+pub(crate) fn shared_heap(
+    heap_size: u32,
+    distinct_failure_probability: Option<f64>,
+    heap_size2: u32,
+    distinct_failure_probability2: Option<f64>,
+) -> u32 {
+    let delta = match (distinct_failure_probability, distinct_failure_probability2) {
+        (Some(a), Some(b)) => a.min(b),
+        (a, b) => match a.or(b) {
+            Some(delta) => delta,
+            None => return heap_size.max(heap_size2),
+        },
+    };
+    let resized = |heap_size, distinct_failure_probability| match with_failure_probability(
+        &SketchParams::UnivMon {
+            heap_size,
+            sketch_rows: 1,
+            sketch_cols: 1,
+            layers: 1,
+            distinct_failure_probability,
+        },
+        delta,
+    ) {
+        SketchParams::UnivMon { heap_size, .. } => heap_size,
+        _ => heap_size,
+    };
+    resized(heap_size, distinct_failure_probability)
+        .max(resized(heap_size2, distinct_failure_probability2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

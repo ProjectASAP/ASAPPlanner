@@ -230,10 +230,11 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
 /// parameters of different algorithms, or a shared UnivMon the library
 /// would not build ([`univmon::hash_independent`]).
 ///
-/// A KLL's `k` is the exception to the largest value: its rank error grows
-/// as its failure probability shrinks, so each reader's `k` is first
-/// resized to the shared (smallest) failure probability at no larger rank
-/// error ([`kll::shared_k`]), and the shared build meets every reader.
+/// A KLL's `k` and a distinct-count UnivMon's heap are the exceptions to
+/// the largest value: their error grows as their failure probability
+/// shrinks, so each reader's `k` or heap is first resized to the shared
+/// (smallest) failure probability at no larger error ([`kll::shared_k`],
+/// [`univmon::shared_heap`]), and the shared build meets every reader.
 pub(crate) fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
     use SketchParams as P;
     let (first, rest) = params.split_first()?;
@@ -255,7 +256,10 @@ pub(crate) fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchPar
                     distinct_failure_probability: f,
                 },
             ) => P::UnivMon {
-                heap_size: heap_size.max(*h),
+                // Not the largest heap: a distinct count's error grows as
+                // its failure probability shrinks, so each reader's heap
+                // first grows to the shared one at no larger error.
+                heap_size: univmon::shared_heap(heap_size, distinct_failure_probability, *h, *f),
                 sketch_rows: sketch_rows.max(*r),
                 sketch_cols: sketch_cols.max(*c),
                 layers: layers.max(*l),
@@ -421,9 +425,11 @@ mod shared_size_tests {
         else {
             unreachable!()
         };
+        // The heap of 4096 sized at δ = 0.01 grows to the shared δ = 0.001
+        // at its own relative error.
         assert_eq!(
             (heap_size, distinct_failure_probability),
-            (4096, Some(0.001))
+            (40_961, Some(0.001))
         );
         let kll = |k, failure_probability| SketchParams::Kll {
             k,
@@ -517,6 +523,46 @@ mod shared_size_tests {
         assert_eq!(
             size_for_all_readers(&[&univmon(1, 12, 512, 1), &univmon(1, 5, 1 << 16, 1)]),
             None
+        );
+    }
+
+    /// A distinct-count UnivMon shared by a reader at relative (0.05,
+    /// δ = 0.01) and one at (0.2, δ = 1e-4) meets both: each reader's heap
+    /// grows to the shared δ = 1e-4 at no larger error before the larger is
+    /// taken (5 400 000), not B's 337 500 stated at 1e-4 (error 0.2).
+    #[test]
+    fn a_distinct_univmon_shared_across_failure_probabilities_meets_each_reader() {
+        use asap_types::ir::operator::agg_intent::default_cardinality;
+        let readers = [(0.05, 0.01), (0.2, 1e-4)];
+        let params = readers.map(|(eps, delta)| {
+            size_params(SketchAlgorithm::UnivMon, &default_cardinality(), eps, delta)
+        });
+        let shared = size_for_all_readers(&[&params[0], &params[1]]).unwrap();
+        let guarantee = univmon::distinct_guarantee(&shared, "m").unwrap();
+        let error = guarantee.spec.error.evaluate().unwrap();
+        // The top-layer term stays symbolic in the source's distinct bound;
+        // the Chebyshev term is the share of δ the heap was sized for.
+        let ProbabilityExpr::UnionBound { terms } = &guarantee.spec.failure_probability else {
+            panic!("{guarantee:?}")
+        };
+        let chebyshev = terms[0].evaluate().unwrap();
+        for (eps, delta) in readers {
+            assert!(
+                error <= eps && chebyshev <= delta,
+                "{shared:?} misses ({eps}, {delta}): error {error}"
+            );
+        }
+        let SketchParams::UnivMon {
+            heap_size,
+            distinct_failure_probability,
+            ..
+        } = shared
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (heap_size, distinct_failure_probability),
+            (5_400_000, Some(1e-4))
         );
     }
 }

@@ -115,7 +115,7 @@ The built-in models currently include:
 | Model | Current accuracy contract and limits |
 |---|---|
 | Exact computation | Exact over exact inputs under the supported operation's semantics; approximate inputs still require propagation |
-| KLL | Normalized rank error at the model's fixed 99% empirical calibration; tighter confidence is not inferred from increasing `k` alone |
+| KLL | Normalized rank error from the empirical 99% calibration `2.296 / k^0.9723`, fitted on Apache DataSketches' C++ KLL (`a9b42755072b`); below a failure probability of 0.01 that error is scaled by the Gaussian quantile ratio `z(1 − δ/2) / z(1 − 0.01/2)`, a model rather than a measurement, and the guarantee names that contract apart |
 | DDSketch | Relative value error from alpha under the supported estimator/domain contract; sensitive compositions require additional domain evidence |
 | Generic HLL | RSE magnitude with unknown failure probability; not a general confidence theorem |
 | Bounded Classic HLL | Source-conditioned relative-error/failure-probability bound and precision sizing for the linear-counting branch |
@@ -133,7 +133,11 @@ observed error; both its confidence and applicability must remain explicit.
 
 Default sizing is `realization::default_size_params`, which dispatches to the
 estimator modules; a summary shared by several readers is sized with each
-parameter's largest value among them. Accuracy validation is independent of
+parameter's largest value among them. Where an error bound grows as the failure
+probability shrinks (a KLL's `k`, a distinct-count UnivMon's heap), each
+reader's parameter is first resized to the readers' smallest failure
+probability at no larger error, so the shared summary meets every reader at
+the one failure probability it states. Accuracy validation is independent of
 sizing: Stage 3 checks the guarantee derived from the committed parameters.
 The design boundary is that sizing never grants accuracy authority to the
 cost model.
@@ -281,6 +285,19 @@ window or filter, or groups by another key: those queries differ in semantics,
 not just accuracy. Nor does this example justify serving B at a failure target
 of 0.1%; A's 1% failure guarantee would not meet it. A separate supported reuse
 rule or a different estimator configuration would be needed in those cases.
+
+When the consumers' failure targets differ, the summary-capability rule offers
+such a configuration. A shared summary states one accuracy bound at one failure
+probability, so it is sized at the smallest one. Each consumer's parameters are
+resized to it at no larger error, and the largest is kept. Suppose A asks
+for 1% rank error at a 1% failure probability (`k = 269` alone) and B for
+5% at 0.01% (`k = 79` alone). At 0.01% the Gaussian scale is 1.51, so A's
+`k = 269` would give 1.5% rank error there, which misses A's target. A's
+`k` is therefore grown to 412 (rank error 0.997% at 0.01%), and the shared KLL is
+`k = 412` at 0.01%, which meets both. A distinct-count UnivMon's heap is shared
+the same way. Checking each consumer at its own failure probability against
+a smaller shared summary would need a guarantee per consumer, which the
+current composition does not carry.
 
 ## Organization and extension contract
 
