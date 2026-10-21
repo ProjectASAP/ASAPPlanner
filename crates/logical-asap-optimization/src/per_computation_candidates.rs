@@ -313,7 +313,7 @@ impl ComputationTarget {
     }
 
     /// How the measure is computed when this target's digit of a
-    /// whole-workload choice is `index`: the candidate, and the target it
+    /// whole-workload choice is `index`: the candidate, and the targets it
     /// absorbs when the candidate is the fused computation's (past this
     /// target's own candidates). `None` past [`Self::choice_count`].
     pub fn computation_for(

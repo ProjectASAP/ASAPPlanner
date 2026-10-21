@@ -46,10 +46,12 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   dropped. Pass 1 prunes only what it can prove; accuracy that depends on
   data facts is left to Stage 3.
 - **Fused computations.** `FusedComputation { absorbs, candidates, pruned }`
-  replaces the target directly beneath (the whole-expression top-k, the
-  nested sum). A whole-workload choice keeps one digit per target; a fused
-  pick with a non-first digit on the absorbed target is skipped, so each
-  plan is enumerated once.
+  replaces the targets beneath (the whole-expression top-k, the nested sum).
+  It absorbs the target directly beneath and, for a heap over the raw samples
+  beneath a grouped sum of per-series sums or counts, the per-series target
+  too. A whole-workload choice keeps one digit per target; a fused pick with
+  a non-first digit on an absorbed target is skipped, so each plan is
+  enumerated once.
 - **Pass 2.** Each rule adds candidates; none removes a Pass 1 candidate, adds
   a summary family, or adds a readout. So a deployment that does not support a
   family never sees it again after Pass 1. A Pass 2 candidate records what it
