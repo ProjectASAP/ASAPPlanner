@@ -49,31 +49,25 @@ pub enum AggIntent<C = ColumnId> {
         accuracy: AccuracyTarget,
     },
     Sum {
-        #[serde(default)]
         col: Option<C>,
     },
     Min {
-        #[serde(default)]
         col: Option<C>,
     },
     Max {
-        #[serde(default)]
         col: Option<C>,
     },
     Avg {
-        #[serde(default)]
         col: Option<C>,
     },
     /// Sample standard deviation when `population == false`; population stddev
     /// otherwise. PromQL `stddev` / `stddev_over_time`; SQL `STDDEV(col)`.
     StdDev {
-        #[serde(default)]
         col: Option<C>,
         population: bool,
     },
     /// Variance — PromQL `stdvar` / `stdvar_over_time`; SQL `VARIANCE(col)`.
     Variance {
-        #[serde(default)]
         col: Option<C>,
         population: bool,
     },
@@ -88,7 +82,6 @@ pub enum AggIntent<C = ColumnId> {
     /// `median(col)` (φ=0.5); PromQL `quantile(φ, …)` leaves `col` as `None`
     /// (the sample value).
     Quantile {
-        #[serde(default)]
         col: Option<C>,
         #[serde(with = "crate::serde_f64")]
         q: f64,
@@ -109,19 +102,16 @@ pub enum AggIntent<C = ColumnId> {
     /// them. Empty is the PromQL convention "the sample value" — `count_values`
     /// and `distinct_over_time` leave it so.
     Cardinality {
-        #[serde(default = "Vec::new")]
         cols: Vec<C>,
         accuracy: AccuracyTarget,
     },
     /// L2 norm of the frequency vector of distinct input values.
     FrequencyL2 {
-        #[serde(default)]
         col: Option<C>,
         accuracy: AccuracyTarget,
     },
     /// Shannon entropy in bits of the frequency distribution of input values.
     FrequencyEntropy {
-        #[serde(default)]
         col: Option<C>,
         accuracy: AccuracyTarget,
     },
@@ -943,39 +933,6 @@ mod tests {
                 "{payload}"
             );
         }
-    }
-
-    /// `col` is `#[serde(default)]`, so a DAG serialized before issue #115 —
-    /// with no `col` key — still deserializes, as the sample-value convention `None`.
-    #[test]
-    fn agg_intent_serde_reads_pre_115_payloads() {
-        let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":{"max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
-        assert_eq!(
-            serde_json::from_str::<AggIntent>(legacy).unwrap(),
-            AggIntent::Quantile {
-                col: None,
-                q: 0.99,
-                accuracy: AccuracyTarget::exact()
-            }
-        );
-
-        let legacy = r#"{"kind":"top_k","k":5,"accuracy":{"max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
-        assert_eq!(
-            serde_json::from_str::<AggIntent>(legacy).unwrap(),
-            AggIntent::TopK {
-                k: 5,
-                accuracy: AccuracyTarget::exact(),
-            }
-        );
-
-        let legacy = r#"{"kind":"cardinality","accuracy":{"max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#;
-        assert_eq!(
-            serde_json::from_str::<AggIntent>(legacy).unwrap(),
-            AggIntent::Cardinality {
-                cols: vec![],
-                accuracy: AccuracyTarget::exact()
-            }
-        );
     }
 }
 

@@ -27,8 +27,6 @@ pub use planner_types as planner;
 /// columns ([`values::Batch::try_from_columns`], [`values::Batch::column`]).
 pub use arrow;
 
-pub mod dag;
-
 pub mod evaluation;
 
 mod error;

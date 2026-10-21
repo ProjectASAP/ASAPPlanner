@@ -72,8 +72,7 @@ same pipeline behind the `OptimizationPass` trait that `asap-planner` calls.
 
 Not yet wired into the stages: `maintained_population.rs` (maintained
 populations for instant top-k, quantile and sum) in Stage 1, and
-`pane_sharing.rs`, `cost/storage_io.rs`, `cost/physical_handoff_cost.rs` and
-`cost/query_physical_lowering.rs` in plan selection.
+`pane_sharing.rs` in plan selection.
 
 ## Algorithm in one pass
 

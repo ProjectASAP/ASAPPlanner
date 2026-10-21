@@ -1,6 +1,5 @@
 use asap_types::ir::physical_export::WindowEdgeCompatibility;
 use asap_types::physical::{validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
-use asap_types::workload::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
 
 // Renamed pane APIs still read and emit the deployed wire contract.
 #[test]
@@ -26,26 +25,4 @@ fn window_edge_names_preserve_wire_values() {
         serde_json::from_value::<WindowEdgeCompatibility>(wire).unwrap(),
         compatibility
     );
-}
-
-// External consumers can use the new resource names without changing behavior.
-// (The schema-resolver half moved with the resolver to `asap-frontend-common`;
-// `schema_resolver::tests::bare_source_yields_ts_value_floor` covers it.)
-#[test]
-fn renamed_handoff_apis_are_public() {
-    let bytes = PhysicalHandoffBytes {
-        network_bytes: 12,
-        materialization_bytes: 4,
-    };
-    assert_eq!(
-        serde_json::to_value(bytes).unwrap(),
-        serde_json::json!({
-            "network_bytes": 12, "materialization_bytes": 4
-        })
-    );
-    let kind: PhysicalHandoffKind = serde_json::from_value(serde_json::json!({
-        "kind": "network", "source_location": "edge", "destination_location": "backend"
-    }))
-    .unwrap();
-    assert!(matches!(kind, PhysicalHandoffKind::Network { .. }));
 }

@@ -56,7 +56,10 @@ input still uses `boundaries`. Resource explanation labels (`boundary:<id>:<dime
 and the `physical-boundary-bytes-v1` model version also remain unchanged. These
 are compatibility labels, not the names to use in new Rust code.
 
-See [physical handoff costs](physical-handoff-costs.md) for evidence fields and
-[the planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)
-for ownership. Documentation now uses *comparison scope* for `ComparisonScope`
-and *planner-runtime contract* for planner/downstream interaction.
+See [the planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)
+for ownership. Documentation now uses *planner-runtime contract* for
+planner/downstream interaction.
+
+The physical-handoff estimator (`physical_handoff_cost`, with
+`PhysicalHandoffProfile` and the `resources::physical_handoff` types) and
+`ComparisonScope` were later deleted: no planning stage read them.
