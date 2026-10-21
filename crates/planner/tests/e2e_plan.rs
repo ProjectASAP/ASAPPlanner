@@ -1,15 +1,20 @@
 //! End-to-end coverage for the library facade (#429) and for plugging a
-//! different optimization pass into it (#430).
+//! different optimization pass into it (#430). The SQL tests need the `sql`
+//! feature; the PromQL-only build checks that a SQL workload names it instead.
 
 use std::rc::Rc;
 
+#[cfg(feature = "sql")]
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_plan_selection::pass::PlanningModels;
+#[cfg(feature = "sql")]
 use asap_plan_selection::pass::{
     run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
-    PlanningModels, Stage1ToStage3Pass,
+    Stage1ToStage3Pass,
 };
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+#[cfg(feature = "sql")]
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
@@ -46,6 +51,7 @@ fn batch(sql: &str) -> BatchEntry {
     }
 }
 
+#[cfg(feature = "sql")]
 fn lineitem_catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
         "lineitem",
@@ -76,6 +82,7 @@ fn sql_workload(
 /// The facade turns a prepared workload into one selected DAG per query, in
 /// `QueryWorkload::entries()` order, without the caller touching any stage's
 /// candidates.
+#[cfg(feature = "sql")]
 #[tokio::test]
 async fn plans_every_query_in_entry_order() {
     let workload = sql_workload(
@@ -99,6 +106,7 @@ async fn plans_every_query_in_entry_order() {
 
 /// The facade selects what the planning stages select over the frontends'
 /// roots ([`run_stage1_to_stage3`]), and reports that selection.
+#[cfg(feature = "sql")]
 #[tokio::test]
 async fn facade_plans_match_run_stage1_to_stage3() {
     let workload = sql_workload(
@@ -163,6 +171,7 @@ async fn facade_plans_match_run_stage1_to_stage3() {
 /// A repeating SQL query reaches the optimizer. `lower_sql_batch` walks
 /// `query_batch` alone, so driving the frontend through it would drop the
 /// repeating entries.
+#[cfg(feature = "sql")]
 #[tokio::test]
 async fn lowers_repeating_sql_entries_too() {
     let workload = sql_workload(
@@ -195,6 +204,7 @@ async fn lowers_repeating_sql_entries_too() {
 
 /// A caller-supplied pass replaces the shipped algorithm entirely: the trait is
 /// the whole optimization stage, not a rule inside it.
+#[cfg(feature = "sql")]
 #[tokio::test]
 async fn runs_a_caller_supplied_pass_instead_of_the_shipped_one() {
     struct CountingPass;
@@ -236,6 +246,7 @@ async fn runs_a_caller_supplied_pass_instead_of_the_shipped_one() {
 
 /// The harness catches a pass that mislabels which query a plan belongs to,
 /// rather than letting the mislabelled plan reach a deployment.
+#[cfg(feature = "sql")]
 #[tokio::test]
 async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
     struct Mangling;
@@ -281,6 +292,7 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
 
 /// A frontend input that cannot lower the workload's language fails before any
 /// query is parsed.
+#[cfg(feature = "sql")]
 #[tokio::test]
 async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
     let workload = sql_workload(
@@ -298,6 +310,32 @@ async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
         err,
         PlanError::Input(UserInputError::FrontendMismatch { .. })
     ));
+}
+
+/// Without the `sql` feature a SQL workload fails validation, naming the
+/// feature to enable, before any frontend runs.
+#[cfg(not(feature = "sql"))]
+#[tokio::test]
+async fn a_sql_workload_without_the_sql_feature_names_the_missing_feature() {
+    let workload = sql_workload(
+        vec![batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem")],
+        None,
+    );
+    let input = UserInput::new(
+        &workload,
+        FrontendInput::Promql { histograms: None },
+        PlanningModels::builtin(),
+    );
+
+    let err = e2e_plan(input).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PlanError::Input(UserInputError::FrontendDisabled { feature: "sql", .. })
+        ),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("`sql` cargo feature"), "{err}");
 }
 
 /// A repeating PromQL query yields one plan carrying its selected DAG root.
