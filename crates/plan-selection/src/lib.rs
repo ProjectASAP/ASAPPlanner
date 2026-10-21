@@ -269,9 +269,9 @@ pub mod pane_sharing;
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
 pub mod pass;
 pub use pass::{
-    optimize, run_stage1_to_stage3, run_stage1_to_stage3_with, OptimizationInput,
-    OptimizationInputError, OptimizationPass, OptimizeError, PassNameConflict, PassRegistry,
-    PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
+    optimize, run_stage1_to_stage3, run_stage1_to_stage3_with, ExecutorCompileCheck,
+    OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError, PassNameConflict,
+    PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
     Stage1ToStage3Search,
 };
 
@@ -749,6 +749,11 @@ pub enum RejectionCause {
     /// executor cannot compile it
     /// ([`asap_types::ir::operator::agg_has_exact_per_entity_kernel`]).
     PerEntityAggregateNotExecutable,
+    /// The deployment's executor cannot compile its plan
+    /// ([`PlanningModels::executor_compile_check`]), e.g. a summary readout
+    /// whose output shape the executor does not build. The reason is the
+    /// executor's error.
+    ExecutorCannotCompile,
     /// A query's output has no accuracy guarantee (Stage 1 has no
     /// analytical rule for it and the deployment's evidence supplies none),
     /// and the deployment's accuracy model did not accept it directly
@@ -791,6 +796,7 @@ impl RejectionCause {
                 | Self::AccuracyTargetMissed
                 | Self::CountMinWeightsNotProvenNonNegative
                 | Self::PerEntityAggregateNotExecutable
+                | Self::ExecutorCannotCompile
                 | Self::NoAccuracyGuarantee
                 | Self::RawDataNotRetained
                 | Self::LatencyBoundExceeded
@@ -1208,6 +1214,17 @@ impl<'a> PlanSelector<'a> {
             if !selectable {
                 return Ok(());
             }
+        }
+        // Only a candidate that may be selected is compiled: the check runs
+        // the executor's own compiler, the costliest check.
+        if let Some(check) = self.models.executor_compile_check {
+            if let Err(reason) = check.compiles(&sized.roots) {
+                self.reject(&candidate.id, RejectionCause::ExecutorCannotCompile, reason);
+                return Ok(());
+            }
+        }
+        if !self.keep_every_candidate {
+            let kept_cost = |kept: &KeptCandidate| &self.costs[&kept.built.id];
             let dominated: Vec<bool> = self
                 .kept
                 .iter()
@@ -5379,6 +5396,56 @@ mod tests {
             );
             assert!(p2.cause.failed_a_check());
         }
+    }
+
+    /// An executor that compiles every plan but the one it is first asked
+    /// about.
+    struct RefusesTheFirstPlan(std::cell::Cell<bool>);
+
+    impl crate::ExecutorCompileCheck for RefusesTheFirstPlan {
+        fn compiles(&self, _roots: &[QueryRoot]) -> Result<(), String> {
+            if self.0.replace(true) {
+                Ok(())
+            } else {
+                Err("invalid keyed evaluation shape or capacity".into())
+            }
+        }
+    }
+
+    /// A candidate the deployment's executor does not compile is rejected
+    /// as `ExecutorCannotCompile` with the executor's reason, and another
+    /// is selected; without the check the same candidate is valid.
+    #[test]
+    fn a_plan_the_executor_cannot_compile_is_rejected() {
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE);
+        let entries = [entry_with(target, repeating(10_000))];
+        // More than one valid candidate: every output accepted.
+        let settings = PlanSelectionSettings {
+            ignore_accuracy_guarantees: true,
+            ..PlanSelectionSettings::default()
+        };
+        let models = PlanningModels::builtin().with_plan_selection(&settings);
+        let unchecked = select_plan(&candidates(), &entries, &data(), models).unwrap();
+        let check = RefusesTheFirstPlan(std::cell::Cell::new(false));
+        let checked = select_plan(
+            &candidates(),
+            &entries,
+            &data(),
+            models.with_executor_compile_check(&check),
+        )
+        .unwrap();
+        let refused = checked
+            .rejected
+            .iter()
+            .find(|r| r.cause == RejectionCause::ExecutorCannotCompile)
+            .expect("the first plan is refused");
+        assert_eq!(refused.reason, "invalid keyed evaluation shape or capacity");
+        assert!(refused.cause.failed_a_check());
+        assert!(unchecked.costs.contains_key(&refused.id), "{}", refused.id);
+        assert!(!checked.costs.contains_key(&refused.id));
+        assert_ne!(checked.selected, refused.id);
     }
 
     /// `ignore_accuracy_guarantees` (issue #774) does not override the

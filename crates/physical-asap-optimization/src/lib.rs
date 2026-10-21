@@ -75,7 +75,8 @@
 //! columns, so an exact root has the same column names as a summary
 //! candidate's and as the frontend declares. Over PromQL rows it also keeps
 //! the series identity, after them: `topk` answers whole input series, so
-//! each answer carries the chosen series' full label set.
+//! each answer carries the chosen series' full label set. PromQL rows without
+//! one (e.g. of `sum by (job)`) keep their other string label columns instead.
 //! `topk_k` carries the ranked value's type and nullability (the frontend
 //! declares a non-null `Utf8` placeholder); casting the value to `Utf8` would
 //! not make it the same answer.
@@ -96,7 +97,7 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::scalar::column_resolution::resolve_column_ref;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
-use asap_types::ir::schema::{ExactKind, FieldDataType};
+use asap_types::ir::schema::{DataType, ExactKind, FieldDataType};
 use asap_types::ir::{
     apply_materialization_timings, is_filtered_build, split_shared_by_timing, ASAPOp,
     MaterializationAssignment, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot,
@@ -779,6 +780,20 @@ fn implement_topk(
             alias: Some(asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into()),
             expr: ScalarExpr::Column(identity),
         });
+    } else if reads_only_time_series(&child) {
+        // PromQL rows without it (e.g. those of `sum by (job)`) carry their
+        // labels as plain string columns: each answer keeps the ones the
+        // logical columns do not, so `topk(k, sum by (job) (...))` answers
+        // each job. A SQL result keeps only its logical columns.
+        for (index, field) in child.schema.fields.iter().enumerate() {
+            let is_label = field.dtype == FieldDataType::Plain(DataType::Utf8);
+            if is_label && index != value && !key_fields.iter().any(|k| k.name == field.name) {
+                cols.push(ProjectItem {
+                    alias: Some(field.name.clone()),
+                    expr: ScalarExpr::Column(index),
+                });
+            }
+        }
     }
     Ok(Rc::new(
         OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
@@ -888,7 +903,8 @@ mod tests {
         let root = lower_promql("topk(5, sum by (job) (m))", AccuracyTarget::exact());
         let candidate = first_candidate(&[root.into()]);
         let physical = operator_root(&candidate, 0);
-        assert_eq!(names(&physical), ["topk_5"]);
+        // The answers keep their `job` label.
+        assert_eq!(names(&physical), ["topk_5", "job"]);
         let limit = topk_limit(&physical);
         assert_eq!(names(&limit), ["job", "sum"]);
         assert_eq!(topk_sort_key(&limit), (ScalarExpr::Column(1), false));

@@ -40,7 +40,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::{NodePriceSource, OperatorKind, SearchReport, Selection};
+use asap_plan_selection::{
+    ExecutorCompileCheck, NodePriceSource, OperatorKind, SearchReport, Selection,
+};
 use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
 use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPDAGDocument,
@@ -359,10 +361,17 @@ pub async fn plan_installable(input: UserInput<'_>) -> Result<InstallablePlan, P
         .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
         .collect();
     let query_texts: Vec<String> = entries.into_iter().map(|entry| entry.query.0).collect();
+    // Stage 3 selects only a plan the Planner's executor compiles, unless
+    // the caller brings its own executor's check.
+    let models = input.models.with_deployment_capabilities(&capabilities);
+    let models = match models.executor_compile_check {
+        Some(_) => models,
+        None => models.with_executor_compile_check(&PlannerExecutorCompileCheck),
+    };
     let input = UserInput {
         workload: input.workload,
         frontend_specific: input.frontend_specific,
-        models: input.models.with_deployment_capabilities(&capabilities),
+        models,
         pass: input.pass,
     };
     let output = e2e_plan(input).await?;
@@ -389,7 +398,107 @@ pub async fn plan_installable(input: UserInput<'_>) -> Result<InstallablePlan, P
     installable().map_err(PlanError::Installable)
 }
 
+/// The Planner's executor as Stage 3's compile check
+/// ([`ExecutorCompileCheck`]): a candidate's plan, installed as
+/// [`plan_installable`] installs it, compiles as a runtime compiles it
+/// ([`InstallablePlan::check_compiles`]).
+pub struct PlannerExecutorCompileCheck;
+
+impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
+    fn compiles(&self, roots: &[QueryRoot]) -> Result<(), String> {
+        let installable = || -> Result<InstallablePlan, InstallablePlanError> {
+            let timed = apply_materialization_timings_to_roots(
+                roots,
+                &MaterializationAssignment::default(),
+            )?;
+            let expanded = pane_retention_of_expanded_panes(&timed, None)?;
+            let queries = vec![String::new(); expanded.dag.roots.len()];
+            InstallablePlan::of_dag(
+                expanded.dag,
+                queries,
+                None,
+                &expanded.retention_ms_by_node,
+                &HashMap::new(),
+            )
+        };
+        match installable() {
+            Ok(plan) => plan.check_compiles(),
+            // Not installable for another reason, which `plan_installable`
+            // reports as such (e.g. a scalar root); not the compiler's to say.
+            Err(_) => Ok(()),
+        }
+    }
+}
+
 impl InstallablePlan {
+    /// Whether the Planner's executor compiles this plan as a runtime runs
+    /// it: each stored output's build over its raw-sample windows and stored
+    /// inputs, then the query run over the stored outputs it reads and the
+    /// query-time raw-sample windows. `Err` holds the executor's error.
+    pub fn check_compiles(&self) -> Result<(), String> {
+        use asap_executor::physical_planner::{compile, InputContract};
+        use std::collections::BTreeMap;
+        let dag = &self.dag.dag;
+        let contract = |id: PhysicalASAPNodeId| -> Result<(u64, InputContract), String> {
+            let node = dag
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .ok_or_else(|| format!("node {id} is not in the plan"))?;
+            Ok((
+                id as u64,
+                InputContract::bounded(std::sync::Arc::new(node.output_schema.clone())),
+            ))
+        };
+        let stored: HashSet<PhysicalASAPNodeId> =
+            self.stored_outputs.iter().map(|o| o.node_id).collect();
+        for output in &self.stored_outputs {
+            let inputs = output
+                .inputs
+                .raw_sample_windows
+                .iter()
+                .map(|window| window.time_range_node_id)
+                .chain(output.inputs.stored_outputs.iter().copied())
+                .map(contract)
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            compile(dag, inputs, &[output.node_id as u64])
+                .map_err(|error| format!("stored output {}: {error}", output.node_id))?;
+        }
+        // The query run reads the stored outputs it reaches from the roots
+        // without passing another, and the query-time windows.
+        let roots: Vec<PhysicalASAPNodeId> = self.queries.iter().map(|q| q.root_node_id).collect();
+        let mut read = Vec::new();
+        let mut pending = roots.clone();
+        let mut seen = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if stored.contains(&id) {
+                read.push(id);
+            } else {
+                pending.extend(
+                    dag.edges
+                        .iter()
+                        .filter(|edge| edge.consumer == id)
+                        .map(|edge| edge.producer),
+                );
+            }
+        }
+        let inputs = read
+            .into_iter()
+            .chain(
+                self.query_time_raw_windows
+                    .iter()
+                    .map(|window| window.time_range_node_id),
+            )
+            .map(contract)
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let roots: Vec<u64> = roots.into_iter().map(|id| id as u64).collect();
+        compile(dag, inputs, &roots).map_err(|error| format!("query run: {error}"))?;
+        Ok(())
+    }
+
     /// The plan of `dag`, with what the runtime reads from it derived.
     fn of_dag(
         dag: PhysicalASAPDAG,

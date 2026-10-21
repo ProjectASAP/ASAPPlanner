@@ -163,40 +163,34 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
     );
 }
 
-/// A choice composition cannot substitute is listed with its error, and the
-/// other candidates are still written.
+/// A top-k partitioned by every label of its input has no item, so a heap
+/// over it could not be composed; such a heap reads one row per item and
+/// is pruned in Pass 1 (`TopKHeapOverOneRowPerItem`), listed under
+/// `pass1_pruned`, and every candidate left composes.
 #[test]
-fn uncomposable_candidate_is_recorded_with_its_error() {
-    let out =
-        std::env::temp_dir().join(format!("stage_pipeline_{}_error.json", std::process::id()));
-    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
-        .args([
-            "--promql",
-            // Top-K partitioned by every label of its input has no item.
-            "topk by (job) (3, sum by (job) (rate(m[5m])))",
-            "--max-error",
-            "0.01",
-            "--failure-probability",
-            "0.001",
-            "--out",
-        ])
-        .arg(&out)
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
-    std::fs::remove_file(out).unwrap();
-    let candidates = document["stage1_logical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
-    let (composed, failed): (Vec<_>, Vec<_>) = candidates
-        .iter()
-        .partition(|candidate| candidate.get("dag").is_some());
-    assert!(!composed.is_empty() && !failed.is_empty());
-    for candidate in failed {
-        assert!(candidate["error"].as_str().unwrap().contains("Top-K"));
-    }
-    for candidate in composed {
+fn a_topk_heap_over_one_row_per_item_is_pruned_with_its_reason() {
+    let document = document_of(&[
+        "--promql",
+        "topk by (job) (3, sum by (job) (rate(m[5m])))",
+        "--max-error",
+        "0.01",
+        "--failure-probability",
+        "0.001",
+    ]);
+    let stage1 = &document["stage1_logical_asap_optimization"];
+    assert_eq!(
+        stage1["pass1_pruned"],
+        serde_json::json!([{
+            "target": 0,
+            "query": "Q1",
+            "pruned": [
+                { "candidate": "CMS+heap", "reason": "TopKHeapOverOneRowPerItem" },
+                { "candidate": "CountSketch+heap", "reason": "TopKHeapOverOneRowPerItem" },
+            ],
+            "fused_pruned": [],
+        }])
+    );
+    for candidate in stage1["candidates"].as_array().unwrap() {
         validated_dag(&candidate["dag"], 1);
     }
 }
@@ -405,12 +399,13 @@ fn workload_above_the_candidate_limit_is_rejected() {
     );
 }
 
-/// The default limit is 10^4: nine approximate Top-K queries (3^9 = 19683
-/// Pass 1 combinations) are rejected once the count passes it.
+/// The default limit is 10^4: nine approximate quantile queries, three
+/// candidates each (3^9 = 19683 Pass 1 combinations), are rejected once the
+/// count passes it.
 #[test]
 fn default_candidate_limit_is_ten_thousand() {
     let queries: Vec<String> = (1..=9)
-        .map(|i| format!("topk(5, rate(m{i}[5m]))"))
+        .map(|i| format!("quantile_over_time(0.99, m{i}[5m])"))
         .collect();
     let mut args = Vec::new();
     for query in &queries {
