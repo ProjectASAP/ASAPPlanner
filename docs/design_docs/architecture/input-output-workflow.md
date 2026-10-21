@@ -196,6 +196,7 @@ enum DataArrival {
 struct SourceFacts {
     series_count: Option<u64>,
     metric_type: Option<MetricType>,
+    values_non_negative: bool,
     sample_interval: Option<DurationMs>,
     stream_norms: Option<StreamNorms>,
     max_distinct_per_evaluation: Option<u64>,
@@ -208,6 +209,7 @@ struct SourceFacts {
 | `rows_per_second` | With `Ingesting`/`Mixed` | Rows arriving per second over all sources, used to price scans and continuous maintenance. It must be finite and non-negative. |
 | `series_count` | Optional | Series in the source. Plan selection bounds a query's number of values `G`, and its input row count, by the series counts of the sources it reads (each branch of an `or` counted); unknown, they stay unbound. |
 | `metric_type` | Optional | Declared Prometheus type; a counter proves samples non-negative. Never inferred from a name. |
+| `values_non_negative` | Optional; default `false` | Declares every sample non-negative, for a gauge as well as a counter. It is the sign a relative-error bound needs to carry through `sum` and `avg` (a per-series DDSketch quantile under `avg by`, say); without it, and for a gauge, that bound is unknown. |
 | `sample_interval` | PromQL and MetricsQL; nonzero | How often each series of the metric is sampled. Bare instant selectors over it use it as their selection horizon; without it, such a query fails to lower. |
 | `stream_norms`, `max_distinct_per_evaluation` | Optional | Bounds that Count-Min/Count Sketch and HLL/UnivMon guarantees are bound with. |
 

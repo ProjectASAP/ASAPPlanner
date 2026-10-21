@@ -805,7 +805,10 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
             );
             let direct_counter_ranking = matches!(&child, Unresolved::Aggregate {
                 measures, reduction: Reduction::PerEntity, ..
-            } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
+            } if matches!(
+                measures.as_slice(),
+                [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
+            ));
             if descending && (weighted_counter_ranking || direct_counter_ranking) {
                 return Ok(outer_aggregate(
                     keys,
@@ -1708,7 +1711,12 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // Preserve the counter-value ranking intent. Physical candidates
             // may rebuild a heap over finalized rates or use exact Sort/Limit;
             // neither is allowed to sum raw counter samples as ranking weights.
-            if descending && matches!(inner.func, Some(InnerFunc::Rate | InnerFunc::Increase)) {
+            if descending
+                && matches!(
+                    inner.func,
+                    Some(InnerFunc::Rate | InnerFunc::Increase | InnerFunc::IRate)
+                )
+            {
                 let intent = inner_intent(inner.func.as_ref().expect("counter function"));
                 let ranked = windowed_aggregate(inner, vec![], intent)?;
                 return Ok(Unresolved::Aggregate {

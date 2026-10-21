@@ -16,14 +16,23 @@
 //! new frontend, a deserialized plan, a test that does not want to build SQL
 //! and a catalog — skips this crate and calls
 //! [`asap_plan_selection::optimize`] directly.
+//!
+//! Each frontend is a cargo feature — `promql`, `sql` and `metricsql`, all on
+//! by default. A workload whose language's feature is off fails validation
+//! with [`UserInputError::FrontendDisabled`].
 
 use asap_types::workload::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
-use asap_types::workload::{QueryLanguage, SqlDialect, WorkloadError};
+#[cfg(feature = "sql")]
+use asap_types::workload::SqlDialect;
+use asap_types::workload::{QueryLanguage, WorkloadError};
 
+#[cfg(feature = "metricsql")]
 use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
+#[cfg(feature = "promql")]
 use asap_frontend_promql::{
     lower_promql_query_workload, lower_promql_query_workload_with_histograms, PromqlError,
 };
+#[cfg(feature = "sql")]
 use asap_frontend_sql::{lower_sql_dialect, SqlError};
 
 // The optimization stage's vocabulary is this facade's vocabulary too: a caller
@@ -37,12 +46,14 @@ pub use asap_plan_selection::pass::{
 mod installable;
 pub use installable::{
     plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery, SelectedPlanReport,
-    StoredOutput, StoredOutputBuild,
+    StoredCoverage, StoredOutput, StoredOutputBuild, StoredOutputInputs,
 };
 
 // What a deployment runtime needs to build a `UserInput` and read an
 // `InstallablePlan`, so it depends on this crate and `asap-executor` alone.
+#[cfg(feature = "promql")]
 pub use asap_frontend_promql::{HistogramCatalog, HistogramKind};
+#[cfg(feature = "sql")]
 pub use asap_frontend_sql::SqlCatalog;
 pub use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
 pub use asap_plan_selection::{
@@ -52,6 +63,7 @@ pub use asap_plan_selection::{
 pub use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPNodeId, RawSampleWindow,
 };
+pub use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
 pub use asap_types::ir::schema::{SketchAlgorithm, SketchParams, StatisticKind};
 pub use asap_types::workload::PlanningWorkload;
 
@@ -59,16 +71,22 @@ pub use asap_types::workload::PlanningWorkload;
 
 /// The lowering dependencies of one frontend. Which variant applies is fixed by
 /// `PlanningWorkload::query_workload.language`; [`UserInput::validate`] checks
-/// that they agree.
+/// that they agree. Each variant exists only when its frontend's feature is on.
 #[non_exhaustive]
 pub enum FrontendInput<'a> {
-    Sql {
-        catalog: &'a SqlCatalog,
-    },
+    #[cfg(feature = "sql")]
+    Sql { catalog: &'a SqlCatalog },
+    #[cfg(feature = "promql")]
     Promql {
         histograms: Option<HistogramCatalog>,
     },
+    #[cfg(feature = "metricsql")]
     Metricsql,
+    /// Keeps `'a` in use when the `sql` feature is off; it cannot be
+    /// constructed.
+    #[cfg(not(feature = "sql"))]
+    #[doc(hidden)]
+    NoSqlFeature(std::convert::Infallible, std::marker::PhantomData<&'a ()>),
 }
 
 #[non_exhaustive]
@@ -105,15 +123,27 @@ impl<'a> UserInput<'a> {
         self.workload.validate().map_err(UserInputError::Workload)?;
 
         let language = &self.workload.query_workload.language;
-        let matches_frontend = matches!(
-            (language, &self.frontend_specific),
-            (
-                QueryLanguage::SQL(_) | QueryLanguage::DataFusion,
-                FrontendInput::Sql { .. }
-            ) | (QueryLanguage::PromQL, FrontendInput::Promql { .. })
-                | (QueryLanguage::MetricsQL, FrontendInput::Metricsql)
-        );
-        if !matches_frontend {
+        // The `FrontendInput` variant that lowers `language`, and its cargo
+        // feature with whether this build enables it.
+        let (frontend, feature) = match language {
+            QueryLanguage::SQL(_) | QueryLanguage::DataFusion => {
+                ("Sql", Some(("sql", cfg!(feature = "sql"))))
+            }
+            QueryLanguage::PromQL => ("Promql", Some(("promql", cfg!(feature = "promql")))),
+            QueryLanguage::MetricsQL => (
+                "Metricsql",
+                Some(("metricsql", cfg!(feature = "metricsql"))),
+            ),
+            // No frontend lowers it.
+            QueryLanguage::ElasticDSL => ("none", None),
+        };
+        if let Some((feature, false)) = feature {
+            return Err(UserInputError::FrontendDisabled {
+                language: format!("{language:?}"),
+                feature,
+            });
+        }
+        if self.frontend_specific.name() != frontend {
             return Err(UserInputError::FrontendMismatch {
                 language: format!("{language:?}"),
                 frontend: self.frontend_specific.name(),
@@ -127,9 +157,14 @@ impl<'a> UserInput<'a> {
 impl FrontendInput<'_> {
     fn name(&self) -> &'static str {
         match self {
+            #[cfg(feature = "sql")]
             Self::Sql { .. } => "Sql",
+            #[cfg(feature = "promql")]
             Self::Promql { .. } => "Promql",
-            Self::Metricsql { .. } => "Metricsql",
+            #[cfg(feature = "metricsql")]
+            Self::Metricsql => "Metricsql",
+            #[cfg(not(feature = "sql"))]
+            Self::NoSqlFeature(never, _) => match *never {},
         }
     }
 }
@@ -146,15 +181,29 @@ pub enum UserInputError {
         language: String,
         frontend: &'static str,
     },
+    /// The workload's language needs a frontend this build leaves out: the
+    /// caller must enable `asap-planner`'s cargo feature `feature`. Bad
+    /// input for this build, not an internal bug.
+    #[error(
+        "workload language {language} needs asap-planner's `{feature}` cargo feature, \
+         which this build does not enable"
+    )]
+    FrontendDisabled {
+        language: String,
+        feature: &'static str,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LoweringError {
+    #[cfg(feature = "sql")]
     #[error(transparent)]
     Sql(SqlError),
+    #[cfg(feature = "promql")]
     #[error(transparent)]
     Promql(PromqlError),
+    #[cfg(feature = "metricsql")]
     #[error(transparent)]
     Metricsql(MetricsqlError),
 }
@@ -189,7 +238,8 @@ pub enum PlanError {
 /// optimization pass over the result: by default [`Stage1ToStage3Pass`], the
 /// planning stages in order.
 ///
-/// Async because the SQL frontend plans through DataFusion. One failed query
+/// Async because the SQL frontend plans through DataFusion; it stays async
+/// when the `sql` feature is off, so callers see one signature. One failed query
 /// fails the whole call: the output is positionally aligned with
 /// `QueryWorkload::entries()`, and a partial result would silently break that.
 pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
@@ -211,9 +261,8 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
 /// through `lower_sql_batch`, which walks `query_batch` alone and would drop
 /// every repeating query, and the output must cover every entry.
 async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, PlanError> {
-    let entries = || input.workload.query_workload.entries();
-
     match &input.frontend_specific {
+        #[cfg(feature = "sql")]
         FrontendInput::Sql { catalog } => {
             let dialect = match &input.workload.query_workload.language {
                 QueryLanguage::SQL(dialect) => dialect.clone(),
@@ -221,7 +270,7 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
                 _ => SqlDialect::DataFusionSQL,
             };
             let mut lowered = Vec::new();
-            for (index, entry) in entries().enumerate() {
+            for (index, entry) in input.workload.query_workload.entries().enumerate() {
                 let expr = lower_sql_dialect(
                     &entry.query.0,
                     catalog,
@@ -237,6 +286,7 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
             }
             Ok(lowered)
         }
+        #[cfg(feature = "promql")]
         FrontendInput::Promql { histograms, .. } => {
             let lowered = match histograms {
                 Some(histograms) => {
@@ -250,11 +300,14 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
             })?;
             Ok(lowered)
         }
+        #[cfg(feature = "metricsql")]
         FrontendInput::Metricsql => {
             lower_metricsql_query_workload(input.workload).map_err(|source| PlanError::Lowering {
                 entry_index: None,
                 source: LoweringError::Metricsql(source),
             })
         }
+        #[cfg(not(feature = "sql"))]
+        FrontendInput::NoSqlFeature(never, _) => match *never {},
     }
 }

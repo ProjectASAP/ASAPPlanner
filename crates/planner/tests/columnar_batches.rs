@@ -57,10 +57,14 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     let output = plan
         .stored_outputs
         .iter()
-        .max_by_key(|output| output.pane.bounds_ms(EVALUATION_MS).1)
+        .max_by_key(|output| {
+            output.inputs.raw_sample_windows[0]
+                .bounds_ms(EVALUATION_MS)
+                .1
+        })
         .unwrap();
     // The pane's window at this evaluation, `(start_ms, end_ms]`.
-    let (start_ms, end_ms) = output.pane.bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = output.inputs.raw_sample_windows[0].bounds_ms(EVALUATION_MS);
     // What the runtime received: series `a` and `b`, one sample every 10 s
     // over the pane's ten minutes.
     let samples: Vec<Sample> = ["a", "b"]
@@ -77,7 +81,8 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         })
         .collect();
     // The pane's Scan and TimeRange, prepared once for the window.
-    let selector = RawSampleSelector::new(&plan.dag.dag, &output.pane).unwrap();
+    let selector =
+        RawSampleSelector::new(&plan.dag.dag, &output.inputs.raw_sample_windows[0]).unwrap();
     // The pane's input: the 120 samples as Arrow columns.
     let input: Batch = selector.window_batch(end_ms, &samples).unwrap();
     assert_eq!(input.num_rows(), 120);
@@ -103,7 +108,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     assert_eq!(values.value(0), 1.0);
 
     // The executor's pane build, cut at the pane's TimeRange.
-    let window = output.pane.time_range_node_id as u64;
+    let window = output.inputs.raw_sample_windows[0].time_range_node_id as u64;
     let compiled = compile(
         &plan.dag.dag,
         BTreeMap::from([(window, InputContract::bounded(input.schema().clone()))]),

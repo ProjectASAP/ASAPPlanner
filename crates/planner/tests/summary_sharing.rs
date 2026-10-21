@@ -8,6 +8,7 @@ use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use std::rc::Rc;
 
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
+#[cfg(feature = "sql")]
 use asap_frontend_sql::SqlCatalog;
 use asap_logical_asap_optimization::realization::{default_size_params, DEFAULT_DELTA};
 use asap_plan_selection::pass::{
@@ -17,12 +18,14 @@ use asap_plan_selection::RejectionCause;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::ir::operator::agg_intent::default_quantile;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+#[cfg(feature = "sql")]
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
+#[cfg(feature = "sql")]
+use asap_types::workload::SqlDialect;
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-    SqlDialect,
 };
 
 /// `epsilon` as a query's requested accuracy; a quantile query's target
@@ -124,6 +127,7 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     }
 }
 
+#[cfg(feature = "sql")]
 async fn plan_sql(queries: &[&str]) -> PlanOutput {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
@@ -326,6 +330,7 @@ async fn identical_ungrouped_queries_share_their_producers() {
 
 /// The SQL frontend reaches the same sharing for two copies of one filtered
 /// percentile.
+#[cfg(feature = "sql")]
 #[tokio::test]
 async fn identical_sql_percentiles_share_one_producer() {
     let query =
@@ -338,6 +343,7 @@ async fn identical_sql_percentiles_share_one_producer() {
 /// The quantile is a evaluation parameter: SQL p50 and p99 over one filtered
 /// column build one KLL, named after its input, while each query keeps its
 /// own output column.
+#[cfg(feature = "sql")]
 #[tokio::test]
 #[ignore = "plan selection still selects an exact plan for at least one query: with the built-in cost model its query-time summary costs more than exact (#580)"]
 async fn sql_p50_and_p99_share_one_producer() {
