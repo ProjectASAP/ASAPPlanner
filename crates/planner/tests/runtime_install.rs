@@ -2454,6 +2454,9 @@ fn assert_heap_topk_answers(
 ) {
     let mut answered: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
     for (labels, value) in answers {
+        // A range function's result drops the metric name, as the exact
+        // top-k's does.
+        assert!(!labels.contains_key("__name__"), "{labels:?}");
         let group = partition.map_or(String::new(), |p| labels[p].clone());
         let item = labels
             .get(item_label)
