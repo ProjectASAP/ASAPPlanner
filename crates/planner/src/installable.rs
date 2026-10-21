@@ -46,8 +46,8 @@ use asap_plan_selection::{
 use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
 use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPDAGDocument,
-    PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId, RawSampleWindow,
-    ReferencePlanError,
+    PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
+    RawSampleWindow, ReferencePlanError,
 };
 use asap_types::ir::properties::summary_coverage::{SelectionBox, SummaryCoverage};
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
@@ -439,11 +439,11 @@ impl InstallablePlan {
         use asap_executor::physical_planner::{compile, InputContract};
         use std::collections::BTreeMap;
         let dag = &self.dag.dag;
+        let indexed = IndexedDag::new(dag);
         let contract = |id: PhysicalASAPNodeId| -> Result<(u64, InputContract), String> {
-            let node = dag
+            let node = indexed
                 .nodes
-                .iter()
-                .find(|node| node.id == id)
+                .get(&id)
                 .ok_or_else(|| format!("node {id} is not in the plan"))?;
             Ok((
                 id as u64,
@@ -452,7 +452,9 @@ impl InstallablePlan {
         };
         let stored: HashSet<PhysicalASAPNodeId> =
             self.stored_outputs.iter().map(|o| o.node_id).collect();
-        for output in &self.stored_outputs {
+        // The first build in the whole plan, which runs the executor's checks
+        // of the whole plan once; every other over the nodes below it.
+        for (position, output) in self.stored_outputs.iter().enumerate() {
             let inputs = output
                 .inputs
                 .raw_sample_windows
@@ -461,7 +463,17 @@ impl InstallablePlan {
                 .chain(output.inputs.stored_outputs.iter().copied())
                 .map(contract)
                 .collect::<Result<BTreeMap<_, _>, _>>()?;
-            compile(dag, inputs, &[output.node_id as u64])
+            let sub_dag;
+            let below = match position {
+                0 => dag,
+                _ => {
+                    sub_dag = indexed.dag_below(output.node_id);
+                    &sub_dag
+                }
+            };
+            #[cfg(test)]
+            tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
+            compile(below, inputs, &[output.node_id as u64])
                 .map_err(|error| format!("stored output {}: {error}", output.node_id))?;
         }
         // The query run reads the stored outputs it reaches from the roots
@@ -477,12 +489,7 @@ impl InstallablePlan {
             if stored.contains(&id) {
                 read.push(id);
             } else {
-                pending.extend(
-                    dag.edges
-                        .iter()
-                        .filter(|edge| edge.consumer == id)
-                        .map(|edge| edge.producer),
-                );
+                pending.extend(indexed.inputs.get(&id).into_iter().flatten().copied());
             }
         }
         let inputs = read
@@ -625,7 +632,12 @@ fn queries_bound_to_roots(
 /// order, and two facts every raw-sample window check reads, computed in
 /// one pass each over the DAG (O(nodes + edges)).
 struct IndexedDag<'a> {
+    dag: &'a PhysicalASAPDAG,
     nodes: HashMap<PhysicalASAPNodeId, &'a PhysicalASAPDAGNode>,
+    /// Each node's position in the DAG's node list.
+    position: HashMap<PhysicalASAPNodeId, usize>,
+    /// Each consumer's input edges, in the DAG's edge order.
+    edges_into: HashMap<PhysicalASAPNodeId, Vec<&'a PhysicalASAPDAGEdge>>,
     inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
     /// Every node after its inputs, from the DAG's node order.
     children_first: Vec<PhysicalASAPNodeId>,
@@ -694,12 +706,51 @@ impl<'a> IndexedDag<'a> {
                 re_timed_from_above.extend(inputs.get(id).into_iter().flatten().copied());
             }
         }
+        let position = dag
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.id, i))
+            .collect();
+        let mut edges_into: HashMap<PhysicalASAPNodeId, Vec<&PhysicalASAPDAGEdge>> = HashMap::new();
+        for edge in &dag.edges {
+            edges_into.entry(edge.consumer).or_default().push(edge);
+        }
         IndexedDag {
+            dag,
             nodes,
+            position,
+            edges_into,
             inputs,
             children_first,
             reading_raw_samples,
             re_timed_from_above,
+        }
+    }
+
+    /// The sub-DAG of `root` and every node below it, with their edges, in
+    /// the DAG's node and edge order, rooted at `root`: all a build of
+    /// `root` reads, at the cost of its size rather than the plan's.
+    fn dag_below(&self, root: PhysicalASAPNodeId) -> PhysicalASAPDAG {
+        let mut below = HashSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if below.insert(id) {
+                pending.extend(self.inputs.get(&id).into_iter().flatten().copied());
+            }
+        }
+        let mut ids: Vec<PhysicalASAPNodeId> = below.into_iter().collect();
+        ids.sort_unstable_by_key(|id| self.position[id]);
+        let edges = ids
+            .iter()
+            .flat_map(|id| self.edges_into.get(id).into_iter().flatten())
+            .map(|edge| (*edge).clone())
+            .collect();
+        PhysicalASAPDAG {
+            nodes: ids.iter().map(|id| self.nodes[id].clone()).collect(),
+            edges,
+            roots: vec![root],
+            scalar_roots: Vec::new(),
         }
     }
 
@@ -910,6 +961,10 @@ fn runtime_inputs_of(
     // The ranges of stored outputs' raw-sample windows, which are fed
     // through those outputs' builds.
     let mut stored_window_ranges = HashSet::new();
+    // The first build is compiled in the whole plan, which runs the
+    // executor's checks of the whole plan once; every other over the nodes
+    // below it ([`executor_builds`]).
+    let mut whole_plan_checked = false;
     for &id in indexed
         .children_first
         .iter()
@@ -924,7 +979,8 @@ fn runtime_inputs_of(
             }
         })?;
         coverage_by_node.insert(id, coverage.clone());
-        executor_builds(dag, id, &inputs, &indexed)?;
+        executor_builds(id, &inputs, &indexed, !whole_plan_checked)?;
+        whole_plan_checked = true;
         let reach_ms = reach_ms_of(&inputs, &reach_ms_by_node);
         let span_ms = match inputs.stored_outputs.is_empty() {
             true => 0,
@@ -1067,12 +1123,24 @@ fn with_replaced(
 /// `inputs` bound as sources, as a runtime runs it; the executor's reason
 /// when it does not.
 fn executor_builds(
-    dag: &PhysicalASAPDAG,
     node: PhysicalASAPNodeId,
     inputs: &StoredOutputInputs,
     indexed: &IndexedDag<'_>,
+    in_whole_plan: bool,
 ) -> Result<(), InstallablePlanError> {
     use asap_executor::physical_planner::{compile, InputContract};
+    // The build reads only the nodes below it: compile them, or the whole
+    // plan once, for the executor's checks of the whole plan.
+    let sub_dag;
+    let below = match in_whole_plan {
+        true => indexed.dag,
+        false => {
+            sub_dag = indexed.dag_below(node);
+            &sub_dag
+        }
+    };
+    #[cfg(test)]
+    tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
     let bound = inputs
         .raw_sample_windows
         .iter()
@@ -1083,7 +1151,7 @@ fn executor_builds(
             (id as u64, InputContract::bounded(schema))
         })
         .collect();
-    compile(dag, bound, &[node as u64])
+    compile(below, bound, &[node as u64])
         .map(|_| ())
         .map_err(|error| InstallablePlanError::StoredOutputNotExecutable {
             node_id: node,
@@ -1229,6 +1297,59 @@ fn report_of(
 mod tests {
     use super::*;
     use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
+
+    thread_local! {
+        /// The plan nodes handed to the executor's compiler by the stored
+        /// outputs' builds in [`runtime_inputs_of`] and
+        /// [`InstallablePlan::check_compiles`], summed over their compiles.
+        pub(super) static COMPILED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A p99 panel over a 300 s window every second, with no raw data kept:
+    /// one DDSketch per series in each of 300 one-second panes built at
+    /// ingestion, about 300 stored outputs in a DAG of about 900 nodes.
+    /// Each stored output's build is compiled over the nodes below it, and
+    /// the whole plan's checks run once, so the nodes handed to the
+    /// executor grow with the plan, not with the plan times its stored
+    /// outputs (before, every build compiled the whole plan). The count
+    /// covers both `plan_installable`'s builds and Stage 3's compile check.
+    #[tokio::test]
+    async fn stored_output_builds_compile_only_the_nodes_below_them() {
+        let workload: crate::PlanningWorkload = serde_json::from_str(
+            r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+                  "query": "avg by (job) (quantile_over_time(0.99, data[300s]))",
+                  "demand": {"fixed_interval": 1000},
+                  "requirements": {"accuracy": {"max_error": 0.05, "failure_probability": 0.3,
+                      "accuracy_scope": "whole_result"}},
+                  "predictability": {"predictable": {"known_at": null}}}]},
+                "data_workload": {"arrival": {"ingesting": {"rows_per_second": 10000.0}},
+                  "sources": {"data": {"series_count": 1000, "metric_type": "gauge",
+                      "sample_interval": 100, "values_non_negative": true}}}}"#,
+        )
+        .unwrap();
+        let capabilities = DeploymentCapabilities {
+            raw_data_retained: false,
+            ..DeploymentCapabilities::default()
+        };
+        COMPILED_NODES.with(|count| count.set(0));
+        let plan = plan_installable(crate::UserInput::new(
+            &workload,
+            crate::FrontendInput::Promql { histograms: None },
+            crate::PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+        ))
+        .await
+        .expect("a plan");
+        let nodes = plan.dag.dag.nodes.len();
+        let stored = plan.stored_outputs.len();
+        assert!(stored >= 300, "{stored} stored outputs");
+        // Stage 3's compile check builds the plan of each candidate it may
+        // select, so a few plans are compiled; each costs about its size.
+        let compiled = COMPILED_NODES.with(std::cell::Cell::get);
+        assert!(
+            compiled <= 40 * nodes,
+            "{compiled} nodes compiled for a plan of {nodes} nodes and {stored} stored outputs"
+        );
+    }
 
     /// `TimeShift(10 min) <- TimeRange(5 min) <- Scan`, all at query time:
     /// the shift above the range moves its window, which a window of a
