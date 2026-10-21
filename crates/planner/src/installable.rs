@@ -471,6 +471,8 @@ impl InstallablePlan {
                     &sub_dag
                 }
             };
+            #[cfg(test)]
+            tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
             compile(below, inputs, &[output.node_id as u64])
                 .map_err(|error| format!("stored output {}: {error}", output.node_id))?;
         }
@@ -1297,18 +1299,20 @@ mod tests {
     use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
 
     thread_local! {
-        /// The plan nodes handed to the executor's compiler by
-        /// [`runtime_inputs_of`], summed over its compiles.
+        /// The plan nodes handed to the executor's compiler by the stored
+        /// outputs' builds in [`runtime_inputs_of`] and
+        /// [`InstallablePlan::check_compiles`], summed over their compiles.
         pub(super) static COMPILED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     /// A p99 panel over a 300 s window every second, with no raw data kept:
     /// one DDSketch per series in each of 300 one-second panes built at
-    /// ingestion, about 300 stored outputs in a DAG of over a thousand
-    /// nodes. Each stored output's build is compiled over the nodes below
-    /// it, and the whole plan's checks run once, so the nodes handed to the
+    /// ingestion, about 300 stored outputs in a DAG of about 900 nodes.
+    /// Each stored output's build is compiled over the nodes below it, and
+    /// the whole plan's checks run once, so the nodes handed to the
     /// executor grow with the plan, not with the plan times its stored
-    /// outputs (before, every build compiled the whole plan).
+    /// outputs (before, every build compiled the whole plan). The count
+    /// covers both `plan_installable`'s builds and Stage 3's compile check.
     #[tokio::test]
     async fn stored_output_builds_compile_only_the_nodes_below_them() {
         let workload: crate::PlanningWorkload = serde_json::from_str(
