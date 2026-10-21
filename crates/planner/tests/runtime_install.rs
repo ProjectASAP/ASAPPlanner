@@ -2354,7 +2354,7 @@ impl ExecutorCompileCheck for HeapPlansOnly {
                 QueryRoot::Operator(node) => Some(node),
                 QueryRoot::Scalar(_) => None,
             })
-            .flat_map(|node| OperatorNode::reachable(node))
+            .flat_map(OperatorNode::reachable)
             .any(|node| {
                 matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
                     | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })

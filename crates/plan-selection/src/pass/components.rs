@@ -75,7 +75,7 @@ pub(crate) fn source_components(roots: &[QueryRoot]) -> Vec<Vec<usize>> {
             QueryRoot::Operator(node) => vec![node],
             QueryRoot::Scalar(expr) => expr.operator_refs(),
         };
-        for node in starts.into_iter().flat_map(|n| OperatorNode::reachable(n)) {
+        for node in starts.into_iter().flat_map(OperatorNode::reachable) {
             let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.operator else {
                 continue;
             };
@@ -307,7 +307,9 @@ pub(crate) fn search_components<Id: Clone + std::fmt::Debug>(
     let price = selection.costs[&selection.selected]
         .cost_per_second
         .unwrap_or(f64::NAN);
-    if !((price - total).abs() <= 1e-9 * total.abs()) {
+    // A NaN price (no cost) does not add up either.
+    let adds_up = (price - total).abs() <= 1e-9 * total.abs();
+    if !adds_up {
         return Err(SearchedAsOne::NotAdditive);
     }
     // The report: each component's search, and each query's own-candidate
