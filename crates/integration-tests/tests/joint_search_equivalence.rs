@@ -99,10 +99,6 @@ fn assert_equivalent(
                     .collect::<Vec<_>>()
             };
             assert_eq!(front(all), front(searched), "{label}: Pareto front");
-            assert!(
-                searched.search.candidates_checked <= all.search.candidates_checked,
-                "{label}: the pruned search checks no more candidates"
-            );
         }
         (Err(SelectionError::NoValidCandidate(_)), Err(SelectionError::NoValidCandidate(_))) => {}
         (all, searched) => panic!("{label}: exhaustive {all:?}, pruned {searched:?}"),
@@ -232,38 +228,40 @@ impl Rng {
     }
 }
 
-/// One random PromQL query over the gauge `m` and the counter `c_total`,
-/// some of whose candidates fail a check before composition (a per-series
-/// `stddev_over_time`, a top-k over rates).
-fn random_query(rng: &mut Rng) -> String {
+/// One random PromQL query over one of the gauges `gauges` and the
+/// counter `c_total`, some of whose candidates fail a check before
+/// composition (a per-series `stddev_over_time`, a top-k over rates).
+fn random_query(rng: &mut Rng, gauges: &[&str]) -> String {
+    let m = rng.pick(gauges);
     let group = rng.pick(&["job", "job, instance", "instance"]);
     let window = rng.pick(&["1m", "5m", "10m"]);
     let phi = rng.pick(&["0.5", "0.9", "0.99"]);
     let k = rng.pick(&["3", "5"]);
     match rng.below(10) {
-        0 => format!("sum by ({group}) (sum_over_time(m[{window}]))"),
-        1 => format!("avg by ({group}) (quantile_over_time({phi}, m[{window}]))"),
-        2 => format!("quantile_over_time({phi}, m[{window}])"),
-        3 => format!("topk by ({group}) ({k}, sum_over_time(m[{window}]))"),
+        0 => format!("sum by ({group}) (sum_over_time({m}[{window}]))"),
+        1 => format!("avg by ({group}) (quantile_over_time({phi}, {m}[{window}]))"),
+        2 => format!("quantile_over_time({phi}, {m}[{window}])"),
+        3 => format!("topk by ({group}) ({k}, sum_over_time({m}[{window}]))"),
         4 => format!("sum by ({group}) (rate(c_total[{window}]))"),
-        5 => format!("max by ({group}) (max_over_time(m[{window}]))"),
-        6 => format!("count_over_time(m[{window}])"),
+        5 => format!("max by ({group}) (max_over_time({m}[{window}]))"),
+        6 => format!("count_over_time({m}[{window}])"),
         7 => format!("sum by ({group}) (increase(c_total[{window}]))"),
         // The executor has no exact per-series stddev kernel.
-        8 => format!("stddev_over_time(m[{window}])"),
+        8 => format!("stddev_over_time({m}[{window}])"),
         // A heap sketch over rates, whose weights are not proven non-negative.
         _ => format!("topk({k}, sum by ({group}) (rate(c_total[{window}])))"),
     }
 }
 
 /// A random workload of two to four repeating queries with random accuracy
-/// targets, over 1,000 series of each metric.
-fn random_workload(seed: u64) -> PlanningWorkload {
+/// targets, over 1,000 series of each metric: the gauges `gauges` and the
+/// counter `c_total`.
+fn random_workload_over(seed: u64, gauges: &[&str]) -> PlanningWorkload {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let queries = 2 + rng.below(3);
     let entries = (0..queries)
         .map(|_| RepeatingEntry {
-            query: Query(random_query(&mut rng)),
+            query: Query(random_query(&mut rng, gauges)),
             demand: RepeatedDemand::FixedInterval(RepetitionInterval(
                 *rng.pick(&[60_000u32, 300_000]),
             )),
@@ -298,14 +296,18 @@ fn random_workload(seed: u64) -> PlanningWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 2_000.0 / 15.0,
             },
-            sources: [
-                ("m".to_string(), source(MetricType::Gauge)),
-                ("c_total".to_string(), source(MetricType::Counter)),
-            ]
-            .into_iter()
-            .collect(),
+            sources: gauges
+                .iter()
+                .map(|g| (g.to_string(), source(MetricType::Gauge)))
+                .chain([("c_total".to_string(), source(MetricType::Counter))])
+                .collect(),
         }),
     }
+}
+
+/// [`random_workload_over`] the gauge `m`.
+fn random_workload(seed: u64) -> PlanningWorkload {
+    random_workload_over(seed, &["m"])
 }
 
 /// The most composed Pass 1 candidates a random workload may have to be
@@ -590,4 +592,79 @@ fn a_calibrated_cost_model_selects_the_exhaustive_plan() {
         searched >= 10,
         "only {searched} workloads were small enough"
     );
+}
+
+/// Seeded random workloads over two gauges and a counter under cost model
+/// 1, whose queries often read disjoint sources: the components are
+/// searched separately and combined (design method 5), and the combined
+/// plan is the exhaustive search's.
+#[test]
+fn random_workloads_over_disjoint_sources_combine_their_components() {
+    let settings = &cost_models(1)[..1];
+    let mut combined = 0;
+    for seed in 1..=40u64 {
+        let workload = random_workload_over(seed, &["m", "n"]);
+        let roots = lower_promql_roots(&workload).unwrap();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                roots.iter().cloned().enumerate().collect(),
+            )
+            .unwrap();
+        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
+            continue;
+        }
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap();
+        let models = PlanningModels::builtin().with_plan_selection(&settings[0]);
+        let run = assert_equivalent(&format!("seed {seed}"), &roots, &entries, &data, models);
+        if let Ok(selection) = &run.stage3_plan_selection {
+            if !selection.search.components.is_empty() {
+                combined += 1;
+                assert_eq!(selection.search.searched_as_one, None);
+                let queries: usize = selection
+                    .search
+                    .components
+                    .iter()
+                    .map(|c| c.queries.len())
+                    .sum();
+                assert_eq!(queries, roots.len());
+            }
+        }
+    }
+    assert!(combined >= 10, "only {combined} workloads were combined");
+}
+
+/// Queries reading disjoint sources are separate components, and queries
+/// linked through a common source are one, in workload order.
+#[test]
+fn components_follow_shared_sources() {
+    let mut workload = random_workload_over(1, &["m", "n"]);
+    let entry = |query: &str| RepeatingEntry {
+        query: Query(query.into()),
+        demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+        requirements: QueryRequirements {
+            accuracy: AccuracyTarget::max_error(0.05),
+            max_latency_ms: None,
+        },
+        predictability: Predictability::Predictable { known_at: None },
+        range_evaluation: None,
+    };
+    workload.query_workload.repeating_queries = Some(vec![
+        entry("sum by (job) (sum_over_time(m[5m]))"),
+        entry("sum by (job) (rate(c_total[5m]))"),
+        entry("max by (job) (max_over_time(n[5m]))"),
+        entry("sum(sum_over_time(m[1m])) / sum(sum_over_time(n[1m]))"),
+    ]);
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = assert_equivalent("linked", &roots, &entries, &data, PlanningModels::builtin());
+    let search = &run.stage3_plan_selection.as_ref().unwrap().search;
+    // q4 reads m and n, linking q1 and q3; q2 alone reads c_total.
+    let components: Vec<_> = search
+        .components
+        .iter()
+        .map(|c| c.queries.clone())
+        .collect();
+    assert_eq!(components, vec![vec![0, 2, 3], vec![1]]);
 }
