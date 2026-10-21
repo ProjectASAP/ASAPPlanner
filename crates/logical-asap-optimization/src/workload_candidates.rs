@@ -67,8 +67,8 @@ pub struct Stage1Candidate {
 /// fastest), followed by its Pass 2 candidates: the identical-expression
 /// rule's, then the window-composition rule's, then the reuse rules'
 /// (exact top-k reuse and rollup), then each summary-capability
-/// candidate followed by its own identical-expression and
-/// window-composition candidates; every window-composition candidate is
+/// candidate followed by its own identical-expression, window-composition
+/// and reuse candidates; every window-composition candidate is
 /// followed by its own identical-expression candidates. `entries[q]` is
 /// query `q`'s workload entry: the window-composition rule splits only
 /// builds of queries that repeat at a fixed interval, into panes on every
@@ -276,6 +276,7 @@ fn pass2_candidates(
                     found.identical_expression(&rules, &roots);
                 }
                 found.window_composition(&rules, &roots, evaluation_grid_ms);
+                found.reuse(&rules, &roots, evaluation_grid_ms);
             }
             // Listed as a candidate that cannot be composed; the other
             // Pass 2 candidates go on.
