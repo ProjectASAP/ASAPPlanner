@@ -358,8 +358,9 @@ impl Sharing<'_> {
 /// order a children-first walk of the roots meets them.
 #[derive(Debug, Clone)]
 pub struct CapabilitySharingCandidate {
-    /// The sketch family every member builds.
-    pub family: SketchAlgorithm,
+    /// The family the first member builds: every member builds this sketch
+    /// algorithm at some size, or this exact accumulator.
+    pub family: FieldDataType,
     /// The summary builds (`SummaryAgg`), at least two, not all of one size.
     pub members: Vec<Rc<OperatorNode>>,
 }
@@ -400,7 +401,7 @@ pub fn capability_sharing_candidates(roots: &[QueryRoot]) -> Vec<CapabilityShari
         };
         match candidates
             .iter_mut()
-            .find(|c| c.family == family && same_input_data(&c.members[0], node))
+            .find(|c| same_family(&c.family, &family) && same_input_data(&c.members[0], node))
         {
             Some(candidate) => candidate.members.push(Rc::clone(node)),
             None => candidates.push(CapabilitySharingCandidate {
@@ -428,34 +429,59 @@ fn collect_children_first(
 }
 
 /// The family of a per-subpopulation sketch build whose every reader is an
-/// estimate the family answers; `None` for any other node.
+/// estimate the family answers, or of a per-series exact accumulator whose
+/// every reader finalizes it; `None` for any other node.
 fn shareable_family(
     node: &OperatorNode,
     readers: Option<&Vec<&Rc<OperatorNode>>>,
-) -> Option<SketchAlgorithm> {
-    let Some(ASAPOp::SummaryAgg {
-        family: family @ FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance),
-        ..
-    }) = node.asap()
-    else {
-        return None;
-    };
-    let capability = FamilyCapability::of(family);
-    let answered = |reader: &&Rc<OperatorNode>| {
-        matches!(
-            reader.asap(),
-            Some(ASAPOp::SummaryEstimate { query, .. }) if capability.answers(query)
-        )
-    };
+) -> Option<FieldDataType> {
     let readers = readers?;
-    readers
-        .iter()
-        .all(answered)
-        .then(|| kind.algorithm().clone())
+    match node.asap() {
+        Some(ASAPOp::SummaryAgg {
+            family: family @ FieldDataType::Sketch(_, GroupingStrategy::PerSubpopulationInstance),
+            ..
+        }) => {
+            let capability = FamilyCapability::of(family);
+            readers
+                .iter()
+                .all(|reader| {
+                    matches!(
+                        reader.asap(),
+                        Some(ASAPOp::SummaryEstimate { query, .. }) if capability.answers(query)
+                    )
+                })
+                .then(|| family.clone())
+        }
+        Some(ASAPOp::SummaryAgg {
+            family: family @ FieldDataType::ExactAggregate(..),
+            reduction: Reduction::PerEntity,
+            ..
+        }) => readers
+            .iter()
+            .all(|reader| matches!(reader.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. })))
+            .then(|| family.clone()),
+        _ => None,
+    }
+}
+
+/// Whether builds of families `a` and `b` can be one build: one sketch
+/// algorithm and grouping at any sizes, or one exact accumulator.
+fn same_family(a: &FieldDataType, b: &FieldDataType) -> bool {
+    match (a, b) {
+        (FieldDataType::Sketch(a, grouping), FieldDataType::Sketch(b, grouping_b)) => {
+            a.algorithm() == b.algorithm() && grouping == grouping_b
+        }
+        _ => a == b,
+    }
 }
 
 /// Whether two builds of one family read the same data the same way: the
-/// same input sub-DAG, item and weight, grouping and filter.
+/// same input sub-DAG, item and weight, grouping and filter. Two
+/// per-series builds over one metric's samples also do when their scans
+/// project different labels ([`same_rows`]): a per-series state is keyed by
+/// the series identity, which determines every label, so a build over the
+/// scan with the most labels holds every member's states and its readers
+/// keep the labels each needs ([`share_summaries`]).
 fn same_input_data(a: &OperatorNode, b: &OperatorNode) -> bool {
     match (a.asap(), b.asap()) {
         (
@@ -476,13 +502,34 @@ fn same_input_data(a: &OperatorNode, b: &OperatorNode) -> bool {
                 ..
             }),
         ) => {
-            (Rc::ptr_eq(child, child_b) || child == child_b)
+            let same_child = Rc::ptr_eq(child, child_b)
+                || child == child_b
+                || (*reduction == Reduction::PerEntity
+                    && filter.is_none()
+                    && child.schema.has_promql_series_identity()
+                    && child_b.schema.has_promql_series_identity()
+                    && same_rows(child, child_b));
+            same_child
                 && input == input_b
                 && reduction == reduction_b
                 && grouping == grouping_b
                 && filter == filter_b
         }
         _ => false,
+    }
+}
+
+/// The names of the columns of a build's input: for a per-series build,
+/// the labels its scan projects, among others.
+fn input_column_names(build: &OperatorNode) -> Vec<&str> {
+    match build.asap() {
+        Some(ASAPOp::SummaryAgg { child, .. }) => child
+            .schema
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -594,13 +641,49 @@ fn share_summaries(
     shared_builds: &[Vec<Rc<OperatorNode>>],
 ) -> Result<Option<Vec<QueryRoot>>, PerComputationCandidateError> {
     let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    // Every node that reads each build, by the build's address.
+    let mut nodes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for node in roots.iter().flat_map(root_operators) {
+        collect_children_first(node, &mut seen, &mut nodes);
+    }
+    let mut readers: HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>> = HashMap::new();
+    for node in &nodes {
+        for child in node.children() {
+            readers.entry(Rc::as_ptr(child)).or_default().push(node);
+        }
+    }
     for members in shared_builds {
-        let members: Vec<&Rc<OperatorNode>> = members.iter().collect();
+        let mut members: Vec<&Rc<OperatorNode>> = members.iter().collect();
+        // The build is over the input with every member's columns (the
+        // scan with the most labels); none such, no shared build.
+        let Some(host) = members.iter().position(|candidate| {
+            let columns = input_column_names(candidate);
+            members.iter().all(|member| {
+                input_column_names(member)
+                    .iter()
+                    .all(|c| columns.contains(c))
+            })
+        }) else {
+            return Ok(None);
+        };
+        members.swap(0, host);
         let Some(build) = sized_for_all(&members)? else {
             return Ok(None);
         };
         for member in members {
-            replaced.insert(Rc::as_ptr(member), Rc::clone(&build));
+            if member.schema == build.schema {
+                replaced.insert(Rc::as_ptr(member), Rc::clone(&build));
+                continue;
+            }
+            // A member over fewer labels: each of its estimates reads the
+            // shared build and keeps the member's columns, by name.
+            for reader in readers.get(&Rc::as_ptr(member)).into_iter().flatten() {
+                let Some(estimate) = relabeled_estimate(reader, &build)? else {
+                    return Ok(None);
+                };
+                replaced.insert(Rc::as_ptr(reader), estimate);
+            }
         }
     }
     let mut rebuilt: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
@@ -623,11 +706,64 @@ fn share_summaries(
     Ok(Some(recompose_guarantees(&out)?))
 }
 
+/// `reader`, an estimate or finalization of a per-series build over fewer
+/// labels, as the same read of `build` with only `reader`'s columns, by
+/// name; `None` for another reader or a missing column.
+fn relabeled_estimate(
+    reader: &OperatorNode,
+    build: &Rc<OperatorNode>,
+) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+    use asap_types::ir::ProjectItem;
+    let operator = match reader.asap() {
+        Some(ASAPOp::SummaryEstimate { query, .. }) => ASAPOp::SummaryEstimate {
+            summary_input: Rc::clone(build),
+            query: query.clone(),
+        },
+        Some(ASAPOp::FinalizeExactAccumulator { .. }) => ASAPOp::FinalizeExactAccumulator {
+            child: Rc::clone(build),
+        },
+        _ => return Ok(None),
+    };
+    let estimate = Rc::new(OperatorNode::new(Operator::ASAP(operator))?);
+    let mut cols = Vec::with_capacity(reader.schema.fields.len());
+    for field in &reader.schema.fields {
+        let Some(column) = estimate
+            .schema
+            .fields
+            .iter()
+            .position(|f| f.name == field.name && f.table == field.table)
+        else {
+            return Ok(None);
+        };
+        cols.push(ProjectItem {
+            alias: Some(field.name.clone()),
+            expr: ScalarExpr::Column(column),
+        });
+    }
+    Ok(Some(Rc::new(OperatorNode::new(Operator::NonASAP(
+        NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: estimate,
+        },
+    ))?)))
+}
+
 /// One build serving every member: the first member with the members'
 /// shared size ([`size_for_all_readers`]).
 fn sized_for_all(
     members: &[&Rc<OperatorNode>],
 ) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+    // An exact accumulator has one size: the first member serves them all.
+    if matches!(
+        members[0].asap(),
+        Some(ASAPOp::SummaryAgg {
+            family: FieldDataType::ExactAggregate(..),
+            ..
+        })
+    ) {
+        return Ok(Some(Rc::clone(members[0])));
+    }
     let kinds: Vec<&SketchKind> = members
         .iter()
         .filter_map(|member| match member.asap() {
@@ -1896,7 +2032,9 @@ mod tests {
         assert!(own[0].1 < own[1].1);
         let sharing = capability_sharing_candidates(&roots);
         assert_eq!(sharing.len(), 1);
-        assert_eq!(sharing[0].family, SketchAlgorithm::Kll);
+        assert!(
+            matches!(&sharing[0].family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll)
+        );
         let pass2_candidates = summary_capability_pass2_candidates(&roots, &sharing).unwrap();
         assert_eq!(pass2_candidates.len(), 1);
         let [shared_builds] = pass2_candidates[0].shared_builds.as_slice() else {
@@ -2013,10 +2151,10 @@ mod tests {
             SketchAlgorithm::DDSketch,
         );
         assert_eq!(capability_sharing_candidates(&families).len(), 1);
-        assert_eq!(
-            capability_sharing_candidates(&families)[0].family,
-            SketchAlgorithm::DDSketch
-        );
+        assert!(matches!(
+            &capability_sharing_candidates(&families)[0].family,
+            FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::DDSketch
+        ));
     }
 
     /// Quantiles over other groupings share no capability build.
