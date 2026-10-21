@@ -327,7 +327,13 @@ function stageCandidateRows(doc) {
   ((doc.stage1_logical_asap_optimization || {}).candidates || []).filter((c) => 'error' in c).forEach((c) => rows.push({
     id: c.id, logical: c.id, display_name: c.display_name, total: null, rank: null, status: 'composition error', reason: c.error,
   }));
-  const order = { selected: 0, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4 };
+  // Rejections of candidates the document does not hold (the default search
+  // keeps only the best one and records the first rejection of each cause),
+  // and the search's own: listed with their cause, not clickable.
+  (selection.search_rejected || []).forEach((r) => rows.push({
+    id: r.id, logical: null, display_name: `not kept · ${r.cause.replace(/_/g, ' ')}`, total: null, rank: null, status: 'not kept', reason: r.reason,
+  }));
+  const order = { selected: 0, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4, 'not kept': 5 };
   rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
   let rank = 0;
   // Only valid candidates are ranked: the selected one and those that lost
@@ -349,6 +355,30 @@ function stageCandidateHeader(doc) {
     selection.error ? ` · selection failed: ${selection.error}` : '',
   ].join('');
   return `${logical.combinations ?? 0} candidates${shown}${error}`;
+}
+
+// What the search behind the document did, for the candidate list's
+// header: "default search · 206 physical candidates checked · 2 components
+// searched separately · q3: 1 of 3 own candidates discarded (no accuracy
+// guarantee)"; "" for a document that does not say.
+function searchText(doc) {
+  const name = { default: 'default search', exhaustive: 'exhaustive search' }[doc.search];
+  if (!name) return '';
+  const parts = [name];
+  const search = (doc.stage3_plan_selection || {}).search;
+  if (search) {
+    parts.push(`${search.candidates_checked} physical candidates checked`);
+    if ((search.components || []).length) parts.push(`${search.components.length} independent components searched separately`);
+    const queryIds = ((doc.workload || {}).queries || []).map((q) => q.id);
+    (search.queries || []).forEach((query, index) => {
+      if (!query.discarded.length) return;
+      const causes = [...new Set(query.discarded.map((d) => d.cause.replace(/_/g, ' ')))].join(', ');
+      parts.push(`${queryIds[index] || `q${index + 1}`}: ${query.discarded.length} of ${query.candidates_checked} own candidates discarded (${causes})`);
+    });
+    if (search.raw_scan_candidates_skipped) parts.push(`${search.raw_scan_candidates_skipped} Stage 1 candidates skipped: they scan raw data at query time`);
+    if (search.raw_scan_assignments_skipped) parts.push(`${search.raw_scan_assignments_skipped} Stage 2 assignments skipped: they scan raw data at query time`);
+  }
+  return parts.join(' · ');
 }
 
 function compactWire(value) {

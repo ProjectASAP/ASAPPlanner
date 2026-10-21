@@ -208,7 +208,7 @@ class WriteExamplesTests(unittest.TestCase):
             (root / "out").mkdir()
             (root / "out" / "a.json").write_text("kept")
             calls = self.run_write(root, force=False)
-            self.assertEqual(calls, [[str(server.BINARY), "--example", "planner-layering-3b", "--out", str(root / "out" / "b.json")]])
+            self.assertEqual(calls, [[str(server.BINARY), "--example", "planner-layering-3b", "--exhaustive", "--out", str(root / "out" / "b.json")]])
             self.assertEqual((root / "out" / "a.json").read_text(), "kept")
 
     def test_regenerate_rewrites_every_document(self):

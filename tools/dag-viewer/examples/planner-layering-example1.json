@@ -5,6 +5,7 @@
     "supported_summaries": null
   },
   "format": "asap-stage-pipeline/v1",
+  "search": "exhaustive",
   "stage0_query_language_frontends": {
     "dag": {
       "nodes": [
@@ -106361,6 +106362,16 @@
         "reason": "costlier: 17.940 vs 7.940 cost_per_second"
       }
     ],
+    "search": {
+      "candidates_checked": 57,
+      "components": [],
+      "queries": [],
+      "raw_scan_assignments_skipped": 0,
+      "raw_scan_candidates_skipped": 0,
+      "runner_up_cost_per_second": 8.540209999999998,
+      "searched_as_one": null
+    },
+    "search_rejected": [],
     "selected": "P1"
   },
   "workload": {

@@ -71,6 +71,7 @@ h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter
 .rank button { width: 100%; text-align: left; font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 8px 10px; cursor: pointer; display: grid; grid-template-columns: 34px minmax(0,1fr) auto; gap: 2px 8px; align-items: baseline; }
 .rank button:hover { background: var(--panel-2); }
 .rank button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.rank button[disabled] { cursor: default; color: var(--muted); }
 .rank button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pid { font-family: var(--font-mono); font-weight: 500; }
 .plabel { min-width: 0; overflow-wrap: anywhere; }

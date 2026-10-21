@@ -103,18 +103,22 @@
     if (status === 'costlier') return '<span class="chip costlier">valid · costlier</span>';
     if (status === 'rejected') return '<span class="chip invalid">✗ invalid</span>';
     if (status === 'not judged') return '<span class="chip">not judged</span>';
+    if (status === 'not kept') return '<span class="chip invalid">✗ invalid · not kept</span>';
     return `<span class="chip invalid">${esc(status)}</span>`;
   }
 
-  function rowKey(row) { return `${row.status === 'pruned' || row.status === 'composition error' ? 'L' : 'P'}:${row.id}`; }
+  function rowKey(row) {
+    if (row.status === 'not kept') return `X:${row.id}`;
+    return `${row.status === 'pruned' || row.status === 'composition error' ? 'L' : 'P'}:${row.id}`;
+  }
 
   function renderRanking() {
     const pressed = current.physical ? `P:${current.physical}` : `L:${current.logical}`;
-    $('rank').innerHTML = rows.map((r) => `<li><button type="button" data-key="${esc(rowKey(r))}" aria-pressed="${rowKey(r) === pressed}">
+    $('rank').innerHTML = rows.map((r) => `<li><button type="button" data-key="${esc(rowKey(r))}" aria-pressed="${rowKey(r) === pressed}"${r.status === 'not kept' ? ' disabled title="the default search did not keep this candidate"' : ''}>
         <span class="pid">${esc(r.id)}</span><span class="plabel">${esc(r.display_name || r.id)}</span>
         <span class="ptotal">${r.total === null ? '—' : fmtCost(r.total)}</span>
         <span class="pstatus">${statusChip(r.status)}${r.reason ? `<span>${esc(r.reason)}</span>` : ''}${r.accepted ? `<span class="accepted">${esc(r.accepted)}</span>` : ''}</span></button></li>`).join('');
-    $('rank').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+    $('rank').querySelectorAll('button:not([disabled])').forEach((b) => b.addEventListener('click', () => {
       const [kind, id] = [b.dataset.key.slice(0, 1), b.dataset.key.slice(2)];
       if (kind === 'P') selectPhysical(id);
       else selectLogical(id);
@@ -201,7 +205,7 @@
       (logical.capped ? ` (<b>${logical.candidates.length}</b> shown)` : '') +
       ` → <b>${physicalById.size}</b> physical` +
       (selection.selected ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
-    $('rank-meta').textContent = stageCandidateHeader(doc);
+    $('rank-meta').textContent = [stageCandidateHeader(doc), searchText(doc)].filter(Boolean).join(' · ');
     const sel = selection.selected ? selection.costs[selection.selected] : null;
     $('cost-unit').textContent = sel ? sel.cost_unit.replace(/_/g, ' ') : '';
 
