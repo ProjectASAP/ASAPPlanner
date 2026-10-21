@@ -101,7 +101,7 @@ pub fn validate_summary_kernel(
                         layers,
                         ..
                     },
-                ) if asap_sketchlib::UnivMon::check_shape(
+                ) if crate::summary_kernels::univmon::check_shape(
                     *heap_size as usize,
                     *sketch_rows as usize,
                     *sketch_cols as usize,

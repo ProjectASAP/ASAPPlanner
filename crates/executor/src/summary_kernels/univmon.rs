@@ -7,6 +7,20 @@ use planner_types::ir::schema::SketchStatistic;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// The shapes the executor builds: sketchlib's ([`UnivMon::check_shape`]),
+/// with at most `MATRIX_MAX_ROWS` rows, the rows its ASAPv1 encoding takes,
+/// so a deployment can store every state the executor builds.
+pub fn check_shape(heap_size: usize, rows: usize, cols: usize, layers: usize) -> Result<(), Error> {
+    if rows > asap_sketchlib::MATRIX_MAX_ROWS {
+        return Err(format!(
+            "UnivMon rows {rows} exceeds MATRIX_MAX_ROWS {}",
+            asap_sketchlib::MATRIX_MAX_ROWS
+        )
+        .into());
+    }
+    Ok(UnivMon::check_shape(heap_size, rows, cols, layers)?)
+}
+
 #[derive(Debug, Clone)]
 pub struct UnivMonAccumulator {
     inner: UnivMon,
@@ -30,7 +44,7 @@ impl UnivMonAccumulator {
     }
 
     pub fn new(heap_size: usize, rows: usize, cols: usize, layers: usize) -> Result<Self, Error> {
-        UnivMon::check_shape(heap_size, rows, cols, layers)?;
+        check_shape(heap_size, rows, cols, layers)?;
         Ok(Self {
             inner: UnivMon::new(heap_size, rows, cols, layers),
             max_key_bytes: 0,
@@ -42,7 +56,7 @@ impl UnivMonAccumulator {
     /// bytes. Rejects dimensions [`Self::new`] rejects and terminal-mode
     /// sketches, which do not accept this accumulator's updates.
     pub fn from_sketch(sketch: UnivMon) -> Result<Self, Error> {
-        UnivMon::check_shape(sketch.heap_size, sketch.rows, sketch.cols, sketch.layers)?;
+        check_shape(sketch.heap_size, sketch.rows, sketch.cols, sketch.layers)?;
         if !sketch.accepts_standard_updates() {
             return Err("terminal-mode UnivMon state cannot accept standard updates".into());
         }
@@ -269,6 +283,19 @@ mod tests {
         let mut misshapen = UnivMon::new(4, 3, 16, 2);
         misshapen.rows = 26;
         assert!(UnivMonAccumulator::from_sketch(misshapen).is_err());
+    }
+
+    // A 21-row UnivMon fits the hash budget (21 · (5 + 1) = 126 at 32
+    // columns) and sketchlib builds it, but its ASAPv1 encoding refuses more
+    // than MATRIX_MAX_ROWS rows, so a deployment could not store it: the
+    // executor refuses it, building or adopting.
+    #[test]
+    fn rejects_rows_past_what_the_state_encodes() {
+        assert!(UnivMon::new(4, 21, 32, 1).to_asapv1().is_err());
+        assert!(UnivMon::new(4, 20, 32, 1).to_asapv1().is_ok());
+        assert!(UnivMonAccumulator::new(4, 21, 32, 1).is_err());
+        assert!(UnivMonAccumulator::new(4, 20, 32, 1).is_ok());
+        assert!(UnivMonAccumulator::from_sketch(UnivMon::new(4, 21, 32, 1)).is_err());
     }
 
     // Shapes whose hashes are not independent are errors, not library
