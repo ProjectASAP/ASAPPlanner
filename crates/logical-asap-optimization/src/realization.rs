@@ -305,9 +305,18 @@ pub(crate) fn realize_keyed_additive_summary_input(
         _ => None,
     };
     let counter_input = derivative_of.is_some();
+    // `sum by (G) (sum_over_time(m[W]))` or `... count_over_time ...`: the
+    // grouped sum of per-series sums (counts) of raw data samples is their sum
+    // (count) by `G`, so the heap reads those samples.
+    let samples = summed_per_series_samples(child);
+    // A raw data sample's count or a count's row weighs one.
+    let counted = match &samples {
+        Some((_, inner)) => matches!(inner, AggIntent::Count { .. }),
+        None => matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+    };
     let weight = match measures.as_slice() {
-        [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
-        [AggIntent::Sum { .. }] if counter_input => {
+        _ if counted => SummaryInputExpr::Constant(1.0),
+        [AggIntent::Sum { .. }] if counter_input || samples.is_some() => {
             SummaryInputExpr::Column(ColumnRef::SampleValue)
         }
         [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
@@ -322,14 +331,12 @@ pub(crate) fn realize_keyed_additive_summary_input(
         }),
         _ => return None,
     };
-    let weight_domain = match measures.as_slice() {
-        [AggIntent::Count { .. }] => WeightDomain::NonNegative {
+    let weight_domain = match derivative_of {
+        _ if counted => WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::UnitCount,
         },
-        _ => match derivative_of {
-            Some(Some(metric)) => WeightDomain::CounterDerivativeOfMetric { metric },
-            _ => WeightDomain::UnknownOrSigned,
-        },
+        Some(Some(metric)) => WeightDomain::CounterDerivativeOfMetric { metric },
+        _ => WeightDomain::UnknownOrSigned,
     };
     if matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
         && !matches!(
@@ -384,13 +391,74 @@ pub(crate) fn realize_keyed_additive_summary_input(
         }
     };
     Some(PhysicalSummaryInput {
-        child: Rc::clone(raw_child),
+        child: samples.map_or_else(|| Rc::clone(raw_child), |(rows, _)| rows),
         input: SummaryUpdate {
             item: Some(item),
             weight,
             weight_domain,
         },
     })
+}
+
+/// The raw data sample rows and the per-series `sum` or `count` over them when
+/// `grouped` is a grouped `sum` (not by `without`, nor by the metric name
+/// the per-series result drops) of the value of a per-series `sum` or
+/// `count` of raw data samples (`sum by (G) (sum_over_time(m[W]))`), neither
+/// filtered nor with `HAVING`; `None` otherwise. The grouped sum is then the
+/// sum (count) of those samples by `G`.
+fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>, AggIntent)> {
+    use asap_types::ir::operator::non_asap::any_measure_filtered;
+    let Some(NonASAPOp::Aggregate {
+        reduction: Reduction::Reduce(by),
+        measures,
+        filters,
+        having: None,
+        child: per_series,
+        ..
+    }) = grouped.non_asap()
+    else {
+        return None;
+    };
+    let [AggIntent::Sum { col }] = measures.as_slice() else {
+        return None;
+    };
+    let Some(NonASAPOp::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures: inner,
+        filters: inner_filters,
+        having: None,
+        child: rows,
+        ..
+    }) = per_series.non_asap()
+    else {
+        return None;
+    };
+    let [inner @ (AggIntent::Sum { col: None } | AggIntent::Count { .. })] = inner.as_slice()
+    else {
+        return None;
+    };
+    if by.is_without()
+        || any_measure_filtered(filters)
+        || any_measure_filtered(inner_filters)
+        || matches!(rows.non_asap(), Some(NonASAPOp::Aggregate { .. }))
+    {
+        return None;
+    }
+    // The grouped sum reads the per-series value.
+    let value = resolve_column_ref(&ColumnRef::SampleValue, &per_series.schema).ok()?;
+    if col.is_some_and(|col| col != value) || by.keys().contains(&value) {
+        return None;
+    }
+    if by.keys().iter().any(|&key| {
+        per_series
+            .schema
+            .fields
+            .get(key)
+            .is_none_or(|field| field.name == "__name__")
+    }) {
+        return None;
+    }
+    Some((Rc::clone(rows), inner.clone()))
 }
 
 pub(crate) fn schema_column_ref(child: &OperatorNode, index: usize) -> Option<ColumnRef> {

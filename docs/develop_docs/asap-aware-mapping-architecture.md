@@ -80,7 +80,7 @@ populations for instant top-k, quantile and sum) in Stage 1, and
    one exact option plus the summary families of `summary_candidates` that the
    accuracy target permits and the deployment supports. A whole-expression
    top-k or a nested sum also gets a fused computation that absorbs the
-   target beneath it.
+   targets beneath it.
 2. **Enumeration** takes one choice per target and composes the logical DAG.
    For each composed DAG, the Pass 2 rules find what can be shared, split into
    panes or reused, and each subset of their candidates becomes another

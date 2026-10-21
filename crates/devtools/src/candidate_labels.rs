@@ -86,7 +86,7 @@ pub fn computation_label(candidate: &ComputationCandidate) -> String {
 /// parentheses), each target listed under the first query that reads it.
 pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usize]) -> String {
     let query_of_target = query_of_each_target(inventory);
-    // Each target's chosen candidate, with the target it absorbs when the
+    // Each target's chosen candidate, with the targets it absorbs when the
     // candidate is its fused computation's.
     let chosen: Vec<_> = inventory
         .targets
@@ -95,7 +95,12 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
         .map(|(target, &index)| target.computation_for(index).expect("a listed candidate"))
         .collect();
     // Targets a chosen fused computation absorbs are not computed.
-    let absorbed: Vec<usize> = chosen.iter().filter_map(|&(_, absorbs)| absorbs).collect();
+    let absorbed: Vec<usize> = chosen
+        .iter()
+        .filter_map(|&(_, absorbs)| absorbs)
+        .flatten()
+        .copied()
+        .collect();
     (0..inventory.roots.len())
         .map(|query| {
             let mut sketches = Vec::new();
