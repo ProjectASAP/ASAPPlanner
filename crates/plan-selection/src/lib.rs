@@ -3285,10 +3285,13 @@ fn price_at_scale(
                 let states = group_count * u64::from(*pane_count);
                 // Each pane's state sees its group's rows in one pane: of
                 // one second's rows at ingestion time, of the rows read at
-                // query time.
-                let rows_per_pane = match ingestion {
-                    true => input.rows * *pane_width_ms / 1_000,
-                    false => input.rows / u64::from(*pane_count).max(1),
+                // query time (all of them for a chain kept across
+                // evaluations, whose scan Stage 2 bounds to its newest pane,
+                // the only one it builds).
+                let rows_per_pane = match (ingestion, node.materialization) {
+                    (true, _) => input.rows * *pane_width_ms / 1_000,
+                    (false, Materialization::MatAtQueryKeptAcrossEvaluations(_)) => input.rows,
+                    (false, _) => input.rows / u64::from(*pane_count).max(1),
                 };
                 let input_rows = StateInputRows {
                     rows_per_state: Some(rows_per_pane / group_count.max(1)),
@@ -4139,8 +4142,9 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 /// `asap_sketchlib` allocates:
 /// - Count-Min / Count-Sketch: `depth × width` 8-byte counters, plus a
 ///   24-byte entry per heap slot for the top-k variants;
-/// - KLL: the 8-byte item array at its full capacity ([`kll_items`]), an
-///   upper bound: `asap_sketchlib`'s KLL grows the array as items arrive;
+/// - KLL: its fixed bytes ([`kll_fixed_bytes`]: the struct and its level
+///   array) plus the 8-byte item array as `asap_sketchlib` grows it for the
+///   rows the state folds, at most its full capacity ([`kll_buffer_items`]);
 /// - DDSketch: its struct and, per bucket store it fills, 8-byte counts in
 ///   the 128-bin chunks the library grows a store by
 ///   ([`ddsketch_state_bytes`]);
@@ -4166,7 +4170,7 @@ fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u6
 }
 
 /// What one summary state's bytes depend on besides its parameters (only
-/// a DDSketch's do): the input rows it folds and the sign of their values.
+/// a DDSketch's and a KLL's do): the input rows it folds and the sign of their values.
 /// The rows are whatever its producer emits (raw data samples, rates, sums),
 /// not a summary sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -4209,7 +4213,10 @@ fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64)
             f64::from(*depth) + 1.0,
             8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
         ),
-        SketchParams::Kll { k, .. } => (1.0, 8 * kll_items(*k)),
+        SketchParams::Kll { k, .. } => (
+            1.0,
+            kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
+        ),
         SketchParams::DDSketch { alpha } => (1.0, ddsketch_state_bytes(*alpha, input_rows)),
         SketchParams::Hll { precision, .. } => (1.0, 1u64 << (*precision).min(63)),
         SketchParams::Kmv { k, .. } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
@@ -4228,21 +4235,57 @@ fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64)
     }
 }
 
+/// Levels `asap_sketchlib`'s KLL has room for (`MAX_LEVELS`).
+const KLL_MAX_LEVELS: usize = 61;
+
+/// Bytes every `asap_sketchlib` KLL state holds whatever its samples: the
+/// struct and the 8-byte level-boundary array of `KLL_MAX_LEVELS + 1` entries it
+/// allocates on creation (`Kll::init_internal`). 744 bytes, an empty
+/// sketch's `memory_bytes()`.
+fn kll_fixed_bytes() -> u64 {
+    (std::mem::size_of::<asap_sketchlib::Kll<f64>>() + 8 * (KLL_MAX_LEVELS + 1)) as u64
+}
+
 /// The most items `asap_sketchlib`'s KLL holds for `k`, the capacity its item
-/// array grows to (`Kll::init_internal` → `compute_max_capacity(k, 8)`): over its 61 levels,
+/// array grows to (`Kll::init_internal` → `compute_max_capacity(k, 8)`): over its
+/// [`KLL_MAX_LEVELS`] levels,
 /// `max(ceil(k · (2/3)^i), 8)` each, with `k` capped at [`KLL_MAX_K`] as the
 /// library caps it. 1,206 items at `k` = 269.
-fn kll_items(k: u32) -> u64 {
-    const LEVELS: usize = 61;
+fn kll_capacity_items(k: u32) -> u64 {
     const MIN_LEVEL_CAPACITY: f64 = 8.0;
     let k = f64::from(k.min(KLL_MAX_K));
     let mut scale = 1.0_f64;
     let mut total = 0;
-    for _ in 0..LEVELS {
+    for _ in 0..KLL_MAX_LEVELS {
         total += (k * scale).ceil().max(MIN_LEVEL_CAPACITY) as u64;
         scale *= 2.0 / 3.0;
     }
     total
+}
+
+/// Items `asap_sketchlib`'s KLL for `k` allocates over `input_rows`: its
+/// item array starts empty and grows when full, to at least twice its
+/// length and at least 16 items (`INITIAL_BUFFER_ITEMS`), at most its full
+/// capacity ([`kll_capacity_items`]). So `n` rows take the smallest
+/// `16 · 2^j` ≥ `n`, capped at the capacity: exactly what the library holds
+/// up to `max(k, 8)` rows, before anything compacts; 16 items for one row,
+/// the capacity when the rows are unknown. Past that, compaction keeps the
+/// array within this size, but the library also holds merge scratch space,
+/// not modelled here, that adds up to about a fifth. A state is assumed to
+/// fold at least one row, as a DDSketch's is.
+fn kll_buffer_items(k: u32, input_rows: StateInputRows) -> u64 {
+    const INITIAL_BUFFER_ITEMS: u64 = 16;
+    let capacity = kll_capacity_items(k);
+    match input_rows.rows_per_state {
+        None => capacity,
+        Some(rows_per_state) => {
+            let grown = rows_per_state
+                .max(1)
+                .div_ceil(INITIAL_BUFFER_ITEMS)
+                .next_power_of_two();
+            grown.saturating_mul(INITIAL_BUFFER_ITEMS).min(capacity)
+        }
+    }
 }
 
 /// Layers a UnivMon row updates in expectation. `asap_sketchlib` updates
@@ -6213,13 +6256,14 @@ mod tests {
 
     /// Kept exact quantile state keeps every value of its group: over one
     /// group of 10 000 values it costs more than a quantile sketch sized for
-    /// ε = 0.01, δ = 0.01, which is selected; over 100 groups of 100 values it
-    /// is smaller than the sketch and is selected. (State held only while a
-    /// query runs is not charged.)
+    /// ε = 0.01, δ = 0.01, which is selected. Over 100 groups of 100 values,
+    /// fewer than the sketch's `k`, the sketch keeps every value too, in an
+    /// item array grown past them, so its state is no smaller than the
+    /// exact state, which is selected. (State held only while a query runs is not charged.)
     #[test]
     fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-        for (query, sketch_wins) in [
+        for (query, large_groups) in [
             ("quantile(0.99, rate(x[5m]))", true),
             ("quantile by (job) (0.99, rate(x[5m]))", false),
         ] {
@@ -6234,15 +6278,29 @@ mod tests {
                 PlanningModels::builtin(),
             )
             .unwrap();
+            let kept_bytes = |sketch: bool| {
+                let candidate = candidates
+                    .iter()
+                    .find(|c| {
+                        has_summary_estimate(c) == sketch && selection.costs.contains_key(&c.id)
+                    })
+                    .unwrap();
+                selection.costs[&candidate.id].usage.average_memory_bytes
+            };
             let selected = candidates
                 .iter()
                 .find(|c| c.id == selection.selected)
                 .unwrap();
-            assert_eq!(
-                has_summary_estimate(selected),
-                sketch_wins,
-                "{query}: {selection:?}"
-            );
+            match large_groups {
+                true => {
+                    assert!(has_summary_estimate(selected), "{query}: {selection:?}");
+                    assert!(kept_bytes(true) < kept_bytes(false), "{query}");
+                }
+                false => {
+                    assert!(!has_summary_estimate(selected), "{query}: {selection:?}");
+                    assert!(kept_bytes(true) >= kept_bytes(false), "{query}");
+                }
+            }
         }
     }
 
@@ -6453,9 +6511,9 @@ mod tests {
         );
     }
 
-    /// KLL state is charged the item array at the capacity `asap_sketchlib`
-    /// grows it to: `compute_max_capacity(k, 8)` 8-byte items, with `k`
-    /// capped at 26 602.
+    /// KLL state whose samples are unknown is charged its fixed 744 bytes
+    /// and the item array at the capacity `asap_sketchlib` grows it to:
+    /// `compute_max_capacity(k, 8)` 8-byte items, with `k` capped at 26 602.
     #[test]
     fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
         let bytes = |k| {
@@ -6474,9 +6532,61 @@ mod tests {
             )
             .1
         };
-        assert_eq!(bytes(269), 8 * 1_206);
-        assert_eq!(bytes(26_602), 8 * 80_118);
-        assert_eq!(bytes(30_000), 8 * 80_118);
+        assert_eq!(bytes(269), 744 + 8 * 1_206);
+        assert_eq!(bytes(26_602), 744 + 8 * 80_118);
+        assert_eq!(bytes(30_000), 744 + 8 * 80_118);
+    }
+
+    /// A KLL state is charged what `asap_sketchlib` allocates for the
+    /// samples it sees, not its full capacity: its fixed struct and level
+    /// array, plus the item array the library starts empty and doubles from
+    /// 16 items as samples arrive, up to `compute_max_capacity(k, 8)`. E.g.
+    /// a 10 s pane of a series sampled every 15 s sees one sample: 744 + 128
+    /// = 872 bytes, where the full capacity at `k` = 269 is 1,206 items.
+    #[test]
+    fn kll_state_bytes_grow_with_the_samples_it_sees() {
+        let k = 269;
+        // The library's bytes after `n` samples.
+        let library_bytes = |n: u32| {
+            let mut sketch = asap_sketchlib::Kll::<f64>::with_k(k as i32);
+            for i in 0..n {
+                sketch.update(&f64::from(i));
+            }
+            sketch.memory_bytes() as u64
+        };
+        let model_bytes = |rows_per_state| {
+            sketch_shape(
+                &SketchParams::Kll {
+                    k,
+                    failure_probability: None,
+                },
+                StateInputRows {
+                    rows_per_state,
+                    non_negative: true,
+                },
+            )
+            .1
+        };
+        // An empty sketch holds its fixed bytes; one sample adds 16 items.
+        assert_eq!(library_bytes(0), kll_fixed_bytes());
+        assert_eq!(library_bytes(0), 744);
+        assert_eq!(library_bytes(1), 872);
+        // Up to `k` samples nothing compacts, so the library holds exactly
+        // the fixed bytes and the grown array (and no merge scratch space).
+        for n in [1, 4, 16, 17, 100, k] {
+            assert_eq!(
+                model_bytes(Some(u64::from(n))),
+                library_bytes(n),
+                "{n} samples"
+            );
+        }
+        // Many samples are charged the full capacity, the most the array
+        // grows to.
+        assert_eq!(model_bytes(Some(5_000)), 744 + 8 * 1_206);
+        // A state assumed to see no sample holds at least one, as a
+        // DDSketch's does; unknown samples fill the full capacity.
+        assert_eq!(model_bytes(Some(0)), 872);
+        assert_eq!(model_bytes(None), 744 + 8 * 1_206);
     }
 
     /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is
@@ -7468,8 +7578,18 @@ mod tests {
             else {
                 unreachable!()
             };
-            // One state per series: data() declares 10 000.
-            let state = 10_000.0 * summary_shape(family, StateInputRows::UNKNOWN).1 as f64;
+            // One state per series: data() declares 10 000. At query time
+            // each sees its series' 12 samples: the 120 000 rows of its
+            // source's 1-min window (data()'s 10 000 rows per second over its
+            // five sources); at ingestion time its samples are unknown.
+            let samples = match materialization {
+                AT_INGESTION => StateInputRows::UNKNOWN,
+                _ => StateInputRows {
+                    rows_per_state: Some(12),
+                    non_negative: false,
+                },
+            };
+            let state = 10_000.0 * summary_shape(family, samples).1 as f64;
             let byte_seconds = if materialization == AT_INGESTION {
                 2.0 * state
             } else {
@@ -7945,7 +8065,13 @@ mod tests {
         else {
             unreachable!()
         };
-        let (_, state_bytes) = summary_shape(family, StateInputRows::UNKNOWN);
+        // Each pane sees its series' 60 samples: the one minute of 10 000
+        // rows per second over 10 000 series it reads.
+        let samples = StateInputRows {
+            rows_per_state: Some(60),
+            non_negative: false,
+        };
+        let (_, state_bytes) = summary_shape(family, samples);
         let chain_cost = &kept.per_node[&chain];
         assert!(chain_cost.detail.contains("; x 0.0167/s"), "{chain_cost:?}");
         // One state per series: arriving() declares 10 000.
@@ -8138,7 +8264,13 @@ mod tests {
             unreachable!()
         };
         assert_eq!(*pane_count, 5);
-        let (depth, state_bytes) = summary_shape(family, StateInputRows::UNKNOWN);
+        // Each pane sees its series' 60 samples: one minute of 10 000 rows
+        // per second over 10 000 series.
+        let samples = StateInputRows {
+            rows_per_state: Some(60),
+            non_negative: false,
+        };
+        let (depth, state_bytes) = summary_shape(family, samples);
         let recurrence = [repeating(MINUTE)];
         let without_memory = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let work = &price(dag, &recurrence, &arriving(10_000.0), &without_memory)
@@ -9258,9 +9390,13 @@ mod tests {
             .average_memory_bytes
         };
         let formula = memory(None);
-        let half = memory(Some(
-            sketch_shape(&kll, StateInputRows::UNKNOWN).1 as f64 / 2.0,
-        ));
+        // The formula's state: each pane sees its series' 60 samples (one
+        // minute of 10 000 rows per second over 10 000 series).
+        let samples = StateInputRows {
+            rows_per_state: Some(60),
+            non_negative: false,
+        };
+        let half = memory(Some(sketch_shape(&kll, samples).1 as f64 / 2.0));
         assert!(half < formula && half > 0.0, "{half} vs {formula}");
     }
 

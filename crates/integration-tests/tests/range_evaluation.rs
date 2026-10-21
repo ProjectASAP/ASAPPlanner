@@ -119,8 +119,8 @@ fn with_chain(run: &Run, wanted: Materialization) -> String {
 /// (2.1 → 128.1 cost/s), the panes rebuilt per step (2.18333 → 133.18333)
 /// and the exact plan (2.4 → 146.4) cost 61 times as much. The kept panes
 /// (B3) are built once per request (one new 1-min pane) but merged at every
-/// step, and keep 64 older panes instead of 4 (1 h + 5 min of panes): 8,884.53
-/// → 142,151.53. B1 keeps 66 instead of 6: 13,326.53 → 146,593.53. The
+/// step, and keep 64 older panes instead of 4 (1 h + 5 min of panes): 436.53
+/// → 6,983.53. B1 keeps 66 instead of 6: 654.53 → 7,201.53. The
 /// whole-window KLL is still selected.
 #[test]
 fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
@@ -132,8 +132,8 @@ fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
         ("P1", 2.4, 146.4),
         ("P2", 2.1, 128.1),
         ("P3", 2.183_333_333_333_333, 133.183_333_333_333_37),
-        ("P3-m1", 13_326.530_002_066_667, 146_593.530_002_066_7),
-        ("P3-m2", 8_884.53, 142_151.53),
+        ("P3-m1", 654.530_002_066_667, 7_201.530_002_066_7),
+        ("P3-m2", 436.53, 6_983.53),
     ] {
         assert!(close(cost(&none, id), before), "{id}: {}", cost(&none, id));
         assert!(close(cost(&range, id), after), "{id}: {}", cost(&range, id));
@@ -144,10 +144,10 @@ fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
     }
     let memory = |run: &Run, id: &str| run.selection.costs[id].usage.average_memory_bytes;
     // B3: 4 → 64 panes kept between requests; B1: 6 → 66 panes kept.
-    assert_eq!(memory(&none, "P3-m2"), 71_072_000_000.0);
-    assert_eq!(memory(&range, "P3-m2"), 71_072_000_000.0 / 4.0 * 64.0);
-    assert_eq!(memory(&none, "P3-m1"), 106_608_000_000.0);
-    assert_eq!(memory(&range, "P3-m1"), 106_608_000_000.0 / 6.0 * 66.0);
+    assert_eq!(memory(&none, "P3-m2"), 3_488_000_000.0);
+    assert_eq!(memory(&range, "P3-m2"), 3_488_000_000.0 / 4.0 * 64.0);
+    assert_eq!(memory(&none, "P3-m1"), 5_232_000_000.0);
+    assert_eq!(memory(&range, "P3-m1"), 5_232_000_000.0 / 6.0 * 66.0);
     assert_eq!(range.selection.selected, "P2");
 }
 
@@ -217,7 +217,7 @@ fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
 
 /// (d) Without a range evaluation nothing changes: Pattern B's pinned
 /// costs (#509 Example 3 and 4: whole-window KLL 2.1, panes 2.18333, B3
-/// 8,884.53, B1 106.6 GB kept) are as before, and a range of one step per
+/// 436.53, B1 5.232 GB kept) are as before, and a range of one step per
 /// request (`span_ms: 0`) prices exactly as no range.
 #[test]
 fn no_range_evaluation_leaves_every_price_unchanged() {
@@ -225,10 +225,10 @@ fn no_range_evaluation_leaves_every_price_unchanged() {
     let none = run_promql_for(&pattern_b_with(None), &deployment);
     assert!(close(cost(&none, "P2"), 2.1));
     assert!(close(cost(&none, "P3"), 2.1 + 5e6 * 1e-6 / 60.0));
-    assert!(close(cost(&none, "P3-m2"), 8_884.53));
+    assert!(close(cost(&none, "P3-m2"), 436.53));
     assert_eq!(
         none.selection.costs["P3-m1"].usage.average_memory_bytes,
-        106_608_000_000.0
+        5_232_000_000.0
     );
     let one_step = run_promql_for(
         &pattern_b_with(Some(RangeEvaluation {

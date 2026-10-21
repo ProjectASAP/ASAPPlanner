@@ -449,13 +449,14 @@ fn cluster(memory_gb: u64, objective: ClusterObjective) -> CostModel {
 
 /// Each cost model chooses what its deployment pays for. Cost model 1
 /// (usage over time) picks the KLL rebuilt every minute: it uses memory only
-/// while it runs, and B1 pays for 107 GB of panes every second. Cost model 2
+/// while it runs, and B1 pays for 5.2 GB of panes every second. Cost model 2
 /// (provisioned capacity) picks the exact plan: every candidate needs one
 /// core for its evaluation, and the exact plan's peak memory (192 MB of
-/// per-series values) is the smallest, while the KLL's 1M states take
-/// 17.8 GB at once. Cost model 3 (own cluster, lowest latency) picks B1 when
-/// its 124 GB fit, since merging maintained panes takes 7 ms against 126 ms
-/// for rebuilding; in 64 GB, B1 is invalid and the KLL is fastest.
+/// per-series values) is the smallest, while the KLL's 1M states, each
+/// grown for its 20 samples, take 1 GB at once. Cost model 3 (own cluster,
+/// lowest latency) picks B1 when its 6.1 GB fit, since merging maintained
+/// panes takes 7 ms against 126 ms for rebuilding; in 4 GB, B1 is invalid
+/// and the KLL is fastest.
 #[test]
 fn stage3_plan_selection_b_cost_models_choose_differently() {
     let usage_over_time =
@@ -478,7 +479,7 @@ fn stage3_plan_selection_b_cost_models_choose_differently() {
         .values()
         .all(|c| c.cost_per_second.is_none()));
 
-    let small = pattern_b_under(cluster(64, ClusterObjective::LowestLatency));
+    let small = pattern_b_under(cluster(4, ClusterObjective::LowestLatency));
     assert_eq!(small.selection.selected, ids.whole_window_kll);
     let invalid = small.invalid();
     let b1 = invalid[ids.b1.as_str()];

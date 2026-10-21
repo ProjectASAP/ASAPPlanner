@@ -58,8 +58,8 @@ evaluations) is offered when the deployment declares
 adds `MatAtQueryKeptAcrossEvaluations` for a tumbling-pane chain that builds
 one new pane per evaluation. Pattern A's shared EH needs window segments shared across
 queries (#628, #634), so A1–A3 do not exist yet. B3's
-4 kept panes plus the newest cost 8,884.53 per second under cost model 1,
-between B2 (2.183) and B1 (13,326.53).
+4 kept panes plus the newest cost 436.53 per second under cost model 1,
+between B2 (2.183) and B1 (654.53).
 
 ## Invariants and tests
 
@@ -102,7 +102,7 @@ it.
 | B1 builds at ingestion time; its merge and estimate run at query time | `stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time` | passes |
 | B3 runs nothing at ingestion time | `stage2_physical_asap_optimization_b_b3_keeps_query_time_windows` | passes |
 | The sliding KLL yields exactly ingestion time and query time, kept | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (#522) |
-| Each cost model chooses what its deployment pays for: cost model 1 the whole-window KLL; cost model 2 the exact plan (smallest peak memory); cost model 3 with lowest latency B1 in 256 GB, and the whole-window KLL in 64 GB, where B1 is invalid on peak memory | `stage3_plan_selection_b_cost_models_choose_differently` | passes |
+| Each cost model chooses what its deployment pays for: cost model 1 the whole-window KLL; cost model 2 the exact plan (smallest peak memory); cost model 3 with lowest latency B1 in 256 GB, and the whole-window KLL in 4 GB, where B1 is invalid on peak memory | `stage3_plan_selection_b_cost_models_choose_differently` | passes |
 | Under cost model 3, the Pareto front over peak memory, disk and latency is {exact, whole-window KLL, B1} and B1 is selected; B2 is dominated by the whole-window KLL; least memory selects the exact plan | `stage3_plan_selection_b_pareto_front_over_memory_disk_and_latency` | passes |
 
 ### Selection direction, relative to the cost model
@@ -111,7 +111,7 @@ it.
   more of the same work. B2 also rebuilds more per evaluation than B1 and B3,
   but it keeps nothing between evaluations, so B2 ≥ B1, B3 holds only under a
   model that charges rebuilds more than kept state. Cost model 1 does not:
-  B2 costs 2.183 per second, B3 8,884.5 and B1 13,326.5 (see the table
+  B2 costs 2.183 per second, B3 436.5 and B1 654.5 (see the table
   above).
 * A1 ≤ A2 as given, and B1 ≤ B3, depend on the cost model (cost model 1, 2
   or 3). The doc's reasons are
