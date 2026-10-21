@@ -47,7 +47,7 @@ workload itself.
 | Logical ASAP-aware optimization, Pass 1 | Each computation: exact, a specialized summary, UnivMon. 3 × 3 × 3 = **27** | Q1: exact, HLL, KMV, UnivMon (no Theta: `asap_sketchlib` has no Theta sketch). Q2, Q3: exact, UnivMon (no specialized entropy or norm summary). 4 × 2 × 2 = **16** |
 | Logical ASAP-aware optimization, Pass 2 | Summary-capability rule: + 1 (one UnivMon for all three, sized for ε = 0.01) + 9 (3 pairs share a UnivMon × 3 options of the third). Independent kept. **37**. Window composition left out. | Identical-expression rule (Q2 and Q3's shared per-source count, and the shared scan) and summary-capability rule (one UnivMon for two of the queries or all three, sized with each parameter's largest value among its readers): **82** |
 | Physical ASAP-aware optimization | Same options as Example 1: no window form → rebuilt from raw samples each refresh. | Each logical candidate with every sub-DAG `NotMaterialized`, plus `MatAtQuery(Memory)` for each summary build two or more queries read: **184** |
-| Plan selection | One UnivMon sized for ε = 0.01 vs three separate summaries; the shared one usually wins (one update per flow record instead of three). | 164 invalid: HLL or UnivMon for Q1 (120), whose bound has failure probability None without a distinct bound for `flows`, and UnivMon for Q2 (44), whose entropy has no guarantee. 20 valid. P1, all exact, is selected at 6.08 per second (cost model 1); KMV for Q1 costs the same to three decimals; the shared per-source count costs 7.44 rebuilt for each query and 7.04 kept `MatAtQuery`; UnivMon for Q3 costs 8.08. |
+| Plan selection | One UnivMon sized for ε = 0.01 vs three separate summaries; the shared one usually wins (one update per flow record instead of three). | 174 invalid: HLL or UnivMon for Q1 (120), whose failure probability is unknown without a distinct bound for `flows` (UnivMon's is at best the paper's 0.3, above δ = 0.01); UnivMon for Q2 (44), whose entropy has no guarantee; and UnivMon for Q3 (10), whose failure probability is at best 0.3. 10 valid. P1, all exact, is selected at 6.08 per second (cost model 1); KMV for Q1 costs the same to three decimals; the shared per-source count costs 7.44 rebuilt for each query and 7.04 kept `MatAtQuery`. |
 
 ## Invariants and tests
 
@@ -98,10 +98,10 @@ evaluation.
 | The selected plan is the cheapest valid one | `stage3_plan_selection_selects_cheapest_valid` | passes |
 | Each node of a valid candidate is charged once per consuming query while `NotMaterialized`, once when materialized | `stage3_plan_selection_charges_each_node_per_consuming_query` | passes |
 | No candidate builds a Theta sketch | `stage3_plan_selection_has_no_theta_candidate` | passes |
-| A UnivMon estimate has a guarantee, so it is judged against its target instead of rejected for having none | `stage3_plan_selection_judges_univmon_with_an_accuracy_model` | ignored: needs a UnivMon entropy accuracy model; L2 and the distinct count have one |
+| A UnivMon estimate has a guarantee, so it is judged against its target instead of rejected for having none | `stage3_plan_selection_judges_univmon_with_an_accuracy_model` | ignored: needs a UnivMon entropy accuracy model; L2 and the distinct count have the paper's |
 | Given a distinct bound for the source, classic HLL's failure probability is bound and Q1's HLL is accepted; a larger bound enlarges its precision, also in a tumbling-pane chain | `stage3_plan_selection_accepts_hll_given_a_distinct_bound`, `…_enlarges_hll_for_a_larger_distinct_bound`, `…_enlarges_tumbling_pane_hll` | passes |
 | KMV certifies Q1 for any failure probability, without a distinct bound | `stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound` | passes |
-| UnivMon's distinct count is certified given a distinct bound its layers cover; its L2 is certified from layer 0 alone, also through SQL Q3's exact population count and `CASE` | `stage3_plan_selection_accepts_univmon_distinct_given_a_distinct_bound`, `…_rejects_univmon_distinct_past_its_layers`, `…_accepts_univmon_l2` | passes |
+| UnivMon's L2 and distinct count carry the paper's guarantee, relative ε at failure probability 0.3, given a distinct bound its layers cover (`⌈log2 n⌉ + 1`), and are sized by its conditions; L2 also through SQL Q3's exact population count and `CASE`. A target below 0.3, Example 2's own δ = 0.01, entropy, a missing bound and one past 19 layers are rejected | `stage3_plan_selection_accepts_univmon_l2_and_distinct_at_the_paper_failure_probability`, `…_rejects_univmon_below_the_paper_failure_probability`, `…_rejects_univmon_entropy_at_the_paper_failure_probability`, `…_rejects_univmon_past_its_layers`, `…_rejects_univmon_at_example2s_targets`, `…_accepts_sql_univmon_l2_beside_its_exact_population_count` | passes |
 | One materialized UnivMon for all three costs no more than three separate UnivMons | `stage3_plan_selection_shared_univmon_costs_no_more_than_three` | ignored: needs a UnivMon entropy accuracy model and keeping the shared UnivMon materialized |
 | Selection direction: the selected plan has at most one UnivMon, because one shared UnivMon dominates several over the same input | `stage3_plan_selection_selected_plan_has_at_most_one_univmon` | passes |
 | The selected KMV plan's Q1 runs in the executor | `stage3_plan_selection_selected_kmv_plan_executes_end_to_end` | passes |
@@ -136,11 +136,13 @@ strictest size.
    largest value among them.
 6. **Accuracy.** Plan selection accepts an output whose guarantee meets the
    target or for which the deployment has evidence. UnivMon's L2 and
-   distinct count are certified (the distinct count only given a distinct
-   bound for the source); its entropy is not, so every UnivMon candidate for
-   Q2 is invalid. HLL's and UnivMon's distinct-count failure probability
-   stays unknown without the deployment's bound on distinct items per
-   evaluation (`sources["flows"].max_distinct_per_evaluation`), which this
+   distinct count carry only the paper's guarantee: relative error ε at
+   failure probability 0.3, given the source's bound on distinct items per
+   evaluation (`sources["flows"].max_distinct_per_evaluation`), which sets
+   its layers. Example 2's targets ask for δ = 0.01, so every UnivMon
+   candidate is invalid; the tests that accept UnivMon raise the target to
+   δ = 0.3 over a small source. Its entropy has no guarantee. HLL's
+   distinct-count failure probability also needs that bound, which this
    example does not declare; KMV needs none. The doc treats a distinct
    summary as valid.
 7. **Pairwise count.** "The third keeps any of its own 3 options" includes its

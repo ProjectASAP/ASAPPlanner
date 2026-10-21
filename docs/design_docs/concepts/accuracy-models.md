@@ -122,7 +122,7 @@ The built-in models currently include:
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
 | CountSketch | L2-normalized frequency bound and median concentration bound, requiring valid odd depth |
 | KMV / Theta | Parameter-derived cardinality bounds using the registered variance/Chebyshev model at 99% confidence |
-| UnivMon | Exact unit-update total for the supported evaluation; no universal guarantee for all its statistics |
+| UnivMon | Exact unit-update total. L2 and the distinct count: the paper's guarantee only (arXiv:1011.2571, Theorem 4.2), relative error ε at failure probability 0.3, when the layers cover the source's distinct bound (`⌈log2 n⌉ + 1`), the heap holds `φ³/ε²` keys and the Count Sketch meets the planner's rule; a smaller failure probability is never met. Entropy has no guarantee |
 | Other families/evaluations | No default certificate where no accuracy model is registered |
 
 This table describes Planner's registered contracts, not independent

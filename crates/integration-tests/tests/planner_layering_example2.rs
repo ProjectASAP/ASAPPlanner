@@ -29,6 +29,8 @@ use asap_types::workload::{
     QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
     SourceFacts, SqlDialect,
 };
+use asap_logical_asap_optimization::accuracy::estimators::univmon;
+use asap_types::ir::flat::flatten;
 use planner_layering_common::*;
 
 // ── Example 2 workload ───────────────────────────────────────────────────
@@ -458,7 +460,7 @@ fn stage1_logical_asap_optimization_shared_univmon_takes_each_parameters_largest
             sketch_cols: want[2],
             layers: want[3] as u8,
             // Ignored by equality.
-            distinct_failure_probability: None,
+            relative_error: None,
         };
         for c in &run.logical {
             if let Some(params) = shared_univmon(c, &queries) {
@@ -801,74 +803,204 @@ fn univmon_only_candidates(run: &Run, query: usize) -> Vec<&str> {
     ids
 }
 
-/// Q1's UnivMon is sized for (0.02, 0.01): a 337,500-key heap on 19
-/// layers. Its distinct count is certified once the deployment bounds the
-/// source's distinct items, both at 9 (the top layer is always complete)
-/// and at 10M (7 layers suffice, where classic HLL certifies nothing);
-/// without a bound its failure probability stays unknown.
+/// The stand-in with Q`query`'s target set to `(ε, δ)` per value and the
+/// deployment's distinct bound for its source, when given. The other two
+/// keep Example 2's targets.
+fn standin_at(query: usize, (epsilon, delta): (f64, f64), bound: Option<u64>) -> PlanningWorkload {
+    let mut workload = standin_with_distinct_bound(bound);
+    workload
+        .query_workload
+        .repeating_queries
+        .as_mut()
+        .expect("repeating queries")[query]
+        .requirements
+        .accuracy = AccuracyTarget {
+        accuracy_scope: AccuracyScope::PerValue,
+        ..AccuracyTarget::max_error(epsilon).failure_probability(delta)
+    };
+    workload
+}
+
+fn run_of(workload: &PlanningWorkload) -> Run {
+    run_stages(workload, lower_promql(workload))
+}
+
+/// The UnivMon of candidate `id` and its root guarantee for Q`query`, as
+/// plan selection resizes them for `workload`'s distinct bound, with the
+/// failure probability bound for `bound`.
+fn sized_univmon(
+    run: &Run,
+    workload: &PlanningWorkload,
+    id: &str,
+    query: usize,
+    bound: u64,
+) -> (SketchParams, Option<(f64, f64)>) {
+    let targets: Vec<_> = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.requirements.accuracy.clone())
+        .collect();
+    let roots = asap_plan_selection::resize_for_failure_probability(
+        &run.physical(id).candidate.roots,
+        &targets,
+        workload.data_workload.as_ref().expect("data workload"),
+    )
+    .expect("resized");
+    let params = sketch_builds(&flatten(&roots).0)
+        .into_iter()
+        .find(|(_, algorithm, _)| *algorithm == SketchAlgorithm::UnivMon)
+        .expect("a UnivMon")
+        .2;
+    let QueryRoot::Operator(root) = &roots[query] else {
+        panic!("an operator root")
+    };
+    let guarantee = root.guarantee.as_ref().map(|guarantee| {
+        let bound = guarantee.bind(&|statistic| {
+            let (layers, _) = univmon::parse_layers_statistic(statistic)?;
+            Some(univmon::failure_probability(layers, bound))
+        });
+        (
+            bound.spec.error.evaluate().expect("an error bound"),
+            bound
+                .spec
+                .failure_probability
+                .evaluate()
+                .expect("a failure probability"),
+        )
+    });
+    (params, guarantee)
+}
+
+/// UnivMon's guarantee is the paper's: relative error ε at failure
+/// probability 0.3, given layers that cover the source's distinct items
+/// (Braverman–Ostrovsky, arXiv:1011.2571, Theorem 4.2). Q3's L2 and Q1's
+/// distinct count at (0.1, 0.3) over a source of at most 16 distinct items
+/// are accepted, sized by the paper's conditions: `⌈log2 16⌉ + 1 = 5`
+/// layers, a heap of `5³/0.1² = 12,500` and a 1 × 2^25 Count Sketch.
 #[test]
-fn stage3_plan_selection_accepts_univmon_distinct_given_a_distinct_bound() {
-    for bound in [9, 10_000_000] {
-        let run = pipeline_with_distinct_bound(Some(bound));
-        for id in univmon_only_candidates(&run, 0) {
-            assert!(
-                run.cost(id).is_some(),
-                "{bound} {id}: {:?}",
-                run.invalid().get(id)
+fn stage3_plan_selection_accepts_univmon_l2_and_distinct_at_the_paper_failure_probability() {
+    for query in [2, 0] {
+        let workload = standin_at(query, (0.1, 0.3), Some(16));
+        let run = run_of(&workload);
+        for id in univmon_only_candidates(&run, query) {
+            assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
+            assert_eq!(
+                sized_univmon(&run, &workload, id, query, 16),
+                (
+                    SketchParams::UnivMon {
+                        heap_size: 12_500,
+                        sketch_rows: 1,
+                        sketch_cols: 1 << 25,
+                        layers: 5,
+                        relative_error: Some(0.1),
+                    },
+                    Some((0.1, 0.3))
+                ),
+                "{id}"
             );
         }
     }
-    let unbounded = pipeline_with_distinct_bound(None);
-    let invalid = unbounded.invalid();
-    for id in univmon_only_candidates(&unbounded, 0) {
+}
+
+/// A target asking for a failure probability below the paper's 0.3 is
+/// not met by UnivMon: Q3's L2 and Q1's distinct count at (0.1, 0.05) are
+/// rejected, with the same bound and sizing as at 0.3.
+#[test]
+fn stage3_plan_selection_rejects_univmon_below_the_paper_failure_probability() {
+    for query in [2, 0] {
+        let run = run_of(&standin_at(query, (0.1, 0.05), Some(16)));
+        let invalid = run.invalid();
+        for id in univmon_only_candidates(&run, query) {
+            let reason = invalid.get(id).unwrap_or_else(|| panic!("{id} is invalid"));
+            assert!(
+                reason.starts_with(&format!("q{}:", query + 1)),
+                "{id}: {reason}"
+            );
+        }
+    }
+}
+
+/// Entropy has no UnivMon guarantee even at (0.1, 0.3): the paper's
+/// statement bounds `Σ f log f` relatively, which bounds the entropy
+/// `log2 m − Σ f log2 f / m` only to `± ε log2 m`, and the Count Sketch
+/// rule does not cover `x log x`'s heavy keys.
+#[test]
+fn stage3_plan_selection_rejects_univmon_entropy_at_the_paper_failure_probability() {
+    let run = run_of(&standin_at(1, (0.1, 0.3), Some(16)));
+    let invalid = run.invalid();
+    for id in univmon_only_candidates(&run, 1) {
         let reason = invalid.get(id).unwrap_or_else(|| panic!("{id} is invalid"));
-        assert!(reason.starts_with("q1:"), "{id}: {reason}");
         assert!(
-            reason.contains("failure probability None"),
+            reason.starts_with("q2: the output has no guarantee"),
             "{id}: {reason}"
         );
     }
 }
 
-/// A distinct bound past what 19 layers cover for Q1's heap
-/// (337,500 · 2^17) certifies nothing.
+/// Without the source's distinct bound, or with one past what the
+/// library's 19 layers cover (`⌈log2 n⌉ + 1 ≤ 19`, so `n ≤ 2^18`), the
+/// layers condition is not met and UnivMon is rejected; at `n = 2^18` and
+/// (0.5, 0.3) it is accepted on 19 layers.
 #[test]
-fn stage3_plan_selection_rejects_univmon_distinct_past_its_layers() {
-    let run = pipeline_with_distinct_bound(Some(337_500 << 17 | 1));
-    let invalid = run.invalid();
-    for id in univmon_only_candidates(&run, 0) {
-        let reason = invalid.get(id).unwrap_or_else(|| panic!("{id} is invalid"));
-        assert!(reason.starts_with("q1:"), "{id}: {reason}");
+fn stage3_plan_selection_rejects_univmon_past_its_layers() {
+    let accepted = run_of(&standin_at(0, (0.5, 0.3), Some(1 << 18)));
+    for id in univmon_only_candidates(&accepted, 0) {
+        assert!(
+            accepted.cost(id).is_some(),
+            "{id}: {:?}",
+            accepted.invalid().get(id)
+        );
+    }
+    for bound in [None, Some((1 << 18) + 1), Some(10_000_000)] {
+        let run = run_of(&standin_at(0, (0.5, 0.3), bound));
+        let invalid = run.invalid();
+        for id in univmon_only_candidates(&run, 0) {
+            let reason = invalid
+                .get(id)
+                .unwrap_or_else(|| panic!("{bound:?}: {id} is invalid"));
+            assert!(reason.starts_with("q1:"), "{bound:?} {id}: {reason}");
+        }
     }
 }
 
-/// Q3's L2 at (0.01, 0.01) is certified from layer 0 alone: a 5 × 56,817
-/// Count Sketch on one layer, with no data-workload statistic.
+/// At Example 2's own targets (δ = 0.01) and 10M source IPs, no UnivMon
+/// is accepted: δ is below the paper's 0.3.
 #[test]
-fn stage3_plan_selection_accepts_univmon_l2() {
-    let run = pipeline();
-    assert_eq!(
-        own_univmon(&run, 2),
-        SketchParams::UnivMon {
-            heap_size: 1,
-            sketch_rows: 5,
-            sketch_cols: 56_817,
-            layers: 1,
-            distinct_failure_probability: None,
+fn stage3_plan_selection_rejects_univmon_at_example2s_targets() {
+    let run = pipeline_with_distinct_bound(Some(10_000_000));
+    let invalid = run.invalid();
+    for query in 0..3 {
+        for id in univmon_only_candidates(&run, query) {
+            assert!(invalid.contains_key(id), "Q{}: {id}", query + 1);
         }
-    );
-    for id in univmon_only_candidates(&run, 2) {
-        assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
     }
 }
 
 /// SQL Q3's L2 through UnivMon keeps its guarantee: the exact population
 /// count joined beside it (a cross join, no key) and the `CASE` deciding the
 /// empty-input NULL on that exact count keep the estimate's guarantee, so
-/// plan selection accepts it.
+/// plan selection accepts it, at the paper's failure probability (0.1, 0.3)
+/// over at most 16 source IPs.
 #[tokio::test]
 async fn stage3_plan_selection_accepts_sql_univmon_l2_beside_its_exact_population_count() {
-    let workload = sql_workload();
+    let mut workload = sql_workload();
+    let q3 = &mut workload
+        .query_workload
+        .repeating_queries
+        .as_mut()
+        .expect("repeating queries")[2];
+    q3.requirements.accuracy = AccuracyTarget {
+        accuracy_scope: AccuracyScope::WholeResult,
+        ..AccuracyTarget::max_error(0.1).failure_probability(0.3)
+    };
+    workload
+        .data_workload
+        .as_mut()
+        .expect("data workload")
+        .sources
+        .get_mut("flows")
+        .expect("flows")
+        .max_distinct_per_evaluation = Some(16);
     let run = run_stages(&workload, lower_sql(&workload).await);
     for id in univmon_only_candidates(&run, 2) {
         assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));

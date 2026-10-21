@@ -23,14 +23,19 @@ VictoriaMetrics build. In particular, the norm of the numeric sample vector
 would be sqrt(33), which is a different operation and must not use this
 readout. External differential tests must establish the engine's semantics.
 
-The existing `asap_sketchlib::UnivMon` implementation supplies `calc_card`,
-`calc_l1`, `calc_l2`, and `calc_entropy`. Its entropy uses log base 2. Its L1
-counter is exact for nonnegative updates; the other estimators are heuristic.
-The parameter contract records heap size, sketch rows, sketch columns and
-number of layers. Default dimensions define a candidate configuration, not
-an epsilon guarantee. A deployment accuracy model must supply calibrated
-evidence before an approximate readout can satisfy an accuracy target. Without
-that evidence, the Planner keeps the exact sub-DAG. HLL/Theta/KMV remain
+The `asap_sketchlib::UnivMon` implementation supplies the distinct count, L1,
+L2 and entropy, each a G-sum of the paper's Algorithm 2. Its entropy uses log
+base 2. Its L1 counter is exact for nonnegative updates. The parameter
+contract records heap size, sketch rows, sketch columns, number of layers and
+the relative error it was sized for. The Planner's accuracy rule is the
+paper's guarantee only (Braverman–Ostrovsky, arXiv:1011.2571, Algorithm 4.1,
+Lemma 3.8, Theorem 4.2): L2 and the distinct count are within relative error
+ε with failure probability 0.3 when the layers cover the source's distinct
+bound, the heap holds `φ³/ε²` keys and the Count Sketch estimates the heap's
+heavy keys within `(1 ± ε)`. A target with a failure probability below 0.3
+is not met. Entropy has no guarantee: a deployment accuracy model must supply
+calibrated evidence before it can satisfy an accuracy target. Without that,
+the Planner keeps the exact sub-DAG. HLL/Theta/KMV remain
 cardinality alternatives, and exact count remains the cheaper first count
 candidate.
 

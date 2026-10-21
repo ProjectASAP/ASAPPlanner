@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::accuracy::estimators::local_guarantee;
-use asap_logical_asap_optimization::accuracy::satisfies;
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::properties::AccuracyMetric;
@@ -32,10 +31,11 @@ fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
 
 #[test]
 fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees() {
-    // Pass 1 sizes UnivMon per readout: the distinct count and L2 get their
-    // own shapes, while the total and entropy keep the baseline shape and so
-    // share one state. Sharing across readouts is the summary-capability
-    // rule's job.
+    // Pass 1 sizes UnivMon per readout: the distinct count and L2 follow
+    // one rule (the paper's conditions at their ε), so at the same ε they
+    // share one state, while the total and entropy keep the baseline shape
+    // and share another. Sharing across readouts is otherwise the
+    // summary-capability rule's job.
     let accuracy = AccuracyTarget::max_error(0.02);
     let roots: Vec<_> = [
         ("distinct_over_time(m[5m])", accuracy.clone()),
@@ -57,7 +57,8 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
         Rc::clone(summary_input)
     };
     assert!(Rc::ptr_eq(&state(1), &state(3)), "total and entropy share");
-    for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+    assert!(Rc::ptr_eq(&state(0), &state(2)), "distinct and L2 share");
+    for (a, b) in [(0, 1), (1, 2)] {
         assert!(
             !Rc::ptr_eq(&state(a), &state(b)),
             "{a} and {b} are sized apart"
@@ -79,16 +80,16 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
         assert_eq!(input.weight, SummaryInputExpr::Constant(1.0));
         let guarantee = root.guarantee.as_ref();
         match index {
-            // The distinct count's failure probability waits for the
-            // source's distinct bound, which Stage 1 does not read.
-            0 => {
-                let guarantee = guarantee.expect("a distinct-count guarantee");
+            // The layers wait for the source's distinct bound, which Stage 1
+            // does not read: it sizes for the 19 layers the library builds,
+            // where no Count Sketch within the hash budget meets the rule at
+            // ε = 0.02, so the guarantee fails with probability 1 until plan
+            // selection resizes it for the bound.
+            0 | 2 => {
+                let guarantee = guarantee.expect("a distinct-count or L2 guarantee");
                 assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
-                assert_eq!(
-                    guarantee.spec.error.evaluate().map(|e| e <= 0.02),
-                    Some(true)
-                );
-                assert_eq!(guarantee.spec.failure_probability.evaluate(), None);
+                assert_eq!(guarantee.spec.error.evaluate(), Some(0.02));
+                assert_eq!(guarantee.spec.failure_probability.evaluate(), Some(1.0));
                 assert!(local_guarantee(family, query).is_none());
             }
             1 => {
@@ -97,15 +98,6 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
                     SketchStatistic::PointCount { value: None, .. }
                 ));
                 assert!(guarantee.is_some_and(|g| g.is_exact()));
-            }
-            2 => {
-                let guarantee = guarantee.expect("an L2 guarantee");
-                assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
-                assert!(satisfies(
-                    guarantee,
-                    &AccuracyTarget::max_error(0.02).accuracy_metric(AccuracyMetric::Relative)
-                ));
-                assert!(guarantee.spec.failure_probability.evaluate().unwrap() <= 0.01);
             }
             // Entropy has no certified bound, so composition certifies nothing.
             _ => {
@@ -121,7 +113,8 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
 fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     // An unmeasured heuristic remains inspectable but is never certified or
     // automatically selected for a caller-visible bounded-error result.
-    // L2 is certified; entropy is not.
+    // L2 has the paper's guarantee (given the source's distinct bound);
+    // entropy has none.
     for query in ["entropy_over_time(m[5m])"] {
         for target in [
             AccuracyTarget::exact(),

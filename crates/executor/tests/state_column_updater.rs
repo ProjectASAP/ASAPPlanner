@@ -142,7 +142,7 @@ fn value_families() -> Vec<FieldDataType> {
                 sketch_rows: 5,
                 sketch_cols: 128,
                 layers: 4,
-                distinct_failure_probability: None,
+                relative_error: None,
             },
         ),
     ]

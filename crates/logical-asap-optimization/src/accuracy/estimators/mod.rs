@@ -82,13 +82,14 @@ pub fn local_guarantee(
 /// on enlarged, never reduced, so that each value it answers fails with
 /// probability at most `delta` and its error bound is unchanged or smaller
 /// (#669b): Count-Min's depth, Count Sketch's depth (the binomial tail of
-/// its median), KLL's failure probability (its δ scale), a distinct count
-/// UnivMon's heap, and KMV's `k` at the relative error it was sized for
-/// (#694). Other parameters are returned as they are: DDSketch never fails;
-/// classic HLL's failure probability comes from its source's distinct bound
+/// its median), KLL's failure probability (its δ scale), and KMV's `k` at
+/// the relative error it was sized for (#694). Other parameters are
+/// returned as they are: DDSketch never fails; classic HLL's failure
+/// probability comes from its source's distinct bound
 /// ([`hll::min_precision`]); Theta is calibrated at a fixed 99%; a KMV not
-/// sized for a relative error and an L2 or entropy UnivMon are not
-/// enlarged.
+/// sized for a relative error is not enlarged; UnivMon's failure
+/// probability is the paper's 0.3 whatever its size
+/// ([`univmon::FAILURE_PROBABILITY`]).
 pub fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
     if !(delta > 0.0 && delta < 1.0) {
         return params.clone();
@@ -128,7 +129,6 @@ pub fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchPara
             k: (*k).max(cardinality::kmv_k(*eps, delta)),
             relative_error: Some(*eps),
         },
-        SketchParams::UnivMon { .. } => univmon::with_failure_probability(params, delta),
         _ => params.clone(),
     }
 }
@@ -140,7 +140,7 @@ pub(crate) fn size_params(
     delta: f64,
 ) -> SketchParams {
     match kind {
-        SketchAlgorithm::UnivMon => univmon::size_params(intent, eps, delta),
+        SketchAlgorithm::UnivMon => univmon::size_params(intent, eps),
         SketchAlgorithm::Kll => kll::size_params(eps, delta),
         SketchAlgorithm::Cms => SketchParams::Cms {
             width: cms::cms_width(eps),
@@ -254,22 +254,22 @@ pub(crate) fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchPar
                     sketch_rows,
                     sketch_cols,
                     layers,
-                    distinct_failure_probability,
+                    relative_error,
                 },
                 P::UnivMon {
                     heap_size: h,
                     sketch_rows: r,
                     sketch_cols: c,
                     layers: l,
-                    distinct_failure_probability: f,
+                    relative_error: f,
                 },
             ) => P::UnivMon {
                 heap_size: heap_size.max(*h),
                 sketch_rows: sketch_rows.max(*r),
                 sketch_cols: sketch_cols.max(*c),
                 layers: layers.max(*l),
-                // `None`: not sized for a distinct count.
-                distinct_failure_probability: min_recorded(distinct_failure_probability, *f),
+                // `None`: not sized for an error.
+                relative_error: min_recorded(relative_error, *f),
             },
             (
                 P::Kll {
@@ -409,18 +409,17 @@ mod shared_size_tests {
             size_for_all_readers(&[&univmon(256, 5, 1024, 16), &univmon(1, 7, 4096, 1)]),
             Some(univmon(256, 7, 4096, 16))
         );
-        // The distinct count's failure probability, where one was sized
-        // for, takes the smallest.
-        let distinct = |heap_size, delta| SketchParams::UnivMon {
+        // The relative error, where one was sized for, takes the smallest.
+        let distinct = |heap_size, eps| SketchParams::UnivMon {
             heap_size,
             sketch_rows: 1,
             sketch_cols: 1,
             layers: 19,
-            distinct_failure_probability: Some(delta),
+            relative_error: Some(eps),
         };
         let Some(SketchParams::UnivMon {
             heap_size,
-            distinct_failure_probability,
+            relative_error,
             ..
         }) = size_for_all_readers(&[
             &univmon(256, 5, 1024, 16),
@@ -431,7 +430,7 @@ mod shared_size_tests {
             unreachable!()
         };
         assert_eq!(
-            (heap_size, distinct_failure_probability),
+            (heap_size, relative_error),
             (4096, Some(0.001))
         );
         let kll = |k, failure_probability| SketchParams::Kll {
@@ -477,7 +476,7 @@ mod shared_size_tests {
             sketch_rows,
             sketch_cols,
             layers,
-            distinct_failure_probability: None,
+            relative_error: None,
         }
     }
 
@@ -561,34 +560,12 @@ mod tests {
         assert_eq!(with_failure_probability(&ddsketch, 1e-6), ddsketch);
     }
 
-    /// A distinct-count UnivMon grows its heap for a smaller failure
-    /// probability at no larger relative error.
+    /// UnivMon's failure probability is the paper's 0.3 whatever its
+    /// size: nothing is enlarged for a smaller one.
     #[test]
-    fn a_distinct_count_univmon_grows_its_heap() {
-        let params = size_params(SketchAlgorithm::UnivMon, &default_cardinality(), 0.05, 0.01);
-        let enlarged = with_failure_probability(&params, 1e-4);
-        let error = |p: &SketchParams| {
-            univmon::distinct_guarantee(p, "m")
-                .unwrap()
-                .spec
-                .error
-                .evaluate()
-                .unwrap()
-        };
-        let (
-            SketchParams::UnivMon { heap_size: k, .. },
-            SketchParams::UnivMon {
-                heap_size: grown,
-                distinct_failure_probability,
-                ..
-            },
-        ) = (&params, &enlarged)
-        else {
-            panic!("{enlarged:?}")
-        };
-        assert!(grown > k);
-        assert_eq!(*distinct_failure_probability, Some(1e-4));
-        assert!(error(&enlarged) <= error(&params) * (1.0 + 1e-9));
+    fn a_univmon_is_not_enlarged_for_a_failure_probability() {
+        let params = size_params(SketchAlgorithm::UnivMon, &default_cardinality(), 0.1, 0.3);
+        assert_eq!(with_failure_probability(&params, 1e-4), params);
     }
 
     /// Classic HLL's precision grows until its failure probability over the

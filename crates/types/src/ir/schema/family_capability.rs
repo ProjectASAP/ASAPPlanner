@@ -277,7 +277,7 @@ mod tests {
                 sketch_rows: 5,
                 sketch_cols: 1024,
                 layers: 16,
-                distinct_failure_probability: None,
+                relative_error: None,
             },
         ));
         for statistic in [

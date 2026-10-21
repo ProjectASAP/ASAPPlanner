@@ -223,7 +223,7 @@ fn family_capability_table() {
                     sketch_rows: depth,
                     sketch_cols: width,
                     layers: 8,
-                    distinct_failure_probability: None,
+                    relative_error: None,
                 },
             ),
             Some(Disjoint),
@@ -406,7 +406,7 @@ fn merged_error_depends_on_the_readout() {
             sketch_rows: 4,
             sketch_cols: 64,
             layers: 8,
-            distinct_failure_probability: None,
+            relative_error: None,
         },
     ));
     for (readout, error) in [
