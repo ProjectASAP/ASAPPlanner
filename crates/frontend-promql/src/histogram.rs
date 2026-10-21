@@ -1,7 +1,7 @@
 //! Sample-type metadata for the `histogram_quantile` discrimination (issue #79).
 //!
 //! Classic cumulative buckets use exact interpolation. The explicitly declared
-//! `RawSamples` extension permits generic quantile sketches; it is not standard
+//! `RawDataSamples` extension permits generic quantile sketches; it is not standard
 //! PromQL histogram semantics. Native samples are rejected until the IR has a
 //! native histogram sample type. Undeclared metrics require classic bucket
 //! evidence (`by (le)`, a `_bucket` metric, or an `le` matcher).
@@ -20,16 +20,16 @@ pub enum HistogramKind {
     /// Native histogram samples; currently rejected because the IR lacks their type.
     Native,
     /// Raw float samples the client retains — sketch-able. This is the case the
-    /// generic `Quantile` lowering exists for (a client holding raw samples can
+    /// generic `Quantile` lowering exists for (a client holding raw data samples can
     /// build a quantile sketch even though the user wrote `histogram_quantile`).
-    RawSamples,
+    RawDataSamples,
 }
 
 impl HistogramKind {
     /// Whether `histogram_quantile` over this kind lowers to the sketch-able
     /// generic `Quantile` (`true`) rather than exact bucket interpolation.
     pub fn is_sketchable(self) -> bool {
-        matches!(self, HistogramKind::RawSamples)
+        matches!(self, HistogramKind::RawDataSamples)
     }
 }
 
@@ -98,19 +98,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_explicit_raw_samples_are_sketchable() {
+    fn only_explicit_raw_data_samples_are_sketchable() {
         assert!(!HistogramKind::ClassicBucket.is_sketchable());
         assert!(!HistogramKind::Native.is_sketchable());
-        assert!(HistogramKind::RawSamples.is_sketchable());
+        assert!(HistogramKind::RawDataSamples.is_sketchable());
     }
 
     #[test]
     fn catalog_lookup() {
         let cat = HistogramCatalog::new()
             .with("classic", HistogramKind::ClassicBucket)
-            .with("raw", HistogramKind::RawSamples);
+            .with("raw", HistogramKind::RawDataSamples);
         assert_eq!(cat.kind_of("classic"), Some(HistogramKind::ClassicBucket));
-        assert_eq!(cat.kind_of("raw"), Some(HistogramKind::RawSamples));
+        assert_eq!(cat.kind_of("raw"), Some(HistogramKind::RawDataSamples));
         assert_eq!(cat.kind_of("unknown"), None);
     }
 

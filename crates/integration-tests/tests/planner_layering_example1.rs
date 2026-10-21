@@ -578,7 +578,7 @@ fn stage3_plan_selection_selects_one_and_explains_the_rest() {
 
 /// The exact Q2 is selected. Both heaps are invalid because a top-k output
 /// has no guarantee and the deployment has no evidence for it. Count-Min's
-/// weights are raw samples of `http_requests_total`, which the workload
+/// weights are raw data samples of `http_requests_total`, which the workload
 /// declares a counter, so they are non-negative.
 #[test]
 fn stage3_plan_selection_selects_exact_q2_and_rejects_both_heaps() {

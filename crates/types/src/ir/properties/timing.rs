@@ -1345,7 +1345,7 @@ mod tests {
     }
 
     /// A summary build with a filter never runs at ingestion time: an
-    /// ingestion-time build reads raw samples, which carry none of the
+    /// ingestion-time build reads raw data samples, which carry none of the
     /// query's columns the filter reads. An explicit `MatAtIngestion` is an
     /// error; the all-at-ingestion default leaves it at query time.
     #[test]

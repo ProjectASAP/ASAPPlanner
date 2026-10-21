@@ -11,9 +11,9 @@
 //!   Pass 2 candidate has one either (Pass 2 rules share, split into panes
 //!   or reuse existing builds; none adds a family or a readout). Exact
 //!   accumulators and plain exact execution are always supported;
-//! * whether raw samples are retained. If they are, Stage 3 counts them on
+//! * whether raw data samples are retained. If they are, Stage 3 counts them on
 //!   disk once per source, at the longest window a query-time scan of it
-//!   reads. If they are not, raw samples are not kept after they arrive, so
+//!   reads. If they are not, raw data samples are not kept after they arrive, so
 //!   a candidate that scans raw data at query time is invalid (the
 //!   rejection lists every such scan): only ingestion-time work reads raw
 //!   rows. Stored data (at rest or mixed) with no raw data retained is a
@@ -50,7 +50,7 @@ pub struct DeploymentCapabilities {
     /// it can answer from one; `None` (the default) supports every family
     /// and readout the planner can build.
     pub supported_summaries: Option<Vec<SupportedSummary>>,
-    /// Whether raw samples are kept for query-time scans; default `true`.
+    /// Whether raw data samples are kept for query-time scans; default `true`.
     pub raw_data_retained: bool,
     /// Whether a query-time result may be kept across evaluations
     /// (`MatAtQueryKeptAcrossEvaluations`); default `false`.

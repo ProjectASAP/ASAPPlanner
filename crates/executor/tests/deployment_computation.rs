@@ -97,13 +97,13 @@ fn raw_inputs(dag: &PhysicalASAPDAG) -> Vec<(u64, Arc<Schema>, String)> {
         .collect()
 }
 
-type Sample = (&'static str, &'static str, &'static str, i64, f64);
+type RawDataSample = (&'static str, &'static str, &'static str, i64, f64);
 
 /// Compile, round-trip, bind raw `(metric, job, instance, ts, value)` samples,
 /// and return the root's batches.
 fn execute(
     dag: &PhysicalASAPDAG,
-    samples: &[Sample],
+    samples: &[RawDataSample],
     end: i64,
 ) -> Result<Vec<asap_executor::runtime::SharedValue<Batch>>, String> {
     execute_relabeled(dag, samples, end, &BTreeMap::new())
@@ -113,7 +113,7 @@ fn execute(
 /// `(__name__, instance)` instead.
 fn execute_relabeled(
     dag: &PhysicalASAPDAG,
-    samples: &[Sample],
+    samples: &[RawDataSample],
     end: i64,
     relabel: &BTreeMap<&str, (&str, &str)>,
 ) -> Result<Vec<asap_executor::runtime::SharedValue<Batch>>, String> {
@@ -195,7 +195,7 @@ fn execute_relabeled(
 /// [`execute`], returning `(job, value)` rows of the root.
 fn run(
     dag: &PhysicalASAPDAG,
-    samples: &[Sample],
+    samples: &[RawDataSample],
     end: i64,
 ) -> Result<BTreeMap<String, f64>, String> {
     let mut rows = BTreeMap::new();
@@ -217,7 +217,7 @@ fn run(
     Ok(rows)
 }
 
-const SAMPLES: &[Sample] = &[
+const SAMPLES: &[RawDataSample] = &[
     ("m", "api", "a", 10_000, 4.),
     ("m", "api", "a", 50_000, 1.),
     ("m", "api", "b", 40_000, 7.),
@@ -294,7 +294,7 @@ fn scalar_literal_arithmetic_applies_to_grouped_values() {
 // unchecked division by zero yields +Inf as in PromQL.
 #[test]
 fn grouped_vector_arithmetic_matches_labels() {
-    let samples: &[Sample] = &[
+    let samples: &[RawDataSample] = &[
         ("a", "api", "x", 10_000, 6.),
         ("a", "api", "y", 20_000, 3.),
         ("a", "db", "x", 10_000, 1.),
@@ -395,7 +395,11 @@ fn per_series_comparisons_filter_or_return_bool() {
 
 /// [`execute`], returning per-series `(identity, value)` rows of the root,
 /// with NaN-aware formatting for comparison.
-fn run_series(dag: &PhysicalASAPDAG, samples: &[Sample], end: i64) -> Result<String, String> {
+fn run_series(
+    dag: &PhysicalASAPDAG,
+    samples: &[RawDataSample],
+    end: i64,
+) -> Result<String, String> {
     let mut rows = BTreeMap::new();
     for batch in execute(dag, samples, end)? {
         let schema = batch.schema();
@@ -431,7 +435,7 @@ fn counter(
     job: &'static str,
     base: f64,
     step: f64,
-) -> impl Iterator<Item = Sample> {
+) -> impl Iterator<Item = RawDataSample> {
     (1..=5).map(move |i| (metric, job, "x", i * 60_000, base + step * (i - 1) as f64))
 }
 
@@ -450,7 +454,7 @@ fn per_series_average_divides_stored_sum_by_count() {
             ("db", "d", 5.)
         ])
     );
-    let huge: &[Sample] = &[
+    let huge: &[RawDataSample] = &[
         ("m", "api", "a", 10_000, 1.7e308),
         ("m", "api", "a", 20_000, 1.7e308),
     ];
@@ -587,12 +591,12 @@ fn per_series_vector_matching_follows_on_and_ignoring() {
 // overflowing running sum does not turn the average into +Inf.
 #[test]
 fn population_sums_and_averages_are_compensated() {
-    let cancel: &[Sample] = &[
+    let cancel: &[RawDataSample] = &[
         ("m", "api", "a", 50_000, 1e100),
         ("m", "api", "b", 50_000, 1.),
         ("m", "api", "c", 50_000, -1e100),
     ];
-    let huge: &[Sample] = &[
+    let huge: &[RawDataSample] = &[
         ("m", "api", "a", 50_000, 1.7e308),
         ("m", "api", "b", 50_000, 1.7e308),
     ];

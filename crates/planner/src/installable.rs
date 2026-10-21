@@ -5,9 +5,9 @@
 //! The runtime writes the returned [`InstallablePlan`] as its plan file and
 //! executes its DAG with the executor, as given (#509 Assumption 8). It
 //! needs three things from it: the DAG to install (`dag`), the summaries to
-//! store (`stored_outputs`), and where raw samples go (each stored output's
-//! `inputs.raw_sample_windows` and `query_time_raw_windows`, fed with
-//! `asap_executor::RawSampleSelector`). How the Planner represents the
+//! store (`stored_outputs`), and where raw data samples go (each stored output's
+//! `inputs.raw_data_sample_windows` and `query_time_raw_windows`, fed with
+//! `asap_executor::RawDataSampleSelector`). How the Planner represents the
 //! plan internally (e.g. a tumbling-pane chain, which the stage export keeps
 //! for costing and display) is not the runtime's concern: the installable
 //! DAG has every chain expanded into the panes the executor runs.
@@ -16,11 +16,11 @@
 //!
 //! `stored_outputs` is in dependency order: every stored output a build
 //! reads is listed before it. A runtime builds an output once all of its
-//! inputs are complete: each raw-sample window's samples have arrived
+//! inputs are complete: each raw-data-sample window's samples have arrived
 //! (sealed) and each stored input is built. It compiles the DAG with the
 //! executor for that output's node, with each input bound as a source: a
-//! raw-sample window at its `time_range_node_id` (the rows
-//! `RawSampleSelector::window_batch` returns) and a stored input at its own
+//! raw-data-sample window at its `time_range_node_id` (the rows
+//! `RawDataSampleSelector::window_batch` returns) and a stored input at its own
 //! node id (its stored state). It runs the build in an ingestion run
 //! (`StoredOutputBuild::IngestionRun`) or in the query run of the
 //! evaluation that first needs it (`StoredOutputBuild::QueryRun`), stores
@@ -47,7 +47,7 @@ use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
 use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPDAGDocument,
     PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
-    RawSampleWindow, ReferencePlanError,
+    RawDataSampleWindow, ReferencePlanError,
 };
 use asap_types::ir::properties::summary_coverage::{SelectionBox, SummaryCoverage};
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
@@ -79,10 +79,10 @@ pub struct InstallablePlan {
     /// `MatAtQueryKeptAcrossEvaluations`), in dependency order (each after
     /// the stored outputs it is built from), with its coverage and inputs.
     pub stored_outputs: Vec<StoredOutput>,
-    /// Every window of raw samples read at query time other than one a
+    /// Every window of raw data samples read at query time other than one a
     /// stored output's build reads, in node order: the runtime feeds each
     /// its samples when a query evaluates.
-    pub query_time_raw_windows: Vec<RawSampleWindow>,
+    pub query_time_raw_windows: Vec<RawDataSampleWindow>,
     /// Stage 3's record of the selected plan, for reporting only; `None` for
     /// [`InstallablePlan::query_time_reference`] and for a pass
     /// that selects without pricing.
@@ -116,7 +116,7 @@ pub struct StoredOutput {
     pub inputs: StoredOutputInputs,
     /// How far back from the newest evaluation time this node's output
     /// must stay available once built. At least how far back the data it
-    /// summarizes reaches (its raw-sample windows', and its stored inputs',
+    /// summarizes reaches (its raw-data-sample windows', and its stored inputs',
     /// `end_offset_ms + width_ms`). A pane of a tumbling-pane chain takes
     /// Stage 3's retention of its chain (`Selection::pane_retention_ms`: its
     /// offset plus its window plus the longest range-evaluation span of its
@@ -153,8 +153,10 @@ pub struct StoredCoverage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredOutputInputs {
-    /// The windows of raw samples it reads directly, in node order.
-    pub raw_sample_windows: Vec<RawSampleWindow>,
+    /// The windows of raw data samples it reads directly, in node order.
+    /// Serialized as `raw_sample_windows`.
+    #[serde(rename = "raw_sample_windows")]
+    pub raw_data_sample_windows: Vec<RawDataSampleWindow>,
     /// The stored outputs it reads, by node id, in node order; each is
     /// listed before it in `stored_outputs`.
     pub stored_outputs: Vec<PhysicalASAPNodeId>,
@@ -173,7 +175,7 @@ pub enum StoredOutputBuild {
     /// (`MatAtQueryKeptAcrossEvaluations`): when an evaluation needs this
     /// output for a selection it has not been built for yet, the runtime
     /// runs the node in a query run over its inputs, keeps the result, and
-    /// binds it like an output built at ingestion. Its raw-sample windows
+    /// binds it like an output built at ingestion. Its raw-data-sample windows
     /// are fed only through this build, so they are not listed in
     /// `query_time_raw_windows`.
     QueryRun,
@@ -305,7 +307,7 @@ pub enum InstallablePlanError {
     #[error("pane retention for node {node_id}, which is not a pane chain of the selected plan")]
     PaneRetentionOfUnknownChain { node_id: PhysicalASAPNodeId },
     /// Unsatisfiable request: the plan stores node `node_id`, whose build
-    /// reads a source `Scan` other than through a raw-sample `TimeRange`
+    /// reads a source `Scan` other than through a raw-data-sample `TimeRange`
     /// (e.g. a whole SQL table), which a runtime cannot feed it.
     #[error("stored output {node_id} reads a source outside a raw-sample window")]
     StoredOutputReadsUnwindowedSource { node_id: PhysicalASAPNodeId },
@@ -324,14 +326,14 @@ pub enum InstallablePlanError {
         node_id: PhysicalASAPNodeId,
         reason: String,
     },
-    /// Unsatisfiable request: the plan reads raw samples through
+    /// Unsatisfiable request: the plan reads raw data samples through
     /// `TimeRange` `time_range_node_id` in a shape whose window is not a
     /// fixed offset from the evaluation time (`reason`: a subquery or a
     /// `TimeShift` above it, or an `@` anchor below it), or that ends after
     /// the evaluation (a negative offset below it), which no ingestion run
     /// can build in time. Not supported yet.
     #[error("raw-sample window of node {time_range_node_id} is unsupported: {reason}")]
-    UnsupportedRawSampleWindow {
+    UnsupportedRawDataSampleWindow {
         time_range_node_id: PhysicalASAPNodeId,
         reason: &'static str,
     },
@@ -440,9 +442,9 @@ impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
 
 impl InstallablePlan {
     /// Whether the Planner's executor compiles this plan as a runtime runs
-    /// it: each stored output's build over its raw-sample windows and stored
+    /// it: each stored output's build over its raw-data-sample windows and stored
     /// inputs, then the query run over the stored outputs it reads and the
-    /// query-time raw-sample windows. `Err` holds the executor's error.
+    /// query-time raw-data-sample windows. `Err` holds the executor's error.
     pub fn check_compiles(&self) -> Result<(), String> {
         use asap_executor::physical_planner::{compile, InputContract};
         use std::collections::BTreeMap;
@@ -465,7 +467,7 @@ impl InstallablePlan {
         for (position, output) in self.stored_outputs.iter().enumerate() {
             let inputs = output
                 .inputs
-                .raw_sample_windows
+                .raw_data_sample_windows
                 .iter()
                 .map(|window| window.time_range_node_id)
                 .chain(output.inputs.stored_outputs.iter().copied())
@@ -579,7 +581,7 @@ impl InstallablePlan {
     /// nothing materialized, the same operators, summaries and parameters
     /// with every node at query time, and the same queries. A runtime's
     /// test compares its installed plan's answers with the executor running
-    /// this one over raw samples. Its `selection` is `None`. Validates this
+    /// this one over raw data samples. Its `selection` is `None`. Validates this
     /// plan first.
     pub fn query_time_reference(&self) -> Result<InstallablePlan, InstallablePlanError> {
         self.validate()?;
@@ -637,7 +639,7 @@ fn queries_bound_to_roots(
 }
 
 /// The nodes of a validated (acyclic) DAG by id, each node's inputs in edge
-/// order, and two facts every raw-sample window check reads, computed in
+/// order, and two facts every raw-data-sample window check reads, computed in
 /// one pass each over the DAG (O(nodes + edges)).
 struct IndexedDag<'a> {
     dag: &'a PhysicalASAPDAG,
@@ -649,9 +651,9 @@ struct IndexedDag<'a> {
     inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
     /// Every node after its inputs, from the DAG's node order.
     children_first: Vec<PhysicalASAPNodeId>,
-    /// The nodes whose rows come from raw samples: a `Scan` is reachable
+    /// The nodes whose rows come from raw data samples: a `Scan` is reachable
     /// below them without passing a `TimeRange`.
-    reading_raw_samples: HashSet<PhysicalASAPNodeId>,
+    reading_raw_data_samples: HashSet<PhysicalASAPNodeId>,
     /// The nodes with a `TimeShift`, `TimeRange` or `PromqlSubquery` above
     /// them, which evaluates them at other times than the evaluation time.
     re_timed_from_above: HashSet<PhysicalASAPNodeId>,
@@ -693,7 +695,7 @@ impl<'a> IndexedDag<'a> {
             }
         }
         let payload = |id: &PhysicalASAPNodeId| &nodes[id].payload;
-        let mut reading_raw_samples = HashSet::new();
+        let mut reading_raw_data_samples = HashSet::new();
         for id in &children_first {
             let reads = inputs
                 .get(id)
@@ -702,10 +704,10 @@ impl<'a> IndexedDag<'a> {
                 .any(|input| match payload(input) {
                     Operator::NonASAP(NonASAPOp::Scan { .. }) => true,
                     Operator::NonASAP(NonASAPOp::TimeRange { .. }) => false,
-                    _ => reading_raw_samples.contains(input),
+                    _ => reading_raw_data_samples.contains(input),
                 });
             if reads {
-                reading_raw_samples.insert(*id);
+                reading_raw_data_samples.insert(*id);
             }
         }
         let mut re_timed_from_above = HashSet::new();
@@ -731,7 +733,7 @@ impl<'a> IndexedDag<'a> {
             edges_into,
             inputs,
             children_first,
-            reading_raw_samples,
+            reading_raw_data_samples,
             re_timed_from_above,
         }
     }
@@ -776,13 +778,13 @@ impl<'a> IndexedDag<'a> {
         }
     }
 
-    /// The raw-sample window read through the `TimeRange` `time_range`, or
+    /// The raw-data-sample window read through the `TimeRange` `time_range`, or
     /// why its shape is unsupported.
     fn window_at(
         &self,
         time_range: PhysicalASAPNodeId,
-    ) -> Result<RawSampleWindow, InstallablePlanError> {
-        let unsupported = |reason| InstallablePlanError::UnsupportedRawSampleWindow {
+    ) -> Result<RawDataSampleWindow, InstallablePlanError> {
+        let unsupported = |reason| InstallablePlanError::UnsupportedRawDataSampleWindow {
             time_range_node_id: time_range,
             reason,
         };
@@ -813,7 +815,7 @@ impl<'a> IndexedDag<'a> {
                     return Err(unsupported("a negative offset below the range"))
                 }
                 Some(NonASAPOp::Scan { .. }) => {
-                    return Ok(RawSampleWindow {
+                    return Ok(RawDataSampleWindow {
                         time_range_node_id: time_range,
                         width_ms,
                         end_offset_ms,
@@ -830,7 +832,7 @@ impl<'a> IndexedDag<'a> {
     }
 
     /// What stored output `node`'s build reads: below it, each stored node
-    /// (`stored`) and each raw-sample `TimeRange` it reaches without
+    /// (`stored`) and each raw-data-sample `TimeRange` it reaches without
     /// passing another of them, in node order.
     fn inputs_of_stored(
         &self,
@@ -856,7 +858,9 @@ impl<'a> IndexedDag<'a> {
                 continue;
             }
             match self.relational(id) {
-                Some(NonASAPOp::TimeRange { .. }) if self.reading_raw_samples.contains(&id) => {
+                Some(NonASAPOp::TimeRange { .. })
+                    if self.reading_raw_data_samples.contains(&id) =>
+                {
                     raw_ranges.push(id);
                     continue;
                 }
@@ -871,7 +875,7 @@ impl<'a> IndexedDag<'a> {
         raw_ranges.sort_unstable();
         stored_inputs.sort_unstable();
         Ok(StoredOutputInputs {
-            raw_sample_windows: raw_ranges
+            raw_data_sample_windows: raw_ranges
                 .into_iter()
                 .map(|range| self.window_at(range))
                 .collect::<Result<_, _>>()?,
@@ -881,16 +885,16 @@ impl<'a> IndexedDag<'a> {
 }
 
 /// How far back from the evaluation time the data an output built from
-/// `inputs` summarizes reaches: the farthest of its raw-sample windows and
+/// `inputs` summarizes reaches: the farthest of its raw-data-sample windows and
 /// of its stored inputs (`reach_ms_by_node`, each already computed).
 fn reach_ms_of(
     inputs: &StoredOutputInputs,
     reach_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
 ) -> u64 {
     let windows = inputs
-        .raw_sample_windows
+        .raw_data_sample_windows
         .iter()
-        .map(RawSampleWindow::reach_ms);
+        .map(RawDataSampleWindow::reach_ms);
     let stored = inputs
         .stored_outputs
         .iter()
@@ -929,20 +933,20 @@ fn reader_span_ms_by_node(
 }
 
 /// Every node of `dag` stored across evaluations, in dependency order,
-/// with its coverage, inputs and retention, and every window of raw samples
+/// with its coverage, inputs and retention, and every window of raw data samples
 /// read at query time other than through a stored output's build, in node
 /// order. `retention_ms_by_node` gives a node's retention (Stage 3's for a
 /// pane, or a plan file's own); otherwise it is how far back its data
 /// reaches, plus, for an output built from stored outputs, its readers'
 /// longest range-evaluation span (`reader_span_ms_by_node`). Then each
 /// stored input is kept as long as the outputs built from it need. An
-/// error for a stored output the runtime cannot build, or a raw-sample
+/// error for a stored output the runtime cannot build, or a raw-data-sample
 /// window of an unsupported shape.
 fn runtime_inputs_of(
     dag: &PhysicalASAPDAG,
     retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
-) -> Result<(Vec<StoredOutput>, Vec<RawSampleWindow>), InstallablePlanError> {
+) -> Result<(Vec<StoredOutput>, Vec<RawDataSampleWindow>), InstallablePlanError> {
     let indexed = IndexedDag::new(dag);
     let stored: HashSet<PhysicalASAPNodeId> = dag
         .nodes
@@ -966,7 +970,7 @@ fn runtime_inputs_of(
     let mut coverage_by_node: HashMap<PhysicalASAPNodeId, SummaryCoverage> = HashMap::new();
     let mut position_of = HashMap::new();
     let mut reach_ms_by_node = HashMap::new();
-    // The ranges of stored outputs' raw-sample windows, which are fed
+    // The ranges of stored outputs' raw-data-sample windows, which are fed
     // through those outputs' builds.
     let mut stored_window_ranges = HashSet::new();
     // The first build is compiled in the whole plan, which runs the
@@ -996,7 +1000,7 @@ fn runtime_inputs_of(
         };
         stored_window_ranges.extend(
             inputs
-                .raw_sample_windows
+                .raw_data_sample_windows
                 .iter()
                 .map(|window| window.time_range_node_id),
         );
@@ -1035,9 +1039,9 @@ fn runtime_inputs_of(
     let mut query_time_raw_windows = Vec::new();
     for node in &dag.nodes {
         if matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. }))
-            && indexed.reading_raw_samples.contains(&node.id)
+            && indexed.reading_raw_data_samples.contains(&node.id)
         {
-            // Every raw-sample window must be one the runtime can feed; a
+            // Every raw-data-sample window must be one the runtime can feed; a
             // stored output's window is fed through that output's build.
             let window = indexed.window_at(node.id)?;
             if node.output_state.timing == ExecutionTiming::QueryTime
@@ -1069,7 +1073,7 @@ fn coverage_of(
     let [input] = inputs.stored_outputs.as_slice() else {
         return Ok(own);
     };
-    if !inputs.raw_sample_windows.is_empty()
+    if !inputs.raw_data_sample_windows.is_empty()
         || matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
         || own.selection != [SelectionBox::default()]
     {
@@ -1150,7 +1154,7 @@ fn executor_builds(
     #[cfg(test)]
     tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
     let bound = inputs
-        .raw_sample_windows
+        .raw_data_sample_windows
         .iter()
         .map(|window| window.time_range_node_id)
         .chain(inputs.stored_outputs.iter().copied())
@@ -1412,7 +1416,7 @@ mod tests {
             compile_physical_asap_dag(&timed).unwrap()
         };
         match runtime_inputs_of(&export(shifted), &HashMap::new(), &HashMap::new()) {
-            Err(InstallablePlanError::UnsupportedRawSampleWindow { reason, .. }) => {
+            Err(InstallablePlanError::UnsupportedRawDataSampleWindow { reason, .. }) => {
                 assert_eq!(reason, "a subquery or a TimeShift above the range")
             }
             other => panic!("{other:?}"),

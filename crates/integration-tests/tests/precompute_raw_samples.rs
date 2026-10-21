@@ -1,4 +1,4 @@
-//! Planner-selected summaries over raw samples compile as precompute DAGs
+//! Planner-selected summaries over raw data samples compile as precompute DAGs
 //! and produce the same estimates as feeding their kernel sample by sample.
 mod physical_common;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
@@ -144,11 +144,11 @@ fn execute(
         &serde_json::to_vec(&program).unwrap(),
     )
     .unwrap();
-    let schema = precompute::raw_sample_schema();
+    let schema = precompute::raw_data_sample_schema();
     let batch = Batch::try_new(
         schema.clone(),
         rows.iter()
-            .map(|(labels, time, value)| precompute::raw_sample_row(labels, *time, *value))
+            .map(|(labels, time, value)| precompute::raw_data_sample_row(labels, *time, *value))
             .collect(),
     )
     .unwrap();
@@ -399,10 +399,10 @@ fn check(
     Ok(label)
 }
 
-// Every raw-input summary Planner composes compiles over raw sample rows,
+// Every raw-input summary Planner composes compiles over raw data sample rows,
 // and each population's estimates equal feeding its kernel sample by sample.
 #[test]
-fn raw_sample_summaries_compile_and_match_their_kernels() {
+fn raw_data_sample_summaries_compile_and_match_their_kernels() {
     let exact = AccuracyTarget::exact();
     let sketch = AccuracyTarget::max_error(0.02);
     // A UnivMon sized for a distinct count at ε = 0.02 holds a heap of
@@ -474,7 +474,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
         "Hll",
         "Kmv",
         "UnivMon",
-        // The whole-expression heaps over raw samples.
+        // The whole-expression heaps over raw data samples.
         "CmsWithHeap",
         "CountSketchWithHeap",
     ] {
@@ -519,10 +519,10 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     (dag, source, root)
 }
 
-// Keyed heaps over raw samples resolve items from the series label set and
+// Keyed heaps over raw data samples resolve items from the series label set and
 // estimate each item's exact total; invalid weight contracts do not compile.
 #[test]
-fn raw_sample_heaps_resolve_items_from_labels() {
+fn raw_data_sample_heaps_resolve_items_from_labels() {
     use asap_types::ir::schema::GroupingStrategy::PerSubpopulationInstance;
     use asap_types::ir::schema::{NonNegativeWeightProof, SketchKind, SketchParams, WeightDomain};
     let heap = |algorithm, params| {
@@ -614,9 +614,9 @@ fn raw_sample_heaps_resolve_items_from_labels() {
     assert!(precompute::compile(&time_item.0, &[time_item.1], &[time_item.2]).is_err());
 }
 
-// `without` grouping over raw samples drops the listed labels and `__name__`.
+// `without` grouping over raw data samples drops the listed labels and `__name__`.
 #[test]
-fn raw_sample_without_grouping_drops_labels_and_name() {
+fn raw_data_sample_without_grouping_drops_labels_and_name() {
     use asap_types::ir::operator::GroupKeys;
     let family =
         FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::ir::schema::ExactParams::Sum);
@@ -646,7 +646,7 @@ fn raw_sample_without_grouping_drops_labels_and_name() {
 
 // End to end: `topk(2, count by (service) (m))` at ε = 0.02 has a Count-Min
 // heap candidate whose update is the unit count (`Constant(1.0)`). Placed at
-// ingestion, its raw-sample precompute adds the constant 1 per sample to each
+// ingestion, its raw-data-sample precompute adds the constant 1 per sample to each
 // service's count, with no column of ones projected, and each heap reads the
 // exact per-service sample counts of the fixture.
 #[test]

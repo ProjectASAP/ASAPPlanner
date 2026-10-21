@@ -226,7 +226,7 @@ pub(crate) fn hydra_cms_shape(
 }
 
 /// A filtered `SummaryAgg` never runs at ingestion time. An ingestion-time
-/// build reads raw samples (`$population`, `$timestamp`, `value`), which carry
+/// build reads raw data samples (`$population`, `$timestamp`, `value`), which carry
 /// none of the query's columns for the filter predicate to read, so only a
 /// query-time build can apply it. The ingestion-time compiler and the
 /// binding of any ingestion-timed `SummaryAgg` apply this check. The planner

@@ -65,7 +65,7 @@ pub use asap_plan_selection::{
     SearchReport, SummaryOperation,
 };
 pub use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPNodeId, RawSampleWindow,
+    PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPNodeId, RawDataSampleWindow,
 };
 pub use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
 pub use asap_types::ir::properties::ExecutionTiming;
@@ -231,7 +231,7 @@ pub enum PlanError {
     #[error(transparent)]
     Optimize(OptimizeError),
     /// The selected plan cannot be installed ([`plan_installable`]): an
-    /// unsupported raw-sample window or stored output (unsatisfiable
+    /// unsupported raw-data-sample window or stored output (unsatisfiable
     /// request), or an internal bug; see [`InstallablePlanError`].
     #[error("installable plan: {0}")]
     Installable(InstallablePlanError),

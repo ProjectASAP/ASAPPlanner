@@ -1,6 +1,6 @@
-//! A precompute boundary reads raw samples only from a time series scan.
+//! A precompute boundary reads raw data samples only from a time series scan.
 mod common;
-use asap_executor::physical_planner::precompute::{boundary_schema, raw_sample_schema};
+use asap_executor::physical_planner::precompute::{boundary_schema, raw_data_sample_schema};
 use common::compile_physical_asap_dag;
 use planner_types::ir::operator::{Source, TimeShift};
 use planner_types::ir::schema::{DataType, Field, Schema};
@@ -44,20 +44,20 @@ fn boundary(
 }
 
 #[test]
-fn only_a_time_series_range_reads_raw_samples() {
+fn only_a_time_series_range_reads_raw_data_samples() {
     let series = boundary(&time_range_over(Source::TimeSeries { metric: "m".into() }));
-    assert_eq!(series.unwrap(), raw_sample_schema());
+    assert_eq!(series.unwrap(), raw_data_sample_schema());
     let table = boundary(&time_range_over(Source::Table {
         table_ref: "t".into(),
     }));
-    // A table range is not raw samples: it must be a stored population.
-    assert_ne!(table.ok(), Some(raw_sample_schema()));
+    // A table range is not raw data samples: it must be a stored population.
+    assert_ne!(table.ok(), Some(raw_data_sample_schema()));
 }
 
 /// A range over stacked time shifts of a time series scan still reads raw
 /// samples: the boundary looks through every shift, not only the first.
 #[test]
-fn a_range_over_stacked_shifts_reads_raw_samples() {
+fn a_range_over_stacked_shifts_reads_raw_data_samples() {
     let range = time_range_over(Source::TimeSeries { metric: "m".into() });
     let NonASAPOp::TimeRange {
         range: window,
@@ -83,5 +83,5 @@ fn a_range_over_stacked_shifts_reads_raw_samples() {
         child: shifted(60_000, shifted(300_000, scan)),
     }))
     .unwrap();
-    assert_eq!(boundary(&stacked).unwrap(), raw_sample_schema());
+    assert_eq!(boundary(&stacked).unwrap(), raw_data_sample_schema());
 }

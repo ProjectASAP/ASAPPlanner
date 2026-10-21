@@ -685,7 +685,7 @@ pub fn agg_is_exact(op: &AggIntent) -> bool {
     )
 }
 
-/// Whether the executor reduces each series' raw samples exactly for an
+/// Whether the executor reduces each series' raw data samples exactly for an
 /// `Aggregate` of `op` with `Reduction::PerEntity` (a PromQL
 /// `quantile/sum/avg/min/max/count/distinct/l2/entropy_over_time` over raw
 /// samples). The executor compiles only these, and Stage 3 rejects a plan

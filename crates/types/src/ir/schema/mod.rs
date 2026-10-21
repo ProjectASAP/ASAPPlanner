@@ -136,8 +136,15 @@ impl From<Field<DataType>> for Field<FieldDataType> {
 /// type system can reject merges of incompatible summaries at plan
 /// construction time — a `SummaryMerge` over `Sketch(Kll, …)` and
 /// `Sketch(Cms, …)` inputs is a plan-time error, and a `Sketch(…)` can never
-/// be confused for a `Sample(…)` even though both are "opaque summary state"
-/// at a glance.
+/// be confused for a `SummarySample(…)` even though both are "opaque summary
+/// state" at a glance.
+///
+/// "Sample" means two things in the planner, and the names keep them apart:
+/// a *raw data sample* is one timestamped value of a time series as it
+/// arrives (`RawDataSample`, `RawDataSamplesOfMetric`,
+/// `raw_data_sample_windows`), and a *summary sample* is the subset of
+/// input rows a sampling summary family keeps as its state
+/// ([`FieldDataType::SummarySample`], [`SamplingKind`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FieldDataType {
     /// An ordinary, readable value — the closed vocabulary of [`DataType`].
@@ -151,8 +158,10 @@ pub enum FieldDataType {
     /// category — a bound node needs to know it's specifically independent
     /// KLL or shared Hydra-backed CMS, not merely "some sketch".
     Sketch(SketchKind, GroupingStrategy),
-    /// Sampling-based summary state (a retained row subset).
-    Sample(SamplingKind, SamplingParams),
+    /// A summary sample: the subset of input rows a [`SamplingKind`] keeps,
+    /// such as a reservoir. Not raw data samples. Serialized as `Sample`.
+    #[serde(rename = "Sample")]
+    SummarySample(SamplingKind, SamplingParams),
     /// Wavelet-transform summary state (a coefficient vector).
     Wavelet(WaveletKind, WaveletParams),
     /// Fitted statistical/parametric-model summary state.

@@ -117,7 +117,7 @@ use asap_types::physical::Materialization;
 use thiserror::Error;
 
 use crate::accuracy::composition::propagate;
-use crate::accuracy::composition::samples_sign_statistic;
+use crate::accuracy::composition::raw_data_samples_sign_statistic;
 use crate::accuracy::composition::{
     additive_as_absolute, StreamNorm, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
@@ -271,11 +271,11 @@ pub struct ComputationTarget {
     /// directly beneath it, offered beside this target's own candidates;
     /// `None` when no fusion applies.
     pub fused: Option<FusedComputation>,
-    /// The metric whose raw samples, or plain sums of them, are every value
-    /// the aggregate reads ([`samples_of_metric`]); `None` otherwise. A
+    /// The metric whose raw data samples, or plain sums of them, are every value
+    /// the aggregate reads ([`raw_data_samples_of_metric`]); `None` otherwise. A
     /// heap-sketch weight read from them carries the open requirement
-    /// [`WeightDomain::SamplesOfMetric`], which plan selection confirms.
-    pub samples_of: Option<String>,
+    /// [`WeightDomain::RawDataSamplesOfMetric`], which plan selection confirms.
+    pub raw_data_samples_of: Option<String>,
 }
 
 /// A target's measure computed together with the target directly beneath
@@ -674,8 +674,8 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
                 filter: filters.get(measure).cloned().flatten(),
                 having: entries.clone(),
                 fused: None,
-                samples_of: node.non_asap().and_then(|op| match op {
-                    NonASAPOp::Aggregate { child, .. } => samples_of_metric(child),
+                raw_data_samples_of: node.non_asap().and_then(|op| match op {
+                    NonASAPOp::Aggregate { child, .. } => raw_data_samples_of_metric(child),
                     _ => None,
                 }),
             });
@@ -1008,37 +1008,42 @@ pub(crate) fn partitions_over(
     Some(Reduction::by(keys))
 }
 
-/// The metric whose raw samples, or plain sums of them, are every value
+/// The metric whose raw data samples, or plain sums of them, are every value
 /// `node` outputs, or `None`. Only a time-series scan, a time range over it,
 /// an `offset`-only time shift (it moves the window, not the samples) and a
 /// plain `sum` keep that; any other operator (rate and arithmetic included)
 /// ends it. The metric's type is not read here: whether its
 /// samples are non-negative is plan selection's question
-/// ([`WeightDomain::SamplesOfMetric`]).
-pub(crate) fn samples_of_metric(node: &OperatorNode) -> Option<String> {
+/// ([`WeightDomain::RawDataSamplesOfMetric`]).
+pub(crate) fn raw_data_samples_of_metric(node: &OperatorNode) -> Option<String> {
     match node.non_asap()? {
         NonASAPOp::Scan {
             source: Source::TimeSeries { metric },
             ..
         } => Some(metric.clone()),
-        NonASAPOp::TimeRange { child, .. } => samples_of_metric(child),
-        NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => samples_of_metric(child),
+        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(child),
+        NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => {
+            raw_data_samples_of_metric(child)
+        }
         NonASAPOp::Aggregate {
             measures, child, ..
         } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {
-            samples_of_metric(child)
+            raw_data_samples_of_metric(child)
         }
         _ => None,
     }
 }
 
 /// `update` with the open requirement that its weights are samples of
-/// `metric` ([`WeightDomain::SamplesOfMetric`]), when it is a keyed heap
+/// `metric` ([`WeightDomain::RawDataSamplesOfMetric`]), when it is a keyed heap
 /// update whose weights are not otherwise proven.
-fn with_samples_requirement(mut update: SummaryUpdate, metric: Option<&str>) -> SummaryUpdate {
+fn with_raw_data_samples_requirement(
+    mut update: SummaryUpdate,
+    metric: Option<&str>,
+) -> SummaryUpdate {
     if let Some(metric) = metric {
         if update.item.is_some() && update.weight_domain == WeightDomain::UnknownOrSigned {
-            update.weight_domain = WeightDomain::SamplesOfMetric {
+            update.weight_domain = WeightDomain::RawDataSamplesOfMetric {
                 metric: metric.to_string(),
             };
         }
@@ -1700,7 +1705,8 @@ fn source_distinct_guarantee(
 /// subquery with an explicit resolution, `⌈range / resolution⌉`. `None`
 /// when that count is not in the query.
 fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<PropagationStats> {
-    let sign_statistic = estimates_samples_of(input).map(|metric| samples_sign_statistic(&metric));
+    let sign_statistic =
+        estimates_raw_data_samples_of(input).map(|metric| raw_data_samples_sign_statistic(&metric));
     let stats = match reduction {
         // The series count of the sources read bounds a PromQL fold's rows
         // (series), not the rows of a SQL group.
@@ -1727,17 +1733,17 @@ fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<Propaga
     })
 }
 
-/// The metric whose raw samples, or plain sums of them, a composed node's
-/// values are or estimate, or `None`: [`samples_of_metric`]'s strict rule
+/// The metric whose raw data samples, or plain sums of them, a composed node's
+/// values are or estimate, or `None`: [`raw_data_samples_of_metric`]'s strict rule
 /// over a composed candidate. An exact sum accumulator, a projection of
 /// columns and a
 /// heap estimate whose update weights carry the
-/// [`WeightDomain::SamplesOfMetric`] requirement keep it, and so does a
+/// [`WeightDomain::RawDataSamplesOfMetric`] requirement keep it, and so does a
 /// quantile estimate of those values, built over the raw window or merged
 /// from its tumbling panes: it is one of them, or between two of them, so it
 /// shares their sign. Anything else (rate, arithmetic, other
 /// functions) ends it. Only the sign of the values is read from it.
-fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
+fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<String> {
     match &node.operator {
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap()? {
             ASAPOp::SummaryAgg {
@@ -1745,7 +1751,7 @@ fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
                 child,
                 filter: None,
                 ..
-            } => estimates_samples_of(child),
+            } => estimates_raw_data_samples_of(child),
             _ => None,
         },
         // Only a φ in [0, 1] picks one of the values; outside it the answer
@@ -1781,7 +1787,7 @@ fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
                 filter: None,
                 child,
                 ..
-            } => estimates_samples_of(child),
+            } => estimates_raw_data_samples_of(child),
             _ => None,
         },
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
@@ -1789,7 +1795,7 @@ fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
                 ASAPOp::SummaryAgg {
                     input:
                         SummaryUpdate {
-                            weight_domain: WeightDomain::SamplesOfMetric { metric },
+                            weight_domain: WeightDomain::RawDataSamplesOfMetric { metric },
                             ..
                         },
                     filter: None,
@@ -1804,9 +1810,9 @@ fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
                 .iter()
                 .all(|item| matches!(item.expr, ScalarExpr::Column(_))) =>
         {
-            estimates_samples_of(child)
+            estimates_raw_data_samples_of(child)
         }
-        _ => samples_of_metric(node),
+        _ => raw_data_samples_of_metric(node),
     }
 }
 
@@ -2233,7 +2239,7 @@ fn stream_norm(node: &Rc<OperatorNode>) -> Option<StreamNorm> {
     }
 }
 
-/// Whether `column` of `node` is its source's raw sample value: `node` is
+/// Whether `column` of `node` is its source's raw data sample value: `node` is
 /// the source's scan, at most behind filters and windows that keep its
 /// schema, and `column` resolves to the scan's sample value.
 fn raw_value_column(node: &Rc<OperatorNode>, column: &ColumnRef) -> bool {
@@ -2583,21 +2589,21 @@ fn estimate_has_bound(
 }
 
 /// A Count-Min estimate whose weights carry the open requirement that they
-/// are samples of one metric ([`WeightDomain::SamplesOfMetric`]): its local
+/// are samples of one metric ([`WeightDomain::RawDataSamplesOfMetric`]): its local
 /// guarantee with the bound gated on that metric's sign
-/// ([`samples_sign_statistic`]), which plan selection binds to 1 when the
+/// ([`raw_data_samples_sign_statistic`]), which plan selection binds to 1 when the
 /// metric is declared a counter. `None` for any other estimate.
 fn estimate_bound_over_samples(
     family: &FieldDataType,
     update: &SummaryUpdate,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
-    let WeightDomain::SamplesOfMetric { metric } = &update.weight_domain else {
+    let WeightDomain::RawDataSamplesOfMetric { metric } = &update.weight_domain else {
         return None;
     };
     let proven = SummaryUpdate {
         weight_domain: WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::CounterSamples,
+            proof: NonNegativeWeightProof::CounterRawDataSamples,
         },
         ..update.clone()
     };
@@ -2609,7 +2615,7 @@ fn estimate_bound_over_samples(
         factors: vec![
             local.spec.error,
             asap_types::ir::properties::BoundExpr::Unknown {
-                statistic: samples_sign_statistic(metric),
+                statistic: raw_data_samples_sign_statistic(metric),
             },
         ],
     };
@@ -2665,13 +2671,13 @@ fn substitute(
         .map(|(measure, intent)| {
             // `fused`: the candidate is the target's fused computation's,
             // which absorbs the target beneath.
-            let (candidate, samples_of, fused) = targets
+            let (candidate, raw_data_samples_of, fused) = targets
                 .iter()
                 .find(|chosen| chosen.target.measure == measure)
                 .map_or((&ComputationCandidate::Exact, None, false), |chosen| {
                     (
                         chosen.candidate,
-                        chosen.target.samples_of.as_deref(),
+                        chosen.target.raw_data_samples_of.as_deref(),
                         chosen.absorbs.is_some(),
                     )
                 });
@@ -2680,9 +2686,14 @@ fn substitute(
             if fused {
                 return match candidate {
                     ComputationCandidate::ExactAccumulator(_) => nested_sum(target, memo),
-                    ComputationCandidate::Summary(algorithm) => {
-                        whole_expression(target, intent, algorithm, samples_of, (sizing, key), memo)
-                    }
+                    ComputationCandidate::Summary(algorithm) => whole_expression(
+                        target,
+                        intent,
+                        algorithm,
+                        raw_data_samples_of,
+                        (sizing, key),
+                        memo,
+                    ),
                     ComputationCandidate::Exact => Err(PerComputationCandidateError::Unsupported(
                         "plain exact execution of a fused computation",
                     )),
@@ -2694,7 +2705,7 @@ fn substitute(
                 candidate,
                 filter,
                 &input,
-                samples_of,
+                raw_data_samples_of,
                 (sizing, key),
             )
         })
@@ -2762,7 +2773,7 @@ fn whole_expression(
     target: &OperatorNode,
     intent: &AggIntent,
     algorithm: &SketchAlgorithm,
-    samples_of: Option<&str>,
+    raw_data_samples_of: Option<&str>,
     (sizing, key): (&Sizing, MeasureKey),
     memo: &Memo,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
@@ -2771,7 +2782,7 @@ fn whole_expression(
     )?;
     let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: memo[&Rc::as_ptr(&input)].clone(),
-        input: with_samples_requirement(update, samples_of),
+        input: with_raw_data_samples_requirement(update, raw_data_samples_of),
         family: FieldDataType::Sketch(
             sized(algorithm, intent, sizing.share(key)),
             GroupingStrategy::default(),
@@ -2896,7 +2907,7 @@ fn substitute_measure(
     candidate: &ComputationCandidate,
     filter: Option<Predicate>,
     input: &Rc<OperatorNode>,
-    samples_of: Option<&str>,
+    raw_data_samples_of: Option<&str>,
     (sizing, key): (&Sizing, MeasureKey),
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
@@ -2906,9 +2917,9 @@ fn substitute_measure(
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
             ASAPOp::SummaryAgg {
                 child: input.clone(),
-                input: with_samples_requirement(
+                input: with_raw_data_samples_requirement(
                     summary_update(intent, &family, reduction, &input.schema, read)?,
-                    samples_of,
+                    raw_data_samples_of,
                 ),
                 family,
                 reduction: reduction.clone(),
@@ -4298,7 +4309,7 @@ mod tests {
             assert_eq!(domains.len(), 2, "{query}");
             assert!(
                 domains.iter().all(|d| *d
-                    == WeightDomain::SamplesOfMetric {
+                    == WeightDomain::RawDataSamplesOfMetric {
                         metric: metric.into()
                     }),
                 "{query}: {domains:?}"
@@ -4306,10 +4317,10 @@ mod tests {
         }
     }
 
-    /// Only raw samples and plain sums of them: arithmetic, `rate` and other
+    /// Only raw data samples and plain sums of them: arithmetic, `rate` and other
     /// functions end the requirement.
     #[test]
-    fn samples_of_metric_ends_at_any_other_operator() {
+    fn raw_data_samples_of_metric_ends_at_any_other_operator() {
         for (query, metric) in [
             ("sum_over_time(m[1m])", Some("m")),
             ("sum by (job) (sum_over_time(m[1m]))", Some("m")),
@@ -4319,7 +4330,11 @@ mod tests {
             ("max_over_time(m[1m])", None),
         ] {
             let root = crate::test_support::lower_promql(query, AccuracyTarget::exact());
-            assert_eq!(samples_of_metric(&root).as_deref(), metric, "{query}");
+            assert_eq!(
+                raw_data_samples_of_metric(&root).as_deref(),
+                metric,
+                "{query}"
+            );
         }
     }
 
@@ -4359,7 +4374,7 @@ mod tests {
 
     /// `sum by (job) (sum_over_time(m[5m]))` gets a fused nested sum
     /// beside its own accumulator: one exact Sum accumulator over the range's
-    /// raw samples, grouped by `job`, which absorbs the inner per-series sum.
+    /// raw data samples, grouped by `job`, which absorbs the inner per-series sum.
     /// Composed, no per-series state is built, the value is exact and the
     /// output columns are the outer sum's.
     #[test]
@@ -4439,7 +4454,7 @@ mod tests {
         }
     }
 
-    /// A per-series sum drops the metric name, but the raw samples keep it:
+    /// A per-series sum drops the metric name, but the raw data samples keep it:
     /// grouping the merge by `__name__` would answer the metric's name where
     /// the nested sums answer none, so no merge is offered.
     #[test]
@@ -4542,7 +4557,7 @@ mod tests {
                 })
         };
         let inside = estimate_of("quantile_over_time(0.5, m[1m])").expect("a sketch estimate");
-        assert_eq!(estimates_samples_of(&inside).as_deref(), Some("m"));
+        assert_eq!(estimates_raw_data_samples_of(&inside).as_deref(), Some("m"));
         let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = inside.asap() else {
             unreachable!()
         };
@@ -4554,7 +4569,7 @@ mod tests {
                 }),
                 inside.schema.clone(),
             );
-            assert_eq!(estimates_samples_of(&outside), None, "q = {q}");
+            assert_eq!(estimates_raw_data_samples_of(&outside), None, "q = {q}");
         }
         for query in [
             "quantile_over_time(-1, m[1m])",
@@ -4621,19 +4636,22 @@ mod tests {
                 estimate.schema.clone(),
             )
         };
-        assert_eq!(estimates_samples_of(&read(0.99)).as_deref(), Some("m"));
+        assert_eq!(
+            estimates_raw_data_samples_of(&read(0.99)).as_deref(),
+            Some("m")
+        );
         assert_eq!(
             fold_stats(&Reduction::by(vec![]), &Rc::new(read(0.99)))
                 .unwrap()
                 .sign_statistic,
-            Some(samples_sign_statistic("m"))
+            Some(raw_data_samples_sign_statistic("m"))
         );
         for q in [-1.0, 2.0] {
-            assert_eq!(estimates_samples_of(&read(q)), None, "q = {q}");
+            assert_eq!(estimates_raw_data_samples_of(&read(q)), None, "q = {q}");
         }
     }
 
-    /// The metric whose raw samples, or plain sums of them, a composed node's
+    /// The metric whose raw data samples, or plain sums of them, a composed node's
     /// values estimate: a whole-expression heap's estimates and an exact
     /// sum over the samples are; a rate or any other function is not. A
     /// fold over them names its unknown sign by that metric.
@@ -4655,14 +4673,14 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                estimates_samples_of(&estimate).as_deref(),
+                estimates_raw_data_samples_of(&estimate).as_deref(),
                 Some("m"),
                 "{candidate:?}"
             );
             let stats = fold_stats(&Reduction::by(vec![]), &estimate).unwrap();
             assert_eq!(
                 stats.sign_statistic,
-                Some(crate::accuracy::composition::samples_sign_statistic("m"))
+                Some(crate::accuracy::composition::raw_data_samples_sign_statistic("m"))
             );
         }
         let rate = inventory_root("sum by (job) (rate(m[1m]))");
@@ -4672,7 +4690,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!finalized.is_empty());
         for node in finalized {
-            assert_eq!(estimates_samples_of(&node), None);
+            assert_eq!(estimates_raw_data_samples_of(&node), None);
         }
         let stats = fold_stats(&Reduction::by(vec![]), &rate).unwrap();
         assert_eq!(stats.sign_statistic, None);
@@ -4764,7 +4782,7 @@ mod tests {
     }
 
     /// A Count-Min estimate has a bound only over weights proven
-    /// non-negative: an open requirement (`SamplesOfMetric`) is not a proof.
+    /// non-negative: an open requirement (`RawDataSamplesOfMetric`) is not a proof.
     #[test]
     fn count_min_estimate_has_no_bound_over_an_open_requirement() {
         let family = FieldDataType::Sketch(
@@ -4785,7 +4803,7 @@ mod tests {
         };
         assert!(!estimate_has_bound(
             &family,
-            &with(WeightDomain::SamplesOfMetric { metric: "m".into() }),
+            &with(WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }),
             &query
         ));
         assert!(!estimate_has_bound(
@@ -4796,7 +4814,7 @@ mod tests {
         assert!(estimate_has_bound(
             &family,
             &with(WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::CounterSamples
+                proof: NonNegativeWeightProof::CounterRawDataSamples
             }),
             &query
         ));
@@ -4824,12 +4842,12 @@ mod tests {
         let update = SummaryUpdate {
             item: Some(SummaryInputExpr::Column(ColumnRef::SampleValue)),
             weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
-            weight_domain: WeightDomain::SamplesOfMetric { metric: "m".into() },
+            weight_domain: WeightDomain::RawDataSamplesOfMetric { metric: "m".into() },
         };
         let gated = estimate_bound_over_samples(&family, &update, &query).expect("gated");
         assert_eq!(gated.spec.error.evaluate(), None);
         let local = local_guarantee(&family, &query).unwrap();
-        let statistic = samples_sign_statistic("m");
+        let statistic = raw_data_samples_sign_statistic("m");
         // Every other statistic (a stream norm) bound alike.
         let others = |s: &str| Some(if s == statistic { 1.0 } else { 1_000.0 });
         let bound = gated.bind(&others).spec.error.evaluate();

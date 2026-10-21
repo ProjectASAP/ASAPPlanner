@@ -53,12 +53,12 @@ pub(crate) fn source_norm_statistic(norm: &str, source: &str) -> String {
 /// `values_non_negative[m]`: an indicator, 1 when proven. Plan selection
 /// binds it to 1 when the data workload declares `metric` a counter or
 /// non-negative, and leaves it unbound otherwise.
-pub fn samples_sign_statistic(metric: &str) -> String {
+pub fn raw_data_samples_sign_statistic(metric: &str) -> String {
     format!("{VALUES_NON_NEGATIVE}[{metric}]")
 }
 
-/// The metric a [`samples_sign_statistic`] names.
-pub fn parse_samples_sign_statistic(statistic: &str) -> Option<&str> {
+/// The metric a [`raw_data_samples_sign_statistic`] names.
+pub fn parse_raw_data_samples_sign_statistic(statistic: &str) -> Option<&str> {
     statistic
         .strip_prefix(VALUES_NON_NEGATIVE)?
         .strip_prefix('[')?
@@ -1320,14 +1320,17 @@ mod tests {
         }
     }
     /// Over the samples of one metric, an unknown sign is named by that
-    /// metric ([`samples_sign_statistic`]) and gates the bound: binding it
+    /// metric ([`raw_data_samples_sign_statistic`]) and gates the bound: binding it
     /// to 1 (proven) gives the relative bound, and left unbound it stays
     /// unknown.
     #[test]
     fn a_sign_over_one_metrics_samples_gates_the_relative_bound() {
-        let statistic = samples_sign_statistic("m");
-        assert_eq!(parse_samples_sign_statistic(&statistic), Some("m"));
-        assert_eq!(parse_samples_sign_statistic(VALUES_NON_NEGATIVE), None);
+        let statistic = raw_data_samples_sign_statistic("m");
+        assert_eq!(parse_raw_data_samples_sign_statistic(&statistic), Some("m"));
+        assert_eq!(
+            parse_raw_data_samples_sign_statistic(VALUES_NON_NEGATIVE),
+            None
+        );
         for op in [
             CompositionOperator::ExactSum,
             CompositionOperator::ExactAverage,
@@ -1346,7 +1349,7 @@ mod tests {
             assert_eq!(out.spec.error.evaluate(), None, "{op:?}");
             let proven = out.bind(&|s| (s == statistic).then_some(1.0));
             assert_eq!(proven.spec.error.evaluate(), Some(0.01), "{op:?}");
-            let other = out.bind(&|s| (s == samples_sign_statistic("n")).then_some(1.0));
+            let other = out.bind(&|s| (s == raw_data_samples_sign_statistic("n")).then_some(1.0));
             assert_eq!(other.spec.error.evaluate(), None, "{op:?}");
         }
     }

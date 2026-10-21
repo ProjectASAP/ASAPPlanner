@@ -263,7 +263,7 @@ pub enum SketchCategory {
 /// top-k-style estimation — together with the concrete [`SketchAlgorithm`]
 /// and [`SketchParams`] realizing it. Sits between
 /// [`FieldDataType::Sketch`](crate::ir::schema::FieldDataType::Sketch)
-/// (the `Sketch` family as a whole, sibling to `Sample`/`Wavelet`/
+/// (the `Sketch` family as a whole, sibling to `SummarySample`/`Wavelet`/
 /// `StatModel`) and the bare algorithm: `Kll` vs. `DDSketch` is a choice
 /// *within* `Quantile`, not a choice *of* `SketchKind` — every `Quantile`
 /// value already carries which of the two (and its params) was picked.
@@ -348,9 +348,12 @@ impl SketchKind {
 
 // ── Sampling summaries ───────────────────────────────────────────────────────
 
-/// A sampling-based summary family — retains an actual (weighted) subset of
-/// rows rather than a compressed sketch. Minimal starting vocabulary: one
-/// family, extend as a deployment needs another (stratified, weighted, …).
+/// A sampling summary family — retains an actual (weighted) subset of input
+/// rows rather than a compressed sketch. The retained rows are its summary
+/// sample ([`FieldDataType::SummarySample`](crate::ir::schema::FieldDataType::SummarySample)),
+/// not the raw data samples a metric arrives as. Minimal
+/// starting vocabulary: one family, extend as a deployment needs another
+/// (stratified, weighted, …).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SamplingKind {
     /// Reservoir sampling (mergeable via weighted reservoir merge;
@@ -391,7 +394,7 @@ pub enum WaveletParams {
 
 /// A fitted statistical/parametric-model summary family — e.g. a distribution
 /// fit used to answer approximate quantile/density queries without
-/// retaining raw samples. Deliberately open-ended: `family` names the model
+/// retaining raw data samples. Deliberately open-ended: `family` names the model
 /// family and is interpreted by whatever deployment builds/reads it, the
 /// same "core doesn't enumerate every deployment shape" stance
 /// `AggIntent::Extension` already takes for pre-ASAP intents.
@@ -691,26 +694,28 @@ pub enum WeightDomain {
     NonNegative {
         proof: NonNegativeWeightProof,
     },
-    /// An open requirement, not a proof: the weights are raw samples of
+    /// An open requirement, not a proof: the weights are raw data samples of
     /// `metric`, or plain sums of them (no rate, no other arithmetic), so they
-    /// are non-negative when every sample of `metric` is: `metric` is
+    /// are non-negative when every raw data sample of `metric` is: `metric` is
     /// declared a counter, or declared non-negative. Logical optimization
     /// records it without reading the data workload; plan selection confirms
     /// it from the declared source facts
     /// ([`SourceFacts::metric_type`](crate::workload::SourceFacts::metric_type),
     /// [`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative)).
-    /// Unconfirmed, it counts as not proven.
-    SamplesOfMetric {
+    /// Unconfirmed, it counts as not proven. Serialized as
+    /// `samples_of_metric`.
+    #[serde(rename = "samples_of_metric")]
+    RawDataSamplesOfMetric {
         metric: String,
     },
     /// An open requirement, not a proof: the weights are reset-corrected
-    /// `rate`, `increase` or `irate` values of `metric`'s samples, or plain
+    /// `rate`, `increase` or `irate` values of `metric`'s raw data samples, or plain
     /// sums of them. Reset correction keeps them non-negative exactly when
     /// the samples are, that is when `metric` is a counter; over a gauge a
     /// negative sample can give a negative value. Plan selection confirms
     /// it from the declared metric types, as
-    /// [`SamplesOfMetric`](Self::SamplesOfMetric). Unconfirmed, it counts as
-    /// not proven.
+    /// [`RawDataSamplesOfMetric`](Self::RawDataSamplesOfMetric). Unconfirmed, it
+    /// counts as not proven.
     CounterDerivativeOfMetric {
         metric: String,
     },
@@ -718,10 +723,10 @@ pub enum WeightDomain {
 
 impl WeightDomain {
     /// The domain once the declared facts have answered an open requirement.
-    /// [`SamplesOfMetric`](Self::SamplesOfMetric) is proven when the metric
-    /// is a counter ([`NonNegativeWeightProof::CounterSamples`]) or else
+    /// [`RawDataSamplesOfMetric`](Self::RawDataSamplesOfMetric) is proven when the
+    /// metric is a counter ([`NonNegativeWeightProof::CounterRawDataSamples`]) or else
     /// declared non-negative
-    /// ([`NonNegativeWeightProof::DeclaredNonNegativeSamples`]);
+    /// ([`NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples`]);
     /// [`CounterDerivativeOfMetric`](Self::CounterDerivativeOfMetric) only
     /// when it is a counter
     /// ([`NonNegativeWeightProof::ResetAwareCounterDerivative`]). Otherwise
@@ -732,14 +737,14 @@ impl WeightDomain {
         is_declared_non_negative: impl Fn(&str) -> bool,
     ) -> WeightDomain {
         match self {
-            WeightDomain::SamplesOfMetric { metric } if is_counter(metric) => {
+            WeightDomain::RawDataSamplesOfMetric { metric } if is_counter(metric) => {
                 WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::CounterSamples,
+                    proof: NonNegativeWeightProof::CounterRawDataSamples,
                 }
             }
-            WeightDomain::SamplesOfMetric { metric } if is_declared_non_negative(metric) => {
+            WeightDomain::RawDataSamplesOfMetric { metric } if is_declared_non_negative(metric) => {
                 WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::DeclaredNonNegativeSamples,
+                    proof: NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples,
                 }
             }
             WeightDomain::CounterDerivativeOfMetric { metric } if is_counter(metric) => {
@@ -747,7 +752,7 @@ impl WeightDomain {
                     proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
                 }
             }
-            WeightDomain::SamplesOfMetric { .. }
+            WeightDomain::RawDataSamplesOfMetric { .. }
             | WeightDomain::CounterDerivativeOfMetric { .. } => WeightDomain::UnknownOrSigned,
             other => other.clone(),
         }
@@ -764,18 +769,22 @@ pub enum NonNegativeWeightProof {
     /// Plan selection gives it on confirming a
     /// [`WeightDomain::CounterDerivativeOfMetric`] requirement.
     ResetAwareCounterDerivative,
-    /// Raw samples of a metric declared a counter
+    /// Raw data samples of a metric declared a counter
     /// ([`MetricType::Counter`](crate::workload::MetricType::Counter)), or
     /// plain sums of them: a counter sample is never negative. Plan selection
     /// gives it on confirming a
-    /// [`WeightDomain::SamplesOfMetric`] requirement.
-    CounterSamples,
-    /// Raw samples of a metric declared non-negative
+    /// [`WeightDomain::RawDataSamplesOfMetric`] requirement. Serialized as
+    /// `counter_samples`.
+    #[serde(rename = "counter_samples")]
+    CounterRawDataSamples,
+    /// Raw data samples of a metric declared non-negative
     /// ([`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative)),
     /// such as a gauge, or plain sums of them. Plan selection gives it on
-    /// confirming a [`WeightDomain::SamplesOfMetric`] requirement for a
-    /// metric not declared a counter.
-    DeclaredNonNegativeSamples,
+    /// confirming a [`WeightDomain::RawDataSamplesOfMetric`] requirement for a
+    /// metric not declared a counter. Serialized as
+    /// `declared_non_negative_samples`.
+    #[serde(rename = "declared_non_negative_samples")]
+    DeclaredNonNegativeRawDataSamples,
     /// A constant weight greater than 0, such as `Constant(2.0)`: every row
     /// adds the same positive amount, so no weight is negative.
     PositiveConstant,
@@ -1009,6 +1018,44 @@ mod tests {
                 }
             ),
             None
+        );
+    }
+
+    /// The raw-data-sample and summary-sample renames keep their JSON names,
+    /// so committed plans and workloads still read.
+    #[test]
+    fn renamed_sample_terms_keep_their_wire_names() {
+        use crate::ir::schema::FieldDataType;
+        let json = |value: serde_json::Value| value.to_string();
+        let raw = WeightDomain::RawDataSamplesOfMetric {
+            metric: "m".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&raw).unwrap(),
+            json(serde_json::json!({"kind": "samples_of_metric", "metric": "m"}))
+        );
+        for (proof, name) in [
+            (
+                NonNegativeWeightProof::CounterRawDataSamples,
+                "counter_samples",
+            ),
+            (
+                NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples,
+                "declared_non_negative_samples",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&proof).unwrap(),
+                format!("\"{name}\"")
+            );
+        }
+        let summary_sample = FieldDataType::SummarySample(
+            SamplingKind::Reservoir,
+            SamplingParams::Reservoir { size: 64 },
+        );
+        assert_eq!(
+            serde_json::to_string(&summary_sample).unwrap(),
+            json(serde_json::json!({"Sample": ["Reservoir", {"Reservoir": {"size": 64}}]}))
         );
     }
 }

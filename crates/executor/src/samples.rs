@@ -1,11 +1,11 @@
-//! Raw samples in, labeled answers out: how a deployment runtime feeds a
+//! Raw data samples in, labeled answers out: how a deployment runtime feeds a
 //! plan's inputs and reads its PromQL outputs, without the executor's row
 //! encoding.
 //!
-//! A [`RawSampleSelector`] is prepared once per raw-sample window of the
+//! A [`RawDataSampleSelector`] is prepared once per raw-data-sample window of the
 //! installable DAG. It says which metric's samples the window reads
-//! ([`RawSampleSelector::metric`]), and turns the samples a runtime
-//! received into the window's input rows ([`RawSampleSelector::window_batch`]):
+//! ([`RawDataSampleSelector::metric`]), and turns the samples a runtime
+//! received into the window's input rows ([`RawDataSampleSelector::window_batch`]):
 //! those in the window, kept by the window's `Scan` predicates (its label
 //! matchers) and, for an instant selector, only each series' latest one.
 //! Stale markers are dropped there, once for every consumer: they end a
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use planner_types::ir::operator::Source as ScanSource;
-use planner_types::ir::physical_export::{PhysicalASAPDAG, RawSampleWindow};
+use planner_types::ir::physical_export::{PhysicalASAPDAG, RawDataSampleWindow};
 use planner_types::ir::schema::Schema;
 use planner_types::ir::{NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 use std::rc::Rc;
@@ -29,9 +29,11 @@ use crate::physical_planner::promql_rows::{
 use crate::values::{Batch, SchemaRef, Value};
 use crate::Error;
 
-/// One raw sample, e.g. one Prometheus Remote Write sample.
+/// One raw data sample: one timestamped value of a time series as it arrives,
+/// e.g. one Prometheus Remote Write sample. Not a summary sample, the rows a
+/// sampling summary keeps (`FieldDataType::SummarySample`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Sample {
+pub struct RawDataSample {
     /// Every label of the series, `__name__` (the metric) included.
     pub labels: BTreeMap<String, String>,
     /// When the sample was taken, in Unix milliseconds.
@@ -40,10 +42,10 @@ pub struct Sample {
     pub value: f64,
 }
 
-/// One raw-sample window of an installable DAG, prepared to turn samples
-/// into its input rows: built once per window ([`RawSampleSelector::new`]),
-/// then called for each window end ([`RawSampleSelector::window_batch`]).
-pub struct RawSampleSelector {
+/// One raw-data-sample window of an installable DAG, prepared to turn samples
+/// into its input rows: built once per window ([`RawDataSampleSelector::new`]),
+/// then called for each window end ([`RawDataSampleSelector::window_batch`]).
+pub struct RawDataSampleSelector {
     /// The metric the window's `Scan` reads (`__name__`).
     metric: String,
     /// The `Scan`'s output schema, which the rows are encoded in.
@@ -59,11 +61,11 @@ pub struct RawSampleSelector {
     latest_sample_per_series: bool,
 }
 
-impl RawSampleSelector {
+impl RawDataSampleSelector {
     /// The selector of `window` of `dag`. Bad input when the window's nodes
     /// are not a time-series `Scan` and a `TimeRange` of `dag` with the same
     /// columns, or a predicate does not compile.
-    pub fn new(dag: &PhysicalASAPDAG, window: &RawSampleWindow) -> Result<Self, Error> {
+    pub fn new(dag: &PhysicalASAPDAG, window: &RawDataSampleWindow) -> Result<Self, Error> {
         let node = |id| {
             dag.nodes
                 .iter()
@@ -136,15 +138,19 @@ impl RawSampleSelector {
     /// whose latest sample is one has no row for that series, as in PromQL.
     /// An ordinary NaN is a sample and is kept. Bad input when a sample's
     /// labels cannot fill the schema.
-    pub fn window_batch(&self, window_end_ms: i64, samples: &[Sample]) -> Result<Batch, Error> {
+    pub fn window_batch(
+        &self,
+        window_end_ms: i64,
+        samples: &[RawDataSample],
+    ) -> Result<Batch, Error> {
         let start_ms = window_end_ms - self.width_ms;
-        let mut kept: Vec<&Sample> = samples
+        let mut kept: Vec<&RawDataSample> = samples
             .iter()
             .filter(|s| start_ms < s.timestamp_ms && s.timestamp_ms <= window_end_ms)
             .filter(|s| s.labels.get("__name__").map(String::as_str) == Some(self.metric()))
             .collect();
         if self.latest_sample_per_series {
-            let mut latest: BTreeMap<&BTreeMap<String, String>, &Sample> = BTreeMap::new();
+            let mut latest: BTreeMap<&BTreeMap<String, String>, &RawDataSample> = BTreeMap::new();
             for sample in kept {
                 let entry = latest.entry(&sample.labels).or_insert(sample);
                 if sample.timestamp_ms >= entry.timestamp_ms {
@@ -220,12 +226,12 @@ mod tests {
     use std::time::Duration;
 
     /// `TimeRange(width_ms, kind)` over a `Scan` of `source` keeping
-    /// `instance="a"`, timed and exported, with its raw-sample window.
+    /// `instance="a"`, timed and exported, with its raw-data-sample window.
     fn window_over(
         source: Source,
         width_ms: u64,
         kind: TimeRangeKind,
-    ) -> (PhysicalASAPDAG, RawSampleWindow) {
+    ) -> (PhysicalASAPDAG, RawDataSampleWindow) {
         let schema = Schema::with_time_index(
             vec![
                 Field::plain(PROMQL_SERIES_IDENTITY, DataType::Utf8, false),
@@ -261,7 +267,7 @@ mod tests {
         )
         .unwrap();
         let dag = compile_physical_asap_dag(&timed).unwrap();
-        let window = RawSampleWindow {
+        let window = RawDataSampleWindow {
             time_range_node_id: dag.roots[0],
             width_ms: width_ms as i64,
             end_offset_ms: 0,
@@ -270,8 +276,8 @@ mod tests {
         (dag, window)
     }
 
-    fn sample(metric: &str, instance: &str, timestamp_ms: i64, value: f64) -> Sample {
-        Sample {
+    fn sample(metric: &str, instance: &str, timestamp_ms: i64, value: f64) -> RawDataSample {
+        RawDataSample {
             labels: BTreeMap::from([
                 ("__name__".to_string(), metric.to_string()),
                 ("instance".to_string(), instance.to_string()),
@@ -305,7 +311,7 @@ mod tests {
     #[test]
     fn a_range_window_keeps_its_bounds_matchers_and_metric() {
         let (dag, window) = window_over(latency_ms(), 1_000, TimeRangeKind::Range);
-        let selector = RawSampleSelector::new(&dag, &window).unwrap();
+        let selector = RawDataSampleSelector::new(&dag, &window).unwrap();
         assert_eq!(selector.metric(), "latency_ms");
         let samples = [
             sample("latency_ms", "a", 9_000, 1.0),
@@ -323,7 +329,7 @@ mod tests {
     #[test]
     fn an_instant_window_keeps_each_series_latest_sample() {
         let (dag, window) = window_over(latency_ms(), 1_000, TimeRangeKind::Instant);
-        let selector = RawSampleSelector::new(&dag, &window).unwrap();
+        let selector = RawDataSampleSelector::new(&dag, &window).unwrap();
         let samples = [
             sample("latency_ms", "a", 9_100, 1.0),
             sample("latency_ms", "a", 9_900, 10.0),
@@ -341,7 +347,7 @@ mod tests {
     fn stale_markers_are_not_rows() {
         let stale = f64::from_bits(STALE_MARKER);
         let (dag, window) = window_over(latency_ms(), 1_000, TimeRangeKind::Range);
-        let selector = RawSampleSelector::new(&dag, &window).unwrap();
+        let selector = RawDataSampleSelector::new(&dag, &window).unwrap();
         let samples = [
             sample("latency_ms", "a", 9_200, 3.0),
             sample("latency_ms", "a", 9_400, stale),
@@ -354,7 +360,7 @@ mod tests {
         assert!(rows[1].1.is_nan() && rows[1].1.to_bits() != STALE_MARKER);
 
         let (dag, window) = window_over(latency_ms(), 1_000, TimeRangeKind::Instant);
-        let selector = RawSampleSelector::new(&dag, &window).unwrap();
+        let selector = RawDataSampleSelector::new(&dag, &window).unwrap();
         let ended = [
             sample("latency_ms", "a", 9_500, 5.0),
             sample("latency_ms", "a", 9_900, stale),
@@ -370,7 +376,7 @@ mod tests {
         };
         let (dag, window) = window_over(table, 1_000, TimeRangeKind::Range);
         assert!(matches!(
-            RawSampleSelector::new(&dag, &window),
+            RawDataSampleSelector::new(&dag, &window),
             Err(Error::Invalid(_))
         ));
     }
@@ -383,7 +389,7 @@ mod tests {
         use crate::physical_planner::promql_rows::series_row;
         use arrow::array::AsArray;
         let (dag, window) = window_over(latency_ms(), 10_000, TimeRangeKind::Range);
-        let selector = RawSampleSelector::new(&dag, &window).unwrap();
+        let selector = RawDataSampleSelector::new(&dag, &window).unwrap();
         let samples = (0..30)
             .map(|i| {
                 sample(

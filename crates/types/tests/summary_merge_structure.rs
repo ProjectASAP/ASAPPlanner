@@ -319,7 +319,7 @@ fn family_capability_table() {
         ),
         (FieldDataType::Plain(DataType::Float64), None, vec![]),
         (
-            FieldDataType::Sample(
+            FieldDataType::SummarySample(
                 SamplingKind::Reservoir,
                 SamplingParams::Reservoir { size: 64 },
             ),

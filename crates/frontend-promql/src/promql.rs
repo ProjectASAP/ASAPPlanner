@@ -856,7 +856,7 @@ fn ranked_by_value(
 ///
 /// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
 /// `sum by (le)` / `rate` structure inside it. The classic `le`-bucket form
-/// becomes [`classic_histogram_quantile`]; a native histogram or raw samples
+/// becomes [`classic_histogram_quantile`]; a native histogram or raw data samples
 /// become a `Quantile` over the whole argument.
 /// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
 /// `stdvar`) and `histogram_fraction` (native or classic buckets) are rejected.
@@ -870,7 +870,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         // Two lowerings of `histogram_quantile(φ, …)`:
         //  - classic `le`-bucket form → `HistogramQuantile`, exact interpolation
         //    over cumulative buckets (not sketch-able).
-        //  - native-histogram / raw-samples form → the generic `Quantile` intent
+        //  - native-histogram / raw-data-samples form → the generic `Quantile` intent
         //    (sketch-able).
         // The true signal is the argument's sample type: a declared
         // `HistogramKind` (issue #79) drives the choice when available, else we
@@ -918,7 +918,7 @@ fn classic_histogram_quantile(q: f64, output_name: &str, child: Unresolved) -> U
 ///
 /// Lowers to a `Concat` of one `PromqlRelabel`-wrapped quantile branch per φ, reusing
 /// the single-quantile decision — classic `le`-buckets interpolate
-/// (`HistogramQuantile`), native histograms / raw samples take the sketch-able
+/// (`HistogramQuantile`), native histograms / raw data samples take the sketch-able
 /// `Quantile` (issues #43 / #79) — so the two functions cannot diverge.
 ///
 /// The vector argument is lowered once per branch, duplicating the sub-DAG —
@@ -1341,7 +1341,7 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
 }
 
 /// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
-/// argument — as opposed to a native histogram or raw samples. Recognised
+/// argument — as opposed to a native histogram or raw data samples. Recognised
 /// structurally, by any of:
 ///  - a `by (le)` grouping (`sum by (le) (…)`),
 ///  - a selector on a classic `_bucket` metric (`http_request_…_bucket`),
@@ -1357,7 +1357,7 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
 /// Metadata wins: if any metric referenced in `arg` has a declared
 /// [`HistogramKind`](crate::histogram::HistogramKind), that decides it (issue
 /// #79) — this fixes both the false-positive (a `…_bucket`-named non-histogram
-/// declared `RawSamples`) and the false-negative (a suffix-less classic
+/// declared `RawDataSamples`) and the false-negative (a suffix-less classic
 /// histogram declared `ClassicBucket`) of the structural heuristic. With no
 /// declaration, fall back to the structural `by (le)`/`_bucket` heuristic.
 fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
@@ -1383,7 +1383,7 @@ fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
     if is_classic_bucket_arg(arg) {
         Ok(false)
     } else {
-        Err(LoweringError::UnsupportedFeature("histogram_quantile requires classic buckets; use quantile for float samples or explicitly declare the RawSamples extension".into()))
+        Err(LoweringError::UnsupportedFeature("histogram_quantile requires classic buckets; use quantile for float samples or explicitly declare the RawDataSamples extension".into()))
     }
 }
 
@@ -1779,7 +1779,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                 // A **bare instant selector** (`topk(k, m)`) ranks its own
                 // samples directly: it must NOT be wrapped in a reducing
                 // aggregate. Defaulting it to `Sum` was both semantically wrong
-                // (PromQL `topk` ranks the raw samples, it does not sum them) and
+                // (PromQL `topk` ranks the raw data samples, it does not sum them) and
                 // destructive — the cross-series `Sum` collapses every label,
                 // including the `by (…)` partition keys, so they no longer
                 // resolve (issue #30). Keep the selector label-preserving so

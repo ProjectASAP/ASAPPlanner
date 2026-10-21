@@ -504,7 +504,7 @@ mod tests {
     /// A rollup Pass 2 candidate is also built over tumbling panes: for a
     /// fine and a coarse sum over one window, some Pass 2 candidate answers
     /// the coarse sum from the fine one and builds the fine one as panes, so
-    /// a deployment that keeps no raw samples can store it and roll the
+    /// a deployment that keeps no raw data samples can store it and roll the
     /// coarse sum up from its merged state.
     #[test]
     fn a_rollup_is_also_built_over_tumbling_panes() {

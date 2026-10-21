@@ -189,7 +189,7 @@ impl PhysicalASAPDAGDocument {
     }
 }
 
-/// A window of raw samples a deployment runtime feeds the DAG: at
+/// A window of raw data samples a deployment runtime feeds the DAG: at
 /// evaluation time `T`, the samples in `(T - end_offset_ms -
 /// width_ms, T - end_offset_ms]` that the `Scan`
 /// `scan_node_id` selects, bound as the input rows of the `TimeRange`
@@ -199,7 +199,7 @@ impl PhysicalASAPDAGDocument {
 /// an instant selector `width_ms` is its lookback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RawSampleWindow {
+pub struct RawDataSampleWindow {
     /// The `TimeRange` node the window's input rows are bound to.
     pub time_range_node_id: PhysicalASAPNodeId,
     /// Width of the window, from the `TimeRange`.
@@ -211,7 +211,7 @@ pub struct RawSampleWindow {
     pub scan_node_id: PhysicalASAPNodeId,
 }
 
-impl RawSampleWindow {
+impl RawDataSampleWindow {
     /// How far back from the evaluation time the window reaches:
     /// `end_offset_ms + width_ms`.
     pub fn reach_ms(&self) -> u64 {
