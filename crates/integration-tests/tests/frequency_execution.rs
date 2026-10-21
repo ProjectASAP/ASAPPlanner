@@ -13,12 +13,14 @@ use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::logical_candidates;
+use asap_logical_asap_optimization::accuracy::estimators::univmon;
+use asap_logical_asap_optimization::per_computation_candidates::with_resized_summaries;
 use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOperatorPayload};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, OperatorNode,
-    TimingMemo,
+    QueryRoot, TimingMemo,
 };
 
 mod physical_common;
@@ -35,6 +37,19 @@ fn built_family(candidate: &Rc<OperatorNode>) -> Option<FieldDataType> {
             Some(ASAPOp::SummaryAgg { family, .. }) => Some(family.clone()),
             _ => None,
         })
+}
+
+/// `candidate` with its UnivMon resized for a source of at most
+/// `max_distinct` distinct items, as plan selection resizes it.
+fn for_distinct_bound(candidate: &Rc<OperatorNode>, max_distinct: u64) -> Rc<OperatorNode> {
+    let roots = with_resized_summaries(&[QueryRoot::Operator(Rc::clone(candidate))], &|_, params| {
+        univmon::sized_for_distinct_bound(params, max_distinct)
+    })
+    .unwrap();
+    match roots.into_iter().next() {
+        Some(QueryRoot::Operator(root)) => root,
+        other => panic!("{other:?}"),
+    }
 }
 
 /// Execute `candidate` at query time over `SAMPLES`, all inside the window.
@@ -112,17 +127,14 @@ fn standin_exact_and_univmon_candidates_execute() {
         .iter()
         .map(|count| count / 6.0 * (count / 6.0).log2())
         .sum::<f64>();
-    // A UnivMon sized for a distinct count at ε = 0.01 holds a heap of
-    // millions of keys on each of its 19 layers, past the default 64 MiB.
+    // Pass 1 sizes a distinct-count or L2 UnivMon for the 19 layers the
+    // library builds, past the default 64 MiB; plan selection resizes it
+    // for the source's distinct bound, here the window's 3 source IPs:
+    // 3 layers, at ε = 0.3 a 300-key heap and a 1 × 2^16 Count Sketch.
     for (query, expected, epsilon, delta) in [
-        ("distinct_over_time(flows_src_ip[1m])", 3.0, 0.2, 0.1),
+        ("distinct_over_time(flows_src_ip[1m])", 3.0, 0.3, 0.3),
         ("entropy_over_time(flows_src_ip[1m])", entropy, 0.01, 0.01),
-        (
-            "l2_over_time(flows_src_ip[1m])",
-            14.0_f64.sqrt(),
-            0.01,
-            0.01,
-        ),
+        ("l2_over_time(flows_src_ip[1m])", 14.0_f64.sqrt(), 0.3, 0.3),
     ] {
         let accuracy = AccuracyTarget::max_error(epsilon).failure_probability(delta);
         let root = lower_promql(query, accuracy.clone()).unwrap();
@@ -139,6 +151,7 @@ fn standin_exact_and_univmon_candidates_execute() {
                 }
                 _ => continue,
             };
+            let candidate = for_distinct_bound(&candidate, 3);
             let values = execute(&candidate);
             assert!(
                 matches!(values.as_slice(), [value] if (value - expected).abs() < 1e-9),

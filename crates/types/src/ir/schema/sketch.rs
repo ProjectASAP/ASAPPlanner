@@ -83,7 +83,7 @@ pub const KLL_MAX_K: u32 = 26_602;
 /// deployment-specific stage ever sees the plan.
 ///
 /// Equality compares the sketch that is built: a KLL's `failure_probability`
-/// and a UnivMon's `distinct_failure_probability` record what it was sized
+/// and a UnivMon's `relative_error` record what it was sized
 /// for, not its structure, so two KLLs with the same `k` are equal (they
 /// share, and match the same offline evidence), as are two UnivMons of the
 /// same shape.
@@ -94,12 +94,13 @@ pub enum SketchParams {
         sketch_rows: u32,
         sketch_cols: u32,
         layers: u8,
-        /// The failure probability the heap was sized for when this
-        /// UnivMon answers a distinct count; its relative error follows from
-        /// it and the heap. `None`: not sized for a distinct count, which
-        /// then has no guarantee. Ignored by equality.
+        /// The relative error the layers' heap and Count Sketch were sized
+        /// for (the `ε` of arXiv:1011.2571's Theorem 4.2): the
+        /// error bound of its L2 and distinct-count guarantee, at failure
+        /// probability 0.3. `None`: not sized for an error, which then has
+        /// no guarantee. Ignored by equality.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        distinct_failure_probability: Option<f64>,
+        relative_error: Option<f64>,
     },
     Kll {
         k: u32,

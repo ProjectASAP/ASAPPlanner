@@ -84,7 +84,7 @@ mod tests {
                 sketch_rows: 3,
                 sketch_cols: 1024,
                 layers: 8,
-                distinct_failure_probability: None,
+                relative_error: None,
             },
             A::Kll => SketchParams::Kll {
                 k: 200,

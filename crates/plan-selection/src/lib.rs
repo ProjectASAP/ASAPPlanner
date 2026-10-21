@@ -1450,7 +1450,10 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
 /// failures union-bound to `δ` over the whole result. A summary several
 /// queries read takes the smallest. The parameters that depend on it are
 /// enlarged ([`with_failure_probability`]; classic HLL's precision from its
-/// source's distinct bound), and the guarantees above are composed again.
+/// source's distinct bound), a UnivMon is resized for its source's distinct
+/// bound ([`univmon::sized_for_distinct_bound`]: the layers it needs, and
+/// the heap and Count Sketch they need), and the guarantees above are
+/// composed again.
 /// A query whose `G` is unbound enlarges nothing: its whole-result target
 /// stays unmet. Stage 1 sizes for ε and reads no data workload; only this
 /// stage binds `G`. `Err` is the reason the candidate is rejected when its
@@ -1538,6 +1541,13 @@ pub fn resize_for_failure_probability(
                     precision: hll::min_precision(relative_error, delta, bound, *precision),
                     relative_error: Some(relative_error),
                 }
+            }
+            // The paper's failure probability is fixed: the bound sets the
+            // layers, and they the heap and Count Sketch at the same error.
+            params @ SketchParams::UnivMon { .. } => {
+                let source = distinct_bound_source(state)?;
+                let bound = data.sources.get(&source)?.max_distinct_per_evaluation?;
+                univmon::sized_for_distinct_bound(params, bound)?
             }
             params => with_failure_probability(params, delta),
         })
@@ -1807,9 +1817,9 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 /// - the input row count, `series` ([`series_read`] of `root`);
 /// - each source's stream norm ([`source_norm_statistic`]), from the data
 ///   workload's per-source `stream_norms`;
-/// - classic HLL's failure probability and the chance a UnivMon's top layer
-///   is incomplete, from the data workload's per-source
-///   `max_distinct_per_evaluation`;
+/// - classic HLL's failure probability and a UnivMon's (the paper's 0.3
+///   when its layers cover the source's distinct items, else 1), from the
+///   data workload's per-source `max_distinct_per_evaluation`;
 /// - a product's or quotient's bound, from the deployment's enforced
 ///   operand domains ([`operand_domain_bounds`]).
 ///
@@ -1849,8 +1859,8 @@ fn bind_statistics(
 
 /// A data-workload statistic Stage 1 left symbolic: the input row count
 /// (`series`, the series of the sources the query reads), one source's
-/// stream norm, or classic HLL's failure probability or a UnivMon's
-/// incomplete-top-layer probability given one source's distinct bound,
+/// stream norm, or classic HLL's or a UnivMon's failure probability given
+/// one source's distinct bound,
 /// from source facts that hold at any planning time, or the sign of one
 /// metric's samples, from its declared type.
 fn workload_statistic(statistic: &str, series: Option<u64>, data: &DataWorkload) -> Option<f64> {
@@ -1873,13 +1883,9 @@ fn workload_statistic(statistic: &str, series: Option<u64>, data: &DataWorkload)
             bound,
         ));
     }
-    if let Some((heap_size, layers, source)) =
-        univmon::parse_incomplete_top_layer_statistic(statistic)
-    {
+    if let Some((layers, source)) = univmon::parse_layers_statistic(statistic) {
         let bound = data.sources.get(source)?.max_distinct_per_evaluation?;
-        return Some(univmon::incomplete_top_layer_probability(
-            heap_size, layers, bound,
-        ));
+        return Some(univmon::failure_probability(layers, bound));
     }
     let (norm, source) = parse_source_norm_statistic(statistic)?;
     let norms = data.sources.get(source)?.stream_norms?;
@@ -5151,7 +5157,7 @@ mod tests {
                     sketch_rows: 5,
                     sketch_cols: 1_024,
                     layers: 16,
-                    distinct_failure_probability: None,
+                    relative_error: None,
                 }
             ),
             16 * (8 * 5 * 1_024 + 24 * 256)
@@ -5195,7 +5201,7 @@ mod tests {
                         sketch_rows: 5,
                         sketch_cols: 1_024,
                         layers,
-                        distinct_failure_probability: None,
+                        relative_error: None,
                     },
                 ),
                 GroupingStrategy::default(),

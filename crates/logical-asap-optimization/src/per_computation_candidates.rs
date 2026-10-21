@@ -1602,11 +1602,12 @@ fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarante
     Some(composed_guarantee(&reader))
 }
 
-/// The guarantee of a distinct count of one instance per group over a
-/// source's own rows, whose failure probability is left symbolic in the
-/// source's distinct bound, which Stage 1 does not read:
-/// - classic HLL's ([`hll::classic_guarantee`]);
-/// - UnivMon's, sized for a distinct count ([`univmon::distinct_guarantee`]).
+/// The guarantee of an estimate of one instance per group over a source's
+/// own rows, whose failure probability is left symbolic in the source's
+/// distinct bound, which Stage 1 does not read:
+/// - classic HLL's distinct count ([`hll::classic_guarantee`]);
+/// - UnivMon's L2 norm and distinct count, the paper's guarantee whose
+///   layers must cover the bound ([`univmon::source_guarantee`]).
 ///
 /// `None` for any other summary, or one over computed rows, whose distinct
 /// items the source's bound does not bound.
@@ -1618,17 +1619,16 @@ fn source_distinct_guarantee(
     let FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) = family else {
         return None;
     };
-    if *query != SketchStatistic::Cardinality {
-        return None;
-    }
     source_scan(input)?;
     match kind.params() {
         SketchParams::Hll {
             precision,
             relative_error,
-        } => hll::classic_guarantee(*precision, *relative_error, &source(input)?),
+        } if *query == SketchStatistic::Cardinality => {
+            hll::classic_guarantee(*precision, *relative_error, &source(input)?)
+        }
         params @ SketchParams::UnivMon { .. } => {
-            univmon::distinct_guarantee(params, &source(input)?)
+            univmon::source_guarantee(params, query, &source(input)?)
         }
         _ => None,
     }

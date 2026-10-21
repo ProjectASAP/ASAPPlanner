@@ -50,6 +50,22 @@ fn canonical(labels: &Series) -> Series {
         .collect()
 }
 
+/// `candidate` with its UnivMon resized for a source of at most
+/// `max_distinct` distinct items, as plan selection resizes it.
+fn for_distinct_bound(candidate: &Rc<OperatorNode>, max_distinct: u64) -> Rc<OperatorNode> {
+    use asap_logical_asap_optimization::accuracy::estimators::univmon;
+    use asap_logical_asap_optimization::per_computation_candidates::with_resized_summaries;
+    use asap_types::ir::QueryRoot;
+    let roots = with_resized_summaries(&[QueryRoot::Operator(Rc::clone(candidate))], &|_, params| {
+        univmon::sized_for_distinct_bound(params, max_distinct)
+    })
+    .unwrap();
+    match roots.into_iter().next() {
+        Some(QueryRoot::Operator(root)) => root,
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Every logical candidate the planner pipeline composes for `query`, with
 /// `m` declared a counter: plan selection's answer to a heap's open
 /// requirement that its weights are counter samples, which the executor
@@ -405,9 +421,11 @@ fn check(
 fn raw_sample_summaries_compile_and_match_their_kernels() {
     let exact = AccuracyTarget::exact();
     let sketch = AccuracyTarget::max_error(0.02);
-    // A UnivMon sized for a distinct count at ε = 0.02 holds a heap of
-    // millions of keys on each of its 19 layers, past the default 64 MiB.
-    let distinct = AccuracyTarget::max_error(0.2).failure_probability(0.1);
+    // Pass 1 sizes a distinct-count UnivMon for the 19 layers the library
+    // builds, past the default 64 MiB; it is resized below for at most 4
+    // distinct values per series, as plan selection resizes it, at the
+    // paper's failure probability 0.3.
+    let distinct = AccuracyTarget::max_error(0.3).failure_probability(0.3);
     let queries = [
         ("sum_over_time(m[5m])", &exact),
         ("count_over_time(m[5m])", &exact),
@@ -437,6 +455,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
     let mut checked = BTreeMap::new();
     for (query, accuracy) in queries {
         for candidate in candidates(query, accuracy.clone()) {
+            let candidate = for_distinct_bound(&candidate, 4);
             let dag = compile_at_ingestion_physical_asap_dag(&candidate).unwrap();
             for (source, root) in raw_summaries(&dag) {
                 match check(query, &dag, source, root, &rows) {
