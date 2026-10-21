@@ -4595,7 +4595,7 @@ mod tests {
     /// counter under another name leaves the requirement unmet. Admitted,
     /// the top-k still needs evidence about its output.
     #[test]
-    fn count_min_over_samples_needs_a_declared_counter() {
+    fn count_min_over_raw_data_samples_needs_a_declared_counter() {
         use asap_types::workload::MetricType;
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let with_types = |types: &[(&str, MetricType)]| with_metric_types(data(), types);
@@ -4730,7 +4730,7 @@ mod tests {
     /// increase of that gauge stays unproven: a reset correction over a
     /// gauge can still give a negative value.
     #[test]
-    fn count_min_over_samples_of_a_gauge_declared_non_negative_is_admitted() {
+    fn count_min_over_raw_data_samples_of_a_gauge_declared_non_negative_is_admitted() {
         use asap_types::ir::schema::NonNegativeWeightProof;
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
@@ -4850,7 +4850,7 @@ mod tests {
     /// unknown for a gauge, an undeclared metric or a counter by another
     /// name.
     #[test]
-    fn sign_of_counter_samples_is_bound_from_the_declared_type() {
+    fn sign_of_counter_raw_data_samples_is_bound_from_the_declared_type() {
         use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,

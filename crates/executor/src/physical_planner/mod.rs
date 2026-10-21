@@ -712,7 +712,7 @@ fn temporal_evaluation_drops_name(node: &PhysicalASAPDAGNode) -> bool {
                         | SketchStatistic::PointCount { .. }
                         | SketchStatistic::FrequencyL2
                         | SketchStatistic::FrequencyEntropy
-                        // A heap ranking series identities over raw samples
+                        // A heap ranking series identities over raw data samples
                         // answers a `sum_over_time` or `count_over_time` per
                         // ranked series.
                         | SketchStatistic::TopK { .. },

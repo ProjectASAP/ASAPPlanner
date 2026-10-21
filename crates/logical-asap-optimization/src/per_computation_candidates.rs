@@ -1521,9 +1521,9 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
                 reduction,
                 ..
             }) if estimate_has_bound(family, update, query)
-                || estimate_bound_over_samples(family, update, query).is_some() =>
+                || estimate_bound_over_raw_data_samples(family, update, query).is_some() =>
             {
-                let local = match estimate_bound_over_samples(family, update, query) {
+                let local = match estimate_bound_over_raw_data_samples(family, update, query) {
                     Some(gated) => gated,
                     None => source_distinct_guarantee(family, query, input)
                         .or_else(|| local_guarantee(family, query))?,
@@ -2589,11 +2589,11 @@ fn estimate_has_bound(
 }
 
 /// A Count-Min estimate whose weights carry the open requirement that they
-/// are samples of one metric ([`WeightDomain::RawDataSamplesOfMetric`]): its local
+/// are raw data samples of one metric ([`WeightDomain::RawDataSamplesOfMetric`]): its local
 /// guarantee with the bound gated on that metric's sign
 /// ([`raw_data_samples_sign_statistic`]), which plan selection binds to 1 when the
 /// metric is declared a counter. `None` for any other estimate.
-fn estimate_bound_over_samples(
+fn estimate_bound_over_raw_data_samples(
     family: &FieldDataType,
     update: &SummaryUpdate,
     query: &SketchStatistic,
@@ -4300,7 +4300,7 @@ mod tests {
     /// samples of `m` carry the open requirement that `m` is a counter, under
     /// any name (`m_total` included), for plan selection to confirm.
     #[test]
-    fn heap_weights_over_samples_record_an_open_requirement() {
+    fn heap_weights_over_raw_data_samples_record_an_open_requirement() {
         for (query, metric) in [
             ("topk by (job) (10, sum_over_time(m[1m]))", "m"),
             ("topk by (job) (10, sum_over_time(m_total[1m]))", "m_total"),
@@ -4545,7 +4545,7 @@ mod tests {
     /// φ in [0, 1]: outside it PromQL answers -Inf or +Inf. Pass 1 offers
     /// no sketch for such a φ.
     #[test]
-    fn a_quantile_estimate_shares_its_samples_sign_only_inside_the_unit_interval() {
+    fn a_quantile_estimate_shares_its_raw_data_samples_sign_only_inside_the_unit_interval() {
         let estimate_of = |query: &str| {
             let inventory = inventory(query);
             (0..inventory.targets.len())
@@ -4584,7 +4584,7 @@ mod tests {
     /// as the same quantile over the raw window does; φ outside [0, 1]
     /// still carries none.
     #[test]
-    fn a_quantile_of_merged_panes_shares_its_samples_sign() {
+    fn a_quantile_of_merged_panes_shares_its_raw_data_samples_sign() {
         let inventory = inventory("quantile_over_time(0.99, m[100s])");
         let estimate = (0..inventory.targets.len())
             .flat_map(|t| composed_with(&inventory, t))
@@ -4656,7 +4656,7 @@ mod tests {
     /// sum over the samples are; a rate or any other function is not. A
     /// fold over them names its unknown sign by that metric.
     #[test]
-    fn values_estimating_samples_name_their_sign_by_the_metric() {
+    fn values_estimating_raw_data_samples_name_their_sign_by_the_metric() {
         let inventory = inventory("topk by (job) (10, sum_over_time(m[1m]))");
         let topk = topk_target(&inventory);
         for (candidate, root) in composed_with(&inventory, topk) {
@@ -4824,7 +4824,7 @@ mod tests {
     /// `m`'s sign: unknown until plan selection binds it, the local bound
     /// once bound to 1.
     #[test]
-    fn count_min_estimate_over_samples_is_gated_on_the_metric() {
+    fn count_min_estimate_over_raw_data_samples_is_gated_on_the_metric() {
         let family = FieldDataType::Sketch(
             SketchKind::new(
                 SketchAlgorithm::Cms,
@@ -4844,7 +4844,7 @@ mod tests {
             weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
             weight_domain: WeightDomain::RawDataSamplesOfMetric { metric: "m".into() },
         };
-        let gated = estimate_bound_over_samples(&family, &update, &query).expect("gated");
+        let gated = estimate_bound_over_raw_data_samples(&family, &update, &query).expect("gated");
         assert_eq!(gated.spec.error.evaluate(), None);
         let local = local_guarantee(&family, &query).unwrap();
         let statistic = raw_data_samples_sign_statistic("m");

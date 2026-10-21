@@ -1052,12 +1052,14 @@ fn evaluate_states(
         match states.storage() {
             StateStorage::Exact(records) => {
                 evaluation.statistic == statistic_of(states.family())
-                    && records[index].insufficient_counter_samples()
+                    && records[index].insufficient_counter_raw_data_samples()
             }
-            StateStorage::Objects(objects) => crate::evaluation::insufficient_counter_samples(
-                objects[index].as_ref(),
-                evaluation.statistic,
-            ),
+            StateStorage::Objects(objects) => {
+                crate::evaluation::insufficient_counter_raw_data_samples(
+                    objects[index].as_ref(),
+                    evaluation.statistic,
+                )
+            }
         }
     };
     let mut keep = Vec::with_capacity(batch.num_rows());

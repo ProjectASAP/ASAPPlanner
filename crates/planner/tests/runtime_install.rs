@@ -2055,7 +2055,7 @@ fn counter_topk_workload(function: &str) -> PlanningWorkload {
 }
 
 /// The per-second rate of series `instance` (1 or 2) of job `job` (1..=12)
-/// in [`counter_samples`]: distinct for every series and every job's sum.
+/// in [`counter_raw_data_samples`]: distinct for every series and every job's sum.
 fn counter_rate(job: i64, instance: i64) -> f64 {
     job as f64 + 0.1 * instance as f64
 }
@@ -2064,7 +2064,7 @@ fn counter_rate(job: i64, instance: i64) -> f64 {
 /// 595 s before `EVALUATION_MS`: each a counter growing linearly at
 /// [`counter_rate`], so its 5-minute `increase` is 300 × its rate (the
 /// samples 5 s inside each window end extrapolate to them exactly).
-fn counter_samples() -> Vec<RawDataSample> {
+fn counter_raw_data_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for job in 1..=12 {
         for instance in 1..=2 {
@@ -2128,7 +2128,7 @@ async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
         let plan_json = serde_json::to_string(&plan).unwrap();
         let run = run_data_plane(
             &plan_json,
-            &counter_samples(),
+            &counter_raw_data_samples(),
             EVALUATION_MS,
             &mut SummaryStore::new(),
         );
@@ -2635,7 +2635,7 @@ async fn a_forced_heap_topk_count_plan_compiles_and_answers_within_its_bound() {
 }
 
 /// The per-second rate of series `instance` (1 or 2) of job `job` (1..=12)
-/// in [`skewed_counter_samples`]: `50 / job^1.2`, plus a little per
+/// in [`skewed_counter_raw_data_samples`]: `50 / job^1.2`, plus a little per
 /// instance, a skewed ranking of the jobs' sums.
 fn skewed_counter_rate(job: i64, instance: i64) -> f64 {
     50.0 / (job as f64).powf(1.2) + 0.01 * instance as f64
@@ -2643,8 +2643,8 @@ fn skewed_counter_rate(job: i64, instance: i64) -> f64 {
 
 /// `data_total` samples of 12 jobs with 2 series each, every 10 s from 595 s
 /// before `EVALUATION_MS`, each a counter growing linearly at
-/// [`skewed_counter_rate`], as [`counter_samples`].
-fn skewed_counter_samples() -> Vec<RawDataSample> {
+/// [`skewed_counter_rate`], as [`counter_raw_data_samples`].
+fn skewed_counter_raw_data_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for job in 1..=12 {
         for instance in 1..=2 {
@@ -2670,7 +2670,7 @@ fn skewed_counter_samples() -> Vec<RawDataSample> {
 /// exact sums.
 #[tokio::test]
 async fn a_forced_heap_counter_topk_plan_compiles_and_answers_within_its_bound() {
-    let samples = skewed_counter_samples();
+    let samples = skewed_counter_raw_data_samples();
     for (function, seconds) in [("increase", 300.0), ("rate", 1.0)] {
         let workload = heap_topk_workload(
             &format!("topk(3, sum by (job) ({function}(data_total[5m])))"),

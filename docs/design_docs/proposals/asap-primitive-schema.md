@@ -1098,6 +1098,7 @@ pub enum FieldDataType {
     /// whether each group has its own sketch or all groups share one.
     Sketch(SketchKind, GroupingStrategy),
     /// Summary sample state: the sampling method, and its parameters.
+    #[serde(rename = "Sample")]
     SummarySample(SamplingKind, SamplingParams),
     /// Wavelet state: the transform, and its parameters.
     Wavelet(WaveletKind, WaveletParams),
