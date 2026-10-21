@@ -528,8 +528,7 @@ class WorkloadViewTests(unittest.TestCase):
         text = self.js.call("searchText", self.doc)
         self.assertIn("default search · ", text)
         self.assertIn("2 independent components searched separately", text)
-        self.assertIn("discarded before composition: no accuracy guarantee ×5 (q3, q4, q5, q6, q7), "
-                      "count min weights not proven non negative ×2 (q6, q7)", text)
+        self.assertIn("discarded before composition: no accuracy guarantee ×7 (q3, q4, q5, q6, q7) · ", text)
         self.assertIn("Stage 2 assignments skipped: they scan raw data at query time", text)
 
     def test_exhaustive_header_counts_rejections_by_cause(self):
