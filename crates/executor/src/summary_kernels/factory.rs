@@ -236,8 +236,11 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
     }
 
     fn memory_usage_bytes(&self) -> usize {
-        // A fixed estimate; the bucket stores grow with the values' range.
-        std::mem::size_of::<DDSketchAccumulator>() + 4096
+        // The struct and the 8-byte counts both bucket stores allocate,
+        // which grow with the values' range.
+        let sketch = &self.acc.inner;
+        let bins = sketch.positive_store_counts().len() + sketch.negative_store_counts().len();
+        std::mem::size_of::<DDSketchAccumulator>() + bins * std::mem::size_of::<u64>()
     }
 }
 
@@ -840,5 +843,24 @@ mod ddsketch_domain {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DDSketch updater reports the bins its stores allocate: none
+    /// before a sample, one 128-bin chunk of the positive store after a
+    /// few positive samples.
+    #[test]
+    fn ddsketch_memory_is_its_allocated_bins() {
+        let mut updater = DDSketchAccumulatorUpdater::new(0.05);
+        let empty = std::mem::size_of::<DDSketchAccumulator>();
+        assert_eq!(updater.memory_usage_bytes(), empty);
+        for value in [1.0, 1.5, 2.0, 4.0] {
+            updater.update_single(value, 0).unwrap();
+        }
+        assert_eq!(updater.memory_usage_bytes(), empty + 128 * 8);
     }
 }

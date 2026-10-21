@@ -2971,7 +2971,7 @@ fn price_at_scale(
     // structure is not that sketch), inherited by the merges, estimates and
     // finalizations over it.
     let mut family_of: HashMap<PhysicalASAPNodeId, StateFamily<'_>> = HashMap::new();
-    let sketch_size = |params: &SketchParams| sketch_shape(params).1 as f64;
+    let sketch_size = |params: &SketchParams| sketch_shape(params, StateSamples::UNKNOWN).1 as f64;
     for node in &dag.nodes {
         let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
         let producers = producers_of.get(&node.id).map_or(&[][..], Vec::as_slice);
@@ -3044,6 +3044,19 @@ fn price_at_scale(
         let edge = |rows: u64| EdgeStatistics {
             rows,
             bytes: rows * width,
+        };
+        // Whether a summary built here sees raw samples (its producer a
+        // scan or a time range) of sources all declared non-negative.
+        let raw_samples_non_negative = || {
+            let raw = producers.first().is_some_and(|producer| {
+                matches!(
+                    nodes[producer].payload,
+                    Payload::NonASAP(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
+                )
+            });
+            raw && sources_read_by[&node.id]
+                .iter()
+                .all(|source| declared_non_negative(data, source))
         };
         let unary = |output| UnaryEdgeStatistics {
             input,
@@ -3222,7 +3235,14 @@ fn price_at_scale(
                 family, reduction, ..
             }) => {
                 let group_count = groups(reduction);
-                let (depth, state_bytes) = summary_shape(family);
+                // At query time, each state sees its group's input rows; at
+                // ingestion time, the rows of a window one second of
+                // arriving rows does not bound.
+                let samples = StateSamples {
+                    per_state: (!ingestion).then(|| input.rows / group_count.max(1)),
+                    non_negative: raw_samples_non_negative(),
+                };
+                let (depth, state_bytes) = summary_shape(family, samples);
                 let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
                 let out = EdgeStatistics {
                     rows: group_count,
@@ -3253,9 +3273,20 @@ fn price_at_scale(
                 // as a time range keeps it (one operation), and updates
                 // that pane.
                 let group_count = groups(reduction);
-                let (depth, state_bytes) = summary_shape(family);
-                let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
                 let states = group_count * u64::from(*pane_count);
+                // Each pane's state sees its group's rows in one pane: of
+                // one second's rows at ingestion time, of the rows read at
+                // query time.
+                let rows_per_pane = match ingestion {
+                    true => input.rows * *pane_width_ms / 1_000,
+                    false => input.rows / u64::from(*pane_count).max(1),
+                };
+                let samples = StateSamples {
+                    per_state: Some(rows_per_pane / group_count.max(1)),
+                    non_negative: raw_samples_non_negative(),
+                };
+                let (depth, state_bytes) = summary_shape(family, samples);
+                let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
                 let out = EdgeStatistics {
                     rows: states,
                     bytes: states * state_bytes,
@@ -4095,13 +4126,15 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 }
 
 /// Update operations per input row and bytes per state, from the sketch's
-/// parameters as `asap_sketchlib` allocates it:
+/// parameters and `samples` (the samples one state sees), modelled on what
+/// `asap_sketchlib` allocates:
 /// - Count-Min / Count-Sketch: `depth × width` 8-byte counters, plus a
 ///   24-byte entry per heap slot for the top-k variants;
 /// - KLL: the 8-byte item array at its full capacity ([`kll_items`]), an
 ///   upper bound: `asap_sketchlib`'s KLL grows the array as items arrive;
-/// - DDSketch: one 8-byte count per bin it touches over an assumed nine
-///   decades of values ([`ddsketch_bins`]);
+/// - DDSketch: its struct and, per bucket store it fills, 8-byte counts in
+///   the 128-bin chunks the library grows a store by
+///   ([`ddsketch_state_bytes`]);
 /// - HLL: one 1-byte register per bucket, `2^precision`;
 /// - KMV: its `k` smallest 64-bit hashes (Theta, which candidate generation
 ///   does not offer because `asap_sketchlib` has no Theta sketch, likewise);
@@ -4115,18 +4148,39 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 /// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
 /// for UnivMon, the same per layer it updates ([`univmon_expected_layers`]);
 /// 1 for every other sketch.
-fn summary_shape(family: &FieldDataType) -> (f64, u64) {
+fn summary_shape(family: &FieldDataType, samples: StateSamples) -> (f64, u64) {
     match family {
-        FieldDataType::Sketch(kind, _) => sketch_shape(kind.params()),
+        FieldDataType::Sketch(kind, _) => sketch_shape(kind.params(), samples),
         FieldDataType::ExactAggregate(..) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
         _ => (1.0, 8),
     }
 }
 
+/// What one summary state's bytes depend on besides its parameters (only
+/// a DDSketch's do): the samples it sees and their sign.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StateSamples {
+    /// Samples one state sees; `None` when unknown, which sizes it for
+    /// every value it can be assumed to see.
+    per_state: Option<u64>,
+    /// Whether every sample is declared non-negative, so a DDSketch fills
+    /// no negative store.
+    non_negative: bool,
+}
+
+impl StateSamples {
+    /// Unknown samples of unknown sign: the most a state is assumed to hold.
+    const UNKNOWN: Self = Self {
+        per_state: None,
+        non_negative: false,
+    };
+}
+
 /// [`summary_shape`] of one sketch: its update operations per row and its
-/// bytes per state. The bytes are also the size the measured table
-/// interpolates between ([`measured_operation_costs`]).
-fn sketch_shape(params: &SketchParams) -> (f64, u64) {
+/// bytes per state. With [`StateSamples::UNKNOWN`], the bytes are also the
+/// size the measured table interpolates between
+/// ([`measured_operation_costs`]).
+fn sketch_shape(params: &SketchParams, samples: StateSamples) -> (f64, u64) {
     match params {
         SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
             (f64::from(*depth), 8 * u64::from(*width) * u64::from(*depth))
@@ -4145,7 +4199,7 @@ fn sketch_shape(params: &SketchParams) -> (f64, u64) {
             8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
         ),
         SketchParams::Kll { k, .. } => (1.0, 8 * kll_items(*k)),
-        SketchParams::DDSketch { alpha } => (1.0, ddsketch_bins(*alpha).saturating_mul(8)),
+        SketchParams::DDSketch { alpha } => (1.0, ddsketch_state_bytes(*alpha, samples)),
         SketchParams::Hll { precision, .. } => (1.0, 1u64 << (*precision).min(63)),
         SketchParams::Kmv { k, .. } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
         SketchParams::UnivMon {
@@ -4193,6 +4247,33 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 /// to see: nine decades, e.g. latencies from 1 ns to 1 s. An assumption, not
 /// workload evidence: the data workload declares no value range.
 const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
+
+/// Bins `asap_sketchlib`'s DDSketch grows a bucket store by
+/// (`GROW_CHUNK`): a store's first sample allocates this many around its
+/// bin, and a sample past either end adds at least this many more.
+const DDSKETCH_GROW_CHUNK_BINS: u64 = 128;
+
+/// Bytes of one `asap_sketchlib` DDSketch with relative accuracy `alpha`
+/// over `samples`: its struct (144 bytes), plus, for the positive store and,
+/// unless the samples are declared non-negative, the negative store, 8
+/// bytes per allocated bin. A store allocates one 128-bin chunk around its
+/// first sample, then 128-bin chunks on each side as samples reach past
+/// it: `128 · (1 + 2 · ⌈(spanned − 128)⁺ / 256⌉)` bins, where `spanned`
+/// is the bins its samples can touch, at most one per sample and at most
+/// [`ddsketch_bins`] over the assumed value range. E.g. 1,168 bytes for ten
+/// non-negative samples at α = 0.05, and 3,216 for many over nine decades.
+fn ddsketch_state_bytes(alpha: f64, samples: StateSamples) -> u64 {
+    let range_bins = ddsketch_bins(alpha);
+    let spanned = samples
+        .per_state
+        .map_or(range_bins, |per_state| range_bins.min(per_state.max(1)));
+    let side_chunks = spanned
+        .saturating_sub(DDSKETCH_GROW_CHUNK_BINS)
+        .div_ceil(2 * DDSKETCH_GROW_CHUNK_BINS);
+    let store_bytes = 8 * DDSKETCH_GROW_CHUNK_BINS * (1 + 2 * side_chunks);
+    let stores = if samples.non_negative { 1 } else { 2 };
+    std::mem::size_of::<asap_sketchlib::sketches::DdSketch>() as u64 + stores * store_bytes
+}
 
 /// Bins a DDSketch with relative accuracy `alpha` touches, assuming its
 /// values span nine decades ([`DDSKETCH_ASSUMED_VALUE_RANGE`] = 1e9): its
@@ -6110,7 +6191,10 @@ mod tests {
             (ExactKind::Rate, ExactParams::Rate),
         ] {
             assert_eq!(
-                summary_shape(&FieldDataType::ExactAggregate(kind, params)),
+                summary_shape(
+                    &FieldDataType::ExactAggregate(kind, params),
+                    StateSamples::UNKNOWN
+                ),
                 (1.0, 56)
             );
         }
@@ -6118,20 +6202,81 @@ mod tests {
     }
 
     /// A DDSketch is sized for values over nine decades: 1,037 bins at
-    /// α = 0.01, 8 bytes each.
+    /// α = 0.01, allocated as 1,152 (nine 128-bin chunks) of 8 bytes per
+    /// store, both stores for samples of unknown sign.
     #[test]
     fn ddsketch_bins_span_nine_decades() {
         assert_eq!(ddsketch_bins(0.01), 1_037);
         assert_eq!(
-            summary_shape(&FieldDataType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::DDSketch,
-                    SketchParams::DDSketch { alpha: 0.01 }
+            summary_shape(
+                &FieldDataType::Sketch(
+                    SketchKind::new(
+                        SketchAlgorithm::DDSketch,
+                        SketchParams::DDSketch { alpha: 0.01 }
+                    ),
+                    GroupingStrategy::default(),
                 ),
-                GroupingStrategy::default(),
-            ))
+                StateSamples::UNKNOWN
+            )
             .1,
-            8 * 1_037
+            144 + 2 * 8 * 1_152
+        );
+    }
+
+    /// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`:
+    /// its struct and the 8-byte counts of both bucket stores.
+    fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
+        let mut sketch = asap_sketchlib::sketches::DdSketch::new(alpha);
+        for value in values {
+            sketch.add(value);
+        }
+        let bins = sketch.positive_store_counts().len() + sketch.negative_store_counts().len();
+        (std::mem::size_of::<asap_sketchlib::sketches::DdSketch>() + 8 * bins) as u64
+    }
+
+    /// The DDSketch state the model prices is what `asap_sketchlib`
+    /// allocates: one 128-bin chunk per store for a few samples, more for
+    /// samples spanning more bins, and no negative store for values
+    /// declared non-negative.
+    #[test]
+    fn ddsketch_state_bytes_match_the_library() {
+        let alpha = 0.05;
+        // Ten Pareto(2) samples (scale 1), one 1 s pane of a 10 Hz series.
+        let pareto: Vec<f64> = (0..10)
+            .map(|i| (1.0 - (f64::from(i) + 0.5) / 10.0).powf(-0.5))
+            .collect();
+        let non_negative = |per_state| StateSamples {
+            per_state,
+            non_negative: true,
+        };
+        assert_eq!(library_ddsketch_bytes(alpha, &pareto), 1_168);
+        assert_eq!(ddsketch_state_bytes(alpha, non_negative(Some(10))), 1_168);
+        // Signed values fill both stores.
+        let signed: Vec<f64> = pareto.iter().map(|v| -v).chain(pareto.clone()).collect();
+        let signed_samples = StateSamples {
+            per_state: Some(20),
+            non_negative: false,
+        };
+        assert_eq!(
+            library_ddsketch_bytes(alpha, &signed),
+            ddsketch_state_bytes(alpha, signed_samples)
+        );
+        // Many samples over the assumed nine decades, the first at the
+        // bottom or at the middle of the range: the range's 208 bins, in
+        // three 128-bin chunks.
+        let decades: Vec<f64> = (0..10_000)
+            .map(|i| 10f64.powf(-4.5 + 9.0 * f64::from((i * 7_919) % 10_000) / 10_000.0))
+            .collect();
+        let middle_first: Vec<f64> = [1.0].into_iter().chain(decades.clone()).collect();
+        assert_eq!(
+            ddsketch_state_bytes(alpha, non_negative(Some(10_000))),
+            3_216
+        );
+        assert_eq!(library_ddsketch_bytes(alpha, &decades), 3_216);
+        assert_eq!(library_ddsketch_bytes(alpha, &middle_first), 3_216);
+        assert_eq!(
+            ddsketch_state_bytes(alpha, non_negative(None)),
+            ddsketch_state_bytes(alpha, non_negative(Some(10_000)))
         );
     }
 
@@ -6139,10 +6284,13 @@ mod tests {
     #[test]
     fn ddsketch_state_grows_as_alpha_shrinks() {
         let bytes = |alpha| {
-            summary_shape(&FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
-                GroupingStrategy::default(),
-            ))
+            summary_shape(
+                &FieldDataType::Sketch(
+                    SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
+                    GroupingStrategy::default(),
+                ),
+                StateSamples::UNKNOWN,
+            )
             .1
         };
         assert!(
@@ -6164,10 +6312,13 @@ mod tests {
     #[test]
     fn summary_state_is_sized_from_sketch_params() {
         let bytes = |algorithm, params| {
-            summary_shape(&FieldDataType::Sketch(
-                SketchKind::new(algorithm, params),
-                GroupingStrategy::default(),
-            ))
+            summary_shape(
+                &FieldDataType::Sketch(
+                    SketchKind::new(algorithm, params),
+                    GroupingStrategy::default(),
+                ),
+                StateSamples::UNKNOWN,
+            )
             .1
         };
         assert_eq!(
@@ -6211,16 +6362,19 @@ mod tests {
     #[test]
     fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
         let bytes = |k| {
-            summary_shape(&FieldDataType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::Kll,
-                    SketchParams::Kll {
-                        k,
-                        failure_probability: None,
-                    },
+            summary_shape(
+                &FieldDataType::Sketch(
+                    SketchKind::new(
+                        SketchAlgorithm::Kll,
+                        SketchParams::Kll {
+                            k,
+                            failure_probability: None,
+                        },
+                    ),
+                    GroupingStrategy::default(),
                 ),
-                GroupingStrategy::default(),
-            ))
+                StateSamples::UNKNOWN,
+            )
             .1
         };
         assert_eq!(bytes(269), 8 * 1_206);
@@ -6235,19 +6389,22 @@ mod tests {
     #[test]
     fn univmon_update_cost_is_expected_layers_times_rows_and_heap() {
         let ops = |layers| {
-            summary_shape(&FieldDataType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::UnivMon,
-                    SketchParams::UnivMon {
-                        heap_size: 256,
-                        sketch_rows: 5,
-                        sketch_cols: 1_024,
-                        layers,
-                        distinct_failure_probability: None,
-                    },
+            summary_shape(
+                &FieldDataType::Sketch(
+                    SketchKind::new(
+                        SketchAlgorithm::UnivMon,
+                        SketchParams::UnivMon {
+                            heap_size: 256,
+                            sketch_rows: 5,
+                            sketch_cols: 1_024,
+                            layers,
+                            distinct_failure_probability: None,
+                        },
+                    ),
+                    GroupingStrategy::default(),
                 ),
-                GroupingStrategy::default(),
-            ))
+                StateSamples::UNKNOWN,
+            )
             .0
         };
         assert_eq!(ops(1), 6.0);
@@ -7215,7 +7372,7 @@ mod tests {
                 unreachable!()
             };
             // One state per series: data() declares 10 000.
-            let state = 10_000.0 * summary_shape(family).1 as f64;
+            let state = 10_000.0 * summary_shape(family, StateSamples::UNKNOWN).1 as f64;
             let byte_seconds = if materialization == AT_INGESTION {
                 2.0 * state
             } else {
@@ -7691,7 +7848,7 @@ mod tests {
         else {
             unreachable!()
         };
-        let (_, state_bytes) = summary_shape(family);
+        let (_, state_bytes) = summary_shape(family, StateSamples::UNKNOWN);
         let chain_cost = &kept.per_node[&chain];
         assert!(chain_cost.detail.contains("; x 0.0167/s"), "{chain_cost:?}");
         // One state per series: arriving() declares 10 000.
@@ -7884,7 +8041,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(*pane_count, 5);
-        let (depth, state_bytes) = summary_shape(family);
+        let (depth, state_bytes) = summary_shape(family, StateSamples::UNKNOWN);
         let recurrence = [repeating(MINUTE)];
         let without_memory = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let work = &price(dag, &recurrence, &arriving(10_000.0), &without_memory)
@@ -8594,7 +8751,7 @@ mod tests {
             ],
             ..MeasuredOperationCosts::default()
         };
-        let size = |params: &SketchParams| sketch_shape(params).1 as f64;
+        let size = |params: &SketchParams| sketch_shape(params, StateSamples::UNKNOWN).1 as f64;
         let at = |k| {
             lookup(
                 &table,
@@ -9004,7 +9161,9 @@ mod tests {
             .average_memory_bytes
         };
         let formula = memory(None);
-        let half = memory(Some(sketch_shape(&kll).1 as f64 / 2.0));
+        let half = memory(Some(
+            sketch_shape(&kll, StateSamples::UNKNOWN).1 as f64 / 2.0,
+        ));
         assert!(half < formula && half > 0.0, "{half} vs {formula}");
     }
 
