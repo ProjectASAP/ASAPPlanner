@@ -23,10 +23,25 @@ To run it, see [RUNNING.md](RUNNING.md).
 
 ## The page
 
-- **Examples**: one tab per entry of `examples.json` (#509 Examples 1, 3a
-  and 3b). `#example3b` in the URL opens that example.
-- **Workload queries** with their accuracy, latency and recurrence, and a
-  line that counts the candidates at each stage.
+- **Examples**: one tab per entry of `examples.json`: #509 Examples 1, 3a
+  and 3b, and workload-01 of each ASAPQuery random workload set (below).
+  `#example3b` in the URL opens that example.
+- **Workload sets** (button): one table per set listed in
+  `workloads/index.json`, one row per workload with its query count, query
+  labels, the queries (text, how often, accuracy) and the sources they
+  read. Clicking a row plans it with the local server (`/api/plan-workload`:
+  `stage_pipeline --workload`, default search, the set's
+  `deployment_capabilities` and `cost_model`). Without the server, a row
+  with a precomputed `document` opens it and the others say they need the
+  server. `#workload-sets` in the URL opens the section.
+- **Query workload** with each query's accuracy, latency, recurrence,
+  predictability and range evaluation, and a line that counts the
+  candidates at each stage.
+- **Data workload** beside it: the arrival and one row per declared source
+  with exactly the facts `SourceFacts` has (series count, metric type,
+  non-negative values, sample interval, stream norms, distinct bound) and
+  the queries whose text names it, plus the deployment capabilities the
+  run planned with.
 - **Stage 3 · plans by cost**: every candidate the document shows. First the
   selected plan, then the other valid ones cheapest first, then the
   rejected ones with their reasons (or "not judged" when plan selection
@@ -48,12 +63,51 @@ To run it, see [RUNNING.md](RUNNING.md).
   series, or one shared instance. A standalone scalar query (`time()`,
   `scalar(v)`, `1 + 2`) is a dashed `Scalar` node over the nodes it reads.
   Query roots have a thick border.
+- **Stored outputs** under the Stage 2 lane: the selected plan's stored
+  outputs as `plan_installable` gives them, one row per installed node: its
+  Stage 2 node, coverage definition, operator and summary parameters, pane
+  (`pane 1 of 30 (newest first), 20 s wide`), how it is built, its inputs,
+  retention, the Stage 2 node's Stage 3 cost and the queries that read it.
+  Clicking a row selects its node in the Stage 2 lane. Stage 3 predicts no
+  per-node state size, so the table has none. The lane's header also shows
+  the shown candidate's Stage 3 usage.
 - **Details**: click a node for its operator, timing, materialization,
   output schema, guarantee and Stage 3 cost; click an edge for its schema
   and data state.
 
-Other documents open with **Open stage document…**, by dropping a file on
-the page, or with `?doc=<path>` for a file served next to `index.html`.
+Other documents open with **Open stage document or workload…**, by
+dropping a file on the page, or with `?doc=<path>` for a file served next
+to `index.html`. A `PlanningWorkload` JSON file (one with a
+`query_workload`) is planned by the local server instead, with the default
+deployment capabilities and cost model.
+
+## Workload sets
+
+`workloads/index.json` lists sets of `PlanningWorkload` files under
+`workloads/<set>/<workload>.json`:
+
+```json
+{ "format": "asap-workload-sets/v1",
+  "sets": [{ "id": "random-mixed-seed-862", "name": "Random mixed · seed-862",
+             "description": "...", "source": "where the workloads come from",
+             "deployment_capabilities": { "raw_data_retained": false, "query_time_results_retained": false },
+             "cost_model": "aws-fargate-us-east-1",
+             "workloads": [{ "id": "workload-01", "file": "random-mixed-seed-862/workload-01.json",
+                             "query_labels": ["q01-sum-fine", "..."],
+                             "document": "examples/random-mixed-seed-862-workload-01.json" }] }] }
+```
+
+`deployment_capabilities`, `cost_model` (`usage-over-time`,
+`aws-fargate-us-east-1` or `provisioned-capacity`), `query_labels` (one per
+query, in entry order) and `document` (a precomputed stage document) are
+optional. A new set is a directory of files and an index entry; no code
+changes. `crates/devtools/tests/stage_pipeline.rs` checks that every file
+parses and passes `PlanningWorkload::validate`.
+
+The three ASAPQuery sets (seed-862, seed-862-x5, seed-862-long; 10
+workloads each, PromQL queries only) were converted from ASAPQuery's random
+workload manifests with ε = 1 − the accuracy SLA and δ = 0.3, and are
+planned as the MVP deployment: raw data not retained, Fargate prices.
 
 ## Query editor
 
@@ -73,8 +127,14 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
   "search": "default",
   "workload": { "queries": [{ "id": "q1", "language": "promql", "text": "...",
                 "requirements": { "accuracy": { "max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result" },
-                                  "repeat_interval_ms": 10000 } }] },
-  "deployment_capabilities": { "supported_summaries": null, "raw_data_retained": true,
+                                  "repeat_interval_ms": 10000 },
+                "recurrence": { "repeated": { "fixed_interval": 10000 } },
+                "predictability": { "predictable": { "known_at": null } } }],
+                "data_workload": { "arrival": { "ingesting": { "rows_per_second": 200000.0 } },
+                                   "sources": { "data": { "series_count": 10000, "metric_type": "gauge", "values_non_negative": true,
+                                                          "sample_interval": 100, "stream_norms": null,
+                                                          "max_distinct_per_evaluation": null } } } },
+  "deployment_capabilities": { "supported_summaries": [{ "family": "Kll", "readouts": ["Quantile"] }, "..."], "raw_data_retained": true,
                                "query_time_results_retained": false },
   "stage0_query_language_frontends": { "dag": "<flat logical DAG>" },
   "stage1_logical_asap_optimization": {
@@ -102,6 +162,12 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
     "selected": "P1",
     "rejected": [{ "id": "P2", "cause": "costlier", "reason": "..." }],
     "search_rejected": [{ "id": "P5", "cause": "accuracy_target_missed", "reason": "..." }],
+    "rejected_by_cause": { "raw_data_not_retained": 533, "costlier": 12 },
+    "stored_outputs": [{ "node_id": 2, "built_at": "ingestion_run",
+                         "coverage": { "definition_id": "98f2b35a…", "selection": ["..."] },
+                         "inputs": { "raw_sample_windows": ["..."], "stored_outputs": [] },
+                         "retention_ms": 600000,
+                         "stage2_node_id": 1, "installed_position": 0, "installed_count": 30 }],
     "search": { "candidates_checked": 206, "components": [{ "queries": [0, 1], "candidates_checked": 204, "selected": "P61-m19" }],
                 "queries": [{ "candidates_checked": 3, "discarded": [{ "choice": [[4, 0]], "cause": "no_accuracy_guarantee", "reason": "..." }] }],
                 "searched_as_one": null, "raw_scan_assignments_skipped": 0, "raw_scan_candidates_skipped": 0,
@@ -161,12 +227,35 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
   cause (their candidates are not kept), and the search's own (e.g. `q2`
   when every own candidate of that query was discarded). The page lists
   them after the other rows, not clickable.
+- `workload.data_workload` is the `DataWorkload` the run planned with
+  (`arrival`, and per source exactly the `SourceFacts` fields). Labels,
+  label hierarchies and per-label cardinalities are not declarable there,
+  so the page shows none. Each query's `recurrence` and `predictability` are
+  its workload entry's own JSON.
+- `stored_outputs` are the selected plan's stored outputs from
+  `installable_plan_of` (what `plan_installable` returns): the node id in
+  the installable DAG (pane chains expanded into panes), `built_at`
+  (`ingestion_run` or `query_run`), `coverage`, `inputs` and
+  `retention_ms`. `stage2_node_id` is the node of the selected Stage 2
+  candidate it is installed from (null when Stage 3 recorded no cost to map
+  it by), `installed_position` its position among that node's installed
+  nodes (a pane chain's panes, newest first) and `installed_count` their
+  number. Empty without a selection; `stored_outputs_error` says why when
+  the plan is not installable.
+- `rejected_by_cause` counts the rejections by cause: every candidate's
+  under `--exhaustive`, the recorded ones under the default search.
+- Under `--exhaustive` the document shows at most `--max-displayed`
+  physical candidates: the selected one, the other valid ones cheapest
+  first, then the rejected ones taking each cause in turn, and the Stage 1
+  candidates they come from.
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
 
 The viewer checks the document before showing it: one root per query, node,
-edge and root references, `scalar_roots` positions, `from_logical`, and the Stage 3 ids, costs and
-`per_node` keys. If a check fails, it shows the problems instead.
+edge and root references, `scalar_roots` positions, `from_logical`, the Stage 3 ids, costs and
+`per_node` keys, the data workload's shape, and each stored output's fields
+and `stage2_node_id`. Documents written before these sections are still
+shown. If a check fails, it shows the problems instead.
 
 ## Files
 
@@ -177,11 +266,18 @@ edge and root references, `scalar_roots` positions, `from_logical`, and the Stag
   against the IR by `crates/devtools/tests/viewer_contract.rs`) and the
   node groups.
 - `editor.js`: the query editor.
+- `workload-sets.js`: the workload-set browser.
+- `workloads/`: the workload sets (`index.json` and the `PlanningWorkload`
+  files).
 - `server.py`: serves the page, writes missing example documents into
   `out/` (git-ignored), and plans editor queries.
-- `examples.json`: the example tabs. `examples/planner-layering-example1.json`
-  is the one committed document: `crates/devtools/tests/stage_pipeline.rs`
-  checks that it is current.
+- `examples.json`: the example tabs. A built-in example (`example`) is
+  written into `out/`; a workload example (`workload`, with its
+  `deployment_capabilities` and `cost_model`) is committed under
+  `examples/`. The committed documents are
+  `examples/planner-layering-example1.json` and workload-01 of each
+  ASAPQuery set (0.9, 0.9 and 1.4 MB); `crates/devtools/tests/stage_pipeline.rs`
+  checks that they are current. `server.py --regenerate` rewrites them.
 - `cytoscape.min.js`, `dagre.min.js`, `cytoscape-dagre.js`: vendored, so the
   page works offline.
 

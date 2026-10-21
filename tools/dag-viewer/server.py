@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local server for the ASAPPlanner Stage Viewer: serves the page, writes the
-example documents into out/, and plans editor queries with `stage_pipeline`."""
+example documents, and plans editor queries and PlanningWorkload files with
+`stage_pipeline`."""
 
 from __future__ import annotations
 
@@ -28,21 +29,33 @@ def build_planner() -> None:
     )
 
 
+def example_args(example: dict, out: str) -> list[str]:
+    """The `stage_pipeline` arguments that write one examples.json entry: a
+    built-in example (`example`, with the exhaustive search its story
+    describes) or a PlanningWorkload file (`workload`, relative to this
+    directory, with the default search and the entry's
+    `deployment_capabilities`)."""
+    if "workload" in example:
+        args = [str(BINARY), "--workload", str(HERE / example["workload"])]
+        if example.get("deployment_capabilities") is not None:
+            args.extend(["--deployment-capabilities", json.dumps(example["deployment_capabilities"], separators=(",", ":"))])
+        if example.get("cost_model") is not None:
+            args.extend(["--cost-model", example["cost_model"]])
+        return args + ["--out", out]
+    return [str(BINARY), "--example", example["example"], "--exhaustive", "--out", out]
+
+
 def write_examples(force: bool) -> None:
-    """Write each examples.json document that is missing (all with `force`)
-    into out/, which git ignores."""
+    """Write each examples.json document that is missing (all with `force`):
+    the built-in examples into out/, which git ignores; the committed
+    workload examples where they are committed."""
     for example in json.loads(EXAMPLES.read_text(encoding="utf-8")):
         out = HERE / example["file"]
         if out.exists() and not force:
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
         print(f"[examples] writing {example['file']}", flush=True)
-        subprocess.run(
-            # The built-in examples' stories describe every candidate.
-            [str(BINARY), "--example", example["example"], "--exhaustive", "--out", str(out)],
-            cwd=REPO,
-            check=True,
-        )
+        subprocess.run(example_args(example, str(out)), cwd=REPO, check=True)
 
 
 class PlanRejected(ValueError):
@@ -152,12 +165,53 @@ PLAN_LOCK = threading.Lock()
 def plan(payload: object) -> dict:
     """Plan a Query planner request with `stage_pipeline`; returns its
     asap-stage-pipeline/v1 document. Requests run one at a time."""
+    plan_args(payload, "out.json")  # a malformed request fails before the lock
+    count = len(payload["queries"])
+    print(f"\n[planner] {count} quer{'y' if count == 1 else 'ies'}", flush=True)
+    return run_stage_pipeline(lambda tmp, out: plan_args(payload, out))
+
+
+def workload_args(payload: object, workload_path: str, out: str) -> list[str]:
+    """The `stage_pipeline` arguments that plan a PlanningWorkload request:
+    `{"workload": <PlanningWorkload JSON>, "deployment_capabilities": <JSON or
+    null>, "cost_model": <a COST_MODELS name or null>}`, the workload written to `workload_path`. `stage_pipeline`
+    validates the workload itself. Raises ValueError for a malformed
+    request."""
+    if not isinstance(payload, dict):
+        raise ValueError("request must be a JSON object")
+    workload = payload.get("workload")
+    if not isinstance(workload, dict) or not isinstance(workload.get("query_workload"), dict):
+        raise ValueError("workload must be a PlanningWorkload object with a query_workload")
+    capabilities = payload.get("deployment_capabilities")
+    if capabilities is not None and not isinstance(capabilities, dict):
+        raise ValueError("deployment_capabilities must be an object or null")
+    cost_model = payload.get("cost_model")
+    if cost_model is not None and cost_model not in COST_MODELS:
+        raise ValueError(f"cost_model must be one of {', '.join(COST_MODELS)} or null")
+    Path(workload_path).write_text(json.dumps(workload), encoding="utf-8")
+    args = [str(BINARY), "--workload", workload_path]
+    if capabilities is not None:
+        args.extend(["--deployment-capabilities", json.dumps(capabilities, separators=(",", ":"))])
+    if cost_model is not None:
+        args.extend(["--cost-model", cost_model])
+    return args + ["--out", out]
+
+
+# The priced cost models `--cost-model` takes without further flags.
+COST_MODELS = ("usage-over-time", "aws-fargate-us-east-1", "provisioned-capacity")
+
+
+# How long one planning request may run.
+PLAN_TIMEOUT_SECONDS = 300
+
+
+def run_stage_pipeline(make_args) -> dict:
+    """Run `stage_pipeline` with `make_args(tmp_dir, out)`; returns its
+    asap-stage-pipeline/v1 document. Requests run one at a time."""
     with PLAN_LOCK, tempfile.TemporaryDirectory() as tmp:
         out = str(Path(tmp) / "plan.json")
-        args = plan_args(payload, out)
-        count = len(payload["queries"])
-        print(f"\n[planner] {count} quer{'y' if count == 1 else 'ies'}", flush=True)
-        result = subprocess.run(args, cwd=REPO, text=True, capture_output=True, timeout=120)
+        args = make_args(tmp, out)
+        result = subprocess.run(args, cwd=REPO, text=True, capture_output=True, timeout=PLAN_TIMEOUT_SECONDS)
         if result.returncode == 3:
             raise PlanRejected(result.stderr.strip())
         if result.returncode != 0:
@@ -167,25 +221,40 @@ def plan(payload: object) -> dict:
     return document
 
 
+def plan_workload(payload: object) -> dict:
+    """Plan a PlanningWorkload request (`workload_args`) with `stage_pipeline
+    --workload` and the default search."""
+    print("\n[planner] workload", flush=True)
+    return run_stage_pipeline(lambda tmp, out: workload_args(payload, str(Path(tmp) / "workload.json"), out))
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(HERE), **kwargs)
 
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+        # The page asks whether it is served by this server (it can plan).
+        if self.path == "/api/status":
+            self._send_json(HTTPStatus.OK, {"planner": True})
+            return
+        super().do_GET()
+
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path != "/api/plan":
+        endpoints = {"/api/plan": plan, "/api/plan-workload": plan_workload}
+        if self.path not in endpoints:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 5_000_000:
                 raise ValueError("request body must contain at most 5 MB")
-            self._send_json(HTTPStatus.OK, plan(json.loads(self.rfile.read(length))))
+            self._send_json(HTTPStatus.OK, endpoints[self.path](json.loads(self.rfile.read(length))))
         except PlanRejected as error:
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
         except (ValueError, json.JSONDecodeError) as error:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except subprocess.TimeoutExpired:
-            self._send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": "planning exceeded 120 seconds"})
+            self._send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": f"planning exceeded {PLAN_TIMEOUT_SECONDS} seconds"})
         except Exception as error:  # surface planner failures to this local UI
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 

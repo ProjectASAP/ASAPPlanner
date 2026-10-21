@@ -24,6 +24,11 @@ HERE = Path(__file__).resolve().parent
 # The one committed example document, which crates/devtools/tests/stage_pipeline.rs
 # keeps current: #509 Example 1, with its Pass 2 identical-expression candidates.
 EXAMPLE1 = HERE / "examples" / "planner-layering-example1.json"
+# A committed workload example: ASAPQuery's random workload seed 862,
+# workload-01 (nine repeating PromQL queries), planned with the default
+# search as the MVP deployment; its selected plan keeps panes at ingestion.
+SEED862 = HERE / "examples" / "random-mixed-seed-862-workload-01.json"
+WORKLOADS = HERE / "workloads"
 # Standalone scalar queries at positions 0, 2 and 4 (first, middle, last):
 # scalar(sum(m)), sum(n), time(), sum by (job) (k), 1 + 2.
 SCALAR_QUERIES = ["scalar(sum(m))", "sum(n)", "time()", "sum by (job) (k)", "1 + 2"]
@@ -36,6 +41,10 @@ except ImportError:
 
 def example1() -> dict:
     return json.loads(EXAMPLE1.read_text())
+
+
+def seed862() -> dict:
+    return json.loads(SEED862.read_text())
 
 
 def stage_pipeline(*args: str) -> dict:
@@ -75,6 +84,38 @@ class ValidationTests(unittest.TestCase):
 
     def test_example1_is_valid(self):
         self.assertEqual(self.validate(self.doc), [])
+
+    def test_a_workload_example_with_stored_outputs_is_valid(self):
+        doc = seed862()
+        self.assertTrue(doc["stage3_plan_selection"]["stored_outputs"])
+        self.assertEqual(self.validate(doc), [])
+
+    def test_documents_without_the_new_sections_are_still_valid(self):
+        doc = seed862()
+        del doc["workload"]["data_workload"]
+        del doc["stage3_plan_selection"]["stored_outputs"]
+        self.assertEqual(self.validate(doc), [])
+
+    def test_data_workload_and_stored_output_violations_are_reported(self):
+        stored = lambda d: d["stage3_plan_selection"]["stored_outputs"]
+        cases = {
+            "data workload not an object": lambda d: d["workload"].update(data_workload=[]),
+            "sources not an object": lambda d: d["workload"]["data_workload"].update(sources=[]),
+            "source facts not an object": lambda d: d["workload"]["data_workload"]["sources"].update(data=3),
+            "stored outputs not an array": lambda d: d["stage3_plan_selection"].update(stored_outputs={}),
+            "node id": lambda d: stored(d)[0].update(node_id="2"),
+            "built at": lambda d: stored(d)[0].update(built_at="later"),
+            "definition id": lambda d: stored(d)[0]["coverage"].pop("definition_id"),
+            "inputs": lambda d: stored(d)[0]["inputs"].pop("raw_sample_windows"),
+            "retention": lambda d: stored(d)[0].update(retention_ms=-1),
+            "stage 2 node": lambda d: stored(d)[0].update(stage2_node_id=99999),
+            "stored without a selection": lambda d: d["stage3_plan_selection"].update(selected=None, rejected=[], costs={}),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name):
+                doc = seed862()
+                mutate(doc)
+                self.assertTrue(self.validate(doc), name)
 
     def test_pass1_failure_is_valid(self):
         """A run whose Pass 1 failed has Stage 0, the error and no plan."""
@@ -442,6 +483,104 @@ class BinaryOperatorTests(unittest.TestCase):
                 self.assertEqual(len(inputs), 2)
 
 
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+class WorkloadViewTests(unittest.TestCase):
+    """The data workload panel, the stored outputs table, the search header
+    and the workload-set rows, from the committed seed-862 example."""
+
+    def setUp(self):
+        self.js = stages_js()
+        self.doc = seed862()
+
+    def test_data_workload_rows_show_exactly_the_declared_facts(self):
+        view = self.js.call("dataWorkloadView", self.doc["workload"]["data_workload"], self.doc["workload"]["queries"])
+        self.assertEqual(view["arrival"], "ingesting · 200000 rows/s")
+        rows = {r["name"]: r for r in view["rows"]}
+        self.assertEqual(sorted(rows), ["data", "data_total", "events"])
+        self.assertEqual((rows["data"]["series"], rows["data"]["type"], rows["data"]["nonNegative"], rows["data"]["sampleInterval"]),
+                         (10000, "gauge", "yes", "100 ms"))
+        self.assertEqual(rows["data_total"]["nonNegative"], "yes (counter)")
+        self.assertEqual((rows["events"]["maxDistinct"], rows["events"]["sampleInterval"]), (10000, "—"))
+        self.assertEqual(rows["data"]["readBy"], ["q1", "q2", "q3", "q4", "q5", "q6", "q7"])
+        self.assertEqual(rows["data_total"]["readBy"], ["q8", "q9"])
+        self.assertEqual(rows["events"]["readBy"], [])
+
+    def test_stored_output_rows_map_to_stage2_nodes_and_their_readers(self):
+        rows = self.js.call("storedOutputRows", self.doc)
+        stored = self.doc["stage3_plan_selection"]["stored_outputs"]
+        self.assertEqual(len(rows), len(stored))
+        first = rows[0]
+        self.assertEqual(first["definition"], stored[0]["coverage"]["definition_id"])
+        self.assertTrue(first["kind"].startswith("PaneChain · "), first["kind"])
+        self.assertRegex(first["pane"], r"^pane 1 of \d+ \(newest first\), ")
+        self.assertEqual(first["builtAt"], "ingestion run")
+        self.assertTrue(all(r["stage2NodeId"] is not None and r["readBy"] for r in rows))
+        # q1 and q2 share one pane chain of exact sums.
+        self.assertEqual(first["readBy"], ["q1", "q2"])
+
+    def test_queries_show_recurrence_and_predictability(self):
+        self.assertEqual(self.js.call("queryScheduleText", self.doc["workload"]["queries"][0]), "every 20 s · predictable")
+        query = {"recurrence": {"one_time": {"invocations": 1, "execute_at": None}}, "predictability": "ad_hoc",
+                 "requirements": {"range_evaluation": {"step_ms": 60000, "span_ms": 3600000}}}
+        self.assertEqual(self.js.call("queryScheduleText", query), "once · ad hoc · range of 1 h in 1 min steps")
+
+    def test_search_header_groups_discards_by_cause(self):
+        text = self.js.call("searchText", self.doc)
+        self.assertIn("default search · ", text)
+        self.assertIn("2 independent components searched separately", text)
+        self.assertIn("discarded before composition: no accuracy guarantee ×5 (q3, q4, q5, q6, q7), "
+                      "count min weights not proven non negative ×2 (q6, q7)", text)
+        self.assertIn("Stage 2 assignments skipped: they scan raw data at query time", text)
+
+    def test_exhaustive_header_counts_rejections_by_cause(self):
+        text = self.js.call("searchText", example1())
+        self.assertRegex(text, r"rejected: [a-z ]+ ×\d+")
+
+    def test_pane_chain_box_shows_its_panes(self):
+        selected = self.doc["stage2_physical_asap_optimization"]["candidates"][0]
+        chain = next(n for n in selected["dag"]["nodes"] if "PaneChain" in n["payload"].get("ASAP", {}))
+        lines = self.js.call("stageNodeLines", chain["payload"], None)
+        body = chain["payload"]["ASAP"]["PaneChain"]
+        self.assertEqual(lines[0], "PaneChain")
+        self.assertIn(f"{body['pane_count']} panes × ", lines[2])
+
+    def test_usage_and_deployment_lines(self):
+        cost = self.doc["stage3_plan_selection"]["costs"][self.doc["stage3_plan_selection"]["selected"]]
+        self.assertIn("peak cores", self.js.call("usageText", cost["usage"]))
+        self.assertTrue(self.js.call("deploymentText", self.doc["deployment_capabilities"]).startswith("raw data not retained · "))
+
+    def test_planning_workload_queries_read_the_workload_json(self):
+        workload = json.loads((WORKLOADS / "random-mixed-seed-862" / "workload-01.json").read_text())
+        self.assertTrue(self.js.call("isPlanningWorkload", workload))
+        self.assertFalse(self.js.call("isPlanningWorkload", self.doc))
+        queries = self.js.call("planningWorkloadQueries", workload)
+        self.assertEqual(len(queries), 9)
+        self.assertEqual(queries[0]["runs"], "every 20 s")
+        self.assertIn("δ=0.3", queries[0]["accuracy"])
+
+
+class WorkloadSetTests(unittest.TestCase):
+    """workloads/index.json lists sets of PlanningWorkload files; the Rust
+    test validates each file with `PlanningWorkload::validate`."""
+
+    def test_index_names_existing_files_and_documents(self):
+        index = json.loads((WORKLOADS / "index.json").read_text())
+        self.assertEqual(index["format"], "asap-workload-sets/v1")
+        files = set()
+        for workload_set in index["sets"]:
+            for field in ("id", "name", "description", "source"):
+                self.assertTrue(workload_set[field], field)
+            for entry in workload_set["workloads"]:
+                path = WORKLOADS / entry["file"]
+                self.assertTrue(path.exists(), path)
+                self.assertIn("query_workload", json.loads(path.read_text()))
+                files.add(path)
+                if "document" in entry:
+                    self.assertTrue((HERE / entry["document"]).exists(), entry["document"])
+        self.assertEqual(files, set(WORKLOADS.glob("*/*.json")))
+        self.assertEqual(len(files), 30)
+
+
 class PageTests(unittest.TestCase):
     """The page's scripts, element ids and examples line up."""
 
@@ -468,18 +607,26 @@ class PageTests(unittest.TestCase):
         self.assertEqual(re.findall(r'<option value="([^"]*)"', select.group(1)), ["", "absolute", "relative", "rank"])
         self.assertIn("accuracy_metric: $('plannerAccuracyMetric').value", (HERE / "editor.js").read_text())
 
-    def test_examples_are_stage_pipeline_examples_written_into_out(self):
+    def test_examples_are_built_in_or_committed_workload_examples(self):
+        """A built-in example is written into out/; a workload example is
+        committed under examples/ from a workload-set file."""
         examples = json.loads((HERE / "examples.json").read_text())
         tool = (HERE.parents[1] / "crates/devtools/src/bin/stage_pipeline.rs").read_text()
         self.assertEqual(len({e["id"] for e in examples}), len(examples))
         for example in examples:
             with self.subTest(example["id"]):
-                self.assertIn(f'"{example["example"]}" =>', tool)
-                self.assertTrue(example["file"].startswith("out/"))
                 self.assertTrue(example["story"])
+                if "workload" in example:
+                    self.assertTrue((HERE / example["workload"]).exists())
+                    self.assertTrue(example["file"].startswith("examples/"))
+                else:
+                    self.assertIn(f'"{example["example"]}" =>', tool)
+                    self.assertTrue(example["file"].startswith("out/"))
 
-    def test_only_example1_is_committed(self):
-        self.assertEqual(sorted(p.name for p in (HERE / "examples").iterdir()), ["planner-layering-example1.json"])
+    def test_committed_documents_are_example1_and_the_workload_examples(self):
+        examples = json.loads((HERE / "examples.json").read_text())
+        committed = {Path(e["file"]).name for e in examples if "workload" in e} | {"planner-layering-example1.json"}
+        self.assertEqual(sorted(p.name for p in (HERE / "examples").iterdir()), sorted(committed))
         self.assertEqual((HERE / ".gitignore").read_text().split(), ["out/"])
 
 
@@ -593,6 +740,34 @@ class AppTests(unittest.TestCase):
         self.assertTrue(js.eval(f"window.StageViewer.showDocument({EXAMPLE1.read_text()}, 'e1')"))
         self.assertFalse(js.eval("window.StageViewer.showDocument({ format: 'nope' }, 'bad')"))
         self.assertIn("Could not load", js.eval("__els.queries.innerHTML"))
+
+    def test_a_workload_document_fills_the_data_workload_and_stored_outputs(self):
+        js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
+        self.assertIn("data_total", self.text(js, "dataSources"))
+        self.assertIn("ingesting", js.eval("__els.dataArrival.textContent"))
+        self.assertIn("raw data not retained", js.eval("__els.deployment.textContent"))
+        stored = len(seed862()["stage3_plan_selection"]["stored_outputs"])
+        self.assertIn(f"{stored} stored outputs", self.text(js, "stored-meta"))
+        self.assertEqual(js.eval("(__els.storedOutputs.innerHTML.match(/data-node=/g) || []).length"), stored)
+        self.assertIn("every 20 s · predictable", self.text(js, "queries"))
+        self.assertIn("Stage 3 usage: CPU", self.text(js, "lane2-meta"))
+
+    def test_workload_sets_without_a_server_mark_what_needs_it(self):
+        index = json.loads((WORKLOADS / "index.json").read_text())
+        files = {"workloads/index.json": json.dumps(index)}
+        for workload_set in index["sets"]:
+            for entry in workload_set["workloads"]:
+                files[f"workloads/{entry['file']}"] = (WORKLOADS / entry["file"]).read_text()
+        js = self.page("", files)
+        js.eval((HERE / "workload-sets.js").read_text())
+        time.sleep(0.1)
+        table = js.eval("__els.setTable.innerHTML")
+        self.assertEqual(table.count("<tr class=\"clickable\""), 10)
+        self.assertEqual(table.count("precomputed"), 1)
+        self.assertEqual(table.count("needs the server"), 9)
+        self.assertIn("q01-sum-fine", table)
+        self.assertIn("no server", js.eval("__els.setsServer.textContent"))
+        self.assertIn("Random mixed · seed-862 (10)", js.eval("__els.setPick.innerHTML"))
 
     def test_an_invalid_document_shows_an_error(self):
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})

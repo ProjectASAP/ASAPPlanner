@@ -13,7 +13,7 @@ use asap_plan_selection::RejectionCause;
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
 use asap_types::ir::QueryRoot;
-use asap_types::workload::DataArrival;
+use asap_types::workload::{DataArrival, PlanningWorkload};
 
 use serde_json::Value;
 
@@ -865,7 +865,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     assert_eq!(
         default["deployment_capabilities"],
         serde_json::json!({
-            "supported_summaries": null,
+            "supported_summaries": asap_executor::supported_summary_families(),
             "raw_data_retained": true,
             "query_time_results_retained": false,
         })
@@ -1141,4 +1141,254 @@ fn ignore_accuracy_guarantees_flag_accepts_outputs_without_a_guarantee() {
             "{id}: {query}"
         );
     }
+}
+
+/// The workload sets the viewer lists (`tools/dag-viewer/workloads`): every
+/// file the index names parses as a `PlanningWorkload` and validates, every
+/// set has a name, description and source, and a workload's precomputed
+/// document, when it names one, exists.
+#[test]
+fn workload_set_index_and_files_validate() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/dag-viewer");
+    let index: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("workloads/index.json")).unwrap())
+            .unwrap();
+    assert_eq!(index["format"], "asap-workload-sets/v1");
+    let sets = index["sets"].as_array().unwrap();
+    assert!(!sets.is_empty());
+    for set in sets {
+        for field in ["id", "name", "description", "source"] {
+            assert!(
+                set[field].as_str().is_some_and(|s| !s.is_empty()),
+                "{field}: {set}"
+            );
+        }
+        if let Some(capabilities) = set.get("deployment_capabilities") {
+            serde_json::from_value::<asap_logical_asap_optimization::DeploymentCapabilities>(
+                capabilities.clone(),
+            )
+            .unwrap();
+        }
+        for entry in set["workloads"].as_array().unwrap() {
+            let file = root.join("workloads").join(entry["file"].as_str().unwrap());
+            let text = std::fs::read_to_string(&file).unwrap();
+            let workload: PlanningWorkload =
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            workload
+                .validate()
+                .unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            if let Some(labels) = entry.get("query_labels") {
+                assert_eq!(
+                    labels.as_array().unwrap().len(),
+                    workload.query_workload.entries().count(),
+                    "{}",
+                    file.display()
+                );
+            }
+            if let Some(document) = entry.get("document") {
+                assert!(root.join(document.as_str().unwrap()).exists(), "{document}");
+            }
+        }
+    }
+}
+
+/// The committed workload examples (`examples.json` entries with a
+/// `workload`) are current: written with the default search from their
+/// workload file, deployment capabilities and cost model. Each carries its
+/// data workload as the file declares it and the selected plan's stored
+/// outputs as `plan_installable` gives them, each mapped to a node of the
+/// selected Stage 2 candidate.
+#[test]
+fn committed_workload_examples_are_current_with_data_workload_and_stored_outputs() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/dag-viewer");
+    let examples: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("examples.json")).unwrap())
+            .unwrap();
+    let workload_examples: Vec<&Value> = examples
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e.get("workload").is_some())
+        .collect();
+    assert_eq!(workload_examples.len(), 3);
+    std::thread::scope(|scope| {
+        for example in workload_examples {
+            let root = &root;
+            scope.spawn(move || check_workload_example(root, example));
+        }
+    });
+}
+
+fn check_workload_example(root: &std::path::Path, example: &Value) {
+    let path = root.join(example["workload"].as_str().unwrap());
+    let capabilities = example["deployment_capabilities"].to_string();
+    let cost_model = example["cost_model"].as_str().unwrap();
+    let document = document_of(&[
+        "--workload",
+        path.to_str().unwrap(),
+        "--deployment-capabilities",
+        &capabilities,
+        "--cost-model",
+        cost_model,
+    ]);
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(example["file"].as_str().unwrap())).unwrap(),
+    )
+    .unwrap();
+    assert!(document == committed, "regenerate {}", example["file"]);
+
+    let workload: PlanningWorkload =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        document["workload"]["data_workload"],
+        serde_json::to_value(workload.data_workload.as_ref().unwrap()).unwrap()
+    );
+    let queries = document["workload"]["queries"].as_array().unwrap();
+    assert!(queries
+        .iter()
+        .all(|q| q["recurrence"]["repeated"].is_object() && q["predictability"].is_object()));
+
+    let selection = &document["stage3_plan_selection"];
+    let selected = selection["selected"].as_str().unwrap();
+    let candidate = &document["stage2_physical_asap_optimization"]["candidates"][0];
+    assert_eq!(candidate["id"], selected);
+    let node_ids: HashSet<u64> = candidate["dag"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_u64().unwrap())
+        .collect();
+    let stored = selection["stored_outputs"].as_array().unwrap();
+    assert!(!stored.is_empty(), "the MVP plan keeps state at ingestion");
+    for output in stored {
+        assert!(node_ids.contains(&output["stage2_node_id"].as_u64().unwrap()));
+        assert!(
+            output["installed_position"].as_u64().unwrap()
+                < output["installed_count"].as_u64().unwrap()
+        );
+    }
+
+    // What plan_installable gives with the same settings.
+    let capabilities: asap_planner::DeploymentCapabilities =
+        serde_json::from_value(example["deployment_capabilities"].clone()).unwrap();
+    let defaults = asap_plan_selection::PlanSelectionSettings::default();
+    assert_eq!(cost_model, "aws-fargate-us-east-1");
+    let settings = asap_plan_selection::PlanSelectionSettings {
+        cost_model: asap_plan_selection::CostModel::UsageOverTime(
+            asap_plan_selection::ResourceUnitCost::aws_fargate_us_east_1(defaults.resource_speed),
+        ),
+        ..defaults
+    };
+    let models = asap_plan_selection::PlanningModels::builtin()
+        .with_plan_selection(&settings)
+        .with_deployment_capabilities(&capabilities);
+    let plan = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(asap_planner::plan_installable(
+            asap_planner::UserInput::new(
+                &workload,
+                asap_planner::FrontendInput::Promql { histograms: None },
+                models,
+            ),
+        ))
+        .unwrap();
+    assert_eq!(
+        plan.selection.as_ref().unwrap().selected_candidate_id,
+        selected
+    );
+    let expected = serde_json::to_value(&plan.stored_outputs).unwrap();
+    let emitted: Vec<Value> = stored
+        .iter()
+        .map(|output| {
+            let mut output = output.clone();
+            let fields = output.as_object_mut().unwrap();
+            for added in ["stage2_node_id", "installed_position", "installed_count"] {
+                fields.remove(added);
+            }
+            output
+        })
+        .collect();
+    assert_eq!(Value::Array(emitted), expected);
+}
+
+/// The `--promql` path's data workload is what it plans with: every metric
+/// the queries read, sampled every `--sample-interval-ms`.
+#[test]
+fn promql_queries_carry_their_sampled_data_workload() {
+    let document = document_of(&[
+        "--promql",
+        "sum(rate(a[1m])) / sum(b)",
+        "--sample-interval-ms",
+        "30000",
+    ]);
+    assert_eq!(
+        document["workload"]["data_workload"]["sources"],
+        serde_json::json!({
+            "a": {"series_count": null, "metric_type": null, "sample_interval": 30000, "stream_norms": null, "max_distinct_per_evaluation": null},
+            "b": {"series_count": null, "metric_type": null, "sample_interval": 30000, "stream_norms": null, "max_distinct_per_evaluation": null},
+        })
+    );
+    // Nothing is stored: every query computes at query time.
+    assert_eq!(
+        document["stage3_plan_selection"]["stored_outputs"],
+        serde_json::json!([])
+    );
+}
+
+/// Under `--exhaustive` with a display cap, the document shows the selected
+/// candidate first, then the other valid ones cheapest first, then the
+/// rejected ones, each cause in turn; `rejected_by_cause` counts every
+/// rejection.
+#[test]
+fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
+    let document = generate_example("planner-layering-3a", &["--max-displayed", "6"]);
+    let selection = &document["stage3_plan_selection"];
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(physical.len(), 6);
+    let ids: HashSet<&str> = physical.iter().map(|p| p["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(selection["selected"].as_str().unwrap()));
+    let counts = selection["rejected_by_cause"].as_object().unwrap();
+    let total: u64 = counts.values().map(|n| n.as_u64().unwrap()).sum();
+    // 972 candidates: one selected, the rest rejected for a failed check or
+    // a loss under the cost model.
+    assert_eq!(total, 971);
+    // The shown valid ones (priced) are the cheapest of all valid ones.
+    let costs = selection["costs"].as_object().unwrap();
+    assert!(costs.len() >= 2, "{costs:?}");
+}
+
+/// With no supported summaries declared, `stage_pipeline` plans with the
+/// executor's families, as `plan_installable` does: a count's CountSketch,
+/// which the Planner's executor does not run, is pruned in Pass 1 instead of
+/// offered (before, `Q1 CountSketch` was a candidate), and the document
+/// shows the families used. A declared list is kept as declared.
+#[test]
+fn undeclared_supported_summaries_default_to_the_executors_families() {
+    let document = document_of(&[
+        "--exhaustive",
+        "--promql",
+        "count by (job) (m)",
+        "--max-error",
+        "0.01",
+        "--failure-probability",
+        "0.01",
+    ]);
+    let labels: Vec<&str> = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["display_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["Q1 exact (Count acc)", "Q1 Cms", "Q1 UnivMon"]);
+    assert_eq!(
+        document["stage1_logical_asap_optimization"]["pass1_pruned"][0]["pruned"],
+        serde_json::json!([{ "candidate": "CountSketch", "reason": "UnsupportedByDeployment" }])
+    );
+    assert_eq!(
+        document["deployment_capabilities"]["supported_summaries"],
+        serde_json::to_value(asap_executor::supported_summary_families()).unwrap()
+    );
 }

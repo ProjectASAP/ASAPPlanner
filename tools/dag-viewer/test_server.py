@@ -140,6 +140,40 @@ class PlanArgsTests(unittest.TestCase):
             )
 
 
+class WorkloadArgsTests(unittest.TestCase):
+    """A PlanningWorkload request becomes `stage_pipeline --workload` with the
+    set's deployment capabilities and cost model."""
+
+    def test_workload_with_capabilities_and_cost_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "w.json")
+            workload = {"query_workload": {"language": "promql", "query_batch": None, "repeating_queries": []}}
+            args = server.workload_args(
+                {"workload": workload, "deployment_capabilities": {"raw_data_retained": False}, "cost_model": "aws-fargate-us-east-1"},
+                path, "out.json")
+            self.assertEqual(args[1:], ["--workload", path, "--deployment-capabilities", '{"raw_data_retained":false}',
+                                        "--cost-model", "aws-fargate-us-east-1", "--out", "out.json"])
+            self.assertEqual(json.loads(Path(path).read_text()), workload)
+
+    def test_malformed_requests_are_rejected(self):
+        for payload, message in [
+            ([], "request must be a JSON object"),
+            ({"workload": {}}, "workload must be a PlanningWorkload"),
+            ({"workload": {"query_workload": {}}, "deployment_capabilities": 3}, "deployment_capabilities"),
+            ({"workload": {"query_workload": {}}, "cost_model": "free"}, "cost_model"),
+        ]:
+            with self.subTest(message), self.assertRaisesRegex(ValueError, message):
+                server.workload_args(payload, "w.json", "out.json")
+
+    def test_example_args(self):
+        self.assertEqual(server.example_args({"example": "planner-layering-1"}, "o.json")[1:],
+                         ["--example", "planner-layering-1", "--exhaustive", "--out", "o.json"])
+        args = server.example_args({"workload": "workloads/s/w.json", "deployment_capabilities": {"raw_data_retained": False},
+                                    "cost_model": "aws-fargate-us-east-1"}, "o.json")
+        self.assertEqual(args[1:3], ["--workload", str(server.HERE / "workloads/s/w.json")])
+        self.assertEqual(args[3:], ["--deployment-capabilities", '{"raw_data_retained":false}', "--cost-model", "aws-fargate-us-east-1", "--out", "o.json"])
+
+
 class PlanTests(unittest.TestCase):
     def test_planning_requests_run_one_at_a_time(self):
         """Concurrent /api/plan requests never run stage_pipeline at once."""
@@ -219,13 +253,13 @@ class WriteExamplesTests(unittest.TestCase):
             self.assertTrue((root / "out" / "a.json").exists())
 
 
-def post_plan(payload: dict) -> dict:
-    """POST `payload` to /api/plan on a fresh server and return the document."""
+def post_plan(payload: dict, path: str = "/api/plan") -> dict:
+    """POST `payload` to `path` on a fresh server and return the document."""
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
         request = urllib.request.Request(
-            f"http://127.0.0.1:{httpd.server_address[1]}/api/plan",
+            f"http://127.0.0.1:{httpd.server_address[1]}{path}",
             data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
         )
@@ -236,8 +270,40 @@ def post_plan(payload: dict) -> dict:
         httpd.server_close()
 
 
+def get_status() -> dict:
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/api/status", timeout=10) as response:
+            return json.loads(response.read())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+class StatusEndpointTests(unittest.TestCase):
+    def test_status_says_the_page_can_plan(self):
+        self.assertEqual(get_status(), {"planner": True})
+
+
 @unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
 class PlanEndpointTests(unittest.TestCase):
+    def test_plan_workload_endpoint_plans_a_planning_workload(self):
+        workload = {
+            "query_workload": {"language": "promql", "query_batch": None, "repeating_queries": [{
+                "query": "sum by (job) (sum_over_time(m[1m]))", "demand": {"fixed_interval": 10000},
+                "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}, "max_latency_ms": None},
+                "predictability": {"predictable": {"known_at": None}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}},
+                              "sources": {"m": {"series_count": 100, "sample_interval": 1000}}},
+        }
+        document = post_plan({"workload": workload, "deployment_capabilities": {"raw_data_retained": False}}, "/api/plan-workload")
+        self.assertEqual(document["search"], "default")
+        self.assertEqual(document["workload"]["data_workload"]["sources"]["m"]["series_count"], 100)
+        self.assertFalse(document["deployment_capabilities"]["raw_data_retained"])
+        self.assertIsNotNone(document["stage3_plan_selection"]["selected"])
+        self.assertTrue(document["stage3_plan_selection"]["stored_outputs"])
+
     def test_plan_endpoint_returns_the_stage_pipeline_document(self):
         document = post_plan({"queries": [{"name": "job_rate", "language": "promql", "text": "sum by (job) (rate(m[1m]))"}]})
         self.assertEqual(document["format"], "asap-stage-pipeline/v1")

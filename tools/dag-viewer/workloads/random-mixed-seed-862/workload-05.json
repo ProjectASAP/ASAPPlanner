@@ -1,0 +1,210 @@
+{
+ "query_workload": {
+  "language": "promql",
+  "query_batch": null,
+  "repeating_queries": [
+   {
+    "query": "sum by (region, service, job) (sum_over_time(data[5m]))",
+    "demand": {
+     "fixed_interval": 10000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "sum by (region, service) (sum_over_time(data[5m]))",
+    "demand": {
+     "fixed_interval": 10000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "avg by (region, service) (quantile_over_time(0.99, data[100s]))",
+    "demand": {
+     "fixed_interval": 1000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "avg by (region, service, job) (quantile_over_time(0.50, data[100s]))",
+    "demand": {
+     "fixed_interval": 1000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "avg by (region) (quantile_over_time(0.90, data[100s]))",
+    "demand": {
+     "fixed_interval": 1000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "topk by (region, service) (8, sum_over_time(data[1m]))",
+    "demand": {
+     "fixed_interval": 1000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "topk by (region) (4, sum_over_time(data[20m]))",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "topk by (region, service) (8, increase(data_total[5m]))",
+    "demand": {
+     "fixed_interval": 10000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "topk by (region) (8, rate(data_total[20m]))",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "max_error": 0.050000000000000044,
+      "failure_probability": 0.3,
+      "accuracy_scope": "whole_result"
+     },
+     "max_latency_ms": null
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   }
+  ]
+ },
+ "data_workload": {
+  "arrival": {
+   "ingesting": {
+    "rows_per_second": 200000.0
+   }
+  },
+  "sources": {
+   "data": {
+    "series_count": 10000,
+    "metric_type": "gauge",
+    "values_non_negative": true,
+    "sample_interval": 100,
+    "stream_norms": null,
+    "max_distinct_per_evaluation": null
+   },
+   "data_total": {
+    "series_count": 10000,
+    "metric_type": "counter",
+    "sample_interval": 100,
+    "stream_norms": null,
+    "max_distinct_per_evaluation": null
+   },
+   "events": {
+    "series_count": 10000,
+    "metric_type": null,
+    "sample_interval": null,
+    "stream_norms": null,
+    "max_distinct_per_evaluation": 10000
+   }
+  }
+ }
+}

@@ -13,6 +13,12 @@ asap-frontend-sql = { path = "../frontend-sql" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 asap-plan-selection = { path = "../plan-selection" }
+# The installable plan of the selected candidate (`installable_plan_of`),
+# whose stored outputs `stage_pipeline` writes.
+asap-planner = { path = "../planner" }
+# The executor's supported summary families, which `stage_pipeline` plans
+# with when the deployment declares none, as `plan_installable` does.
+asap-executor = { path = "../executor" }
 
 # Used by the show_ir / stage_pipeline / variant_coverage bins (catalog schemas,
 # async SQL path, JSON output) and by the topk_ir / canonical_examples
@@ -22,9 +28,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
-
-[dev-dependencies]
-# The default-search test compares `stage_pipeline`'s selection with
-# `plan_installable`'s.
-asap-planner = { path = "../planner" }
 

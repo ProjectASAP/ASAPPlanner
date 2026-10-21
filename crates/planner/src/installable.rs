@@ -57,6 +57,7 @@ use asap_types::ir::{
     OperatorNode, QueryRoot,
 };
 use asap_types::physical::Materialization;
+use asap_types::workload::QueryWorkloadEntry;
 use serde::{Deserialize, Serialize};
 
 use crate::{e2e_plan, PlanError, UserInput};
@@ -354,13 +355,6 @@ impl From<ReferencePlanError> for InstallablePlanError {
 pub async fn plan_installable(input: UserInput<'_>) -> Result<InstallablePlan, PlanError> {
     let capabilities = executor_summaries_when_unrestricted(input.models.deployment_capabilities);
     let entries: Vec<_> = input.workload.query_workload.entries().collect();
-    // Each query's longest range-evaluation span, which the outputs it
-    // reads must stay available for.
-    let range_spans_ms: Vec<u64> = entries
-        .iter()
-        .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
-        .collect();
-    let query_texts: Vec<String> = entries.into_iter().map(|entry| entry.query.0).collect();
     // Stage 3 selects only a plan the Planner's executor compiles, unless
     // the caller brings its own executor's check.
     let models = input.models.with_deployment_capabilities(&capabilities);
@@ -375,27 +369,41 @@ pub async fn plan_installable(input: UserInput<'_>) -> Result<InstallablePlan, P
         pass: input.pass,
     };
     let output = e2e_plan(input).await?;
-    let installable = || -> Result<InstallablePlan, InstallablePlanError> {
-        // Every node keeps the timing Stage 3 gave it.
-        let timed = apply_materialization_timings_to_roots(
-            &output.roots(),
-            &MaterializationAssignment::default(),
-        )?;
-        let expanded = pane_retention_of_expanded_panes(&timed, output.selection.as_ref())?;
-        let selection = output
-            .selection
-            .as_ref()
-            .map(|selection| report_of(selection, &expanded.installed_node_ids));
-        let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
-        InstallablePlan::of_dag(
-            expanded.dag,
-            query_texts,
-            selection,
-            &expanded.retention_ms_by_node,
-            &reader_span_ms_by_node,
-        )
-    };
-    installable().map_err(PlanError::Installable)
+    installable_plan_of(&output.roots(), output.selection.as_ref(), &entries)
+        .map_err(PlanError::Installable)
+}
+
+/// The installable plan of `roots`, the selected roots of a workload whose
+/// entries are `entries` (in `QueryWorkload::entries()` order), with
+/// Stage 3's `selection` of them when there is one: what
+/// [`plan_installable`] returns after planning. A caller that runs the
+/// planning stages itself (e.g. a developer tool that keeps every
+/// candidate) uses it to see what a runtime would install.
+pub fn installable_plan_of(
+    roots: &[QueryRoot],
+    selection: Option<&Selection>,
+    entries: &[QueryWorkloadEntry],
+) -> Result<InstallablePlan, InstallablePlanError> {
+    // Each query's longest range-evaluation span, which the outputs it
+    // reads must stay available for.
+    let range_spans_ms: Vec<u64> = entries
+        .iter()
+        .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
+        .collect();
+    let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
+    // Every node keeps the timing Stage 3 gave it.
+    let timed =
+        apply_materialization_timings_to_roots(roots, &MaterializationAssignment::default())?;
+    let expanded = pane_retention_of_expanded_panes(&timed, selection)?;
+    let report = selection.map(|selection| report_of(selection, &expanded.installed_node_ids));
+    let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
+    InstallablePlan::of_dag(
+        expanded.dag,
+        query_texts,
+        report,
+        &expanded.retention_ms_by_node,
+        &reader_span_ms_by_node,
+    )
 }
 
 /// The Planner's executor as Stage 3's compile check

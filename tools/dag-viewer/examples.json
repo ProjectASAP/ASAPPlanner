@@ -19,5 +19,41 @@
     "example": "planner-layering-3b",
     "file": "out/example3b.json",
     "story": "A p99 panel over the last 5 min, every minute, within 200 ms."
+  },
+  {
+    "id": "random-mixed-seed-862-workload-01",
+    "name": "seed-862 · workload-01",
+    "workload": "workloads/random-mixed-seed-862/workload-01.json",
+    "deployment_capabilities": {
+      "raw_data_retained": false,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "file": "examples/random-mixed-seed-862-workload-01.json",
+    "story": "Workload set Random mixed · seed-862, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices). Ten random workloads (seed 862) of nine PromQL queries each (sums, quantiles, top-k sums, top-k increases and top-k rates at several groupings) over a synthetic hierarchy of 4 regions × 5 services × 10 jobs × 50 label_0 values: 10,000 series per metric, sampled every 100 ms, lookbacks of 1 to 20 minutes."
+  },
+  {
+    "id": "random-mixed-seed-862-x5-workload-01",
+    "name": "seed-862-x5 · workload-01",
+    "workload": "workloads/random-mixed-seed-862-x5/workload-01.json",
+    "deployment_capabilities": {
+      "raw_data_retained": false,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "file": "examples/random-mixed-seed-862-x5-workload-01.json",
+    "story": "Workload set Random mixed · seed-862-x5, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices). The seed-862 workloads over five times as many series: 250 label_0 values per job, 50,000 series per metric."
+  },
+  {
+    "id": "random-mixed-seed-862-long-workload-01",
+    "name": "seed-862-long · workload-01",
+    "workload": "workloads/random-mixed-seed-862-long/workload-01.json",
+    "deployment_capabilities": {
+      "raw_data_retained": false,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "file": "examples/random-mixed-seed-862-long-workload-01.json",
+    "story": "Workload set Random mixed · seed-862-long, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices). The seed-862 workloads with three times longer lookbacks: 3 to 60 minutes."
   }
 ]

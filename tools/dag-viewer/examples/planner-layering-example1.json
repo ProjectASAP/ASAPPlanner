@@ -2,7 +2,62 @@
   "deployment_capabilities": {
     "query_time_results_retained": false,
     "raw_data_retained": true,
-    "supported_summaries": null
+    "supported_summaries": [
+      {
+        "family": "UnivMon",
+        "readouts": [
+          "Total",
+          "Distinct",
+          "FrequencyL2",
+          "FrequencyEntropy"
+        ]
+      },
+      {
+        "family": "Kll",
+        "readouts": [
+          "Quantile"
+        ]
+      },
+      {
+        "family": "Cms",
+        "readouts": [
+          "Total"
+        ]
+      },
+      {
+        "family": "Hll",
+        "readouts": [
+          "Total",
+          "Distinct"
+        ]
+      },
+      {
+        "family": "DDSketch",
+        "readouts": [
+          "Total",
+          "Quantile"
+        ]
+      },
+      {
+        "family": "CmsWithHeap",
+        "readouts": [
+          "TopK"
+        ]
+      },
+      {
+        "family": "Kmv",
+        "readouts": [
+          "Total",
+          "Distinct"
+        ]
+      },
+      {
+        "family": "CountSketchWithHeap",
+        "readouts": [
+          "TopK"
+        ]
+      }
+    ]
   },
   "format": "asap-stage-pipeline/v1",
   "search": "exhaustive",
@@ -106362,6 +106417,11 @@
         "reason": "costlier: 101.940 vs 7.940 cost_per_second"
       }
     ],
+    "rejected_by_cause": {
+      "costlier": 16,
+      "no_accuracy_guarantee": 38,
+      "tied_lost_on_enumeration_order": 2
+    },
     "search": {
       "candidates_checked": 57,
       "components": [],
@@ -106372,13 +106432,40 @@
       "searched_as_one": null
     },
     "search_rejected": [],
-    "selected": "P1"
+    "selected": "P1",
+    "stored_outputs": []
   },
   "workload": {
+    "data_workload": {
+      "arrival": {
+        "ingesting": {
+          "rows_per_second": 66666.66666666667
+        }
+      },
+      "sources": {
+        "http_requests_total": {
+          "max_distinct_per_evaluation": null,
+          "metric_type": "counter",
+          "sample_interval": 15000,
+          "series_count": 1000000,
+          "stream_norms": null
+        }
+      }
+    },
     "queries": [
       {
         "id": "q1",
         "language": "promql",
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "recurrence": {
+          "repeated": {
+            "fixed_interval": 10000
+          }
+        },
         "requirements": {
           "accuracy": {
             "accuracy_scope": "whole_result",
@@ -106392,6 +106479,16 @@
       {
         "id": "q2",
         "language": "promql",
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "recurrence": {
+          "repeated": {
+            "fixed_interval": 10000
+          }
+        },
         "requirements": {
           "accuracy": {
             "accuracy_scope": "whole_result",

@@ -21,9 +21,11 @@
 // candidates are checked first, a whole-workload choice that picks a
 // discarded one is not composed, independent components are searched
 // separately, and without raw data retained the candidates that scan it at
-// query time are skipped), over the stage crates' built-in models and the
-// declared capabilities (not the executor's compile check, which
-// `plan_installable` adds). It keeps only the best candidate, so the document
+// query time are skipped), over the models `plan_installable` plans with:
+// the stage crates' built-in models, the declared capabilities with the
+// executor's summary families when none are declared, and, for a PromQL
+// workload, the executor's compile check (it does not compile SQL table
+// scans, so a SQL workload plans without it). It keeps only the best candidate, so the document
 // holds the selected Stage 1 and Stage 2 candidates, the rejections Stage 3
 // recorded (the first of each cause, under `search_rejected` since their
 // candidates are not kept) and the search's report; `search` is
@@ -38,15 +40,19 @@
 //     identical-expression rule's, one per subset of its sharing candidates,
 //     then the summary-capability rule's, one per choice of shared summary
 //     builds), in enumeration order. Every candidate is optimized and
-//     priced; the document shows the first `--max-displayed` (default 64)
-//     and the selected one, with `combinations` (how many were enumerated),
+//     priced; the document shows the Stage 1 candidates of the physical
+//     candidates it shows (below), and those among the first
+//     `--max-displayed` that have none, with `combinations` (how many were enumerated),
 //     `capped` (whether some are not shown) and `pass1_pruned` (the
 //     candidates Pass 1 pruned per target, with reasons). A candidate that cannot be
 //     composed carries `error` instead of `dag`;
 //   - stage2_physical_asap_optimization: one physical candidate per composed logical
 //     candidate (operator implementation; every sub-DAG NotMaterialized), no
 //     cost; a composed logical candidate Stage 2 cannot implement is listed
-//     under `pruned` with the reason;
+//     under `pruned` with the reason. The document shows at most
+//     `--max-displayed` (default 64) physical candidates: the selected one,
+//     the other valid ones cheapest first, then the rejected ones taking
+//     each cause in turn;
 //   - stage3_plan_selection: the selected candidate, chosen among all candidates;
 //     the shown candidates' costs and accepted accuracy (per query: the
 //     target's metric or null when not set, the accepted guarantee's
@@ -70,7 +76,18 @@
 //     that reads it, so a shared NotMaterialized node is charged once per
 //     query. `search` is the search's report (`SearchReport`: the physical
 //     candidates checked and, per query under the default search, its own
-//     candidates checked and those discarded with why). When selection
+//     candidates checked and those discarded with why), and
+//     `rejected_by_cause` counts the rejections by cause (every candidate's
+//     under `--exhaustive`; the recorded ones under the default search).
+//     `stored_outputs` are the selected plan's stored outputs as
+//     `plan_installable` gives them (`installable_plan_of`: each output's
+//     installed node id, `built_at`, `coverage` with its `definition_id` and
+//     `selection`, `inputs` and `retention_ms`), each with the node of the
+//     selected Stage 2 candidate it is installed from (`stage2_node_id`), its
+//     position among that node's installed nodes (`installed_position`, a
+//     pane chain's panes newest first) and their number
+//     (`installed_count`); empty without a selection, with
+//     `stored_outputs_error` when the plan is not installable. When selection
 //     fails, `selected` is null, with the rejections (and under
 //     `search_rejected` the search's own, which name no candidate: e.g. a
 //     query whose every own candidate was discarded), or with `error` for
@@ -78,6 +95,10 @@
 //     pane chain the selected plan keeps beyond one evaluation (by node id)
 //     to how far back from the newest evaluation the runtime must keep its
 //     panes: the window plus the longest range-evaluation span reading it.
+// `workload.data_workload` is the `DataWorkload` the run planned with, as
+// declared (`--workload`, `--example`) or built from `--sample-interval-ms`
+// (`--promql`); each query also carries its `recurrence` and
+// `predictability` as its workload entry declares them.
 // When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
 // `error` and no candidates, and nothing is selected.
 //
@@ -90,6 +111,9 @@
 // Planning never caps or truncates the candidates it ranks; only the display
 // does (`--max-displayed`).
 //
+// With `--workload`, each query's accuracy (ε, δ, metric) comes from the
+// file: `--max-error`, `--failure-probability` and `--accuracy-metric` apply
+// to `--promql`/`--sql` queries only.
 // `--promql` and `--sql` may repeat and mix, in workload order; `--name`
 // names the query before it (default `q<n>`). `--max-error` (ε) and
 // `--failure-probability` (δ) apply to every query; without them the
@@ -116,8 +140,9 @@
 // executor can run and keep (`DeploymentCapabilities`):
 // `{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}, ...],
 // "raw_data_retained": true, "query_time_results_retained": false}`. Every
-// field is optional: by default every sketch family and readout the planner
-// can build is supported (`supported_summaries` null), raw data is retained,
+// field is optional: by default the sketch families and readouts the
+// Planner's executor runs are supported (`supported_summaries` null, as
+// `plan_installable` defaults it), raw data is retained,
 // and no query-time result is kept across evaluations. Pass 1 offers no
 // summary the deployment does not support (exact computations are always
 // supported); Stage 1's `pass1_pruned` lists, per target with any, every
@@ -128,7 +153,8 @@
 // a tumbling-pane chain whose readers evaluate together at its pane width is
 // also offered built at query time and kept across evaluations, beside being
 // shared within one evaluation. The document's top-level
-// `deployment_capabilities` shows the inputs used.
+// `deployment_capabilities` shows the capabilities used, with the
+// executor's families filled in.
 // `--measured-operation-costs <file>` reads the deployment's measured CPU
 // time per operator (`MeasuredOperationCosts`: `{"operators": [...],
 // "ns_per_evaluation": ..., "provenance": ...}`, or the earlier JSON array
@@ -176,6 +202,7 @@ use asap_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts, PlanSelectionSettings,
     PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
 };
+use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -245,12 +272,13 @@ fn main() {
 fn document_of(
     queries: Vec<Value>,
     roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
     result: Result<PlanningStagesRun, PlanningStagesError>,
     max_displayed: usize,
 ) -> Result<Value, Failure> {
     let queries = with_default_metrics(queries, roots);
     match result {
-        Ok(run) => Ok(stage_pipeline(queries, &run, max_displayed)),
+        Ok(run) => Ok(stage_pipeline(queries, entries, &run, max_displayed)),
         Err(PlanningStagesError::Pass1(error)) => Ok(json!({
             "format": "asap-stage-pipeline/v1",
             "workload": { "queries": queries },
@@ -263,7 +291,7 @@ fn document_of(
                 "error": format!("Pass 1: {error}"),
             },
             "stage2_physical_asap_optimization": { "candidates": [], "pruned": [] },
-            "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [] },
+            "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [], "stored_outputs": [] },
         })),
         Err(
             error @ (PlanningStagesError::TooManyCandidates { .. }
@@ -462,6 +490,15 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     };
     // The workload's queries as the document describes them, the
     // frontends' roots, the workload entries and the data workload.
+    // Whether every query is PromQL, which the executor's compile check
+    // applies to (it does not compile SQL table scans).
+    let promql_only = match (&from_file, example.as_deref()) {
+        (Some((workload, _)), _) => workload.query_workload.language == QueryLanguage::PromQL,
+        (None, Some(example)) => example != "planner-layering-2",
+        (None, None) => queries
+            .iter()
+            .all(|(language, _, _)| *language == QueryLanguage::PromQL),
+    };
     let (described, roots, entries, data) = match (example.as_deref(), queries.is_empty()) {
         (None, true) if from_file.is_some() => {
             let (workload, catalog) = from_file.expect("checked");
@@ -553,25 +590,33 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             )
         }
     };
+    // Plan with the models `plan_installable` plans with: the executor's
+    // summary families when the deployment declares none, and the
+    // executor's compile check for a PromQL workload.
+    if deployment_capabilities.supported_summaries.is_none() {
+        deployment_capabilities.supported_summaries =
+            Some(asap_executor::supported_summary_families());
+    }
+    let models = PlanningModels::builtin()
+        .with_plan_selection(&plan_selection)
+        .with_deployment_capabilities(&deployment_capabilities);
+    let models = match promql_only {
+        true => models.with_executor_compile_check(&PlannerExecutorCompileCheck),
+        false => models,
+    };
     let result = match exhaustive {
         true => run_planning_stages_over(
             roots.clone(),
             &entries,
             &data,
             Some(max_combinations),
-            &plan_selection,
-            &deployment_capabilities,
+            models,
         ),
-        false => run_default_search_over(
-            roots.clone(),
-            &entries,
-            &data,
-            PlanningModels::builtin()
-                .with_plan_selection(&plan_selection)
-                .with_deployment_capabilities(&deployment_capabilities),
-        ),
+        false => run_default_search_over(roots.clone(), &entries, &data, models),
     };
-    let mut document = document_of(described, &roots, result, max_displayed)?;
+    let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
+    document["workload"]["data_workload"] =
+        serde_json::to_value(&data).map_err(|e| e.to_string())?;
     document["search"] = json!(if exhaustive { "exhaustive" } else { "default" });
     // Read-only: the deployment inputs the run planned with.
     document["deployment_capabilities"] =
@@ -602,31 +647,35 @@ fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered,
 }
 
 /// The document for `run`, whose workload queries are `queries`.
-fn stage_pipeline(queries: Vec<Value>, run: &PlanningStagesRun, max_displayed: usize) -> Value {
-    // The display keeps the first `max_displayed` candidates and the
-    // selected one; plan selection has already ranked all of them.
-    let selected_logical = run
-        .stage3_plan_selection
-        .as_ref()
-        .ok()
-        .and_then(|selection| {
-            run.stage2_physical_asap_optimization
-                .iter()
-                .find(|p| p.id == selection.selected)
-                .map(|p| p.from_logical.as_str())
-        });
+fn stage_pipeline(
+    queries: Vec<Value>,
+    entries: &[QueryWorkloadEntry],
+    run: &PlanningStagesRun,
+    max_displayed: usize,
+) -> Value {
+    // The display keeps `max_displayed` physical candidates (plan selection
+    // has already ranked all of them): the selected one, the other valid
+    // ones cheapest first, then the rejected ones taking each cause in turn,
+    // so a cause with many candidates does not hide the others.
+    let shown_physical = displayed_physical(run, max_displayed);
+    let implemented: HashSet<&str> = run
+        .stage2_physical_asap_optimization
+        .iter()
+        .map(|p| p.from_logical.as_str())
+        .collect();
+    // The Stage 1 candidates of the shown physical ones, and those among
+    // the first `max_displayed` that have none (pruned or not composed).
     let shown: HashSet<&str> = run
         .stage1_logical_asap_optimization
         .iter()
         .enumerate()
-        .filter(|(index, c)| *index < max_displayed || Some(c.id.as_str()) == selected_logical)
+        .filter(|(index, c)| {
+            run.stage2_physical_asap_optimization
+                .iter()
+                .any(|p| p.from_logical == c.id && shown_physical.contains(p.id.as_str()))
+                || (*index < max_displayed && !implemented.contains(c.id.as_str()))
+        })
         .map(|(_, c)| c.id.as_str())
-        .collect();
-    let shown_physical: HashSet<&str> = run
-        .stage2_physical_asap_optimization
-        .iter()
-        .filter(|p| shown.contains(p.from_logical.as_str()))
-        .map(|p| p.id.as_str())
         .collect();
     // Labels are for this document only; planning never reads them.
     let labels = candidate_labels(run);
@@ -662,24 +711,144 @@ fn stage_pipeline(queries: Vec<Value>, run: &PlanningStagesRun, max_displayed: u
         .iter()
         .map(|p| p.id.as_str())
         .collect();
-    let stage3 = plan_selection_json(
+    let mut stage3 = plan_selection_json(
         &run.stage3_plan_selection,
         |id| shown_physical.contains(id),
         |id| every_physical.contains(id),
     );
+    match &run.stage3_plan_selection {
+        Ok(selection) => match stored_outputs_json(selection, entries) {
+            Ok(stored) => stage3["stored_outputs"] = Value::Array(stored),
+            Err(error) => {
+                stage3["stored_outputs"] = json!([]);
+                stage3["stored_outputs_error"] = json!(error);
+            }
+        },
+        Err(_) => stage3["stored_outputs"] = json!([]),
+    }
     json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": queries },
         "stage0_query_language_frontends": { "dag": export(&run.stage0_query_language_frontends) },
         "stage1_logical_asap_optimization": {
             "combinations": run.stage1_logical_asap_optimization.len(),
-            "capped": candidates.len() < run.stage1_logical_asap_optimization.len(),
+            "capped": physical.len() < run.stage2_physical_asap_optimization.len()
+                || candidates.len() < run.stage1_logical_asap_optimization.len(),
             "pass1_pruned": pass1_pruned_json(&run.stage1_pass1_per_computation),
             "candidates": candidates,
         },
         "stage2_physical_asap_optimization": { "candidates": physical, "pruned": pruned },
         "stage3_plan_selection": stage3,
     })
+}
+
+/// The ids of the physical candidates the document shows: at most
+/// `max_displayed`, the selected one first, then the other valid ones
+/// cheapest first (in candidate order when unpriced), then the rejected
+/// ones, one of each cause in turn in candidate order.
+fn displayed_physical(run: &PlanningStagesRun, max_displayed: usize) -> HashSet<&str> {
+    let every = &run.stage2_physical_asap_optimization;
+    let Ok(selection) = &run.stage3_plan_selection else {
+        // Without a selection (rejected, or not judged): each cause in turn.
+        let causes: Vec<_> = match &run.stage3_plan_selection {
+            Err(SelectionError::NoValidCandidate(rejected)) => rejected.iter().collect(),
+            _ => Vec::new(),
+        };
+        let cause_of = |id: &str| causes.iter().find(|r| r.id == id).map(|r| r.cause);
+        return round_robin(every.iter().map(|p| (p.id.as_str(), cause_of(&p.id))))
+            .take(max_displayed)
+            .collect();
+    };
+    let cause_of = |id: &str| {
+        selection
+            .rejected
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.cause)
+    };
+    let mut valid: Vec<&str> = every
+        .iter()
+        .map(|p| p.id.as_str())
+        .filter(|id| *id != selection.selected && selection.costs.contains_key(*id))
+        .collect();
+    let price = |id: &str| selection.costs[id].cost_per_second.unwrap_or(f64::INFINITY);
+    valid.sort_by(|a, b| price(a).total_cmp(&price(b)));
+    let rejected = every
+        .iter()
+        .filter(|p| p.id != selection.selected && !selection.costs.contains_key(&p.id))
+        .map(|p| (p.id.as_str(), cause_of(&p.id)));
+    std::iter::once(selection.selected.as_str())
+        .filter(|id| every.iter().any(|p| p.id == *id))
+        .chain(valid)
+        .chain(round_robin(rejected))
+        // The selected candidate is always shown.
+        .take(max_displayed.max(1))
+        .collect()
+}
+
+/// `candidates` (id, cause) reordered to take one of each cause in turn,
+/// each cause's in candidate order, causes in order of first appearance.
+fn round_robin<'a, C: PartialEq>(
+    candidates: impl Iterator<Item = (&'a str, Option<C>)>,
+) -> impl Iterator<Item = &'a str> {
+    let mut groups: Vec<(Option<C>, std::collections::VecDeque<&'a str>)> = Vec::new();
+    for (id, cause) in candidates {
+        match groups.iter_mut().find(|(c, _)| *c == cause) {
+            Some((_, ids)) => ids.push_back(id),
+            None => groups.push((cause, std::collections::VecDeque::from([id]))),
+        }
+    }
+    std::iter::from_fn(move || {
+        let ids: Vec<&'a str> = groups
+            .iter_mut()
+            .filter_map(|(_, ids)| ids.pop_front())
+            .collect();
+        (!ids.is_empty()).then_some(ids)
+    })
+    .flatten()
+}
+
+/// The selected plan's stored outputs, as [`installable_plan_of`] (what
+/// `plan_installable` returns) gives them: each output's node id in the
+/// installable DAG, `built_at`, `coverage`, `inputs` and `retention_ms`,
+/// plus the node of the selected Stage 2 candidate it is installed from
+/// (`stage2_node_id`, null when Stage 3 recorded no cost to map it by), its
+/// position among that node's installed nodes (`installed_position`: a
+/// pane chain's panes, newest first) and their number (`installed_count`).
+fn stored_outputs_json(
+    selection: &Selection,
+    entries: &[QueryWorkloadEntry],
+) -> Result<Vec<Value>, String> {
+    let plan = installable_plan_of(&selection.plan, Some(selection), entries)
+        .map_err(|e| e.to_string())?;
+    let mut stage2_of = std::collections::HashMap::new();
+    for node in plan
+        .selection
+        .iter()
+        .filter_map(|report| report.predicted_usage.as_ref())
+        .flat_map(|usage| &usage.per_node)
+    {
+        for (position, installed) in node.installed_node_ids.iter().enumerate() {
+            stage2_of.insert(
+                *installed,
+                (node.stage3_node_id, position, node.installed_node_ids.len()),
+            );
+        }
+    }
+    plan.stored_outputs
+        .iter()
+        .map(|output| {
+            let mut value = serde_json::to_value(output).map_err(|e| e.to_string())?;
+            let (stage2_node_id, position, count) = match stage2_of.get(&output.node_id) {
+                Some((id, position, count)) => (json!(id), json!(position), json!(count)),
+                None => (Value::Null, Value::Null, Value::Null),
+            };
+            value["stage2_node_id"] = stage2_node_id;
+            value["installed_position"] = position;
+            value["installed_count"] = count;
+            Ok(value)
+        })
+        .collect()
 }
 
 /// The candidates Pass 1 pruned, per target that has any: the target's
@@ -741,6 +910,7 @@ fn plan_selection_json(
                 "selected": null,
                 "rejected": rejections_json(rejected),
                 "search_rejected": search_rejected,
+                "rejected_by_cause": rejected_by_cause(rejected),
             });
         }
         Err(error) => {
@@ -806,6 +976,7 @@ fn plan_selection_json(
         "selected": selection.selected,
         "rejected": rejections_json(&selection.rejected),
         "search_rejected": search_rejected(&selection.rejected),
+        "rejected_by_cause": rejected_by_cause(&selection.rejected),
         "front": selection.front,
         "search": selection.search,
         "pane_retention_ms": selection
@@ -831,6 +1002,22 @@ fn usage_json(usage: &ResourceUsage) -> Value {
             .map(|l| json!({ "compaction_ms": l.compaction_ms, "query_ms": l.query_ms }))
             .collect::<Vec<_>>(),
     })
+}
+
+/// How many of `rejected` have each cause, by cause: over every candidate
+/// under `--exhaustive`; under the default search, the rejections it
+/// recorded (the first of each cause).
+fn rejected_by_cause(rejected: &[Rejection]) -> Value {
+    let mut counts = serde_json::Map::new();
+    for rejection in rejected {
+        let cause = serde_json::to_value(rejection.cause)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let count = counts.entry(cause).or_insert(json!(0));
+        *count = json!(count.as_u64().unwrap_or(0) + 1);
+    }
+    Value::Object(counts)
 }
 
 fn rejections_json<'a>(rejected: impl Iterator<Item = &'a Rejection>) -> Vec<Value> {
@@ -873,6 +1060,10 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
                 "language": language,
                 "text": entry.query.0,
                 "requirements": requirements,
+                // How often and when the query runs, as the workload entry
+                // declares it.
+                "recurrence": entry.recurrence,
+                "predictability": entry.predictability,
             })
         })
         .collect()
@@ -1022,6 +1213,7 @@ mod tests {
                     "reason": "q1: misses target",
                 }],
                 "search_rejected": [],
+                "rejected_by_cause": { "accuracy_target_missed": 1 },
             })
         );
     }
@@ -1038,7 +1230,8 @@ mod tests {
         );
         let run =
             run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
-        let document = stage_pipeline(workload_queries(&workload), &run, 0);
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let document = stage_pipeline(workload_queries(&workload), &entries, &run, 0);
         let selected = document["stage3_plan_selection"]["selected"]
             .as_str()
             .unwrap();

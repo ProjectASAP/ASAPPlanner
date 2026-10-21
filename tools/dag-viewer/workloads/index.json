@@ -1,0 +1,497 @@
+{
+  "format": "asap-workload-sets/v1",
+  "sets": [
+    {
+      "id": "random-mixed-seed-862",
+      "name": "Random mixed · seed-862",
+      "description": "Ten random workloads (seed 862) of nine PromQL queries each (sums, quantiles, top-k sums, top-k increases and top-k rates at several groupings) over a synthetic hierarchy of 4 regions × 5 services × 10 jobs × 50 label_0 values: 10,000 series per metric, sampled every 100 ms, lookbacks of 1 to 20 minutes.",
+      "source": "Converted from ASAPQuery's random workload manifests (asap-tools/experiments/datasets/fake_metric/random_workloads/seed-862/workload-NN.json), PromQL queries only. Each query repeats at its interval; ε = 1 − its accuracy SLA (0.05), δ = 0.3, metric not set. Planned as the MVP deployment: raw data not retained, priced at AWS Fargate us-east-1 rates. The data workload declares each metric's series count, its type (data a non-negative gauge, data_total a counter) and its 100 ms sample interval, and the events table's distinct-user bound.",
+      "deployment_capabilities": {
+        "raw_data_retained": false,
+        "query_time_results_retained": false
+      },
+      "workloads": [
+        {
+          "id": "workload-01",
+          "file": "random-mixed-seed-862/workload-01.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ],
+          "document": "examples/random-mixed-seed-862-workload-01.json"
+        },
+        {
+          "id": "workload-02",
+          "file": "random-mixed-seed-862/workload-02.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-03",
+          "file": "random-mixed-seed-862/workload-03.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-04",
+          "file": "random-mixed-seed-862/workload-04.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-05",
+          "file": "random-mixed-seed-862/workload-05.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-06",
+          "file": "random-mixed-seed-862/workload-06.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-07",
+          "file": "random-mixed-seed-862/workload-07.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-08",
+          "file": "random-mixed-seed-862/workload-08.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-09",
+          "file": "random-mixed-seed-862/workload-09.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-10",
+          "file": "random-mixed-seed-862/workload-10.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        }
+      ],
+      "cost_model": "aws-fargate-us-east-1"
+    },
+    {
+      "id": "random-mixed-seed-862-x5",
+      "name": "Random mixed · seed-862-x5",
+      "description": "The seed-862 workloads over five times as many series: 250 label_0 values per job, 50,000 series per metric.",
+      "source": "Converted from ASAPQuery's random workload manifests (asap-tools/experiments/datasets/fake_metric/random_workloads/seed-862-x5/workload-NN.json), PromQL queries only. Each query repeats at its interval; ε = 1 − its accuracy SLA (0.05), δ = 0.3, metric not set. Planned as the MVP deployment: raw data not retained, priced at AWS Fargate us-east-1 rates. The data workload declares each metric's series count, its type (data a non-negative gauge, data_total a counter) and its 100 ms sample interval, and the events table's distinct-user bound.",
+      "deployment_capabilities": {
+        "raw_data_retained": false,
+        "query_time_results_retained": false
+      },
+      "workloads": [
+        {
+          "id": "workload-01",
+          "file": "random-mixed-seed-862-x5/workload-01.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ],
+          "document": "examples/random-mixed-seed-862-x5-workload-01.json"
+        },
+        {
+          "id": "workload-02",
+          "file": "random-mixed-seed-862-x5/workload-02.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-03",
+          "file": "random-mixed-seed-862-x5/workload-03.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-04",
+          "file": "random-mixed-seed-862-x5/workload-04.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-05",
+          "file": "random-mixed-seed-862-x5/workload-05.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-06",
+          "file": "random-mixed-seed-862-x5/workload-06.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-07",
+          "file": "random-mixed-seed-862-x5/workload-07.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-08",
+          "file": "random-mixed-seed-862-x5/workload-08.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-09",
+          "file": "random-mixed-seed-862-x5/workload-09.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-10",
+          "file": "random-mixed-seed-862-x5/workload-10.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        }
+      ],
+      "cost_model": "aws-fargate-us-east-1"
+    },
+    {
+      "id": "random-mixed-seed-862-long",
+      "name": "Random mixed · seed-862-long",
+      "description": "The seed-862 workloads with three times longer lookbacks: 3 to 60 minutes.",
+      "source": "Converted from ASAPQuery's random workload manifests (asap-tools/experiments/datasets/fake_metric/random_workloads/seed-862-long/workload-NN.json), PromQL queries only. Each query repeats at its interval; ε = 1 − its accuracy SLA (0.05), δ = 0.3, metric not set. Planned as the MVP deployment: raw data not retained, priced at AWS Fargate us-east-1 rates. The data workload declares each metric's series count, its type (data a non-negative gauge, data_total a counter) and its 100 ms sample interval, and the events table's distinct-user bound.",
+      "deployment_capabilities": {
+        "raw_data_retained": false,
+        "query_time_results_retained": false
+      },
+      "workloads": [
+        {
+          "id": "workload-01",
+          "file": "random-mixed-seed-862-long/workload-01.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ],
+          "document": "examples/random-mixed-seed-862-long-workload-01.json"
+        },
+        {
+          "id": "workload-02",
+          "file": "random-mixed-seed-862-long/workload-02.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-03",
+          "file": "random-mixed-seed-862-long/workload-03.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-04",
+          "file": "random-mixed-seed-862-long/workload-04.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-05",
+          "file": "random-mixed-seed-862-long/workload-05.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-06",
+          "file": "random-mixed-seed-862-long/workload-06.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-07",
+          "file": "random-mixed-seed-862-long/workload-07.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-08",
+          "file": "random-mixed-seed-862-long/workload-08.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-09",
+          "file": "random-mixed-seed-862-long/workload-09.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        },
+        {
+          "id": "workload-10",
+          "file": "random-mixed-seed-862-long/workload-10.json",
+          "query_labels": [
+            "q01-sum-fine",
+            "q02-sum-coarse",
+            "q03-quantile",
+            "q04-quantile",
+            "q05-quantile",
+            "q06-topk-sum",
+            "q07-topk-sum",
+            "q08-topk-count",
+            "q09-rate"
+          ]
+        }
+      ],
+      "cost_model": "aws-fargate-us-east-1"
+    }
+  ]
+}

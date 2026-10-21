@@ -167,7 +167,8 @@
       (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.cost_unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}`
         : cost ? 'no price (cost model 3)' : 'not priced') +
       ` · ${statusChip(row.status)}` +
-      (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '');
+      (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '') +
+      (cost && cost.usage ? `<br>Stage 3 usage: ${esc(usageText(cost.usage))}` : '');
     if (c.from_logical !== current.logical) showLogical(c.from_logical);
     renderRanking();
   }
@@ -197,7 +198,8 @@
     $('queries').innerHTML = doc.workload.queries.map((q) => {
       const r = q.requirements || {};
       const acc = accuracyText(r.accuracy, r.default_metric);
-      const req = [acc && `accuracy ${acc}`, r.max_latency_ms && `latency ≤ ${r.max_latency_ms} ms`, r.repeat_interval_ms && `every ${r.repeat_interval_ms / 1000} s`].filter(Boolean).join(' · ');
+      const schedule = queryScheduleText(q) || (r.repeat_interval_ms && `every ${r.repeat_interval_ms / 1000} s`);
+      const req = [acc && `accuracy ${acc}`, r.max_latency_ms && `latency ≤ ${r.max_latency_ms} ms`, schedule].filter(Boolean).join(' · ');
       return `<div class="query"><span class="qid">${esc(q.id)} · ${esc(q.language)}</span><code>${esc(q.text)}</code>${req ? `<span class="req">${esc(req)}</span>` : ''}</div>`;
     }).join('');
     const count = (status) => rows.filter((r) => r.status === status).length;
@@ -206,6 +208,7 @@
       ` → <b>${physicalById.size}</b> physical` +
       (selection.selected ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
     $('rank-meta').textContent = [stageCandidateHeader(doc), searchText(doc)].filter(Boolean).join(' · ');
+    renderDataWorkload();
     const sel = selection.selected ? selection.costs[selection.selected] : null;
     $('cost-unit').textContent = sel ? sel.cost_unit.replace(/_/g, ' ') : '';
 
@@ -218,12 +221,78 @@
     // The selected plan is the first row when there is one.
     const first = rows[0];
     if (first && rowKey(first).startsWith('P')) selectPhysical(first.id);
-    else if (first) selectLogical(first.logical);
+    else if (first && first.logical) selectLogical(first.logical);
     else {
       clearLane(1, 'no candidates');
       clearLane(2, 'no candidates');
       renderRanking();
     }
+    renderStoredOutputs();
+  }
+
+  const table = (head, body) => `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;
+
+  // The run's data workload beside the queries: one row per source with the
+  // facts it declares, and the queries whose text names it.
+  function renderDataWorkload() {
+    const dataWorkload = doc.workload.data_workload;
+    if (!dataWorkload) {
+      $('dataArrival').textContent = '';
+      $('deployment').textContent = doc.deployment_capabilities ? `Deployment: ${deploymentText(doc.deployment_capabilities)}` : '';
+      $('dataSources').innerHTML = '<span class="status">The document declares no data workload.</span>';
+      return;
+    }
+    const view = dataWorkloadView(dataWorkload, doc.workload.queries);
+    $('dataArrival').textContent = `arrival: ${view.arrival}`;
+    $('deployment').textContent = doc.deployment_capabilities ? `Deployment: ${deploymentText(doc.deployment_capabilities)}` : '';
+    $('dataSources').innerHTML = view.rows.length
+      ? table(['source', 'series', 'type', 'non-negative', 'sample interval', 'stream norms', 'distinct bound', 'read by'],
+        view.rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.series)}</td><td>${esc(r.type)}</td><td>${esc(r.nonNegative)}</td><td>${esc(r.sampleInterval)}</td><td>${esc(r.streamNorms)}</td><td>${esc(r.maxDistinct)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join(''))
+      : '<span class="status">No source declared.</span>';
+  }
+
+  // The selected plan's stored outputs; a row selects its Stage 2 node.
+  function renderStoredOutputs() {
+    const selection = doc.stage3_plan_selection;
+    const stored = storedOutputRows(doc);
+    if (!selection.selected) {
+      $('stored-meta').textContent = 'no plan selected';
+      $('storedOutputs').innerHTML = '';
+      return;
+    }
+    if (selection.stored_outputs === undefined) {
+      $('stored-meta').textContent = 'this document has no stored outputs section; write it again with the current stage_pipeline';
+      $('storedOutputs').innerHTML = '';
+      return;
+    }
+    $('stored-meta').innerHTML = selection.stored_outputs_error
+      ? `<span class="error">no installable plan: ${esc(selection.stored_outputs_error)}</span>`
+      : `<b>${stored.length}</b> stored output${stored.length === 1 ? '' : 's'} of <b>${esc(selection.selected)}</b>` +
+        (stored.length ? '' : ': nothing is kept across evaluations; every query computes at query time');
+    $('storedOutputs').innerHTML = stored.length ? table(
+      ['node', 'Stage 2 node', 'definition', 'kind', 'pane', 'built at', 'inputs', 'retention', 'Stage 3 cost', 'read by'],
+      stored.map((r) => `<tr class="clickable" tabindex="0" data-node="${r.stage2NodeId === null ? '' : esc(r.stage2NodeId)}"><td>${esc(r.nodeId)}</td><td>${r.stage2NodeId === null ? '—' : esc(r.stage2NodeId)}</td>` +
+        `<td class="wrap">${esc(r.definition)}</td><td class="wrap">${esc(r.kind)}</td><td class="wrap">${esc(r.pane)}</td><td>${esc(r.builtAt)}</td><td class="wrap">${esc(r.inputs)}</td>` +
+        `<td>${esc(r.retention)}</td><td class="wrap">${esc(r.cost)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
+    $('storedOutputs').querySelectorAll('tr.clickable').forEach((tr) => {
+      const pick = () => { if (tr.dataset.node !== '') selectStage2Node(Number(tr.dataset.node)); };
+      tr.addEventListener('click', pick);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+    });
+  }
+
+  // Show the selected plan in the Stage 2 lane and select its node `id`.
+  function selectStage2Node(id) {
+    const selected = doc.stage3_plan_selection.selected;
+    if (current.physical !== selected) selectPhysical(selected);
+    const cy = cys[2];
+    if (!cy) return;
+    const node = cy.getElementById(`n${id}`);
+    if (!node || node.length === 0) return;
+    cy.elements().unselect();
+    node.select();
+    cy.animate ? cy.animate({ center: { eles: node }, duration: 200 }) : cy.center(node);
+    showNode(node.data(), 2);
   }
 
   function showError(err) {
@@ -265,8 +334,37 @@
     }
   }
 
+  // Plan a `PlanningWorkload` JSON with the local server (`stage_pipeline
+  // --workload`, default search) under `deploymentCapabilities` and
+  // `costModel` (null: the defaults) and show the document. Resolves to whether it was shown;
+  // rejects when the server could not plan it.
+  function planWorkload(workload, deploymentCapabilities, source, story, costModel) {
+    const ticket = ++loading;
+    pressTab(null);
+    $('queries').innerHTML = `<span class="status">Planning ${esc(source)} with the local server…</span>`;
+    return fetch('/api/plan-workload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workload, deployment_capabilities: deploymentCapabilities || null, cost_model: costModel || null }),
+    }).then((r) => r.json().catch(() => ({ error: `HTTP ${r.status}` })).then((result) => {
+      if (!r.ok) throw new Error(result.error || `HTTP ${r.status}`);
+      if (ticket !== loading) return false;
+      try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+      showDocument(result, source, story || '');
+      return true;
+    })).catch((err) => {
+      if (ticket === loading) $('queries').innerHTML = `<span class="error">Could not plan ${esc(source)}: ${esc(err.message)}</span>`;
+      throw err;
+    });
+  }
+
+  // A dropped or opened file: a stage document is shown, a workload planned.
   function readFile(file) {
-    file.text().then((text) => showExternal(JSON.parse(text), file.name)).catch(showError);
+    file.text().then((text) => {
+      const value = JSON.parse(text);
+      if (isPlanningWorkload(value)) planWorkload(value, null, file.name, '').catch(() => {});
+      else showExternal(value, file.name);
+    }).catch(showError);
   }
   $('openFile').addEventListener('click', () => $('fileInput').click());
   $('fileInput').addEventListener('change', (e) => { if (e.target.files[0]) readFile(e.target.files[0]); e.target.value = ''; });
@@ -284,7 +382,11 @@
   new MutationObserver(restyle).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   $('details').innerHTML = HINT;
 
-  window.StageViewer = { showDocument: showExternal };
+  window.StageViewer = {
+    showDocument: showExternal,
+    planWorkload,
+    loadDocument: (url, source, story) => { pressTab(null); return loadUrl(url, source, story); },
+  };
 
   // `?doc=<path>` opens one document; otherwise the examples listed in
   // examples.json, starting from `#<id>` or the first.
