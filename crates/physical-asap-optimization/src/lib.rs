@@ -86,7 +86,7 @@
 //! candidate alone, with the error as its reason.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::Source;
@@ -322,6 +322,96 @@ pub fn optimize_physical_asap(
             assigned_candidate(from_logical, &implemented, &mat_candidates, assignment)
         })
         .collect()
+}
+
+/// [`optimize_physical_asap`] without the materialization assignments that
+/// read raw data at query time, each with its position in
+/// [`optimize_physical_asap`]'s list, and how many were left out. An
+/// assignment reads raw data at query time when a walk from a root reaches
+/// a `Scan` without passing a summary build materialized at ingestion
+/// time: that scan then runs at query time ([`reads_raw_at_query_time`]).
+/// A deployment that keeps no raw data rejects every such candidate in
+/// Stage 3, whatever else it chooses, so its search need not build them.
+pub fn optimize_physical_asap_without_query_time_raw_scans(
+    from_logical: &str,
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+) -> Result<(Vec<(usize, PhysicalCandidate)>, usize), PhysicalASAPOptimizationError> {
+    let mut memo = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
+    check_panes_on_range_steps(&mat_candidates, entries)?;
+    let mut skipped = 0;
+    let mut candidates = Vec::new();
+    for (position, assignment) in materialization_assignments(&mat_candidates).enumerate() {
+        if reads_raw_at_query_time(&implemented, &mat_candidates, &assignment) {
+            skipped += 1;
+            continue;
+        }
+        let candidate =
+            assigned_candidate(from_logical, &implemented, &mat_candidates, assignment)?;
+        candidates.push((position, candidate));
+    }
+    Ok((candidates, skipped))
+}
+
+/// Whether every materialization assignment of `roots` scans raw data at
+/// query time ([`reads_raw_at_query_time`]): even with every build that may
+/// be materialized at ingestion time materialized there, a walk from a root
+/// reaches a `Scan`. Materializing fewer builds at ingestion only leaves more
+/// scans at query time. `false` when `roots` cannot be implemented (Stage 2
+/// then reports why).
+pub fn every_assignment_scans_raw_at_query_time(
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+) -> bool {
+    let mut memo = HashMap::new();
+    let Ok(implemented) = map_roots(roots, &mut |node| implement(node, &mut memo)) else {
+        return false;
+    };
+    let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
+    let most_at_ingestion: Vec<Materialization> = mat_candidates
+        .iter()
+        .map(|c| match c.at_ingestion {
+            Ok(()) => Materialization::MatAtIngestion(Medium::Memory),
+            Err(_) => Materialization::NotMaterialized,
+        })
+        .collect();
+    reads_raw_at_query_time(&implemented, &mat_candidates, &most_at_ingestion)
+}
+
+/// Whether `assignment` of `mat_candidates` leaves a `Scan` of the
+/// implemented `roots` at query time: one a walk from a root reaches
+/// without passing a build materialized at ingestion time, below which
+/// every node runs at ingestion time.
+fn reads_raw_at_query_time(
+    roots: &[QueryRoot],
+    mat_candidates: &[MaterializationCandidate],
+    assignment: &[Materialization],
+) -> bool {
+    let at_ingestion: HashSet<*const OperatorNode> = mat_candidates
+        .iter()
+        .zip(assignment)
+        .filter(|(_, m)| m.timing() == ExecutionTiming::IngestionTime)
+        .map(|(c, _)| Rc::as_ptr(&c.node))
+        .collect();
+    let mut seen: HashSet<*const OperatorNode> = HashSet::new();
+    let mut stack: Vec<&Rc<OperatorNode>> = roots.iter().flat_map(root_operators).collect();
+    while let Some(node) = stack.pop() {
+        let ptr = Rc::as_ptr(node);
+        if at_ingestion.contains(&ptr) || !seen.insert(ptr) {
+            continue;
+        }
+        if matches!(node.operator, Operator::NonASAP(NonASAPOp::Scan { .. })) {
+            return true;
+        }
+        stack.extend(node.children());
+    }
+    false
 }
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization

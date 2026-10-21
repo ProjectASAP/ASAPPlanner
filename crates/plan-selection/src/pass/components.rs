@@ -257,11 +257,16 @@ pub(crate) fn search_components<Id: Clone + std::fmt::Debug>(
         .collect();
     let joint_choice = joint_choice.ok_or(SearchedAsOne::NotInJointSpace)?;
     let flat = flatten(&combined).0;
-    let (joint, pass2) = stage1_candidates_of_choice(&joint_inventory, entries, &joint_choice)
-        .into_iter()
-        .filter_map(|candidate| Some((candidate.roots.ok()?, candidate.pass2)))
-        .find(|(roots, _)| flatten(roots).0 == flat)
-        .ok_or(SearchedAsOne::NotInJointSpace)?;
+    let skip_raw = !models.deployment_capabilities.raw_data_retained;
+    let viable = |roots: &[QueryRoot]| {
+        super::stage1_to_stage3::viable(roots, entries, data, models, skip_raw)
+    };
+    let (joint, pass2) =
+        stage1_candidates_of_choice(&joint_inventory, entries, &joint_choice, &viable)
+            .into_iter()
+            .filter_map(|candidate| Some((candidate.roots.ok()?, candidate.pass2)))
+            .find(|(roots, _)| flatten(roots).0 == flat)
+            .ok_or(SearchedAsOne::NotInJointSpace)?;
     let mut assignments: Vec<std::vec::IntoIter<Materialization>> = runs
         .iter()
         .map(|run| {
@@ -333,6 +338,10 @@ pub(crate) fn search_components<Id: Clone + std::fmt::Debug>(
         })
         .collect();
     selection.search.runner_up_cost_per_second = None;
+    selection.search.raw_scan_assignments_skipped = selections
+        .iter()
+        .map(|s| s.search.raw_scan_assignments_skipped)
+        .sum();
     let stage3_selected_logical = selected_logical(&joint, entries, data);
     Ok(Stage1ToStage3Run {
         stage1_pass1_per_computation: per_computation

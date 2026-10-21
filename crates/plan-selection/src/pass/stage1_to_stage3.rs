@@ -54,7 +54,8 @@ use super::query_candidates::QueryCandidates;
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::PlanningModels;
 use crate::{
-    CalibrationFit, PlanSelector, QuerySearchReport, Rejection, Selection, SelectionError,
+    CalibrationFit, PlanSelector, QuerySearchReport, Rejection, RejectionCause, Selection,
+    SelectionError,
 };
 use asap_logical_asap_optimization::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError, PerComputationCandidates,
@@ -63,7 +64,10 @@ use asap_logical_asap_optimization::workload_candidates::{
     stage1_logical_asap_optimization, stage1_logical_asap_optimization_skipping, Pass2Candidate,
     Stage1Candidate,
 };
-use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
+use asap_physical_asap_optimization::{
+    every_assignment_scans_raw_at_query_time, optimize_physical_asap,
+    optimize_physical_asap_without_query_time_raw_scans, PhysicalCandidate,
+};
 
 /// One whole-workload CandidateLogicalASAPDAG: `choice[t]` picks target
 /// `t`'s candidate, or its fused computation's
@@ -276,13 +280,29 @@ fn search_as_one<Id: Clone + std::fmt::Debug>(
             search.keep_every_candidate,
             Vec::new(),
             calibration,
+            false,
+            &std::cell::Cell::new(0),
         );
         return run.with_inventory(per_computation);
     }
     let queries = QueryCandidates::check(&per_computation, entries, data, models);
-    let stage1 = stage1_logical_asap_optimization_skipping(&per_computation, entries, |choice| {
-        queries.invalid_prefix(choice)
-    });
+    // Stage 1 candidates left out because every assignment of theirs scans
+    // raw data at query time.
+    let stage1_raw_skipped = std::cell::Cell::new(0u64);
+    let skip_raw =
+        !search.keep_every_candidate && !models.deployment_capabilities.raw_data_retained;
+    let stage1 = stage1_logical_asap_optimization_skipping(
+        &per_computation,
+        entries,
+        |choice| queries.invalid_prefix(choice),
+        |roots| {
+            let viable = viable(roots, entries, data, models, skip_raw);
+            if !viable {
+                stage1_raw_skipped.set(stage1_raw_skipped.get() + 1);
+            }
+            viable
+        },
+    );
     // The calibration is fitted over every candidate, as the exhaustive
     // search fits it, the discarded ones included.
     let calibration = calibration(
@@ -300,6 +320,8 @@ fn search_as_one<Id: Clone + std::fmt::Debug>(
         search.keep_every_candidate,
         queries.reports(),
         calibration,
+        skip_raw,
+        &stage1_raw_skipped,
     );
     run.with_inventory(per_computation)
 }
@@ -335,8 +357,31 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         true,
         Vec::new(),
         calibration,
+        false,
+        &std::cell::Cell::new(0),
     )
     .with_inventory(per_computation)
+}
+
+/// Whether a Stage 1 candidate with roots `roots` may have a valid
+/// implementation: in a deployment that keeps no raw data (`skip_raw`),
+/// not when every Stage 2 assignment of it scans raw data at query time,
+/// which Stage 3 rejects (`RawDataNotRetained`); identical-expression
+/// sharing cannot change that ([`stage1_logical_asap_optimization_skipping`]).
+pub(super) fn viable(
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    skip_raw: bool,
+) -> bool {
+    !skip_raw
+        || !every_assignment_scans_raw_at_query_time(
+            roots,
+            entries,
+            data,
+            models.deployment_capabilities,
+        )
 }
 
 /// The calibration fit of the formulas to the deployment's measured cost
@@ -423,7 +468,13 @@ fn search_stage2_and_stage3<Id>(
     keep_every_candidate: bool,
     queries: Vec<QuerySearchReport>,
     calibration: Result<Option<CalibrationFit>, SelectionError>,
+    skip_query_time_raw_scans: bool,
+    stage1_raw_skipped: &std::cell::Cell<u64>,
 ) -> Searched {
+    // Stage 2 assignments left out because they scan raw data at query
+    // time, and the id of the first one.
+    let mut raw_scans_skipped = 0u64;
+    let mut first_raw_scan_skipped: Option<String> = None;
     let combinations = per_computation.combinations();
     let mut logical: Vec<LogicalCandidate> = Vec::new();
     let mut physical = Vec::new();
@@ -445,10 +496,40 @@ fn search_stage2_and_stage3<Id>(
         let number = index + 1;
         let id = format!("L{number}");
         if let Ok(roots) = &candidate.roots {
-            match optimize_physical_asap(&id, roots, entries, data, models.deployment_capabilities)
-            {
+            let implemented = match skip_query_time_raw_scans {
+                // Each candidate keeps its position in its Stage 1
+                // candidate's full list (`P<n>-m<k>`); `<n>` counts only the
+                // Stage 1 candidates enumerated.
+                true => optimize_physical_asap_without_query_time_raw_scans(
+                    &id,
+                    roots,
+                    entries,
+                    data,
+                    models.deployment_capabilities,
+                )
+                .map(|(candidates, skipped)| {
+                    raw_scans_skipped += skipped as u64;
+                    if skipped > 0 && first_raw_scan_skipped.is_none() {
+                        let position = (0..).find(|k| !candidates.iter().any(|(p, _)| p == k));
+                        first_raw_scan_skipped = position.map(|k| match k {
+                            0 => format!("P{number}"),
+                            k => format!("P{number}-m{k}"),
+                        });
+                    }
+                    candidates
+                }),
+                false => optimize_physical_asap(
+                    &id,
+                    roots,
+                    entries,
+                    data,
+                    models.deployment_capabilities,
+                )
+                .map(|candidates| candidates.into_iter().enumerate().collect()),
+            };
+            match implemented {
                 Ok(implemented) => {
-                    for (k, mut p) in implemented.into_iter().enumerate() {
+                    for (k, mut p) in implemented {
                         p.id = match k {
                             0 => format!("P{number}"),
                             k => format!("P{number}-m{k}"),
@@ -495,9 +576,42 @@ fn search_stage2_and_stage3<Id>(
     let (selection, selected) = match finished {
         Ok((mut selection, selected)) => {
             selection.search.queries = queries;
+            selection.search.raw_scan_assignments_skipped = raw_scans_skipped;
+            selection.search.raw_scan_candidates_skipped = stage1_raw_skipped.get();
             (Ok(selection), Some(selected))
         }
         Err(SelectionError::NoValidCandidate(mut rejected)) => {
+            // The first candidate left out for scanning raw data at query
+            // time stands for them, as Stage 3 would have rejected it.
+            if let Some(id) = first_raw_scan_skipped.filter(|_| {
+                !rejected
+                    .iter()
+                    .any(|r| r.cause == RejectionCause::RawDataNotRetained)
+            }) {
+                rejected.push(Rejection {
+                    id,
+                    cause: RejectionCause::RawDataNotRetained,
+                    reason: "scans raw data at query time, but the deployment does not retain \
+                             raw data"
+                        .to_string(),
+                });
+            }
+            // Stage 1 candidates left out before Stage 2 for the same reason.
+            let left_out = stage1_raw_skipped.get();
+            if left_out > 0
+                && !rejected
+                    .iter()
+                    .any(|r| r.cause == RejectionCause::RawDataNotRetained)
+            {
+                rejected.push(Rejection {
+                    id: format!("{left_out} Stage 1 candidates"),
+                    cause: RejectionCause::RawDataNotRetained,
+                    reason: format!(
+                        "{left_out} Stage 1 candidates scan raw data at query time in every \
+                         materialization, but the deployment does not retain raw data"
+                    ),
+                });
+            }
             // A query whose every own candidate was discarded leaves no
             // candidate to reject: its first discard says why.
             for (query, report) in queries.iter().enumerate() {

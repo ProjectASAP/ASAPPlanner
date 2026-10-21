@@ -926,6 +926,15 @@ pub struct SearchReport {
     /// Why the workload was searched as one; `None` when its components
     /// were searched separately.
     pub searched_as_one: Option<SearchedAsOne>,
+    /// Stage 2 materialization assignments the search did not build because
+    /// they scan raw data at query time, in a deployment that keeps none:
+    /// Stage 3 would reject each of them (`RawDataNotRetained`).
+    pub raw_scan_assignments_skipped: u64,
+    /// Stage 1 candidates the search did not enumerate because every
+    /// materialization of theirs scans raw data at query time, in a
+    /// deployment that keeps none (nor their identical-expression Pass 2
+    /// candidates, which inherit that).
+    pub raw_scan_candidates_skipped: u64,
     /// Under cost models 1 and 2, the cost per second of the cheapest
     /// valid candidate priced more than rounding (1e-12 of it) above the
     /// cheapest: how close the selection came to a tie. Candidates within
