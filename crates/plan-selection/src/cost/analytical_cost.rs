@@ -2174,12 +2174,13 @@ pub enum AnalyticalCostError {
     #[error("invalid physical DAG: {0}")]
     InvalidPhysicalDAG(&'static str),
     /// Bad input: plan selection's measured table has two entries for one
-    /// sketch configuration and operation.
-    #[error("measured_operation_costs has two entries for {operation:?} on {sketch:?}")]
-    DuplicateMeasuredOperationCost {
-        sketch: SketchParams,
-        operation: crate::SummaryOperation,
-    },
+    /// operator, phase and family (named in the message).
+    #[error("measured_operation_costs has two entries for {0}")]
+    DuplicateOperatorCost(String),
+    /// Bad input: a measured entry names more than one of a sketch, an
+    /// exact accumulator and an aggregate measure.
+    #[error("measured_operation_costs entry {0} names more than one family")]
+    AmbiguousOperatorCost(String),
     /// Bad input: a non-empty measured table with `ms_per_cpu_op` not
     /// positive, so a measured time cannot be counted in CPU operations.
     #[error(
