@@ -2602,6 +2602,40 @@ fn family_name(family: &FieldDataType) -> String {
     }
 }
 
+/// Rows per millisecond the sources in `sources` receive together, each
+/// at its own rate: `series_count` series each sampled every
+/// `sample_interval`, or, for a source that does not declare both, its
+/// share of the workload's `rows_per_second` ([`DEFAULT_ROWS_PER_SECOND`]
+/// when the data is not ingesting) by [`priced_series`] among every source
+/// the workload declares and those in `sources`. A node reading no source
+/// sees the whole `rows_per_second`.
+fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> f64 {
+    let workload_rows_per_ms = data
+        .arrival
+        .rows_per_second()
+        .unwrap_or(DEFAULT_ROWS_PER_SECOND)
+        / 1_000.0;
+    if sources.is_empty() {
+        return workload_rows_per_ms;
+    }
+    let mut every_source: BTreeSet<&str> = data.sources.keys().map(String::as_str).collect();
+    every_source.extend(sources.iter().copied());
+    let every_source_series = priced_series(&every_source, data) as f64;
+    sources
+        .iter()
+        .map(|source| {
+            let facts = data.sources.get(*source);
+            match facts.and_then(|facts| facts.series_count.zip(facts.sample_interval)) {
+                Some((series, interval)) if interval.0 > 0 => series as f64 / interval.0 as f64,
+                _ => {
+                    let series = priced_series(&[*source].into(), data) as f64;
+                    workload_rows_per_ms * series / every_source_series
+                }
+            }
+        })
+        .sum()
+}
+
 /// The series pricing assumes a node reading `sources` sees: the sum of
 /// their declared series counts, [`DEFAULT_SERIES`] for each source
 /// without one and for a node that reads none.
@@ -2898,11 +2932,6 @@ fn price_at_scale(
         CostModel::UsageOverTime(prices) => Some(prices),
         _ => None,
     };
-    let rows_per_ms = data
-        .arrival
-        .rows_per_second()
-        .unwrap_or(DEFAULT_ROWS_PER_SECOND)
-        / 1_000.0;
     // The sources each node reads, filled children first.
     let mut sources_read_by: HashMap<PhysicalASAPNodeId, BTreeSet<&str>> = HashMap::new();
     let multipliers = computations(
@@ -2954,6 +2983,9 @@ fn price_at_scale(
                 .collect(),
         };
         let series = priced_series(&sources, data);
+        // The rows per ms its sources receive, which its scans and time
+        // ranges read.
+        let rows_per_ms = source_rows_per_ms(&sources, data);
         sources_read_by.insert(node.id, sources);
         let family = match &node.payload {
             Payload::ASAP(
@@ -5302,6 +5334,134 @@ mod tests {
         assert_eq!(priced_series(&BTreeSet::new(), &declared), DEFAULT_SERIES);
     }
 
+    /// A source's rows per ms: its series over its sample interval when it
+    /// declares both, else its series share of the workload's rate.
+    #[test]
+    fn each_source_arrives_at_its_own_rate() {
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 4_000.0,
+            },
+            sources: [("a", Some(100)), ("b", Some(300)), ("c", None)]
+                .into_iter()
+                .map(|(metric, interval)| {
+                    let facts = SourceFacts {
+                        series_count: Some(if metric == "a" { 1_000 } else { 3_000 }),
+                        sample_interval: interval.map(asap_types::workload::DurationMs),
+                        ..SourceFacts::default()
+                    };
+                    (metric.to_string(), facts)
+                })
+                .collect(),
+        };
+        // 1 000 series every 100 ms; 3 000 series every 300 ms.
+        assert_eq!(source_rows_per_ms(&["a"].into(), &data), 10.0);
+        assert_eq!(source_rows_per_ms(&["a", "b"].into(), &data), 20.0);
+        // No interval: 3 000 of the 7 000 declared series, of 4 rows per ms.
+        assert_eq!(
+            source_rows_per_ms(&["c"].into(), &data),
+            4.0 * 3_000.0 / 7_000.0
+        );
+        // A node reading no source sees the whole rate.
+        assert_eq!(source_rows_per_ms(&BTreeSet::new(), &data), 4.0);
+    }
+
+    /// The exact physical DAG of `queries` planned together, over `data`.
+    fn exact_dag(queries: &[&str], data: &DataWorkload) -> PhysicalASAPDAG {
+        let roots = queries
+            .iter()
+            .enumerate()
+            .map(|(index, query)| {
+                let root = lower_promql(query, AccuracyTarget::exact());
+                (index, QueryRoot::Operator(root))
+            })
+            .collect();
+        let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots)
+            .unwrap();
+        let choice = vec![0; inventory.targets.len()];
+        let roots: Vec<_> =
+            asap_logical_asap_optimization::per_computation_candidates::compose_logical_candidate(
+                &inventory, &choice,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        optimize_physical_asap("L1", &roots, &[], data, &DeploymentCapabilities::default())
+            .unwrap()
+            .remove(0)
+            .dag
+    }
+
+    /// A node's operator, timing, work and price, to compare nodes across
+    /// DAGs whose ids differ.
+    fn node_prices(cost: &CandidateCost) -> Vec<(OperatorKind, ExecutionTiming, String, f64)> {
+        cost.per_node
+            .values()
+            .map(|node| {
+                (
+                    node.operator,
+                    node.timing,
+                    node.detail.clone(),
+                    node.cost_per_second.unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// Each scan is priced at its own source's rate, `series_count` series
+    /// each sampled every `sample_interval`, not at the whole workload's
+    /// `rows_per_second`: adding a query on a second metric, which a
+    /// runtime declares by raising `rows_per_second` by that metric's rate,
+    /// leaves the first metric's node prices unchanged.
+    #[test]
+    fn a_query_on_another_metric_leaves_a_metrics_node_prices_unchanged() {
+        // `a` and `b`: 10 000 series sampled every 100 ms, 100 000 rows/s each.
+        let ingesting = |rows_per_second| DataWorkload {
+            arrival: DataArrival::Ingesting { rows_per_second },
+            sources: ["a", "b"]
+                .into_iter()
+                .map(|metric| {
+                    let facts = SourceFacts {
+                        series_count: Some(10_000),
+                        sample_interval: Some(asap_types::workload::DurationMs(100)),
+                        ..SourceFacts::default()
+                    };
+                    (metric.to_string(), facts)
+                })
+                .collect(),
+        };
+        let settings = PlanSelectionSettings::default();
+        let on_a = "sum(sum_over_time(a[1m]))";
+        let alone = ingesting(100_000.0);
+        let alone = price(
+            &exact_dag(&[on_a], &alone),
+            &recurrences(1),
+            &alone,
+            &settings,
+        )
+        .unwrap();
+        let joint = ingesting(200_000.0);
+        let joint = price(
+            &exact_dag(&[on_a, "sum(sum_over_time(b[1m]))"], &joint),
+            &recurrences(2),
+            &joint,
+            &settings,
+        )
+        .unwrap();
+        let mut joint_nodes = node_prices(&joint);
+        for node in node_prices(&alone) {
+            let found = joint_nodes.iter().position(|other| *other == node);
+            assert!(found.is_some(), "{node:?} not in {joint_nodes:#?}");
+            joint_nodes.remove(found.unwrap());
+        }
+        // Each metric's scan reads its own 100 000 rows per second.
+        assert_eq!(
+            joint.usage.scanned_bytes_per_second,
+            2.0 * alone.usage.scanned_bytes_per_second
+        );
+    }
+
     /// `G` counts the values the root can return: an `or` returns the
     /// values of both branches (here up to `series(x)` series plus the
     /// groups of `x`), a constant vector one more, while a join or a fold
@@ -7143,7 +7303,7 @@ mod tests {
             let id = aggregate.id;
             let cost = |w| {
                 let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
-                price(&dag, &recurrences(1), &data(), &settings)
+                price(&dag, &recurrences(1), &arriving(10_000.0), &settings)
                     .unwrap()
                     .per_node[&id]
                     .cost_per_second
@@ -7358,11 +7518,12 @@ mod tests {
         }
     }
 
-    /// [`data`] arriving at `rows_per_s`.
+    /// [`data`] with each test source arriving at `rows_per_s`: pricing
+    /// gives each source its series share of the workload's rate.
     fn arriving(rows_per_s: f64) -> DataWorkload {
         DataWorkload {
             arrival: DataArrival::Ingesting {
-                rows_per_second: rows_per_s,
+                rows_per_second: rows_per_s * TEST_SOURCES.len() as f64,
             },
             ..data()
         }

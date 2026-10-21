@@ -440,7 +440,9 @@ pub enum DataArrival {
     /// Rows keep arriving while the queries run.
     Ingesting {
         /// Rows (PromQL samples) arriving per second over all sources.
-        /// Plan selection prices scans and ingestion-time work with it.
+        /// Plan selection prices a source's scans with its share of it, by
+        /// series count, when the source does not declare both its
+        /// `series_count` and its `sample_interval` ([`SourceFacts`]).
         rows_per_second: f64,
     },
     /// Older rows are stored and new rows keep arriving.
@@ -532,7 +534,10 @@ pub struct SourceFacts {
     /// receives a sample (default: unknown). A bare instant selector over
     /// the metric reads the latest sample within it; lowering such a
     /// selector without it fails with
-    /// [`WorkloadError::MissingSampleInterval`].
+    /// [`WorkloadError::MissingSampleInterval`]. With `series_count`, it
+    /// gives the source's own arrival rate, `series_count` samples per
+    /// `sample_interval`, which plan selection prices the source's scans
+    /// and time ranges at.
     #[serde(default)]
     pub sample_interval: Option<DurationMs>,
     /// Bounds on the source's stream norms: the inputs Count-Min and Count
