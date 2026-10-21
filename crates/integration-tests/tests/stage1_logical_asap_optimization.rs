@@ -113,7 +113,21 @@ fn compose_all(label: &str, root: QueryRoot) -> usize {
         let root = &composed[0].1;
         root.validate_structure()
             .unwrap_or_else(|e| panic!("{label} {choice:?}: {e}"));
-        assert_eq!(output_columns(root), expected, "{label} {choice:?}");
+        let columns = output_columns(root);
+        // A heap top-k answers the declared `[keys.., topk_k]` with one row
+        // per ranked item: `topk_k` its Float64 estimate (the value the
+        // exact top-k's physical plan answers too), then the item labels.
+        let heap_topk = expected
+            .last()
+            .is_some_and(|(name, _, _)| name.starts_with("topk_"))
+            && columns.get(expected.len() - 1).map(|c| c.1.as_str()) == Some("Plain(Float64)");
+        if heap_topk {
+            let (ranked, keys) = expected.split_last().unwrap();
+            assert_eq!(&columns[..keys.len()], keys, "{label} {choice:?}");
+            assert_eq!(columns[keys.len()].0, ranked.0, "{label} {choice:?}");
+        } else {
+            assert_eq!(columns, expected, "{label} {choice:?}");
+        }
         for (digit, radix) in choice.iter_mut().zip(&radix).rev() {
             *digit += 1;
             if *digit < *radix {

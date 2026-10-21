@@ -8951,17 +8951,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -8981,6 +8985,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -9004,19 +9014,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -9712,17 +9726,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -9742,6 +9760,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -9765,19 +9789,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -10394,17 +10422,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -10424,6 +10456,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -10447,19 +10485,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -11263,17 +11305,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -11293,6 +11339,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -11316,19 +11368,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -12009,17 +12065,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -12039,6 +12099,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -12062,19 +12128,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -12871,17 +12941,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -12901,6 +12975,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -12924,19 +13004,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -13610,17 +13694,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -13640,6 +13728,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -13663,19 +13757,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -14457,17 +14555,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -14487,6 +14589,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -14510,19 +14618,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -15181,17 +15293,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -15211,6 +15327,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -15234,19 +15356,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -16065,17 +16191,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -16095,6 +16225,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -16118,19 +16254,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -16826,17 +16966,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -16856,6 +17000,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -16879,19 +17029,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -17508,17 +17662,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -17538,6 +17696,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -17561,19 +17725,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -18377,17 +18545,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -18407,6 +18579,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -18430,19 +18608,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -19123,17 +19305,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -19153,6 +19339,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -19176,19 +19368,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -19985,17 +20181,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -20015,6 +20215,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -20038,19 +20244,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -20724,17 +20934,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -20754,6 +20968,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -20777,19 +20997,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -21571,17 +21795,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -21601,6 +21829,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -21624,19 +21858,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -22295,17 +22533,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             },
@@ -22325,6 +22567,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -22348,19 +22596,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "timing": null
             }
@@ -54528,17 +54780,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -55360,17 +55616,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -55406,19 +55666,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -55437,6 +55701,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -55908,17 +56178,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -56614,17 +56888,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -56660,19 +56938,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -56691,6 +56973,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -57107,17 +57395,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 7,
               "role": "Input",
@@ -57731,17 +58023,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -57777,19 +58073,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -57808,6 +58108,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -58282,17 +58588,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -59099,17 +59409,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -59145,19 +59459,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -59176,6 +59494,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -59650,17 +59974,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -60469,17 +60797,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -60515,19 +60847,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -60546,6 +60882,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -61020,17 +61362,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -61711,17 +62057,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -61757,19 +62107,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -61788,6 +62142,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -62262,17 +62622,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -63081,17 +63445,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -63127,19 +63495,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -63158,6 +63530,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -63625,17 +64003,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -64435,17 +64817,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -64481,19 +64867,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -64512,6 +64902,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -64979,17 +65375,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -65791,17 +66191,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -65837,19 +66241,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -65868,6 +66276,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -66335,17 +66749,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -67019,17 +67437,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -67065,19 +67487,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -67096,6 +67522,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -67563,17 +67995,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -68375,17 +68811,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -68421,19 +68861,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -68452,6 +68896,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -68922,17 +69372,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -69717,17 +70171,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -69763,19 +70221,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -69794,6 +70256,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -70264,17 +70732,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -71061,17 +71533,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -71107,19 +71583,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -71138,6 +71618,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -71608,17 +72094,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -72405,17 +72895,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -72451,19 +72945,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -72482,6 +72980,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -72952,17 +73456,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -73751,17 +74259,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -73797,19 +74309,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -73828,6 +74344,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -74298,17 +74820,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -74967,17 +75493,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -75013,19 +75543,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -75044,6 +75578,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -75514,17 +76054,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -76311,17 +76855,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -76357,19 +76905,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -76388,6 +76940,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -76858,17 +77416,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -77655,17 +78217,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -77701,19 +78267,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -77732,6 +78302,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -78202,17 +78778,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -78875,17 +79455,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -78921,19 +79505,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -78952,6 +79540,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -79423,17 +80017,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -80255,17 +80853,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -80301,19 +80903,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -80332,6 +80938,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -80803,17 +81415,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -81509,17 +82125,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -81555,19 +82175,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -81586,6 +82210,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -82002,17 +82632,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 7,
               "role": "Input",
@@ -82626,17 +83260,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -82672,19 +83310,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -82703,6 +83345,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -83177,17 +83825,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -83994,17 +84646,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -84040,19 +84696,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -84071,6 +84731,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -84545,17 +85211,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -85364,17 +86034,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -85410,19 +86084,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -85441,6 +86119,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -85915,17 +86599,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -86606,17 +87294,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -86652,19 +87344,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -86683,6 +87379,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -87157,17 +87859,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -87976,17 +88682,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -88022,19 +88732,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -88053,6 +88767,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -88520,17 +89240,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -89330,17 +90054,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -89376,19 +90104,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -89407,6 +90139,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -89874,17 +90612,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -90686,17 +91428,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -90732,19 +91478,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -90763,6 +91513,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -91230,17 +91986,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -91914,17 +92674,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -91960,19 +92724,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -91991,6 +92759,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -92458,17 +93232,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -93270,17 +94048,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -93316,19 +94098,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -93347,6 +94133,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -93817,17 +94609,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -94612,17 +95408,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -94658,19 +95458,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -94689,6 +95493,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -95159,17 +95969,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -95956,17 +96770,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -96002,19 +96820,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -96033,6 +96855,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -96503,17 +97331,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -97300,17 +98132,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -97346,19 +98182,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -97377,6 +98217,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -97847,17 +98693,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -98646,17 +99496,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -98692,19 +99546,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -98723,6 +99581,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -99193,17 +100057,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -99862,17 +100730,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -99908,19 +100780,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -99939,6 +100815,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -100409,17 +101291,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -101206,17 +102092,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -101252,19 +102142,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -101283,6 +102177,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -101753,17 +102653,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 9,
               "role": "Input",
@@ -102550,17 +103454,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -102596,19 +103504,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -102627,6 +103539,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
@@ -103097,17 +104015,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "producer": 8,
               "role": "Input",
@@ -103770,17 +104692,21 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
                     "name": "topk",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -103816,19 +104742,23 @@
                   },
                   {
                     "dtype": {
-                      "Plain": "utf8"
+                      "Plain": "float64"
                     },
                     "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
                     "nullable": false,
                     "table": null
                   }
                 ],
                 "time_index": null,
-                "unique_keys": [
-                  [
-                    0
-                  ]
-                ]
+                "unique_keys": []
               },
               "output_state": {
                 "primitive": "Raw",
@@ -103847,6 +104777,12 @@
                       },
                       {
                         "alias": "topk_10",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
                         "expr": {
                           "Column": 1
                         }
