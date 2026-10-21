@@ -13,7 +13,7 @@ use asap_executor::values::{Batch, Value};
 use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
-    OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
+    OperatorKind, OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
     PlanSelectionSettings, PlanningModels, PlanningWorkload, SelectionBox, Stage1ToStage3Pass,
     StoredOutput, StoredOutputBuild, UserInput,
 };
@@ -471,6 +471,73 @@ async fn a_runtime_installs_and_runs_the_plan_from_one_facade_call() {
     assert_answers_from_pane(&run.answers_per_query[0], 5);
     assert_eq!(run.answers_per_query[0][0].0["instance"], "a");
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// The plan file carries Stage 3's predicted usage of the selected plan, so
+/// a runtime reports it against what it measures without planning again:
+/// for Example 4b's panes maintained at ingestion time, its nodes' prices
+/// add up to Stage 3's selection cost and their CPU to the plan's, with
+/// one latency per query, each node naming the installed nodes that run it.
+#[tokio::test]
+async fn the_plan_carries_stage3s_predicted_usage() {
+    let plan: InstallablePlan =
+        serde_json::from_str(&plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await)
+            .unwrap();
+    assert!(!plan.stored_outputs.is_empty(), "a pane-only plan");
+    assert!(plan.query_time_raw_windows.is_empty(), "a pane-only plan");
+    let selection = plan.selection.as_ref().expect("Stage 3's report");
+    let usage = selection.predicted_usage.as_ref().expect("predicted usage");
+    let node_costs: f64 = usage
+        .per_node
+        .iter()
+        .map(|node| node.cost_per_second.unwrap())
+        .sum();
+    let selection_cost = selection.cost_per_second.unwrap();
+    assert!(
+        (node_costs - selection_cost).abs() <= 1e-9 * selection_cost.abs(),
+        "{node_costs} vs {selection_cost}"
+    );
+    let node_cpu: f64 = usage
+        .per_node
+        .iter()
+        .map(|node| node.cpu_core_seconds_per_second)
+        .sum();
+    assert_eq!(node_cpu, usage.cpu_core_seconds_per_second);
+    assert!(usage.cpu_core_seconds_per_second > 0.0);
+    assert!(usage
+        .per_node
+        .iter()
+        .any(|node| node.operator == OperatorKind::PaneChain
+            && node.timing == asap_planner::ExecutionTiming::IngestionTime));
+    assert_eq!(usage.per_query.len(), 1);
+    assert!(usage.peak_memory_bytes > 0);
+    // Each prediction names the installed nodes that run it: the pane
+    // chain its six ten-minute panes, the query's root its own node.
+    let installed: BTreeSet<_> = plan.dag.dag.nodes.iter().map(|node| node.id).collect();
+    for node in &usage.per_node {
+        assert!(
+            node.installed_node_ids
+                .iter()
+                .all(|id| installed.contains(id)),
+            "{node:?}"
+        );
+    }
+    let chain = usage
+        .per_node
+        .iter()
+        .find(|node| node.operator == OperatorKind::PaneChain)
+        .unwrap();
+    assert_eq!(chain.installed_node_ids.len(), 6, "{chain:?}");
+    let stored: BTreeSet<_> = plan.stored_outputs.iter().map(|o| o.node_id).collect();
+    assert!(chain
+        .installed_node_ids
+        .iter()
+        .all(|id| stored.contains(id)));
+    let root = plan.queries[0].root_node_id;
+    assert!(usage
+        .per_node
+        .iter()
+        .any(|node| node.installed_node_ids == [root]));
 }
 
 /// The query's label matcher selects series `a` only: the runtime feeds
@@ -1031,4 +1098,282 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
             relative_time(-(i + 1) * 600_000, -i * 600_000)
         );
     }
+}
+
+/// PromQL `topk` returns whole input series: `topk by (region) (2,
+/// sum_over_time(data[1m]))` answers, per region, the two series with the
+/// largest sums, each with its own full label set (region, service and
+/// instance; `sum_over_time` drops the metric name), not only `region`.
+/// Series `e1`..`e3` are in `east` with sums 6, 60 and 30; `w1`, `w2` in
+/// `west` with sums 9 and 3.
+#[tokio::test]
+async fn topk_answers_carry_the_chosen_series_labels() {
+    let workload: PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "topk by (region) (2, sum_over_time(data[1m]))",
+              "demand": {"fixed_interval": 60000},
+              "requirements": {},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 0.5}},
+              "sources": {"data": {"series_count": 5, "sample_interval": 10000}}}}"#,
+    )
+    .unwrap();
+    let plan_json = plan_json_for(workload, &DeploymentCapabilities::default()).await;
+    let samples = topk_samples();
+    let run = run_data_plane(
+        &plan_json,
+        &samples,
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_full_series_answers(&run, 4);
+    let labels = |instance: &str, region: &str, service: &str| {
+        BTreeMap::from([
+            ("instance".to_string(), instance.to_string()),
+            ("region".to_string(), region.to_string()),
+            ("service".to_string(), service.to_string()),
+        ])
+    };
+    let mut answered = run.answers_per_query[0].clone();
+    answered.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut expected = vec![
+        (labels("e2", "east", "web"), 60.0),
+        (labels("e3", "east", "db"), 30.0),
+        (labels("w1", "west", "api"), 9.0),
+        (labels("w2", "west", "web"), 3.0),
+    ];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(answered.len(), expected.len(), "{answered:?}");
+    for ((labels, value), (want_labels, want)) in answered.iter().zip(&expected) {
+        assert_eq!(labels, want_labels);
+        assert!((value - want).abs() < 1e-9, "{labels:?}: {value}");
+    }
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// Samples of `data` for `topk_answers_carry_the_chosen_series_labels`:
+/// three per series inside the last minute, each a third of its sum.
+fn topk_samples() -> Vec<Sample> {
+    let mut samples = Vec::new();
+    for (instance, region, service, sum) in [
+        ("e1", "east", "api", 6.0),
+        ("e2", "east", "web", 60.0),
+        ("e3", "east", "db", 30.0),
+        ("w1", "west", "api", 9.0),
+        ("w2", "west", "web", 3.0),
+    ] {
+        // In time order, as a counter's samples arrive.
+        for step in (1..=3).rev() {
+            let mut sample = sample("data", instance, EVALUATION_MS - step * 15_000, sum / 3.0);
+            sample.labels.insert("region".into(), region.into());
+            sample.labels.insert("service".into(), service.into());
+            samples.push(sample);
+        }
+    }
+    samples
+}
+
+/// The first query's `expected` answers, each a whole input series (it
+/// carries its `instance`), and the same as the query-time reference's.
+fn assert_full_series_answers(run: &DataPlaneRun, expected: usize) {
+    let answered = &run.answers_per_query[0];
+    assert_eq!(answered.len(), expected, "{answered:?}");
+    for (labels, _) in answered {
+        assert!(labels.contains_key("instance"), "{labels:?}");
+        assert!(labels.contains_key("service"), "{labels:?}");
+    }
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// Every top-k and bottom-k form, grouped or not, over sums, counts and
+/// rates, answers whole input series: `topk(2, ...)` the two of five,
+/// `by (region)` per region, `bottomk` likewise.
+#[tokio::test]
+async fn every_topk_form_answers_whole_series() {
+    for (query, expected) in [
+        ("topk(2, sum_over_time(data[1m]))", 2),
+        ("topk by (region) (1, count_over_time(data[1m]))", 2),
+        ("topk by (region) (1, rate(data[1m]))", 2),
+        ("bottomk by (region) (1, sum_over_time(data[1m]))", 2),
+        ("bottomk(3, sum_over_time(data[1m]))", 3),
+    ] {
+        let workload: PlanningWorkload = serde_json::from_str(&format!(
+            r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
+                  "query": {query:?},
+                  "demand": {{"fixed_interval": 60000}},
+                  "requirements": {{}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+                "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 0.5}}}},
+                  "sources": {{"data": {{"series_count": 5, "sample_interval": 10000}}}}}}}}"#
+        ))
+        .unwrap();
+        let plan_json = plan_json_for(workload, &DeploymentCapabilities::default()).await;
+        let run = run_data_plane(
+            &plan_json,
+            &topk_samples(),
+            EVALUATION_MS,
+            &mut SummaryStore::new(),
+        );
+        assert_full_series_answers(&run, expected);
+    }
+}
+
+/// The MVP benchmark's p99 query: the per-series p99 of a gauge over 100 s,
+/// averaged per (region, service, job), every second, within 0.05 at
+/// failure probability 0.3, over 1,000 `data` series sampled every 100 ms,
+/// with `data` declared non-negative or not.
+fn p99_avg_workload(values_non_negative: bool) -> PlanningWorkload {
+    serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
+              "query": "avg by (region, service, job) (quantile_over_time(0.99, data[100s]))",
+              "demand": {{"fixed_interval": 1000}},
+              "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.3,
+                  "accuracy_scope": "whole_result"}}}},
+              "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 10000.0}}}},
+              "sources": {{"data": {{"series_count": 1000, "metric_type": "gauge",
+                  "sample_interval": 100, "values_non_negative": {values_non_negative}}}}}}}}}"#
+    ))
+    .unwrap()
+}
+
+/// [`p99_avg_workload`] planned for a deployment that keeps no raw samples.
+async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, String> {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    plan_installable(UserInput::new(
+        &p99_avg_workload(values_non_negative),
+        FrontendInput::Promql { histograms: None },
+        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+    ))
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Without raw samples, the only valid plan of the p99 query keeps one
+/// DDSketch per series in one-second panes built at ingestion and merges
+/// the window's panes at query time (P5-m1). A quantile of merged panes is
+/// still one of the samples, so a declared non-negative gauge carries the
+/// sketch's relative bound through `avg`: P5-m1 is selected, its answers
+/// equal the query-time reference's and are within 5% of the exact
+/// averages.
+#[tokio::test]
+async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_through_avg() {
+    let plan = plan_p99_avg(true).await.expect("a valid plan");
+    let selection = plan.selection.as_ref().expect("Stage 3's report");
+    assert_eq!(selection.selected_candidate_id, "P5-m1");
+    assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
+    assert!(
+        plan.query_time_raw_windows.is_empty(),
+        "no raw samples read"
+    );
+    // The query's guarantee, with `data`'s declared sign and its 1,000
+    // series bound as Stage 3 binds them: a relative error of at most 0.05
+    // at failure probability at most 0.3 (DDSketch's bound is
+    // deterministic).
+    let root = plan.queries[0].root_node_id;
+    let guarantee = plan
+        .dag
+        .dag
+        .nodes
+        .iter()
+        .find(|node| node.id == root)
+        .and_then(|node| node.guarantee.clone())
+        .expect("the query's guarantee");
+    let sign =
+        asap_logical_asap_optimization::accuracy::composition::samples_sign_statistic("data");
+    let bound = guarantee.bind(&|statistic| match statistic {
+        "input_row_count" => Some(1_000.0),
+        _ => (statistic == sign).then_some(1.0),
+    });
+    assert_eq!(
+        bound.spec.accuracy_metric,
+        asap_types::ir::properties::AccuracyMetric::Relative
+    );
+    let error = bound.spec.error.evaluate().expect("a numeric bound");
+    assert!(error <= 0.05, "{error}");
+    let failure = bound
+        .spec
+        .failure_probability
+        .evaluate()
+        .expect("a numeric failure probability");
+    assert!(failure <= 0.3, "{failure}");
+
+    // Eight non-negative series, one sample every 100 ms over the last
+    // 110 s: two per (region, service, job) group.
+    let evaluation_ms = EVALUATION_MS;
+    let mut samples = Vec::new();
+    let mut per_group: BTreeMap<(String, String, String), Vec<Vec<f64>>> = BTreeMap::new();
+    for series in 0..8 {
+        let region = format!("r{}", series % 2);
+        let service = format!("s{}", series / 4);
+        let job = "j".to_string();
+        let mut window = Vec::new();
+        for step in 0..1_100i64 {
+            let timestamp_ms = evaluation_ms - 110_000 + 50 + step * 100;
+            let value = 10.0 * (series + 1) as f64 + ((step * 37 + series * 11) % 997) as f64;
+            samples.push(Sample {
+                labels: BTreeMap::from([
+                    ("__name__".to_string(), "data".to_string()),
+                    ("region".to_string(), region.clone()),
+                    ("service".to_string(), service.clone()),
+                    ("job".to_string(), job.clone()),
+                    ("instance".to_string(), format!("i{series}")),
+                ]),
+                timestamp_ms,
+                value,
+            });
+            if timestamp_ms > evaluation_ms - 100_000 {
+                window.push(value);
+            }
+        }
+        per_group
+            .entry((region, service, job))
+            .or_default()
+            .push(window);
+    }
+    let run = run_data_plane(
+        &serde_json::to_string(&plan).unwrap(),
+        &samples,
+        evaluation_ms,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+    let answers = &run.answers_per_query[0];
+    assert_eq!(answers.len(), per_group.len());
+    for (labels, value) in answers {
+        let key = (
+            labels["region"].clone(),
+            labels["service"].clone(),
+            labels["job"].clone(),
+        );
+        // The exact answer: the mean of the group's per-series p99s, each
+        // PromQL's interpolated quantile of the series' window.
+        let exact = per_group[&key]
+            .iter()
+            .map(|window| {
+                let mut sorted = window.clone();
+                sorted.sort_by(f64::total_cmp);
+                let rank = 0.99 * (sorted.len() - 1) as f64;
+                let (low, high) = (rank.floor() as usize, rank.ceil() as usize);
+                sorted[low] + (sorted[high] - sorted[low]) * (rank - low as f64)
+            })
+            .sum::<f64>()
+            / per_group[&key].len() as f64;
+        assert!(
+            (value - exact).abs() <= 0.05 * exact,
+            "{labels:?}: {value} vs exact {exact}"
+        );
+    }
+}
+
+/// Without the declaration nothing proves `data`'s samples non-negative, so
+/// the merged panes' relative bound does not carry through `avg`: P5-m1 is
+/// rejected, and with no raw samples no plan is valid.
+#[tokio::test]
+async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
+    let error = plan_p99_avg(false).await.expect_err("no valid plan");
+    assert!(error.contains("P5-m1"), "{error}");
 }

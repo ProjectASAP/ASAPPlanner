@@ -152,7 +152,7 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
-        asap_plan_selection::run_stage1_to_stage3(
+        asap_plan_selection::run_stage1_to_stage3_with(
             vec![(0, QueryRoot::Operator(root))],
             &[asap_types::workload::QueryWorkloadEntry {
                 query: Default::default(),
@@ -166,6 +166,7 @@ pub mod planning {
             }],
             &DataWorkload::default(),
             asap_plan_selection::PlanningModels::builtin(),
+            asap_plan_selection::Stage1ToStage3Search::exhaustive(),
         )
         .expect("Pass 1 accepts the query")
     }

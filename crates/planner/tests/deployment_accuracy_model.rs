@@ -10,7 +10,6 @@ use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_plan_selection::{
     AccuracyModel, BuiltinAccuracyModel, PlanOutput, PlanningModels, RejectionCause,
 };
-use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -74,17 +73,52 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
 /// parameters. Two runs that differ only in Stage 3's models must agree.
 fn stage2_candidates(workload: &PlanningWorkload, models: PlanningModels<'_>) -> Vec<String> {
     let roots = lower_promql_query_workload(workload).expect("lowers");
-    let run = asap_plan_selection::run_stage1_to_stage3(
+    let run = asap_plan_selection::run_stage1_to_stage3_with(
         roots.into_iter().enumerate().collect(),
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
         models,
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .expect("Stage 1 accepts the workload");
     run.stage2_physical_asap_optimization
         .iter()
         .map(|candidate| format!("{}: {:?}", candidate.id, candidate.roots))
         .collect()
+}
+
+/// `workload` planned through Stage 1 to Stage 3 under `models`, keeping
+/// every candidate in the selection: the exhaustive search, whose selection
+/// lists every candidate Stage 3 priced or rejected.
+fn plan_every_candidate(
+    workload: &PlanningWorkload,
+    models: PlanningModels<'_>,
+) -> Result<PlanOutput, asap_plan_selection::SelectionError> {
+    let roots = lower_promql_query_workload(workload).expect("lowers");
+    let run = asap_plan_selection::run_stage1_to_stage3_with(
+        roots.into_iter().enumerate().collect(),
+        &workload.query_workload.entries().collect::<Vec<_>>(),
+        workload.data_workload.as_ref().unwrap(),
+        models,
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
+    )
+    .expect("Stage 1 accepts the workload");
+    let selection = run.stage3_plan_selection?;
+    let plans = selection
+        .plan
+        .iter()
+        .enumerate()
+        .map(|(entry_index, root)| match root {
+            QueryRoot::Operator(node) => asap_plan_selection::QueryPlan {
+                entry_index,
+                root: Rc::clone(node),
+            },
+            QueryRoot::Scalar(_) => panic!("operator queries only"),
+        })
+        .collect();
+    let mut output = PlanOutput::new(plans);
+    output.selection = Some(selection);
+    Ok(output)
 }
 
 /// Every candidate Stage 3 was given: the valid ones it priced and the
@@ -117,13 +151,8 @@ async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
     let workload = rank_target_workload("quantile_over_time(0.99, lat[5m])");
 
     // The built-in models: Stage 3 checks guarantees with BuiltinAccuracyModel.
-    let builtin = e2e_plan(UserInput::new(
-        &workload,
-        FrontendInput::Promql { histograms: None },
-        PlanningModels::builtin(),
-    ))
-    .await
-    .expect("plans with the built-in models");
+    let builtin = plan_every_candidate(&workload, PlanningModels::builtin())
+        .expect("plans with the built-in models");
     // The candidates whose approximate output the built-in model accepts:
     // the sketch candidates, sized in Stage 1 for the 1% target.
     let builtin_approximate = approximate_accepted(&builtin);
@@ -132,12 +161,10 @@ async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
     // The same workload with a deployment model that accepts only exact
     // outputs, plugged into Stage 3 through `PlanningModels::with_accuracy`.
     let exact_only_model = ExactOnlyAccuracyModel;
-    let exact_only = e2e_plan(UserInput::new(
+    let exact_only = plan_every_candidate(
         &workload,
-        FrontendInput::Promql { histograms: None },
         PlanningModels::builtin().with_accuracy(&exact_only_model),
-    ))
-    .await
+    )
     .expect("plans with the exact-only model");
 
     // Stages 1 and 2 do not read the model: Stage 3 got the same
@@ -219,17 +246,11 @@ async fn the_deployment_accuracy_model_accepts_outputs_without_a_guarantee() {
     // error. Stage 1 has no analytical rule for a difference of rank
     // estimates, so it keeps the summary candidates with no guarantee.
     let workload = rank_target_workload("quantile(0.99, rate(x[5m])) - quantile(0.5, rate(x[5m]))");
-    let promql = || FrontendInput::Promql { histograms: None };
 
     // The built-in model (default hook: accepts nothing directly) rejects
     // every summary candidate as having no guarantee and selects exact.
-    let builtin = e2e_plan(UserInput::new(
-        &workload,
-        promql(),
-        PlanningModels::builtin(),
-    ))
-    .await
-    .expect("plans with the built-in models");
+    let builtin = plan_every_candidate(&workload, PlanningModels::builtin())
+        .expect("plans with the built-in models");
     // The candidates rejected for having no guarantee: P6 … P47.
     let unguaranteed = rejected_with(&builtin, RejectionCause::NoAccuracyGuarantee);
     assert!(!unguaranteed.is_empty());
@@ -238,12 +259,10 @@ async fn the_deployment_accuracy_model_accepts_outputs_without_a_guarantee() {
 
     // The deployment's model accepts every output directly.
     let accepting_model = AcceptsEveryOutput;
-    let accepting = e2e_plan(UserInput::new(
+    let accepting = plan_every_candidate(
         &workload,
-        promql(),
         PlanningModels::builtin().with_accuracy(&accepting_model),
-    ))
-    .await
+    )
     .expect("plans with the accepting model");
     let accepting_selection = accepting.selection.as_ref().unwrap();
     // Stages 1 and 2 produced the same candidates under both models.
@@ -277,26 +296,18 @@ async fn the_deployment_accuracy_model_accepts_outputs_without_a_guarantee() {
 async fn the_deployment_accuracy_model_accepts_outputs_whose_guarantee_misses() {
     // The user's workload: one p99 query with a 1% rank-error target.
     let workload = rank_target_workload("quantile_over_time(0.99, lat[5m])");
-    let promql = || FrontendInput::Promql { histograms: None };
     // Under the built-in models: the candidates whose guarantee misses the
     // target (P3, a relative bound 0.01 for a rank target).
-    let builtin = e2e_plan(UserInput::new(
-        &workload,
-        promql(),
-        PlanningModels::builtin(),
-    ))
-    .await
-    .expect("plans with the built-in models");
+    let builtin = plan_every_candidate(&workload, PlanningModels::builtin())
+        .expect("plans with the built-in models");
     let missed = rejected_with(&builtin, RejectionCause::AccuracyTargetMissed);
     assert!(!missed.is_empty());
     // The same workload with the model that accepts every output directly.
     let accepting_model = AcceptsEveryOutput;
-    let accepting = e2e_plan(UserInput::new(
+    let accepting = plan_every_candidate(
         &workload,
-        promql(),
         PlanningModels::builtin().with_accuracy(&accepting_model),
-    ))
-    .await
+    )
     .expect("plans with the accepting model");
     // Each of them is now valid, priced and accepted regardless of guarantee.
     let accepting_selection = accepting.selection.as_ref().unwrap();

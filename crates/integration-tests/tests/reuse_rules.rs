@@ -16,7 +16,7 @@ use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
 use asap_plan_selection::select_plan;
-use asap_plan_selection::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
+use asap_plan_selection::{run_stage1_to_stage3_with, PlanningModels, Stage1ToStage3Run};
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag_with_node_ids, PhysicalASAPOperatorPayload,
 };
@@ -45,11 +45,12 @@ fn plan(queries: &[&str], recurrence: QueryRecurrence) -> Stage1ToStage3Run<usiz
             (i, QueryRoot::Operator(root))
         })
         .collect();
-    run_stage1_to_stage3(
+    run_stage1_to_stage3_with(
         roots,
         &vec![exact(recurrence); queries.len()],
         &data(),
         PlanningModels::builtin(),
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .unwrap()
 }

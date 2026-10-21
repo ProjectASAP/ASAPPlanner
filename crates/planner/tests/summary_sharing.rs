@@ -12,7 +12,7 @@ use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_frontend_sql::SqlCatalog;
 use asap_logical_asap_optimization::realization::{default_size_params, DEFAULT_DELTA};
 use asap_plan_selection::pass::{
-    run_stage1_to_stage3, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
+    run_stage1_to_stage3_with, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
 };
 use asap_plan_selection::RejectionCause;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
@@ -97,11 +97,12 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
 fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload).expect("lowers");
-    run_stage1_to_stage3(
+    run_stage1_to_stage3_with(
         roots.into_iter().enumerate().collect(),
         &workload.query_workload.entries().collect::<Vec<_>>(),
         &workload.data_workload.clone().unwrap(),
         PlanningModels::builtin(),
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .expect("Pass 1 accepts the workload")
 }

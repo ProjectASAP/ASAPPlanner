@@ -107,10 +107,12 @@
 // shared within one evaluation. The document's top-level
 // `deployment_capabilities` shows the inputs used.
 // `--measured-operation-costs <file>` reads the deployment's measured CPU
-// time per sketch operation (a JSON array, as `convert_rqe_atomic_costs`
-// writes from sketch-bench's `rqe_atomic_costs.json`); a sketch node with an
-// entry is priced from it, and each node's `price_source` says `measured`
-// or `analytical`.
+// time per operator (`MeasuredOperationCosts`: `{"operators": [...],
+// "ns_per_evaluation": ..., "provenance": ...}`, or the earlier JSON array
+// `convert_rqe_atomic_costs` writes from sketch-bench's
+// `rqe_atomic_costs.json`); a node with an entry is priced from it, the
+// others from the formulas times the calibration factor, and each node's
+// `price_source` says `measured` or `analytical`.
 // `--plan-selection-settings <file>` reads all of Stage 3's settings from
 // one JSON file (`PlanSelectionSettings`: `cost_model`, e.g.
 // `{"usage_over_time": {"cost_per_cpu_op": 1e-6, ...}}` with the
@@ -143,7 +145,7 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 };
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCost, PlanSelectionSettings,
+    ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts, PlanSelectionSettings,
     Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
 };
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -373,15 +375,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         (Some(other), _) => return Err(format!("unknown cost model {other}").into()),
     };
-    let measured_operation_costs: Vec<MeasuredOperationCost> = match &measured_operation_costs_path
-    {
+    let measured_operation_costs: MeasuredOperationCosts = match &measured_operation_costs_path {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("--measured-operation-costs {path}: {e}"))?;
             serde_json::from_str(&text)
                 .map_err(|e| format!("--measured-operation-costs {path}: {e}"))?
         }
-        None => Vec::new(),
+        None => MeasuredOperationCosts::default(),
     };
     let plan_selection = match &plan_selection_settings_path {
         Some(path) => {
