@@ -6,14 +6,13 @@ use asap_logical_asap_optimization::per_computation_candidates::generate_per_com
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
 use asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_optimization;
 pub use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
-use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::{physical_candidate_count, PhysicalCandidate};
 use asap_plan_selection::pass::{
     run_stage1_to_stage3_from_pass1, run_stage2_and_stage3, Stage1ToStage3Search,
 };
 pub use asap_plan_selection::pass::{LogicalCandidate, PrunedCandidate};
 use asap_plan_selection::PlanningModels;
-use asap_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
+use asap_plan_selection::{Selection, SelectionError};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
@@ -149,25 +148,26 @@ pub fn run_planning_stages(
         &entries,
         &data,
         max_combinations,
-        &PlanSelectionSettings::default(),
-        &DeploymentCapabilities::default(),
+        PlanningModels::builtin(),
     )
 }
 
 /// [`run_planning_stages`] over roots lowered from any mix of query
 /// languages: query `i` is `roots[i]`, with workload entry `entries[i]`
 /// (its accuracy target, latency bound, recurrence and predictability).
-/// Plan selection compares candidates under `plan_selection`'s cost model.
-/// `deployment` is what the executor can run and keep: Pass 1 offers only
-/// the summaries it supports, and Stages 2 and 3 read its retention.
+/// Plan selection compares candidates under `models.plan_selection`'s cost
+/// model and rejects those `models.executor_compile_check` does not compile.
+/// `models.deployment_capabilities` is what the executor can run and keep:
+/// Pass 1 offers only the summaries it supports, and Stages 2 and 3 read its
+/// retention.
 pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     max_combinations: Option<usize>,
-    plan_selection: &PlanSelectionSettings,
-    deployment: &DeploymentCapabilities,
+    models: PlanningModels<'_>,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
+    let deployment = models.deployment_capabilities;
     validate(&roots)?;
     let per_computation =
         generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
@@ -193,15 +193,7 @@ pub fn run_planning_stages_over(
             }
         }
     }
-    let run = run_stage2_and_stage3(
-        per_computation,
-        stage1,
-        entries,
-        data,
-        PlanningModels::builtin()
-            .with_plan_selection(plan_selection)
-            .with_deployment_capabilities(deployment),
-    );
+    let run = run_stage2_and_stage3(per_computation, stage1, entries, data, models);
     for candidate in &run.stage1_logical_asap_optimization {
         if let Ok(roots) = &candidate.roots {
             validate(roots)?;

@@ -16,6 +16,9 @@ asap-plan-selection = { path = "../plan-selection" }
 # The installable plan of the selected candidate (`installable_plan_of`),
 # whose stored outputs `stage_pipeline` writes.
 asap-planner = { path = "../planner" }
+# The executor's supported summary families, which `stage_pipeline` plans
+# with when the deployment declares none, as `plan_installable` does.
+asap-executor = { path = "../executor" }
 
 # Used by the show_ir / stage_pipeline / variant_coverage bins (catalog schemas,
 # async SQL path, JSON output) and by the topk_ir / canonical_examples

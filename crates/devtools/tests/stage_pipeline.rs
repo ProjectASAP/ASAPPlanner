@@ -865,7 +865,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     assert_eq!(
         default["deployment_capabilities"],
         serde_json::json!({
-            "supported_summaries": null,
+            "supported_summaries": asap_executor::supported_summary_families(),
             "raw_data_retained": true,
             "query_time_results_retained": false,
         })
@@ -1358,4 +1358,37 @@ fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
     // The shown valid ones (priced) are the cheapest of all valid ones.
     let costs = selection["costs"].as_object().unwrap();
     assert!(costs.len() >= 2, "{costs:?}");
+}
+
+/// With no supported summaries declared, `stage_pipeline` plans with the
+/// executor's families, as `plan_installable` does: a count's CountSketch,
+/// which the Planner's executor does not run, is pruned in Pass 1 instead of
+/// offered (before, `Q1 CountSketch` was a candidate), and the document
+/// shows the families used. A declared list is kept as declared.
+#[test]
+fn undeclared_supported_summaries_default_to_the_executors_families() {
+    let document = document_of(&[
+        "--exhaustive",
+        "--promql",
+        "count by (job) (m)",
+        "--max-error",
+        "0.01",
+        "--failure-probability",
+        "0.01",
+    ]);
+    let labels: Vec<&str> = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["display_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["Q1 exact (Count acc)", "Q1 Cms", "Q1 UnivMon"]);
+    assert_eq!(
+        document["stage1_logical_asap_optimization"]["pass1_pruned"][0]["pruned"],
+        serde_json::json!([{ "candidate": "CountSketch", "reason": "UnsupportedByDeployment" }])
+    );
+    assert_eq!(
+        document["deployment_capabilities"]["supported_summaries"],
+        serde_json::to_value(asap_executor::supported_summary_families()).unwrap()
+    );
 }

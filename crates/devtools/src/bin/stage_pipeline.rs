@@ -21,9 +21,11 @@
 // candidates are checked first, a whole-workload choice that picks a
 // discarded one is not composed, independent components are searched
 // separately, and without raw data retained the candidates that scan it at
-// query time are skipped), over the stage crates' built-in models and the
-// declared capabilities (not the executor's compile check, which
-// `plan_installable` adds). It keeps only the best candidate, so the document
+// query time are skipped), over the models `plan_installable` plans with:
+// the stage crates' built-in models, the declared capabilities with the
+// executor's summary families when none are declared, and, for a PromQL
+// workload, the executor's compile check (it does not compile SQL table
+// scans, so a SQL workload plans without it). It keeps only the best candidate, so the document
 // holds the selected Stage 1 and Stage 2 candidates, the rejections Stage 3
 // recorded (the first of each cause, under `search_rejected` since their
 // candidates are not kept) and the search's report; `search` is
@@ -138,8 +140,9 @@
 // executor can run and keep (`DeploymentCapabilities`):
 // `{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}, ...],
 // "raw_data_retained": true, "query_time_results_retained": false}`. Every
-// field is optional: by default every sketch family and readout the planner
-// can build is supported (`supported_summaries` null), raw data is retained,
+// field is optional: by default the sketch families and readouts the
+// Planner's executor runs are supported (`supported_summaries` null, as
+// `plan_installable` defaults it), raw data is retained,
 // and no query-time result is kept across evaluations. Pass 1 offers no
 // summary the deployment does not support (exact computations are always
 // supported); Stage 1's `pass1_pruned` lists, per target with any, every
@@ -150,7 +153,8 @@
 // a tumbling-pane chain whose readers evaluate together at its pane width is
 // also offered built at query time and kept across evaluations, beside being
 // shared within one evaluation. The document's top-level
-// `deployment_capabilities` shows the inputs used.
+// `deployment_capabilities` shows the capabilities used, with the
+// executor's families filled in.
 // `--measured-operation-costs <file>` reads the deployment's measured CPU
 // time per operator (`MeasuredOperationCosts`: `{"operators": [...],
 // "ns_per_evaluation": ..., "provenance": ...}`, or the earlier JSON array
@@ -198,7 +202,7 @@ use asap_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts, PlanSelectionSettings,
     PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
 };
-use asap_planner::installable_plan_of;
+use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -486,6 +490,15 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     };
     // The workload's queries as the document describes them, the
     // frontends' roots, the workload entries and the data workload.
+    // Whether every query is PromQL, which the executor's compile check
+    // applies to (it does not compile SQL table scans).
+    let promql_only = match (&from_file, example.as_deref()) {
+        (Some((workload, _)), _) => workload.query_workload.language == QueryLanguage::PromQL,
+        (None, Some(example)) => example != "planner-layering-2",
+        (None, None) => queries
+            .iter()
+            .all(|(language, _, _)| *language == QueryLanguage::PromQL),
+    };
     let (described, roots, entries, data) = match (example.as_deref(), queries.is_empty()) {
         (None, true) if from_file.is_some() => {
             let (workload, catalog) = from_file.expect("checked");
@@ -577,23 +590,29 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             )
         }
     };
+    // Plan with the models `plan_installable` plans with: the executor's
+    // summary families when the deployment declares none, and the
+    // executor's compile check for a PromQL workload.
+    if deployment_capabilities.supported_summaries.is_none() {
+        deployment_capabilities.supported_summaries =
+            Some(asap_executor::supported_summary_families());
+    }
+    let models = PlanningModels::builtin()
+        .with_plan_selection(&plan_selection)
+        .with_deployment_capabilities(&deployment_capabilities);
+    let models = match promql_only {
+        true => models.with_executor_compile_check(&PlannerExecutorCompileCheck),
+        false => models,
+    };
     let result = match exhaustive {
         true => run_planning_stages_over(
             roots.clone(),
             &entries,
             &data,
             Some(max_combinations),
-            &plan_selection,
-            &deployment_capabilities,
+            models,
         ),
-        false => run_default_search_over(
-            roots.clone(),
-            &entries,
-            &data,
-            PlanningModels::builtin()
-                .with_plan_selection(&plan_selection)
-                .with_deployment_capabilities(&deployment_capabilities),
-        ),
+        false => run_default_search_over(roots.clone(), &entries, &data, models),
     };
     let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
     document["workload"]["data_workload"] =

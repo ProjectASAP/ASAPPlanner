@@ -22,7 +22,11 @@ The viewer reads one JSON document per workload, written by the
 `stage_pipeline` plans with the planner's default search, the one a
 deployment runtime gets from `plan_installable`: it checks each query's own
 candidates first, searches queries over disjoint sources separately, and keeps
-only the best plan, so it plans workloads with many queries in seconds. The
+only the best plan, so it plans workloads with many queries in seconds. It
+also plans with the models `plan_installable` uses: when the deployment
+declares no supported summaries, only the summaries the Planner's executor
+runs are offered, and a PromQL workload's plans must compile with the
+executor (a SQL workload's table scans are not checked). The
 document then shows the selected plan, the rejections the search recorded and
 what it checked. With `--exhaustive` it instead composes and prices every
 candidate and the document lists them all, for small workloads or to compare;
@@ -151,7 +155,8 @@ was accepted in, e.g. `q1: metric not set; accepted rank (Kll)`.
 - **✗ invalid**: fails a check, with the reason. Examples: an accuracy target
   the sketch cannot guarantee, an evaluation over the latency bound, a
   query-time scan of raw data the deployment does not retain, or, under cost
-  model 3, a plan over the cluster's memory or disk. A summary the deployment
+  model 3, a plan over the cluster's memory or disk, or a PromQL plan the
+  executor cannot compile. A summary the deployment
   cannot build is never offered: the document's
   `stage1_logical_asap_optimization.pass1_pruned` lists it with its reason.
 

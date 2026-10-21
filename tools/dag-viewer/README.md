@@ -134,7 +134,7 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
                                    "sources": { "data": { "series_count": 10000, "metric_type": "gauge", "values_non_negative": true,
                                                           "sample_interval": 100, "stream_norms": null,
                                                           "max_distinct_per_evaluation": null } } } },
-  "deployment_capabilities": { "supported_summaries": null, "raw_data_retained": true,
+  "deployment_capabilities": { "supported_summaries": [{ "family": "Kll", "readouts": ["Quantile"] }, "..."], "raw_data_retained": true,
                                "query_time_results_retained": false },
   "stage0_query_language_frontends": { "dag": "<flat logical DAG>" },
   "stage1_logical_asap_optimization": {

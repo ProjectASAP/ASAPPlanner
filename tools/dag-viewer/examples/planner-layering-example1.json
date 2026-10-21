@@ -2,7 +2,62 @@
   "deployment_capabilities": {
     "query_time_results_retained": false,
     "raw_data_retained": true,
-    "supported_summaries": null
+    "supported_summaries": [
+      {
+        "family": "UnivMon",
+        "readouts": [
+          "Total",
+          "Distinct",
+          "FrequencyL2",
+          "FrequencyEntropy"
+        ]
+      },
+      {
+        "family": "Kll",
+        "readouts": [
+          "Quantile"
+        ]
+      },
+      {
+        "family": "Cms",
+        "readouts": [
+          "Total"
+        ]
+      },
+      {
+        "family": "Hll",
+        "readouts": [
+          "Total",
+          "Distinct"
+        ]
+      },
+      {
+        "family": "DDSketch",
+        "readouts": [
+          "Total",
+          "Quantile"
+        ]
+      },
+      {
+        "family": "CmsWithHeap",
+        "readouts": [
+          "TopK"
+        ]
+      },
+      {
+        "family": "Kmv",
+        "readouts": [
+          "Total",
+          "Distinct"
+        ]
+      },
+      {
+        "family": "CountSketchWithHeap",
+        "readouts": [
+          "TopK"
+        ]
+      }
+    ]
   },
   "format": "asap-stage-pipeline/v1",
   "search": "exhaustive",

@@ -212,7 +212,10 @@ pub fn run_stages_with(
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let run = run_planning_stages_over(roots, &entries, &data, None, settings, deployment)
+    let models = asap_plan_selection::PlanningModels::builtin()
+        .with_plan_selection(settings)
+        .with_deployment_capabilities(deployment);
+    let run = run_planning_stages_over(roots, &entries, &data, None, models)
         .expect("planning stages run");
     let logical_candidates = run
         .stage1_logical_asap_optimization
