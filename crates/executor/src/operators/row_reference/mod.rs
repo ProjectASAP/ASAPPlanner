@@ -127,7 +127,11 @@ pub(crate) mod harness {
             );
         }
         if let Some(frequency) = any.downcast_ref::<WeightedFrequency>() {
-            return serde_json::to_string(frequency).unwrap();
+            return format!(
+                "{:?} {:?}",
+                frequency.counters(),
+                frequency.rows(usize::MAX)
+            );
         }
         panic!("no fingerprint for this state kind")
     }

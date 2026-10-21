@@ -1911,7 +1911,8 @@ fn accuracy_check(
                 // Count-Min (plain, CmsWithHeap or Hydra Count-Min) over
                 // weights not proven non-negative does not run: the executor
                 // refuses CmsWithHeap and HydraCms when it builds the plan,
-                // and plain Count-Min fails at the first negative weight. So
+                // and plain Count-Min adds a negative weight, which voids its
+                // never-underestimate bound. So
                 // this rejects the plan whatever the deployment's accuracy
                 // model accepts.
                 return Err(CheckFailure {
@@ -3856,7 +3857,8 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 /// parameters as `asap_sketchlib` allocates it:
 /// - Count-Min / Count-Sketch: `depth × width` 8-byte counters, plus a
 ///   24-byte entry per heap slot for the top-k variants;
-/// - KLL: the 8-byte item array it allocates up front ([`kll_items`]);
+/// - KLL: the 8-byte item array at its full capacity ([`kll_items`]), an
+///   upper bound: `asap_sketchlib`'s KLL grows the array as items arrive;
 /// - DDSketch: one 8-byte count per bin it touches over an assumed nine
 ///   decades of values ([`ddsketch_bins`]);
 /// - HLL: one 1-byte register per bucket, `2^precision`;
@@ -3916,8 +3918,8 @@ fn sketch_shape(params: &SketchParams) -> (f64, u64) {
     }
 }
 
-/// Items `asap_sketchlib`'s KLL allocates up front for `k`
-/// (`KLL::init_internal` → `compute_max_capacity(k, 8)`): over its 61 levels,
+/// The most items `asap_sketchlib`'s KLL holds for `k`, the capacity its item
+/// array grows to (`Kll::init_internal` → `compute_max_capacity(k, 8)`): over its 61 levels,
 /// `max(ceil(k · (2/3)^i), 8)` each, with `k` capped at [`KLL_MAX_K`] as the
 /// library caps it. 1,206 items at `k` = 269.
 fn kll_items(k: u32) -> u64 {
@@ -5682,8 +5684,9 @@ mod tests {
         );
     }
 
-    /// KLL state is the item array `asap_sketchlib` allocates up front:
-    /// `compute_max_capacity(k, 8)` 8-byte items, with `k` capped at 26 602.
+    /// KLL state is charged the item array at the capacity `asap_sketchlib`
+    /// grows it to: `compute_max_capacity(k, 8)` 8-byte items, with `k`
+    /// capped at 26 602.
     #[test]
     fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
         let bytes = |k| {

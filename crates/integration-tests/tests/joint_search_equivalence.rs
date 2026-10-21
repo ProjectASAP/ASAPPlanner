@@ -548,21 +548,23 @@ fn a_query_with_no_valid_candidate_is_named_in_the_failure() {
 #[test]
 fn a_calibrated_cost_model_selects_the_exhaustive_plan() {
     use asap_plan_selection::{MeasuredOperationCosts, OperatorCost, OperatorKind};
-    let mut settings = PlanSelectionSettings::default();
     // Scans are priced from the table; every other node is calibrated by
     // the factor fitted over the scans.
-    settings.measured_operation_costs = MeasuredOperationCosts {
-        operators: vec![OperatorCost {
-            operator: OperatorKind::Scan,
-            phase: None,
-            sketch: None,
-            exact: None,
-            measure: None,
-            ns_per_unit: 300.0,
-            ns_per_invocation: 0.0,
-            memory_bytes_per_state: None,
-        }],
-        ..MeasuredOperationCosts::default()
+    let settings = PlanSelectionSettings {
+        measured_operation_costs: MeasuredOperationCosts {
+            operators: vec![OperatorCost {
+                operator: OperatorKind::Scan,
+                phase: None,
+                sketch: None,
+                exact: None,
+                measure: None,
+                ns_per_unit: 300.0,
+                ns_per_invocation: 0.0,
+                memory_bytes_per_state: None,
+            }],
+            ..MeasuredOperationCosts::default()
+        },
+        ..PlanSelectionSettings::default()
     };
     let mut searched = 0;
     for seed in 1..=30u64 {
@@ -581,7 +583,7 @@ fn a_calibrated_cost_model_selects_the_exhaustive_plan() {
             &format!("seed {seed}"),
             &workload,
             &roots,
-            &[settings.clone()],
+            std::slice::from_ref(&settings),
         );
     }
     assert!(

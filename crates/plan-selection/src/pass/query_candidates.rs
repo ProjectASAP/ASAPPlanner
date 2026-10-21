@@ -153,7 +153,7 @@ fn query_digits<Id>(
     };
     let reachable: HashSet<*const OperatorNode> = starts
         .into_iter()
-        .flat_map(|node| OperatorNode::reachable(node))
+        .flat_map(OperatorNode::reachable)
         .map(|node| Rc::as_ptr(&node))
         .collect();
     let read: Vec<bool> = per_computation

@@ -44,7 +44,8 @@ pub trait AccuracyModel {
     /// weights not proven non-negative is rejected
     /// (`RejectionCause::CountMinWeightsNotProvenNonNegative`) whatever this
     /// returns, because the executor refuses CmsWithHeap and HydraCms when it
-    /// builds the plan and plain Count-Min fails at the first negative weight. The default accepts
+    /// builds the plan and plain Count-Min adds a negative weight, which voids
+    /// its never-underestimate bound. The default accepts
     /// none, so Stage 3 checks the Stage 1 guarantee, then the evidence
     /// ([`AccuracyEvidenceProvider::output_guarantee`]) with
     /// [`Self::satisfies`].

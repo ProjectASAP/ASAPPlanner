@@ -8,6 +8,8 @@
 //!
 //! Stored-state encodings belong to deployments. Full plan acceptance is
 //! owned by `binding`, which also validates schemas, expressions and inputs.
+use crate::summary_kernels::hll_sketch::HLL_PRECISIONS;
+use crate::summary_kernels::weighted_frequency::{self, FrequencyAlgorithm};
 use crate::Error;
 use planner_types::ir::schema::{
     ExactKind, ExactParams, FieldDataType as SummaryFamilyType, GroupingStrategy, SketchAlgorithm,
@@ -59,14 +61,14 @@ pub fn validate_summary_kernel(
                 {
                     false
                 }
-                (A::Hll, P::Hll { precision, .. }) if (4..=18).contains(precision) => false,
+                (A::Hll, P::Hll { precision, .. }) if HLL_PRECISIONS.contains(precision) => false,
                 (A::Kmv, P::Kmv { k, .. }) if *k >= crate::summary_kernels::kmv::KMV_MIN_K => false,
                 (A::Cms, P::Cms { width, depth }) if valid_matrix(*width, *depth) => true,
                 // The kernel's shape rules (an odd depth, for the median).
                 (A::CountSketch, P::CountSketch { width, depth })
                     if valid_matrix(*width, *depth)
-                        && asap_sketchlib::WeightedFrequency::check_shape(
-                            asap_sketchlib::FrequencyAlgorithm::CountSketch,
+                        && weighted_frequency::check_shape(
+                            FrequencyAlgorithm::CountSketch,
                             *width as usize,
                             *depth as usize,
                         )
@@ -99,7 +101,7 @@ pub fn validate_summary_kernel(
                         layers,
                         ..
                     },
-                ) if asap_sketchlib::UnivMon::check_shape(
+                ) if crate::summary_kernels::univmon::check_shape(
                     *heap_size as usize,
                     *sketch_rows as usize,
                     *sketch_cols as usize,
@@ -306,8 +308,7 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
             };
         }
         if matches!(kind.algorithm(), A::CmsWithHeap | A::CountSketchWithHeap) {
-            let (_, width, depth, _) =
-                crate::summary_kernels::weighted_frequency::WeightedFrequency::configuration(kind)?;
+            let (_, width, depth, _) = weighted_frequency::WeightedFrequency::configuration(kind)?;
             return if valid_matrix(width as u32, depth as u32) && grouping == &Default::default() {
                 Ok(())
             } else {

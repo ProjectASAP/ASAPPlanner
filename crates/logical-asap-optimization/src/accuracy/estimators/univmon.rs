@@ -1,6 +1,7 @@
 //! UnivMon's readouts and the guarantees `asap_sketchlib`'s standard-mode
-//! estimators carry (the derivations are in the library's `calc_l2` and
-//! `calc_card` doc comments):
+//! estimators carry (the derivations are in the library's
+//! `docs/api/api_univmon.md`, the bounds `estimate_l2` and
+//! `estimate_cardinality` cite):
 //! - the total (a bare `PointCount`) is the exact unit-update count;
 //! - L2 reads layer 0's Count Sketch directly: per row, Chebyshev with
 //!   `Var ≤ 2q F2²`, and the median of the rows fails only when at least
@@ -20,9 +21,12 @@ use asap_types::ir::operator::AggIntent;
 
 /// Layers `asap_sketchlib` builds: layer `i` hashes at seed index `i`, and
 /// seed 19 picks the layers a key reaches.
-pub(crate) const MAX_LAYERS: u8 = asap_sketchlib::sketch_framework::univmon::MAX_LAYER_SIZE as u8;
-/// Rows the executor builds an L2 sketch with: the deepest odd shape under
-/// its 20-row limit.
+pub(crate) const MAX_LAYERS: u8 =
+    asap_sketchlib::sketch_framework::univmon::UNIVMON_MAX_LAYERS as u8;
+/// The most rows an L2 sketch is sized with: the deepest odd shape within
+/// the 20 rows the executor builds ([`hash_independent`]), so the row median
+/// is one row's estimate, and within the hash budget at the more than 20
+/// columns an L2 guarantee needs (5 column bits: 19 · 6 = 114 ≤ 128).
 const MAX_L2_ROWS: u32 = 19;
 /// Each row of a layer reads its column and sign bits from one hash.
 const HASH_BITS: u32 = 128;
@@ -30,7 +34,7 @@ const HASH_BITS: u32 = 128;
 /// more than `ε₂ F2` with probability at most `2q/ε₂² = 0.1`. Fixing it
 /// lets a shape state one `(ε, δ)`: the columns give `ε`, the rows `δ`.
 const L2_ROW_FAILURE: f64 = 0.1;
-/// `Var[calc_card] ≤ 1.35 F0²/k` for `k ≥ 8`, the constant the library
+/// `Var[estimate_cardinality] ≤ 1.35 F0²/k` for `k ≥ 8`, the constant the library
 /// proves (it also states the looser `2 F0²/k`).
 const DISTINCT_VARIANCE: f64 = 1.35;
 /// The smallest heap the distinct-count variance bound holds for.
@@ -91,12 +95,19 @@ pub(super) fn guarantee(
     }
 }
 
-/// Whether `asap_sketchlib` builds this shape, with independent hashes: at
-/// most [`MAX_LAYERS`] layers and 20 rows, and `rows · (⌈log2 cols⌉ + 1) ≤
-/// 128` ([`asap_sketchlib::UnivMon::check_shape`]; the heap size is not part
-/// of the hash rules).
+/// Whether the executor builds this shape, with independent hashes: at
+/// most [`MAX_LAYERS`] layers and `MATRIX_MAX_ROWS` (20) rows, the rows a
+/// UnivMon state encodes, and `rows · (⌈log2 cols⌉ + 1) ≤ 128`
+/// ([`asap_sketchlib::UnivMon::check_shape`]; the heap size is not part of
+/// the hash rules).
 pub(crate) fn hash_independent(rows: u32, cols: u32, layers: u8) -> bool {
-    asap_sketchlib::UnivMon::check_shape(1, rows as usize, cols as usize, usize::from(layers))
+    rows as usize <= asap_sketchlib::MATRIX_MAX_ROWS
+        && asap_sketchlib::UnivMon::check_shape(
+            1,
+            rows as usize,
+            cols as usize,
+            usize::from(layers),
+        )
         .is_ok()
 }
 
@@ -485,14 +496,15 @@ mod tests {
         }
     }
 
-    /// The library builds at most 20 rows, so a 21-row UnivMon certifies
-    /// nothing even though its hashes fit the budget (21 · (3 + 1) = 84 ≤
-    /// 128 at 8 columns).
+    /// The executor builds at most 20 rows, the rows a UnivMon state
+    /// encodes, so a 21-row UnivMon certifies nothing even though its hashes
+    /// fit the budget (21 · (5 + 1) = 126 ≤ 128 at 32 columns).
     #[test]
     fn univmon_past_twenty_rows_is_not_hash_independent() {
-        assert!(hash_independent(20, 8, 1));
-        assert!(!hash_independent(21, 8, 1));
-        assert!(l2(&univmon(1, 21, 8, 1, None)).is_none());
+        assert!(hash_independent(20, 32, 1));
+        assert!(!hash_independent(21, 32, 1));
+        assert!(l2(&univmon(1, 20, 32, 1, None)).is_some());
+        assert!(l2(&univmon(1, 21, 32, 1, None)).is_none());
     }
 
     /// Each distinct-count heap meets its target once the source's bound

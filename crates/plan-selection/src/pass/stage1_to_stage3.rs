@@ -371,6 +371,7 @@ impl Searched {
 /// Keeping every candidate lists them all; otherwise only the roots of
 /// the Stage 1 candidates whose physical candidates Stage 3 still keeps are
 /// held. `queries` is each query's own-candidate report, for the selection.
+#[allow(clippy::too_many_arguments)]
 fn search_stage2_and_stage3<Id>(
     per_computation: &PerComputationCandidates<Id>,
     stage1: impl Iterator<Item = Stage1Candidate>,

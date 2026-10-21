@@ -1,25 +1,39 @@
 use crate::{AggregateCore, KeyByLabelValues};
-use asap_sketchlib::HydraKllSketch;
+use asap_sketchlib::input::{HydraCounter, HydraQuery};
+use asap_sketchlib::{DataInput, Hydra, Kll};
 
-/// HydraKLL (shared-grouping quantiles) over `asap_sketchlib::HydraKllSketch`.
+/// The single Hydra key column: a key's whole label tuple is one
+/// subpopulation.
+const KEY: &str = "key";
+
+/// HydraKLL (shared-grouping quantiles): `asap_sketchlib::Hydra` over KLL cells.
 #[derive(Debug, Clone)]
 pub struct HydraKllSketchAccumulator {
-    pub inner: HydraKllSketch,
+    pub inner: Hydra,
 }
 
 impl HydraKllSketchAccumulator {
-    pub fn new(row_num: usize, col_num: usize, k: u16) -> Self {
+    pub fn new(rows: usize, cols: usize, k: u16) -> Self {
+        let cell = HydraCounter::Kll(Kll::with_k(i32::from(k)));
         Self {
-            inner: HydraKllSketch::new(row_num, col_num, k),
+            inner: Hydra::with_schema(rows, cols, [KEY], cell).expect("a one-column schema"),
         }
     }
 
     pub fn update(&mut self, key: &KeyByLabelValues, value: f64) {
-        self.inner.update(&key.to_semicolon_str(), value);
+        self.inner
+            .update(&[&key.to_semicolon_str()], &DataInput::F64(value), None)
+            .expect("one key per schema column");
     }
 
+    /// The median over rows of each cell's KLL quantile.
     pub fn query_key(&self, key: &KeyByLabelValues, quantile: f64) -> f64 {
-        self.inner.quantile(&key.to_semicolon_str(), quantile)
+        self.inner
+            .query_key(
+                &[Some(&key.to_semicolon_str())],
+                &HydraQuery::Quantile(quantile),
+            )
+            .expect("KLL cells answer quantiles")
     }
 }
 
@@ -49,10 +63,49 @@ impl AggregateCore for HydraKllSketchAccumulator {
         Ok(Box::new(merged))
     }
 
+    /// The KLL cells' memory, walking every cell.
     fn approx_memory_bytes(&self) -> usize {
-        // HydraKLL is a row*col grid of KLL sketches; typical instances
-        // are on the order of tens of KiB. 32 KiB is a conservative
-        // per-instance default.
-        32 * 1024
+        self.inner
+            .cells
+            .as_slice()
+            .iter()
+            .map(|cell| match cell {
+                HydraCounter::Kll(kll) => kll.memory_bytes(),
+                _ => 0,
+            })
+            .fold(std::mem::size_of::<Self>(), usize::saturating_add)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A key's quantile reads its own values, and merge keeps both inputs'.
+    #[test]
+    fn quantiles_per_key_survive_merge() {
+        let (mut a, mut b) = (
+            HydraKllSketchAccumulator::new(3, 64, 200),
+            HydraKllSketchAccumulator::new(3, 64, 200),
+        );
+        let (x, y) = (
+            KeyByLabelValues::new_with_labels(vec!["x".into()]),
+            KeyByLabelValues::new_with_labels(vec!["y".into()]),
+        );
+        for v in 1..=50 {
+            a.update(&x, f64::from(v));
+            b.update(&x, f64::from(v + 50));
+            a.update(&y, 1000.0);
+        }
+        let merged = a.merge_with(&b).unwrap();
+        let merged = merged
+            .as_any()
+            .downcast_ref::<HydraKllSketchAccumulator>()
+            .unwrap();
+        assert!((merged.query_key(&x, 1.0) - 100.0).abs() <= 1.0);
+        assert!(merged.query_key(&x, 0.0) <= 2.0);
+        assert!(a
+            .merge_with(&HydraKllSketchAccumulator::new(3, 32, 200))
+            .is_err());
     }
 }

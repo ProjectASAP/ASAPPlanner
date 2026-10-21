@@ -213,7 +213,7 @@ fn fingerprint(state: &dyn AggregateCore) -> String {
             .join(",");
     }
     if let Some(s) = any.downcast_ref::<WeightedFrequency>() {
-        return serde_json::to_string(s).unwrap();
+        return format!("{:?} {:?}", s.counters(), s.rows(usize::MAX));
     }
     if let Some(s) = any.downcast_ref::<asap_executor::summary_kernels::HydraCmsGroup>() {
         // The group's name and its count of every item the samples use.
@@ -380,13 +380,15 @@ fn kernel_build(family: &FieldDataType, keyed: bool, sharded: bool) -> BTreeMap<
                         ),
                         _ => unreachable!(),
                     };
-                    Err(WeightedFrequency::new(
-                        algorithm,
-                        *width as usize,
-                        *depth as usize,
-                        *capacity as usize,
-                    )
-                    .unwrap())
+                    Err(Box::new(
+                        WeightedFrequency::new(
+                            algorithm,
+                            *width as usize,
+                            *depth as usize,
+                            *capacity as usize,
+                        )
+                        .unwrap(),
+                    ))
                 } else {
                     Ok(create_planner_accumulator(family, &update, &Default::default()).unwrap())
                 }
@@ -405,7 +407,7 @@ fn kernel_build(family: &FieldDataType, keyed: bool, sharded: bool) -> BTreeMap<
                     series,
                     match state {
                         Ok(updater) => Arc::<dyn AggregateCore>::from(updater.into_accumulator()),
-                        Err(keyed) => Arc::new(keyed) as Arc<dyn AggregateCore>,
+                        Err(keyed) => Arc::new(*keyed) as Arc<dyn AggregateCore>,
                     },
                 )
             })
