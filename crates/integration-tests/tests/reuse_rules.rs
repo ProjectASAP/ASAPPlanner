@@ -414,7 +414,15 @@ fn reuse_answers_alike(queries: &[&str]) {
     let reusing: Vec<(String, String)> = run
         .stage1_logical_asap_optimization
         .iter()
-        .filter(|c| !reused(&run, &c.id).is_empty())
+        // A reuse candidate also built as tumbling panes reads each pane's
+        // window, which `execute` (one batch per `TimeRange`) does not feed;
+        // panes are checked by the window-composition tests.
+        .filter(|c| {
+            !reused(&run, &c.id).is_empty()
+                && c.pass2
+                    .as_ref()
+                    .is_some_and(|p| p.pane_candidates.is_empty())
+        })
         .map(|c| {
             let from = c.pass2.as_ref().unwrap().from_pass1_position;
             (
