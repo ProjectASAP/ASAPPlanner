@@ -244,7 +244,7 @@ latter cannot be fabricated by one.
 | Accuracy model | `PlanningModels` (`AccuracyModel`; `DefaultAccuracyModel` by default) | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
 | Accuracy/domain evidence | `PlanningModels` (`AccuracyEvidenceProvider`; `NoAccuracyEvidence` by default) | Input ranges, nonempty populations and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
 | Cost model | `PlanSelectionSettings.cost_model` (cost model 1 by default) | Turns each valid candidate's resource usage into a choice. The illustrative unit costs are not a measured deployment cost. |
-| Measured cost evidence | `PlanSelectionSettings.measured_operation_costs` | Measured CPU time per sketch update, merge and estimate replaces the formulas for the sketch nodes it matches. |
+| Measured cost evidence | `PlanSelectionSettings.measured_operation_costs` | Measured CPU time per unit of each operator kind, at ingestion or query time, replaces the formulas for the nodes it prices (a sketch interpolated between measured sizes); the other nodes' formulas are scaled by one calibration factor fitted from the measured ones. |
 | Runtime capabilities | `DeploymentCapabilities` (`supported_summaries`, `raw_data_retained`, `query_time_results_retained`) | Prevents choosing a summary, raw-data scan or kept state the intended executor cannot provide. |
 
 For example, the query `quantile_over_time(0.9, data[5m]) /

@@ -13,7 +13,7 @@ use asap_executor::values::{Batch, Value};
 use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
-    OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
+    OptimizationInput, OptimizationPass, OptimizeError, OperatorKind, PhysicalASAPDAG, PlanOutput,
     PlanSelectionSettings, PlanningModels, PlanningWorkload, SelectionBox, Stage1ToStage3Pass,
     StoredOutput, StoredOutputBuild, UserInput,
 };
@@ -471,6 +471,68 @@ async fn a_runtime_installs_and_runs_the_plan_from_one_facade_call() {
     assert_answers_from_pane(&run.answers_per_query[0], 5);
     assert_eq!(run.answers_per_query[0][0].0["instance"], "a");
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// The plan file carries Stage 3's predicted usage of the selected plan, so
+/// a runtime reports it against what it measures without planning again:
+/// for Example 4b's panes maintained at ingestion time, its nodes' prices
+/// add up to Stage 3's selection cost and their CPU to the plan's, with
+/// one latency per query, each node naming the installed nodes that run it.
+#[tokio::test]
+async fn the_plan_carries_stage3s_predicted_usage() {
+    let plan: InstallablePlan =
+        serde_json::from_str(&plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await)
+            .unwrap();
+    assert!(!plan.stored_outputs.is_empty(), "a pane-only plan");
+    assert!(plan.query_time_raw_windows.is_empty(), "a pane-only plan");
+    let selection = plan.selection.as_ref().expect("Stage 3's report");
+    let usage = selection.predicted_usage.as_ref().expect("predicted usage");
+    let node_costs: f64 = usage
+        .per_node
+        .iter()
+        .map(|node| node.cost_per_second.unwrap())
+        .sum();
+    let selection_cost = selection.cost_per_second.unwrap();
+    assert!(
+        (node_costs - selection_cost).abs() <= 1e-9 * selection_cost.abs(),
+        "{node_costs} vs {selection_cost}"
+    );
+    let node_cpu: f64 = usage
+        .per_node
+        .iter()
+        .map(|node| node.cpu_core_seconds_per_second)
+        .sum();
+    assert_eq!(node_cpu, usage.cpu_core_seconds_per_second);
+    assert!(usage.cpu_core_seconds_per_second > 0.0);
+    assert!(usage
+        .per_node
+        .iter()
+        .any(|node| node.operator == OperatorKind::PaneChain
+            && node.timing == asap_planner::ExecutionTiming::IngestionTime));
+    assert_eq!(usage.per_query.len(), 1);
+    assert!(usage.peak_memory_bytes > 0);
+    // Each prediction names the installed nodes that run it: the pane
+    // chain its six ten-minute panes, the query's root its own node.
+    let installed: BTreeSet<_> = plan.dag.dag.nodes.iter().map(|node| node.id).collect();
+    for node in &usage.per_node {
+        assert!(
+            node.installed_node_ids.iter().all(|id| installed.contains(id)),
+            "{node:?}"
+        );
+    }
+    let chain = usage
+        .per_node
+        .iter()
+        .find(|node| node.operator == OperatorKind::PaneChain)
+        .unwrap();
+    assert_eq!(chain.installed_node_ids.len(), 6, "{chain:?}");
+    let stored: BTreeSet<_> = plan.stored_outputs.iter().map(|o| o.node_id).collect();
+    assert!(chain.installed_node_ids.iter().all(|id| stored.contains(id)));
+    let root = plan.queries[0].root_node_id;
+    assert!(usage
+        .per_node
+        .iter()
+        .any(|node| node.installed_node_ids == [root]));
 }
 
 /// The query's label matcher selects series `a` only: the runtime feeds

@@ -40,7 +40,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::Selection;
+use asap_plan_selection::{NodePriceSource, OperatorKind, Selection};
 use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
 use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPDAGDocument,
@@ -185,6 +185,71 @@ pub struct SelectedPlanReport {
     /// Its price per second; `None` under cost model 3, which has no
     /// prices, or when Stage 3 recorded no cost for it.
     pub cost_per_second: Option<f64>,
+    /// The resources Stage 3 predicts it uses, for a runtime to report
+    /// against what it measures; `None` when Stage 3 recorded no cost.
+    pub predicted_usage: Option<PredictedUsage>,
+}
+
+/// What Stage 3 predicts the selected plan uses, per second of wall time
+/// unless the name says otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PredictedUsage {
+    /// Core-seconds of CPU per second, ingestion and query time: the sum
+    /// of `per_node`'s.
+    pub cpu_core_seconds_per_second: f64,
+    /// Bytes scanned per second.
+    pub scanned_bytes_per_second: f64,
+    /// Memory held between computations, averaged over time.
+    pub average_memory_bytes: f64,
+    /// The most memory live at once.
+    pub peak_memory_bytes: u64,
+    /// Bytes kept on disk, raw data query-time scans read included.
+    pub disk_bytes: u64,
+    /// CPU cores to provision for the peak.
+    pub peak_cpu_cores: u32,
+    /// One per operator node of the plan Stage 3 priced, in node order.
+    pub per_node: Vec<PredictedNodeUsage>,
+    /// One per workload query, in workload order.
+    pub per_query: Vec<PredictedQueryUsage>,
+}
+
+/// One operator node's predicted usage. The node is one of the physical
+/// DAG Stage 3 priced, where a tumbling-pane chain is one node; `dag` has
+/// it expanded into its panes, so `installed_node_ids` says which of
+/// `dag`'s nodes run it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PredictedNodeUsage {
+    /// Its id in Stage 3's physical DAG of the selected candidate.
+    pub stage3_node_id: PhysicalASAPNodeId,
+    /// The ids in `dag` that run it: a tumbling-pane chain's panes, newest
+    /// first; for every other node, the one node it is installed as. Empty
+    /// for a node `dag` has no copy of: one the expansion rebuilds once per
+    /// pane below a chain (e.g. the chain's input window).
+    pub installed_node_ids: Vec<PhysicalASAPNodeId>,
+    /// Its operator, as the measured cost table names it.
+    pub operator: OperatorKind,
+    /// When it runs.
+    pub timing: ExecutionTiming,
+    /// Core-seconds of CPU per second.
+    pub cpu_core_seconds_per_second: f64,
+    /// Its price per second under cost model 1; `None` under cost models
+    /// 2 and 3.
+    pub cost_per_second: Option<f64>,
+    /// Whether its CPU came from the measured cost table or the formulas.
+    pub price_source: NodePriceSource,
+}
+
+/// One query's predicted latency per evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PredictedQueryUsage {
+    /// Milliseconds compacting the newest window of the ingestion-time
+    /// state it reads.
+    pub compaction_ms: f64,
+    /// Milliseconds of its query-time work, its per-request cost included.
+    pub query_ms: f64,
 }
 
 /// Why an installable plan could not be built or is not consistent.
@@ -290,7 +355,6 @@ pub async fn plan_installable(input: UserInput<'_>) -> Result<InstallablePlan, P
         pass: input.pass,
     };
     let output = e2e_plan(input).await?;
-    let selection = output.selection.as_ref().map(report_of);
     let installable = || -> Result<InstallablePlan, InstallablePlanError> {
         // Every node keeps the timing Stage 3 gave it.
         let timed = apply_materialization_timings_to_roots(
@@ -298,6 +362,10 @@ pub async fn plan_installable(input: UserInput<'_>) -> Result<InstallablePlan, P
             &MaterializationAssignment::default(),
         )?;
         let expanded = pane_retention_of_expanded_panes(&timed, output.selection.as_ref())?;
+        let selection = output
+            .selection
+            .as_ref()
+            .map(|selection| report_of(selection, &expanded.installed_node_ids));
         let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
         InstallablePlan::of_dag(
             expanded.dag,
@@ -908,6 +976,10 @@ fn executor_builds(
 struct ExpandedWithRetention {
     dag: PhysicalASAPDAG,
     retention_ms_by_node: HashMap<PhysicalASAPNodeId, u64>,
+    /// Each node id of the selected candidate's physical DAG (`timed`
+    /// exported, Stage 3's ids) with the ids in `dag` that run it
+    /// ([`PredictedNodeUsage::installed_node_ids`]).
+    installed_node_ids: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 }
 
 /// Expand the pane chains of `timed` and export it; each pane takes the
@@ -944,20 +1016,81 @@ fn pane_retention_of_expanded_panes(
             }
         }
     }
+    // A chain runs as its panes; every other node as the node replacing it
+    // (itself when nothing below it changed).
+    let installed_id = |node: &Rc<OperatorNode>| compiled.node_ids.node_id(node);
+    let mut installed_node_ids = HashMap::new();
+    for node in &selected.dag.nodes {
+        let Some(input) = selected.node_ids.operator_node(node.id) else {
+            continue;
+        };
+        let ids: Vec<PhysicalASAPNodeId> = match expansion
+            .chains
+            .iter()
+            .find(|expanded| Rc::ptr_eq(&expanded.chain, input))
+        {
+            Some(expanded) => expanded.panes.iter().filter_map(installed_id).collect(),
+            None => {
+                let replacement = expansion
+                    .expanded_nodes
+                    .iter()
+                    .find(|(original, _)| Rc::ptr_eq(original, input))
+                    .map_or(input, |(_, replacement)| replacement);
+                installed_id(replacement).into_iter().collect()
+            }
+        };
+        installed_node_ids.insert(node.id, ids);
+    }
     Ok(ExpandedWithRetention {
         dag: compiled.dag,
         retention_ms_by_node,
+        installed_node_ids,
     })
 }
 
 /// Stage 3's record of its selected candidate.
-fn report_of(selection: &Selection) -> SelectedPlanReport {
+fn report_of(
+    selection: &Selection,
+    installed_node_ids: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+) -> SelectedPlanReport {
+    let cost = selection.costs.get(&selection.selected);
     SelectedPlanReport {
         selected_candidate_id: selection.selected.clone(),
-        cost_per_second: selection
-            .costs
-            .get(&selection.selected)
-            .and_then(|cost| cost.cost_per_second),
+        cost_per_second: cost.and_then(|cost| cost.cost_per_second),
+        predicted_usage: cost.map(|cost| PredictedUsage {
+            cpu_core_seconds_per_second: cost
+                .per_node
+                .values()
+                .map(|node| node.cpu_core_seconds_per_second)
+                .sum(),
+            scanned_bytes_per_second: cost.usage.scanned_bytes_per_second,
+            average_memory_bytes: cost.usage.average_memory_bytes,
+            peak_memory_bytes: cost.usage.peak_memory_bytes,
+            disk_bytes: cost.usage.disk_bytes,
+            peak_cpu_cores: cost.usage.peak_cpu_cores,
+            per_node: cost
+                .per_node
+                .iter()
+                .map(|(&id, node)| PredictedNodeUsage {
+                    stage3_node_id: id,
+                    installed_node_ids: installed_node_ids.get(&id).cloned().unwrap_or_default(),
+                    operator: node.operator,
+                    timing: node.timing,
+                    cpu_core_seconds_per_second: node.cpu_core_seconds_per_second,
+                    cost_per_second: node.cost_per_second,
+                    price_source: node.price_source,
+                })
+                .collect(),
+            per_query: cost
+                .usage
+                .latency_per_query
+                .iter()
+                .map(|latency| PredictedQueryUsage {
+                    compaction_ms: latency.compaction_ms,
+                    query_ms: latency.query_ms,
+                })
+                .collect(),
+        }),
     }
 }
 

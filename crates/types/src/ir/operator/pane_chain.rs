@@ -174,6 +174,11 @@ pub struct PaneChainExpansion {
     /// Each expanded chain with its panes, newest first, in the order the
     /// chains were first reached.
     pub chains: Vec<ExpandedPaneChain>,
+    /// Every other node of the input workload the expansion reached, with
+    /// the node that replaces it (itself when nothing below it changed),
+    /// so a caller can carry what it knows about a node to the expanded
+    /// workload.
+    pub expanded_nodes: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
 }
 
 /// One expanded chain: the `PaneChain` node of the input workload and the
@@ -229,7 +234,11 @@ pub fn expand_pane_chains_in_workload(
             ExpandedPaneChain { chain, panes }
         })
         .collect();
-    Ok(PaneChainExpansion { roots, chains })
+    Ok(PaneChainExpansion {
+        roots,
+        chains,
+        expanded_nodes: memo.expanded,
+    })
 }
 
 /// The untimed `node` with `timing` written into it and into every untimed
@@ -257,6 +266,8 @@ struct ExpansionMemo {
     panes: HashMap<(*const OperatorNode, u32), Rc<OperatorNode>>,
     /// Each chain expanded, in the order first reached.
     chains: Vec<Rc<OperatorNode>>,
+    /// Each expanded node with its input, in the order expanded.
+    expanded: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
 }
 
 fn expand(
@@ -333,5 +344,6 @@ fn expand(
         }
     };
     memo.nodes.insert(Rc::as_ptr(node), Rc::clone(&out));
+    memo.expanded.push((Rc::clone(node), Rc::clone(&out)));
     Ok(out)
 }
