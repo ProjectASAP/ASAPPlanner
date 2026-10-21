@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "gvzdv-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "gvzdv/claudish-to-english",
+        "ref": "346702bbe0aaaae08cb45e8959c11a55cd476f88"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "claudish-to-english@gvzdv-plugins": true
+  }
+}
