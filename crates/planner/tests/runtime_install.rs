@@ -1370,12 +1370,19 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 }
 
 /// Without the declaration nothing proves `data`'s samples non-negative, so
-/// the merged panes' relative bound does not carry through `avg`: P5-m1 is
-/// rejected, and with no raw samples no plan is valid.
+/// the merged panes' relative bound does not carry through `avg`: no
+/// merged-pane DDSketch candidate is accepted, and with no raw samples no
+/// plan is valid. The search discards the sketch candidates before
+/// composition (they have no bound to meet the target), so the error lists
+/// only what reached Stage 3: the exact plan, which needs raw samples.
 #[tokio::test]
 async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
-    assert!(error.contains("P5-m1"), "{error}");
+    assert!(error.contains("no valid candidate"), "{error}");
+    assert!(
+        error.contains(r#"id: "P1", cause: RawDataNotRetained"#),
+        "{error}"
+    );
 }
 
 /// `avg by (g) (quantile_over_time(0.99, x[100s]))` every 10 s at rank
