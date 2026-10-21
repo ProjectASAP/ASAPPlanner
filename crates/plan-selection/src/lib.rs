@@ -2624,22 +2624,28 @@ fn priced_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> u64 {
 /// Evaluations per second of a node computed once for `queries` together,
 /// each a recurrence with its range evaluation: a request with a range
 /// evaluation is [`RangeEvaluation::evaluations_per_request`] evaluations,
-/// one without it one. Repeating queries with equal intervals are
-/// evaluated together, every request ending at the same instant: a node
-/// they share is computed once per distinct instant their steps fall on,
-/// `end − k · step_ms` for `k · step_ms ≤ span_ms`. A query evaluated once
-/// per request (no range, or one step) evaluates only at the end. Queries
-/// on different intervals add; estimated rates add. One-off, scheduled and unknown queries run as one
+/// one without it one. Repeating queries with equal intervals and equal
+/// phases on them are evaluated together, every request ending at the
+/// same instant: a node they share is computed once per distinct instant
+/// their steps fall on, `end − k · step_ms` for `k · step_ms ≤ span_ms`. A
+/// query of unknown phase runs with the first known phase on its interval,
+/// if any. A query evaluated once per request (no range, or one step)
+/// evaluates only at the end. Queries on different intervals or phases add
+/// (an over-estimate for intervals whose instants coincide, e.g. every 20 s
+/// and every 30 s meet every 60 s); estimated rates add. One-off, scheduled and unknown queries run as one
 /// batch: the most evaluations among them, spread over
 /// `non_repeating_query_horizon_seconds`.
 fn evaluation_rate<'r>(
     queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
-    // Per interval in ms, each step in ms its readers use and the longest
-    // span in ms at that step; once per request is the interval with span 0.
-    let mut longest_span_ms_by_step_ms_by_interval_ms: BTreeMap<u32, BTreeMap<u64, u64>> =
-        BTreeMap::new();
+    // Per interval in ms and phase in ms on it (`None`: unknown), each step
+    // in ms its readers use and the longest span in ms at that step; once
+    // per request is the interval with span 0.
+    let mut longest_span_ms_by_step_ms_by_schedule: BTreeMap<
+        (u32, Option<u64>),
+        BTreeMap<u64, u64>,
+    > = BTreeMap::new();
     let mut estimated = 0.0;
     let mut invocations = 0u64;
     for (recurrence, range_evaluation) in queries {
@@ -2652,13 +2658,20 @@ fn evaluation_rate<'r>(
                 if interval.0 == 0 {
                     return Err(AnalyticalCostError::InvalidRecurrence);
                 }
+                let phase_ms = match recurrence {
+                    QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                        evaluation_phase,
+                        ..
+                    }) => Some(evaluation_phase.0 % u64::from(interval.0)),
+                    _ => None,
+                };
                 let (step_ms, span_ms) = range_evaluation
                     .filter(|_| steps > 1)
                     .map_or((u64::from(interval.0), 0), |range| {
                         (range.step_ms, range.span_ms)
                     });
-                let longest_span_ms = longest_span_ms_by_step_ms_by_interval_ms
-                    .entry(interval.0)
+                let longest_span_ms = longest_span_ms_by_step_ms_by_schedule
+                    .entry((interval.0, phase_ms))
                     .or_default()
                     .entry(step_ms)
                     .or_default();
@@ -2680,9 +2693,34 @@ fn evaluation_rate<'r>(
             QueryRecurrence::Unknown => invocations = invocations.max(steps),
         }
     }
-    let repeated: f64 = longest_span_ms_by_step_ms_by_interval_ms
+    // Queries of unknown phase run with the first known phase on their
+    // interval.
+    let unknown_phase_intervals_ms: Vec<u32> = longest_span_ms_by_step_ms_by_schedule
+        .keys()
+        .filter(|(_, phase_ms)| phase_ms.is_none())
+        .map(|&(interval_ms, _)| interval_ms)
+        .collect();
+    for interval_ms in unknown_phase_intervals_ms {
+        let known = longest_span_ms_by_step_ms_by_schedule
+            .range((interval_ms, Some(0))..=(interval_ms, Some(u64::MAX)))
+            .next()
+            .map(|(&schedule, _)| schedule);
+        if let Some(known) = known {
+            let unknown = longest_span_ms_by_step_ms_by_schedule
+                .remove(&(interval_ms, None))
+                .unwrap_or_default();
+            let with = longest_span_ms_by_step_ms_by_schedule
+                .get_mut(&known)
+                .expect("found above");
+            for (step_ms, span_ms) in unknown {
+                let longest_span_ms = with.entry(step_ms).or_default();
+                *longest_span_ms = (*longest_span_ms).max(span_ms);
+            }
+        }
+    }
+    let repeated: f64 = longest_span_ms_by_step_ms_by_schedule
         .into_iter()
-        .map(|(interval_ms, longest_span_ms_by_step_ms)| {
+        .map(|((interval_ms, _), longest_span_ms_by_step_ms)| {
             1_000.0 / f64::from(interval_ms)
                 * distinct_instants_per_request(&longest_span_ms_by_step_ms) as f64
         })
@@ -7197,6 +7235,29 @@ mod tests {
             rate(&[range(3_600_000, 60_000), range(600_000, 30_000)]),
             71.0 / 60.0
         ));
+    }
+
+    /// Queries every 20 s at phases 0 and 5 s evaluate at different
+    /// instants: a node they share runs at both, twice as often as at one
+    /// phase. Phases 0 and 40 s are one phase on 20 s, and a query of
+    /// unknown phase runs with the known one.
+    #[test]
+    fn readers_at_different_phases_evaluate_apart() {
+        let at = |phase_ms: u64| {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: asap_types::workload::RepetitionInterval(20_000),
+                evaluation_phase: asap_types::workload::TimestampMs(phase_ms),
+            })
+        };
+        let unknown = repeating(20_000);
+        let rate = |queries: &[&QueryRecurrence]| {
+            evaluation_rate(queries.iter().map(|r| (*r, None)), 3_600.0).unwrap()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(rate(&[&at(0), &at(5_000)]), 2.0 / 20.0));
+        assert!(close(rate(&[&at(0), &at(40_000)]), 1.0 / 20.0));
+        assert!(close(rate(&[&at(5_000), &unknown]), 1.0 / 20.0));
+        assert!(close(rate(&[&at(0), &at(5_000), &unknown]), 2.0 / 20.0));
     }
 
     /// One-off and unknown recurrence are spread over the horizon:

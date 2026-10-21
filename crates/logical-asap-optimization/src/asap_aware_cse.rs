@@ -852,10 +852,11 @@ pub const MAX_PANE_CANDIDATES: usize = 20;
 /// The pane candidates of the candidate with query roots `roots`, children
 /// first. `evaluation_grid_ms[q]` is the grid query `q`'s evaluations fall
 /// on: how often it repeats, or with a range evaluation the greatest common
-/// divisor of that and its step
+/// divisor of that and its step, and of its phase if declared
 /// (`QueryWorkloadEntry::evaluation_grid_ms`); `None` when it does not
 /// repeat at a fixed interval. Each pane width divides every reader's grid,
-/// so every evaluation, every range step included, ends on a pane boundary.
+/// so with panes anchored at the epoch every evaluation, every range step
+/// included, ends on a pane boundary.
 pub fn pane_candidates(
     roots: &[QueryRoot],
     evaluation_grid_ms: &[Option<u64>],

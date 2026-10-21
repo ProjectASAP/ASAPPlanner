@@ -370,20 +370,30 @@ pub struct QueryWorkloadEntry {
 }
 
 impl QueryWorkloadEntry {
-    /// The grid every evaluation of this query falls on, in milliseconds:
+    /// The grid every evaluation of this query falls on, in milliseconds,
+    /// anchored at the epoch (every evaluation time is a multiple of it):
     /// its fixed interval ([`QueryRecurrence::fixed_interval_ms`]), or with
     /// a range evaluation of more than one step the greatest common divisor
     /// of the interval and the step, since each run evaluates at every step
-    /// up to its end. `None` when it does not repeat at a positive fixed
-    /// interval.
+    /// up to its end; with a declared evaluation phase
+    /// ([`RepeatedDemand::FixedIntervalAt`]) also the greatest common
+    /// divisor with that phase (every 20 s at phase 5 s is on a 5 s grid).
+    /// `None` when it does not repeat at a positive fixed interval.
     pub fn evaluation_grid_ms(&self) -> Option<u64> {
         let interval_ms = self.recurrence.fixed_interval_ms()?;
-        Some(match self.range_evaluation {
+        let step_ms = match self.range_evaluation {
             Some(range) if range.step_ms > 0 && range.evaluations_per_request() > 1 => {
                 greatest_common_divisor(interval_ms, range.step_ms)
             }
             _ => interval_ms,
-        })
+        };
+        let phase_ms = match &self.recurrence {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                evaluation_phase, ..
+            }) => evaluation_phase.0,
+            _ => 0,
+        };
+        Some(greatest_common_divisor(step_ms, phase_ms))
     }
 }
 
@@ -1036,6 +1046,18 @@ mod tests {
             QueryWorkloadEntry::from(&plain).evaluation_grid_ms(),
             Some(30_000)
         );
+        // At a declared phase, also on that phase from the epoch: every
+        // minute at phase 125 s is on a 5 s grid; at phase 120 s, on 60 s.
+        let at_phase = |phase_ms| QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(60_000),
+                evaluation_phase: TimestampMs(phase_ms),
+            }),
+            range_evaluation: None,
+            ..entry.clone()
+        };
+        assert_eq!(at_phase(125_000).evaluation_grid_ms(), Some(5_000));
+        assert_eq!(at_phase(120_000).evaluation_grid_ms(), Some(60_000));
         // A one-step range (span 0) is one evaluation per request: its
         // step does not narrow the grid (refreshing every 60 s at a 45 s
         // step would otherwise give a 15 s grid for nothing).
