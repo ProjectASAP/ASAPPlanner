@@ -58,9 +58,10 @@ pub use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 pub use asap_frontend_sql::SqlCatalog;
 pub use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
 pub use asap_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, CostTableProvenance, MeasuredOperationCost,
-    MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind, PlanSelectionSettings,
-    ResourceSpeed, ResourceUnitCost, SummaryOperation,
+    ClusterLimits, ClusterObjective, CostModel, CostTableProvenance, DiscardedQueryCandidate,
+    MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind,
+    PlanSelectionSettings, QuerySearchReport, RejectionCause, ResourceSpeed, ResourceUnitCost,
+    SearchReport, SummaryOperation,
 };
 pub use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPNodeId, RawSampleWindow,

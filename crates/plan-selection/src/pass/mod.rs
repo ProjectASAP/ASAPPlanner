@@ -12,6 +12,7 @@
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
+mod query_candidates;
 mod stage1_to_stage3;
 
 use std::collections::BTreeMap;
@@ -34,8 +35,9 @@ use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilit
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 
 pub use stage1_to_stage3::{
-    run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage2_and_stage3, LogicalCandidate,
-    PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run,
+    run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage1_to_stage3_with,
+    run_stage2_and_stage3, LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass,
+    Stage1ToStage3Run, Stage1ToStage3Search,
 };
 
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;

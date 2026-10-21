@@ -65,7 +65,7 @@ fn run_stage1_to_stage3(
         },
         ..Default::default()
     };
-    asap_plan_selection::run_stage1_to_stage3(
+    asap_plan_selection::run_stage1_to_stage3_with(
         vec![(0, QueryRoot::Operator(root))],
         &[planner_types::workload::QueryWorkloadEntry {
             query: Default::default(),
@@ -79,6 +79,7 @@ fn run_stage1_to_stage3(
         }],
         &data,
         asap_plan_selection::PlanningModels::builtin(),
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .expect("Pass 1 accepts the query")
 }

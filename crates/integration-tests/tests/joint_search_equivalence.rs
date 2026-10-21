@@ -1,0 +1,591 @@
+//! The pruned joint-planning search selects what the exhaustive search
+//! selects (`docs/design_docs/proposals/joint-planning-search.md`,
+//! "Exactness contract"): the same plan, at the same cost, with the same
+//! materialization, on the planner-layering examples and on seeded random
+//! workloads small enough to search exhaustively, under every cost model.
+
+mod planner_layering_common;
+
+use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
+use asap_plan_selection::{
+    run_stage1_to_stage3, run_stage1_to_stage3_with, AccuracyModel, BuiltinAccuracyModel,
+    ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, PlanningModels,
+    RejectionCause, ResourceUnitCost, SelectionError, Stage1ToStage3Run, Stage1ToStage3Search,
+};
+use asap_types::ir::flat::flatten;
+use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
+use asap_types::ir::QueryRoot;
+use asap_types::workload::{
+    DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
+    RepeatingEntry, RepetitionInterval, SourceFacts,
+};
+use planner_layering_common::*;
+
+/// Every cost model, each objective of cost model 3 included, with
+/// `memory_gb` of cluster memory: small enough that some candidates do not
+/// fit, so the limits are exercised too.
+fn cost_models(memory_gb: u64) -> Vec<PlanSelectionSettings> {
+    let cluster = |objective| {
+        CostModel::ClusterCapacity(ClusterLimits {
+            memory_bytes: memory_gb * 1_000_000_000,
+            disk_bytes: 1_000_000_000_000,
+            cpu_cores: None,
+            objective,
+        })
+    };
+    [
+        CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
+        CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative()),
+        cluster(ClusterObjective::LowestLatency),
+        cluster(ClusterObjective::LeastMemory),
+        cluster(ClusterObjective::ParetoFront),
+    ]
+    .into_iter()
+    .map(|cost_model| PlanSelectionSettings {
+        cost_model,
+        ..PlanSelectionSettings::default()
+    })
+    .collect()
+}
+
+/// `roots` planned with the exhaustive search keeping every candidate (the
+/// planner before pruning: every candidate priced, then selected at once)
+/// and with the default search under `models`: both select the same plan with the same cost, materialization
+/// and (under the Pareto front) front, or both fail the same way. Returns
+/// the default search's run.
+fn assert_equivalent(
+    label: &str,
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Stage1ToStage3Run<usize> {
+    let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
+    let exhaustive = run_stage1_to_stage3_with(
+        indexed(),
+        entries,
+        data,
+        models,
+        Stage1ToStage3Search::exhaustive(),
+    )
+    .unwrap_or_else(|e| panic!("{label}: {e}"));
+    let pruned = run_stage1_to_stage3(indexed(), entries, data, models)
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+    match (
+        &exhaustive.stage3_plan_selection,
+        &pruned.stage3_plan_selection,
+    ) {
+        (Ok(all), Ok(searched)) => {
+            assert_eq!(flatten(&all.plan), flatten(&searched.plan), "{label}: plan");
+            assert_eq!(
+                all.costs[&all.selected], searched.costs[&searched.selected],
+                "{label}: cost"
+            );
+            let (all_selected, searched_selected) =
+                (exhaustive.selected().unwrap(), pruned.selected().unwrap());
+            assert_eq!(
+                all_selected.dag, searched_selected.dag,
+                "{label}: physical plan"
+            );
+            assert_eq!(
+                all_selected.materialization, searched_selected.materialization,
+                "{label}: materialization"
+            );
+            let front = |s: &asap_plan_selection::Selection| {
+                s.front
+                    .iter()
+                    .map(|id| s.costs[id].clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(front(all), front(searched), "{label}: Pareto front");
+            assert!(
+                searched.search.candidates_checked <= all.search.candidates_checked,
+                "{label}: the pruned search checks no more candidates"
+            );
+        }
+        (Err(SelectionError::NoValidCandidate(_)), Err(SelectionError::NoValidCandidate(_))) => {}
+        (all, searched) => panic!("{label}: exhaustive {all:?}, pruned {searched:?}"),
+    }
+    pruned
+}
+
+/// [`assert_equivalent`] for `workload`'s roots under each of `settings`.
+fn assert_equivalent_under(
+    label: &str,
+    workload: &PlanningWorkload,
+    roots: &[QueryRoot],
+    settings: &[PlanSelectionSettings],
+) -> Vec<Stage1ToStage3Run<usize>> {
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    settings
+        .iter()
+        .map(|settings| {
+            let models = PlanningModels::builtin().with_plan_selection(settings);
+            assert_equivalent(
+                &format!("{label} under {:?}", settings.cost_model),
+                roots,
+                &entries,
+                &data,
+                models,
+            )
+        })
+        .collect()
+}
+
+/// The causes for which `run`'s search discarded some query's candidates
+/// before composition.
+fn discard_causes(run: &Stage1ToStage3Run<usize>) -> Vec<RejectionCause> {
+    match &run.stage3_plan_selection {
+        Ok(selection) => selection
+            .search
+            .queries
+            .iter()
+            .flat_map(|q| q.discarded.iter().map(|d| d.cause))
+            .collect(),
+        Err(SelectionError::NoValidCandidate(rejected)) => rejected
+            .iter()
+            .filter(|r| r.id.starts_with('q'))
+            .map(|r| r.cause)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Examples 1 and 2 and Example 3's Pattern B under every cost model, and
+/// Pattern A as given under cost model 1: the pruned search selects the
+/// exhaustive search's plan.
+#[test]
+fn planner_layering_examples_select_the_exhaustive_plan() {
+    let example1 = example1();
+    assert_equivalent_under(
+        "example 1",
+        &example1,
+        &lower_promql_roots(&example1).unwrap(),
+        &cost_models(64),
+    );
+    let (example2, catalog) = example2();
+    assert_equivalent_under(
+        "example 2",
+        &example2,
+        &lower_sql_roots(&example2, &catalog).unwrap(),
+        &cost_models(64),
+    );
+    let pattern_b = pattern_b();
+    // 64 GB rejects Pattern B's ingestion-time panes (124 GB).
+    assert_equivalent_under(
+        "pattern B",
+        &pattern_b,
+        &lower_promql_roots(&pattern_b).unwrap(),
+        &cost_models(64),
+    );
+    let (label, once) = &pattern_a_variants()[0];
+    let roots = lower_promql_roots(once).unwrap();
+    assert_equivalent_under(label, once, &roots, &cost_models(64)[..1]);
+}
+
+/// Pattern A (as given, and monthly as Example 4 varies it) under every
+/// cost model. The monthly variant's exhaustive search takes minutes: run
+/// with `--release --ignored`.
+#[test]
+#[ignore = "exhaustive search takes minutes; run with --release --ignored"]
+fn pattern_a_selects_the_exhaustive_plan_under_every_cost_model() {
+    for (label, workload) in pattern_a_variants() {
+        let roots = lower_promql_roots(&workload).unwrap();
+        assert_equivalent_under(label, &workload, &roots, &cost_models(64));
+    }
+}
+
+/// Pattern A as given (Example 3), then monthly (Example 4). The at-rest
+/// variant is left out: its exhaustive search takes hours.
+fn pattern_a_variants() -> Vec<(&'static str, PlanningWorkload)> {
+    let mixed = DataArrival::Mixed {
+        rows_per_second: SHARED_ROWS_PER_SECOND,
+    };
+    vec![
+        (
+            "pattern A once",
+            pattern_a(PatternARecurrence::OnceAdHoc, mixed),
+        ),
+        (
+            "pattern A monthly",
+            pattern_a(PatternARecurrence::MonthlyPredictable, mixed),
+        ),
+    ]
+}
+
+/// A seeded xorshift generator, so each random workload is reproducible
+/// from its seed.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n as u64) as usize
+    }
+
+    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len())]
+    }
+}
+
+/// One random PromQL query over the gauge `m` and the counter `c_total`,
+/// some of whose candidates fail a check before composition (a per-series
+/// `stddev_over_time`, a top-k over rates).
+fn random_query(rng: &mut Rng) -> String {
+    let group = rng.pick(&["job", "job, instance", "instance"]);
+    let window = rng.pick(&["1m", "5m", "10m"]);
+    let phi = rng.pick(&["0.5", "0.9", "0.99"]);
+    let k = rng.pick(&["3", "5"]);
+    match rng.below(10) {
+        0 => format!("sum by ({group}) (sum_over_time(m[{window}]))"),
+        1 => format!("avg by ({group}) (quantile_over_time({phi}, m[{window}]))"),
+        2 => format!("quantile_over_time({phi}, m[{window}])"),
+        3 => format!("topk by ({group}) ({k}, sum_over_time(m[{window}]))"),
+        4 => format!("sum by ({group}) (rate(c_total[{window}]))"),
+        5 => format!("max by ({group}) (max_over_time(m[{window}]))"),
+        6 => format!("count_over_time(m[{window}])"),
+        7 => format!("sum by ({group}) (increase(c_total[{window}]))"),
+        // The executor has no exact per-series stddev kernel.
+        8 => format!("stddev_over_time(m[{window}])"),
+        // A heap sketch over rates, whose weights are not proven non-negative.
+        _ => format!("topk({k}, sum by ({group}) (rate(c_total[{window}])))"),
+    }
+}
+
+/// A random workload of two to four repeating queries with random accuracy
+/// targets, over 1,000 series of each metric.
+fn random_workload(seed: u64) -> PlanningWorkload {
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let queries = 2 + rng.below(3);
+    let entries = (0..queries)
+        .map(|_| RepeatingEntry {
+            query: Query(random_query(&mut rng)),
+            demand: RepeatedDemand::FixedInterval(RepetitionInterval(
+                *rng.pick(&[60_000u32, 300_000]),
+            )),
+            requirements: QueryRequirements {
+                accuracy: rng
+                    .pick(&[
+                        AccuracyTarget::exact(),
+                        AccuracyTarget::max_error(0.05),
+                        AccuracyTarget::max_error(0.01).failure_probability(0.01),
+                        AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Rank),
+                    ])
+                    .clone(),
+                max_latency_ms: None,
+            },
+            predictability: Predictability::Predictable { known_at: None },
+            range_evaluation: None,
+        })
+        .collect();
+    let source = |metric_type| SourceFacts {
+        series_count: Some(1_000),
+        metric_type: Some(metric_type),
+        sample_interval: Some(DurationMs(15_000)),
+        ..SourceFacts::default()
+    };
+    PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: None,
+            repeating_queries: Some(entries),
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 2_000.0 / 15.0,
+            },
+            sources: [
+                ("m".to_string(), source(MetricType::Gauge)),
+                ("c_total".to_string(), source(MetricType::Counter)),
+            ]
+            .into_iter()
+            .collect(),
+        }),
+    }
+}
+
+/// The most composed Pass 1 candidates a random workload may have to be
+/// searched exhaustively here; larger ones are skipped.
+const MAX_EXHAUSTIVE_COMBINATIONS: usize = 48;
+
+/// Seeded random workloads small enough to search exhaustively, each under
+/// one cost model in turn (with 1 GB of cluster memory, which rejects some
+/// candidates): the pruned search selects the exhaustive search's plan.
+#[test]
+fn random_small_workloads_select_the_exhaustive_plan() {
+    assert_random_workloads_equivalent(false);
+}
+
+/// [`random_small_workloads_select_the_exhaustive_plan`] with every seed
+/// under every cost model: minutes in a debug build.
+#[test]
+#[ignore = "every seed under every cost model takes minutes in a debug build; run with --release --ignored"]
+fn random_small_workloads_select_the_exhaustive_plan_under_every_cost_model() {
+    assert_random_workloads_equivalent(true);
+}
+
+/// Seeds 1 to 60 that are small enough, under every cost model or one per
+/// seed in turn.
+fn assert_random_workloads_equivalent(every_cost_model: bool) {
+    let models = cost_models(1);
+    let mut searched = 0;
+    let mut causes = std::collections::BTreeSet::new();
+    for seed in 1..=60u64 {
+        let workload = random_workload(seed);
+        let roots = lower_promql_roots(&workload).unwrap();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                roots.iter().cloned().enumerate().collect(),
+            )
+            .unwrap();
+        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
+            continue;
+        }
+        searched += 1;
+        let queries: Vec<_> = workload
+            .query_workload
+            .entries()
+            .map(|e| e.query.0.clone())
+            .collect();
+        let turn = seed as usize % models.len();
+        let settings = match every_cost_model {
+            true => &models[..],
+            false => &models[turn..=turn],
+        };
+        let runs = assert_equivalent_under(
+            &format!("seed {seed}: {queries:?}"),
+            &workload,
+            &roots,
+            settings,
+        );
+        causes.extend(
+            runs.iter()
+                .flat_map(discard_causes)
+                .map(|c| format!("{c:?}")),
+        );
+    }
+    assert!(
+        searched >= 20,
+        "only {searched} workloads were small enough"
+    );
+    // Every kind of early rejection is exercised: an executor without the
+    // kernel, Count-Min weights not proven non-negative, and accuracy (no
+    // guarantee, or an unknown bound).
+    for cause in [
+        "PerEntityAggregateNotExecutable",
+        "CountMinWeightsNotProvenNonNegative",
+        "NoAccuracyGuarantee",
+        "AccuracyTargetMissed",
+    ] {
+        assert!(causes.contains(cause), "{cause} not in {causes:?}");
+    }
+}
+
+/// The average of per-series p99s has no accuracy rule: planned alone, the
+/// query's summary candidates fail whatever their sizes, so the search
+/// discards them before composition and reports why, and Stage 3 checks
+/// fewer candidates for the same plan.
+#[test]
+fn a_query_candidate_without_a_guarantee_is_discarded_before_composition() {
+    let mut workload = random_workload(1);
+    let entry = |query: &str, accuracy: AccuracyTarget| RepeatingEntry {
+        query: Query(query.into()),
+        demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+        requirements: QueryRequirements {
+            accuracy,
+            max_latency_ms: None,
+        },
+        predictability: Predictability::Predictable { known_at: None },
+        range_evaluation: None,
+    };
+    workload.query_workload.repeating_queries = Some(vec![
+        entry(
+            "sum by (job) (sum_over_time(m[5m]))",
+            AccuracyTarget::max_error(0.05),
+        ),
+        entry(
+            "avg by (job) (quantile_over_time(0.99, m[5m]))",
+            AccuracyTarget::max_error(0.05),
+        ),
+    ]);
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = assert_equivalent(
+        "avg of p99",
+        &roots,
+        &entries,
+        &data,
+        PlanningModels::builtin(),
+    );
+    let search = &run.stage3_plan_selection.as_ref().unwrap().search;
+    // q1's candidates all pass; q2's summary candidates are discarded.
+    assert!(search.queries[0].discarded.is_empty());
+    let discarded = &search.queries[1].discarded;
+    assert!(!discarded.is_empty());
+    assert!(discarded.len() < search.queries[1].candidates_checked as usize);
+    assert!(discarded.iter().all(|d| matches!(
+        d.cause,
+        RejectionCause::NoAccuracyGuarantee | RejectionCause::AccuracyTargetMissed
+    )));
+}
+
+/// A deployment model that may accept an output whatever its guarantee
+/// says could accept a larger summary of the same plan, which sharing can
+/// give it: no accuracy failure is then permanent, and nothing is
+/// discarded before composition.
+#[test]
+fn a_model_that_may_accept_any_output_discards_nothing() {
+    struct AcceptsLargeSummaries;
+    impl AccuracyModel for AcceptsLargeSummaries {
+        fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+            BuiltinAccuracyModel.satisfies(guarantee, target)
+        }
+    }
+    let mut workload = random_workload(1);
+    workload.query_workload.repeating_queries = Some(vec![RepeatingEntry {
+        query: Query("avg by (job) (quantile_over_time(0.99, m[5m]))".into()),
+        demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+        requirements: QueryRequirements {
+            accuracy: AccuracyTarget::max_error(0.05),
+            max_latency_ms: None,
+        },
+        predictability: Predictability::Predictable { known_at: None },
+        range_evaluation: None,
+    }]);
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let model = AcceptsLargeSummaries;
+    let run = assert_equivalent(
+        "may accept",
+        &roots,
+        &entries,
+        &data,
+        PlanningModels::builtin().with_accuracy(&model),
+    );
+    let search = &run.stage3_plan_selection.as_ref().unwrap().search;
+    assert!(search.queries[0].discarded.is_empty());
+}
+
+/// A summary whose guarantee is known but misses the target (a relative
+/// bound for a rank target) might meet it at another size: it is not
+/// discarded before composition, and Stage 3 rejects the completed plans
+/// that read it.
+#[test]
+fn a_known_bound_that_misses_is_not_discarded_before_composition() {
+    let mut workload = random_workload(1);
+    workload.query_workload.repeating_queries = Some(vec![RepeatingEntry {
+        query: Query("quantile_over_time(0.99, m[5m])".into()),
+        demand: RepeatedDemand::FixedInterval(RepetitionInterval(600_000)),
+        requirements: QueryRequirements {
+            accuracy: AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank),
+            max_latency_ms: None,
+        },
+        predictability: Predictability::Predictable { known_at: None },
+        range_evaluation: None,
+    }]);
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let indexed: Vec<_> = roots.iter().cloned().enumerate().collect();
+    let run = run_stage1_to_stage3_with(
+        indexed,
+        &entries,
+        &data,
+        PlanningModels::builtin(),
+        Stage1ToStage3Search {
+            keep_every_candidate: true,
+            exhaustive: false,
+        },
+    )
+    .unwrap();
+    let selection = run.stage3_plan_selection.as_ref().unwrap();
+    assert!(selection.search.queries[0].discarded.is_empty());
+    assert!(selection
+        .rejected
+        .iter()
+        .any(|r| r.cause == RejectionCause::AccuracyTargetMissed));
+}
+
+/// A query none of whose own candidates the executor can run (the exact
+/// per-series `stddev_over_time` has no kernel and no summary alternative)
+/// leaves nothing to compose: the selection fails, and its rejections say
+/// which query and why, as the exhaustive search's do.
+#[test]
+fn a_query_with_no_valid_candidate_is_named_in_the_failure() {
+    let mut workload = random_workload(1);
+    workload.query_workload.repeating_queries = Some(vec![RepeatingEntry {
+        query: Query("stddev_over_time(m[5m])".into()),
+        demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+        requirements: QueryRequirements {
+            accuracy: AccuracyTarget::exact(),
+            max_latency_ms: None,
+        },
+        predictability: Predictability::Predictable { known_at: None },
+        range_evaluation: None,
+    }]);
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = assert_equivalent("stddev", &roots, &entries, &data, PlanningModels::builtin());
+    let Err(SelectionError::NoValidCandidate(rejected)) = &run.stage3_plan_selection else {
+        panic!("{:?}", run.stage3_plan_selection)
+    };
+    assert!(rejected.iter().any(|r| r.id == "q1"
+        && r.cause == RejectionCause::PerEntityAggregateNotExecutable
+        && r.reason.starts_with("q1: ")));
+}
+
+/// With a measured cost table, the formulas are calibrated by one factor
+/// fitted over every candidate the exhaustive search prices: the default
+/// search fits it over the same candidates, the discarded ones included,
+/// and selects the exhaustive search's plan.
+#[test]
+fn a_calibrated_cost_model_selects_the_exhaustive_plan() {
+    use asap_plan_selection::{MeasuredOperationCosts, OperatorCost, OperatorKind};
+    let mut settings = PlanSelectionSettings::default();
+    // Scans are priced from the table; every other node is calibrated by
+    // the factor fitted over the scans.
+    settings.measured_operation_costs = MeasuredOperationCosts {
+        operators: vec![OperatorCost {
+            operator: OperatorKind::Scan,
+            phase: None,
+            sketch: None,
+            exact: None,
+            measure: None,
+            ns_per_unit: 300.0,
+            ns_per_invocation: 0.0,
+            memory_bytes_per_state: None,
+        }],
+        ..MeasuredOperationCosts::default()
+    };
+    let mut searched = 0;
+    for seed in 1..=30u64 {
+        let workload = random_workload(seed);
+        let roots = lower_promql_roots(&workload).unwrap();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                roots.iter().cloned().enumerate().collect(),
+            )
+            .unwrap();
+        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
+            continue;
+        }
+        searched += 1;
+        assert_equivalent_under(
+            &format!("seed {seed}"),
+            &workload,
+            &roots,
+            &[settings.clone()],
+        );
+    }
+    assert!(
+        searched >= 10,
+        "only {searched} workloads were small enough"
+    );
+}

@@ -161,7 +161,7 @@ async fn facade_plans_match_run_stage1_to_stage3() {
     let selected = run.selected().expect("the selected candidate is listed");
 
     assert!(
-        run.stage2_physical_asap_optimization.len() > 1,
+        selection.search.candidates_checked > 1,
         "the stages chose among candidates"
     );
     assert_eq!(output.selection.as_ref(), Some(selection));
