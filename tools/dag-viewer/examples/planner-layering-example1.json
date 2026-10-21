@@ -24000,6 +24000,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -24024,6 +24032,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -25589,6 +25603,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -25613,6 +25635,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -27041,6 +27069,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -27065,6 +27101,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -28744,6 +28786,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -28768,6 +28818,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -30449,6 +30505,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -30473,6 +30537,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -32026,6 +32096,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -32050,6 +32128,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -33731,6 +33815,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -33755,6 +33847,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -35434,6 +35532,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -35458,6 +35564,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -37139,6 +37251,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -37163,6 +37283,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -38716,6 +38842,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -38740,6 +38874,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -40421,6 +40561,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -40445,6 +40593,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -42112,6 +42266,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -42136,6 +42298,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -43805,6 +43973,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -43829,6 +44005,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -45498,6 +45680,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -45522,6 +45712,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -47193,6 +47389,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -47217,6 +47421,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -48758,6 +48968,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -48782,6 +49000,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -50451,6 +50675,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -50475,6 +50707,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -52144,6 +52382,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -52168,6 +52414,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],
@@ -53713,6 +53965,14 @@
                     "name": "topk_10",
                     "nullable": false,
                     "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
                   }
                 ],
                 "time_index": null,
@@ -53737,6 +53997,12 @@
                         "alias": "topk_10",
                         "expr": {
                           "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "$promql_series_identity",
+                        "expr": {
+                          "Column": 3
                         }
                       }
                     ],

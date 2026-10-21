@@ -1099,3 +1099,121 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
         );
     }
 }
+
+/// PromQL `topk` returns whole input series: `topk by (region) (2,
+/// sum_over_time(data[1m]))` answers, per region, the two series with the
+/// largest sums, each with its own full label set (region, service and
+/// instance; `sum_over_time` drops the metric name), not only `region`.
+/// Series `e1`..`e3` are in `east` with sums 6, 60 and 30; `w1`, `w2` in
+/// `west` with sums 9 and 3.
+#[tokio::test]
+async fn topk_answers_carry_the_chosen_series_labels() {
+    let workload: PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "topk by (region) (2, sum_over_time(data[1m]))",
+              "demand": {"fixed_interval": 60000},
+              "requirements": {},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 0.5}},
+              "sources": {"data": {"series_count": 5, "sample_interval": 10000}}}}"#,
+    )
+    .unwrap();
+    let plan_json = plan_json_for(workload, &DeploymentCapabilities::default()).await;
+    let samples = topk_samples();
+    let run = run_data_plane(
+        &plan_json,
+        &samples,
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_full_series_answers(&run, 4);
+    let labels = |instance: &str, region: &str, service: &str| {
+        BTreeMap::from([
+            ("instance".to_string(), instance.to_string()),
+            ("region".to_string(), region.to_string()),
+            ("service".to_string(), service.to_string()),
+        ])
+    };
+    let mut answered = run.answers_per_query[0].clone();
+    answered.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut expected = vec![
+        (labels("e2", "east", "web"), 60.0),
+        (labels("e3", "east", "db"), 30.0),
+        (labels("w1", "west", "api"), 9.0),
+        (labels("w2", "west", "web"), 3.0),
+    ];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(answered.len(), expected.len(), "{answered:?}");
+    for ((labels, value), (want_labels, want)) in answered.iter().zip(&expected) {
+        assert_eq!(labels, want_labels);
+        assert!((value - want).abs() < 1e-9, "{labels:?}: {value}");
+    }
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// Samples of `data` for `topk_answers_carry_the_chosen_series_labels`:
+/// three per series inside the last minute, each a third of its sum.
+fn topk_samples() -> Vec<Sample> {
+    let mut samples = Vec::new();
+    for (instance, region, service, sum) in [
+        ("e1", "east", "api", 6.0),
+        ("e2", "east", "web", 60.0),
+        ("e3", "east", "db", 30.0),
+        ("w1", "west", "api", 9.0),
+        ("w2", "west", "web", 3.0),
+    ] {
+        // In time order, as a counter's samples arrive.
+        for step in (1..=3).rev() {
+            let mut sample = sample("data", instance, EVALUATION_MS - step * 15_000, sum / 3.0);
+            sample.labels.insert("region".into(), region.into());
+            sample.labels.insert("service".into(), service.into());
+            samples.push(sample);
+        }
+    }
+    samples
+}
+
+/// The first query's `expected` answers, each a whole input series (it
+/// carries its `instance`), and the same as the query-time reference's.
+fn assert_full_series_answers(run: &DataPlaneRun, expected: usize) {
+    let answered = &run.answers_per_query[0];
+    assert_eq!(answered.len(), expected, "{answered:?}");
+    for (labels, _) in answered {
+        assert!(labels.contains_key("instance"), "{labels:?}");
+        assert!(labels.contains_key("service"), "{labels:?}");
+    }
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// Every top-k and bottom-k form, grouped or not, over sums, counts and
+/// rates, answers whole input series: `topk(2, ...)` the two of five,
+/// `by (region)` per region, `bottomk` likewise.
+#[tokio::test]
+async fn every_topk_form_answers_whole_series() {
+    for (query, expected) in [
+        ("topk(2, sum_over_time(data[1m]))", 2),
+        ("topk by (region) (1, count_over_time(data[1m]))", 2),
+        ("topk by (region) (1, rate(data[1m]))", 2),
+        ("bottomk by (region) (1, sum_over_time(data[1m]))", 2),
+        ("bottomk(3, sum_over_time(data[1m]))", 3),
+    ] {
+        let workload: PlanningWorkload = serde_json::from_str(&format!(
+            r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
+                  "query": {query:?},
+                  "demand": {{"fixed_interval": 60000}},
+                  "requirements": {{}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+                "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 0.5}}}},
+                  "sources": {{"data": {{"series_count": 5, "sample_interval": 10000}}}}}}}}"#
+        ))
+        .unwrap();
+        let plan_json = plan_json_for(workload, &DeploymentCapabilities::default()).await;
+        let run = run_data_plane(
+            &plan_json,
+            &topk_samples(),
+            EVALUATION_MS,
+            &mut SummaryStore::new(),
+        );
+        assert_full_series_answers(&run, expected);
+    }
+}

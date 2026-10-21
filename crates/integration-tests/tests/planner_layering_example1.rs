@@ -411,7 +411,8 @@ fn stage2_physical_asap_optimization_exact_topk_is_sort_then_limit() {
 }
 
 /// Exact Q2 sorts each job's series by the ranked value, descending, and a
-/// `Project` over the limit restores the logical `[job, topk_10]` columns.
+/// `Project` over the limit restores the logical `[job, topk_10]` columns,
+/// then keeps each chosen series' identity (its full label set).
 #[test]
 fn stage2_physical_asap_optimization_exact_topk_returns_job_and_topk_10() {
     let run = pipeline();
@@ -420,7 +421,12 @@ fn stage2_physical_asap_optimization_exact_topk_returns_job_and_topk_10() {
         panic!("{}: Q2 is an operator root", p.id)
     };
     let names: Vec<_> = root.schema.fields.iter().map(|f| f.name.as_str()).collect();
-    assert_eq!(names, ["job", "topk_10"], "{}", p.id);
+    assert_eq!(
+        names,
+        ["job", "topk_10", "$promql_series_identity"],
+        "{}",
+        p.id
+    );
     let NonASAPOp::Project { child: limit, .. } = root.expect_non_asap() else {
         panic!("{}: Q2's root is a Project", p.id)
     };
