@@ -1458,9 +1458,16 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
         std::process::id()
     ));
     std::fs::write(&path, QUANTILE_BY_WORKLOAD).unwrap();
-    let document = document_of(&["--workload", path.to_str().unwrap(), "--exhaustive"]);
+    // Guarantees enforced, so accepted plans passed the guarantee check.
+    let document = document_of(&[
+        "--workload",
+        path.to_str().unwrap(),
+        "--exhaustive",
+        "--enforce-accuracy-guarantees",
+    ]);
     std::fs::remove_file(path).unwrap();
     let selection = &document["stage3_plan_selection"];
+    assert_eq!(document["accuracy_guarantees"], "enforced");
     let by_cause = selection["rejected_by_cause"].as_object().unwrap();
     assert!(
         !by_cause.contains_key("executor_cannot_compile"),
