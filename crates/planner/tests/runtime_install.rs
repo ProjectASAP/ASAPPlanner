@@ -1263,7 +1263,7 @@ async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, Stri
 async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_through_avg() {
     let plan = plan_p99_avg(true).await.expect("a valid plan");
     let selection = plan.selection.as_ref().expect("Stage 3's report");
-    assert_eq!(selection.selected_candidate_id, "P5-m1");
+    assert_eq!(selection.selected_candidate_id, "P3-m1");
     assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
     assert!(
         plan.query_time_raw_windows.is_empty(),

@@ -124,8 +124,11 @@ mod relative_time_bounds {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::ops::Bound;
 
+    /// A relative time window, `(lower, upper)`.
+    type Window = (Bound<i64>, Bound<i64>);
+
     pub(super) fn serialize<S: Serializer>(
-        window: &Option<(Bound<i64>, Bound<i64>)>,
+        window: &Option<Window>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         window
@@ -136,7 +139,7 @@ mod relative_time_bounds {
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<Option<(Bound<i64>, Bound<i64>)>, D::Error> {
+    ) -> Result<Option<Window>, D::Error> {
         let window = Option::<(WireBound<i64>, WireBound<i64>)>::deserialize(deserializer)?;
         Ok(window.map(|(lower, upper)| (lower.into(), upper.into())))
     }

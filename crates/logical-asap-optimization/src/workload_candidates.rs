@@ -459,7 +459,7 @@ mod tests {
     /// length 0 skips every choice.
     #[test]
     fn skipping_enumeration_drops_only_the_invalid_prefixes() {
-        let queries = vec![
+        let queries = [
             "sum by (job) (sum_over_time(m[5m]))".to_string(),
             "quantile_over_time(0.99, n[5m])".to_string(),
         ];
