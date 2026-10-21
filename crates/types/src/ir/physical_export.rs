@@ -255,10 +255,14 @@ impl PhysicalASAPDAG {
         Ok(compile_physical_asap_workload(&timed)?)
     }
 
-    /// The IR this DAG exports, one root per query in batch order, every
-    /// node untimed and `NotMaterialized`: the inverse of
-    /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
-    fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
+    /// Every node of this DAG as IR, by node id, untimed and
+    /// `NotMaterialized` with its exported guarantee: what a caller derives
+    /// IR properties of a plan file's node from, such as its
+    /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
+    /// Shared inputs stay shared. Validates the DAG first.
+    pub fn operator_nodes(
+        &self,
+    ) -> Result<HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>, PhysicalASAPDAGValidationError> {
         self.validate()?;
         let by_id: HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode> =
             self.nodes.iter().map(|node| (node.id, node)).collect();
@@ -284,6 +288,14 @@ impl PhysicalASAPDAG {
                 rebuilt.insert(id, Rc::new(restored));
             }
         }
+        Ok(rebuilt)
+    }
+
+    /// The IR this DAG exports, one root per query in batch order, every
+    /// node untimed and `NotMaterialized`: the inverse of
+    /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
+    fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
+        let rebuilt = self.operator_nodes()?;
         let mut operator_roots = self.roots.iter();
         let mut scalar_roots = self.scalar_roots.iter().peekable();
         let mut roots = Vec::with_capacity(self.roots.len() + self.scalar_roots.len());

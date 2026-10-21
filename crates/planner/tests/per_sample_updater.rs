@@ -52,9 +52,13 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
     let output = plan
         .stored_outputs
         .iter()
-        .max_by_key(|output| output.pane.bounds_ms(EVALUATION_MS).1)
+        .max_by_key(|output| {
+            output.inputs.raw_sample_windows[0]
+                .bounds_ms(EVALUATION_MS)
+                .1
+        })
         .unwrap();
-    let (start_ms, end_ms) = output.pane.bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = output.inputs.raw_sample_windows[0].bounds_ms(EVALUATION_MS);
     // Five one-minute panes, the newest (59 min, 60 min].
     assert_eq!(plan.stored_outputs.len(), 5);
     assert_eq!((start_ms, end_ms), (3_540_000, 3_600_000));
@@ -107,9 +111,9 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
         .collect();
 
     // The executor's pane build: the pane's input batch through the plan.
-    let selector = RawSampleSelector::new(dag, &output.pane).unwrap();
+    let selector = RawSampleSelector::new(dag, &output.inputs.raw_sample_windows[0]).unwrap();
     let input = selector.window_batch(end_ms, &samples).unwrap();
-    let window = output.pane.time_range_node_id as u64;
+    let window = output.inputs.raw_sample_windows[0].time_range_node_id as u64;
     let compiled = compile(
         dag,
         BTreeMap::from([(window, InputContract::bounded(input.schema().clone()))]),
@@ -305,7 +309,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     let mut panes = BTreeMap::new();
     for output in &plan.stored_outputs {
         // The pane's window, `(start_ms, end_ms]`, at this evaluation.
-        let (start_ms, end_ms) = output.pane.bounds_ms(EVALUATION_MS);
+        let (start_ms, end_ms) = output.inputs.raw_sample_windows[0].bounds_ms(EVALUATION_MS);
         // The stored node's family and output schema, from the plan.
         let node = dag.nodes.iter().find(|n| n.id == output.node_id).unwrap();
         let mut id = output.node_id;

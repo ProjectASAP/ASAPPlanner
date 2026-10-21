@@ -4,13 +4,37 @@
 //!
 //! The runtime writes the returned [`InstallablePlan`] as its plan file and
 //! executes its DAG with the executor, as given (#509 Assumption 8). It
-//! needs three things from it: the DAG to install (`dag`), the outputs to
+//! needs three things from it: the DAG to install (`dag`), the summaries to
 //! store (`stored_outputs`), and where raw samples go (each stored output's
-//! `pane` and `query_time_raw_windows`, fed with
+//! `inputs.raw_sample_windows` and `query_time_raw_windows`, fed with
 //! `asap_executor::RawSampleSelector`). How the Planner represents the
 //! plan internally (e.g. a tumbling-pane chain, which the stage export keeps
 //! for costing and display) is not the runtime's concern: the installable
 //! DAG has every chain expanded into the panes the executor runs.
+//!
+//! ## Building a stored output
+//!
+//! `stored_outputs` is in dependency order: every stored output a build
+//! reads is listed before it. A runtime builds an output once all of its
+//! inputs are complete: each raw-sample window's samples have arrived
+//! (sealed) and each stored input is built. It compiles the DAG with the
+//! executor for that output's node, with each input bound as a source: a
+//! raw-sample window at its `time_range_node_id` (the rows
+//! `RawSampleSelector::window_batch` returns) and a stored input at its own
+//! node id (its stored state). It runs the build in an ingestion run
+//! (`StoredOutputBuild::IngestionRun`) or in the query run of the
+//! evaluation that first needs it (`StoredOutputBuild::QueryRun`), stores
+//! the result, and binds it the same way wherever the DAG reads that node.
+//! A query run binds the stored outputs it reaches from the queries' roots
+//! without passing another stored output; an output only other stored
+//! outputs read is read through them.
+//!
+//! Each output's `coverage` says what the stored state is: a stable id of
+//! its definition (what it computes) and its selection (which rows went in,
+//! with time relative to the evaluation time). Two stored outputs with the
+//! same definition id and the same concrete selection (relative time made
+//! absolute at an evaluation) hold the same state, so a runtime may store
+//! it once.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -23,6 +47,7 @@ use asap_types::ir::physical_export::{
     PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId, RawSampleWindow,
     ReferencePlanError,
 };
+use asap_types::ir::properties::summary_coverage::{SelectionBox, SummaryCoverage};
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
@@ -48,12 +73,12 @@ pub struct InstallablePlan {
     pub queries: Vec<InstalledQuery>,
     /// Every node whose output the runtime stores across evaluations (its
     /// node's materialization is `MatAtIngestion` or
-    /// `MatAtQueryKeptAcrossEvaluations`), in node order, with the pane of
-    /// raw samples each one is built from.
+    /// `MatAtQueryKeptAcrossEvaluations`), in dependency order (each after
+    /// the stored outputs it is built from), with its coverage and inputs.
     pub stored_outputs: Vec<StoredOutput>,
-    /// Every window of raw samples read at query time other than a stored
-    /// output's pane, in node order: the runtime feeds each its samples
-    /// when a query evaluates.
+    /// Every window of raw samples read at query time other than one a
+    /// stored output's build reads, in node order: the runtime feeds each
+    /// its samples when a query evaluates.
     pub query_time_raw_windows: Vec<RawSampleWindow>,
     /// Stage 3's record of the selected plan, for reporting only; `None` for
     /// [`InstallablePlan::query_time_reference`] and for a pass
@@ -71,29 +96,65 @@ pub struct InstalledQuery {
     pub root_node_id: PhysicalASAPNodeId,
 }
 
-/// One node of the installable DAG whose output the runtime stores, and the
-/// pane of raw samples it is built from.
+/// One node of the installable DAG whose output (a summary state) the
+/// runtime stores: what it is, what it is built from, when and for how
+/// long.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredOutput {
     /// The node whose output is stored.
     pub node_id: PhysicalASAPNodeId,
-    /// Which run builds it: an ingestion run over its pane's window, or
-    /// the query run of the evaluation that first reads it.
+    /// Which run builds it: an ingestion run once its inputs are complete,
+    /// or the query run of the evaluation that first reads it.
     pub built_at: StoredOutputBuild,
-    /// The pane of raw samples it is built from.
-    pub pane: RawSampleWindow,
+    /// What the stored state is: the node's summary coverage.
+    pub coverage: StoredCoverage,
+    /// What its build reads.
+    pub inputs: StoredOutputInputs,
     /// How far back from the newest evaluation time this node's output
-    /// must stay available once built (an output whose pane starts
-    /// earlier is no longer read): Stage 3's retention of its chain
-    /// (`Selection::pane_retention_ms`: its input's offset plus its window
-    /// plus the longest range-evaluation span of its readers); or, for an
-    /// output Stage 3 records none for, how far back its pane reaches
-    /// (`pane.end_offset_ms + pane.width_ms`). This is this node's own
-    /// requirement: a runtime that stores identical outputs of several
-    /// nodes once must keep them for the largest requirement among those
-    /// nodes, which is the runtime's choice.
+    /// must stay available once built. At least how far back the data it
+    /// summarizes reaches (its raw-sample windows', and its stored inputs',
+    /// `end_offset_ms + width_ms`). A pane of a tumbling-pane chain takes
+    /// Stage 3's retention of its chain (`Selection::pane_retention_ms`: its
+    /// offset plus its window plus the longest range-evaluation span of its
+    /// readers). An output built from stored outputs adds the longest
+    /// range-evaluation span of the queries that read it. An input is kept
+    /// at least as long as every output built from it needs it: as long as
+    /// that output's own retention when it is built in a query run (a range
+    /// request may build it for its oldest step), else as far back as that
+    /// output's data reaches. This is this node's own requirement: a
+    /// runtime that stores identical outputs of several nodes once must keep
+    /// them for the largest requirement among those nodes, which is the
+    /// runtime's choice.
     pub retention_ms: u64,
+}
+
+/// A stored output's summary coverage
+/// ([`SummaryCoverage`], `docs/design_docs/proposals/asap-primitive-schema.md`
+/// §4.2): what it computes and which rows went in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredCoverage {
+    /// [`SummaryCoverage::definition_id`]: equal on every node, plan and
+    /// process that computes the same thing, whatever its selection; a
+    /// rollup to a coarser grouping computes something else and has its
+    /// own.
+    pub definition_id: String,
+    /// The rows that went in: a union of boxes of value sets, value ranges
+    /// and time relative to the evaluation time. A merge's is the union of
+    /// its inputs'.
+    pub selection: Vec<SelectionBox>,
+}
+
+/// What a stored output's build reads, each bound as a source of the build.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredOutputInputs {
+    /// The windows of raw samples it reads directly, in node order.
+    pub raw_sample_windows: Vec<RawSampleWindow>,
+    /// The stored outputs it reads, by node id, in node order; each is
+    /// listed before it in `stored_outputs`.
+    pub stored_outputs: Vec<PhysicalASAPNodeId>,
 }
 
 /// Which run builds a stored output.
@@ -101,15 +162,17 @@ pub struct StoredOutput {
 #[serde(rename_all = "snake_case")]
 pub enum StoredOutputBuild {
     /// Built at ingestion time (`MatAtIngestion`): the runtime runs the
-    /// node in an ingestion run over its pane's window once the pane's
-    /// samples have arrived, and stores the result.
+    /// node in an ingestion run once its inputs are complete (its windows'
+    /// samples have arrived and its stored inputs are built), and stores
+    /// the result.
     IngestionRun,
     /// Built at query time and kept across evaluations
     /// (`MatAtQueryKeptAcrossEvaluations`): when an evaluation needs this
-    /// output for a pane it has not been built for yet, the runtime runs
-    /// the node in a query run over its pane's samples, keeps the result,
-    /// and binds it like an output built at ingestion. Its `TimeRange` is fed only through this build, so
-    /// it is not listed in `query_time_raw_windows`.
+    /// output for a selection it has not been built for yet, the runtime
+    /// runs the node in a query run over its inputs, keeps the result, and
+    /// binds it like an output built at ingestion. Its raw-sample windows
+    /// are fed only through this build, so they are not listed in
+    /// `query_time_raw_windows`.
     QueryRun,
 }
 
@@ -154,18 +217,34 @@ pub enum InstallablePlanError {
     #[error("stored_outputs or query_time_raw_windows do not match the DAG")]
     WindowsOrStoredOutputsDoNotMatchDag,
     /// Bad input (a plan file): stored output `node_id` is kept for less
-    /// than its pane reaches back, so a later evaluation would miss it.
-    #[error("stored output {node_id} is kept for less than its pane reaches back")]
+    /// than the data it summarizes reaches back, so a later evaluation
+    /// would miss it.
+    #[error("stored output {node_id} is kept for less than its data reaches back")]
     StoredOutputRetentionTooShort { node_id: PhysicalASAPNodeId },
     /// Internal bug: Stage 3 records a pane retention for node `node_id`
     /// of the selected plan, which is not one of its pane chains.
     #[error("pane retention for node {node_id}, which is not a pane chain of the selected plan")]
     PaneRetentionOfUnknownChain { node_id: PhysicalASAPNodeId },
+    /// Unsatisfiable request: the plan stores node `node_id`, whose build
+    /// reads a source `Scan` other than through a raw-sample `TimeRange`
+    /// (e.g. a whole SQL table), which a runtime cannot feed it.
+    #[error("stored output {node_id} reads a source outside a raw-sample window")]
+    StoredOutputReadsUnwindowedSource { node_id: PhysicalASAPNodeId },
     /// Unsatisfiable request: the plan stores node `node_id`, which is not
-    /// built from one pane of raw samples (`TimeRange <- TimeShift* <-
-    /// Scan` below single-input operators), so a runtime cannot build it.
-    #[error("stored output {node_id} is not built from one pane of raw samples")]
-    StoredOutputWithoutPane { node_id: PhysicalASAPNodeId },
+    /// a summary state with a coverage (`reason`), so a runtime cannot say
+    /// what it stores.
+    #[error("stored output {node_id} has no summary coverage: {reason}")]
+    StoredOutputWithoutCoverage {
+        node_id: PhysicalASAPNodeId,
+        reason: String,
+    },
+    /// Unsatisfiable request: the executor cannot build stored output
+    /// `node_id` from its inputs (`reason`).
+    #[error("the executor cannot build stored output {node_id} from its inputs: {reason}")]
+    StoredOutputNotExecutable {
+        node_id: PhysicalASAPNodeId,
+        reason: String,
+    },
     /// Unsatisfiable request: the plan reads raw samples through
     /// `TimeRange` `time_range_node_id` in a shape whose window is not a
     /// fixed offset from the evaluation time (`reason`: a subquery or a
@@ -196,12 +275,14 @@ impl From<ReferencePlanError> for InstallablePlanError {
 /// retention stay the caller's.
 pub async fn plan_installable(input: UserInput<'_>) -> Result<InstallablePlan, PlanError> {
     let capabilities = executor_summaries_when_unrestricted(input.models.deployment_capabilities);
-    let query_texts: Vec<String> = input
-        .workload
-        .query_workload
-        .entries()
-        .map(|entry| entry.query.0)
+    let entries: Vec<_> = input.workload.query_workload.entries().collect();
+    // Each query's longest range-evaluation span, which the outputs it
+    // reads must stay available for.
+    let range_spans_ms: Vec<u64> = entries
+        .iter()
+        .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
         .collect();
+    let query_texts: Vec<String> = entries.into_iter().map(|entry| entry.query.0).collect();
     let input = UserInput {
         workload: input.workload,
         frontend_specific: input.frontend_specific,
@@ -217,11 +298,13 @@ pub async fn plan_installable(input: UserInput<'_>) -> Result<InstallablePlan, P
             &MaterializationAssignment::default(),
         )?;
         let expanded = pane_retention_of_expanded_panes(&timed, output.selection.as_ref())?;
+        let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
         InstallablePlan::of_dag(
             expanded.dag,
             query_texts,
             selection,
             &expanded.retention_ms_by_node,
+            &reader_span_ms_by_node,
         )
     };
     installable().map_err(PlanError::Installable)
@@ -234,9 +317,10 @@ impl InstallablePlan {
         query_texts: Vec<String>,
         selection: Option<SelectedPlanReport>,
         retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+        reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     ) -> Result<Self, InstallablePlanError> {
         let (stored_outputs, query_time_raw_windows) =
-            runtime_inputs_of(&dag, retention_ms_by_node)?;
+            runtime_inputs_of(&dag, retention_ms_by_node, reader_span_ms_by_node)?;
         let plan = InstallablePlan {
             queries: queries_bound_to_roots(&dag, query_texts)?,
             stored_outputs,
@@ -260,24 +344,26 @@ impl InstallablePlan {
                 roots: dag.roots.len(),
             });
         }
-        // Retention comes from Stage 3, not from the DAG: take the plan's
-        // own, and check only that each pane is kept while it is read.
-        let retention_ms_by_node = self
+        // Retention comes from Stage 3 and the workload, not from the DAG:
+        // take the plan's own, and check only that each output is kept while
+        // its data is read.
+        let retention_ms_by_node: HashMap<_, _> = self
             .stored_outputs
             .iter()
             .map(|output| (output.node_id, output.retention_ms))
             .collect();
-        if let Some(short) = self
-            .stored_outputs
-            .iter()
-            .find(|output| output.retention_ms < output.pane.reach_ms())
-        {
-            return Err(InstallablePlanError::StoredOutputRetentionTooShort {
-                node_id: short.node_id,
-            });
+        let mut reach_ms_by_node = HashMap::new();
+        for output in &self.stored_outputs {
+            let reach_ms = reach_ms_of(&output.inputs, &reach_ms_by_node);
+            if output.retention_ms < reach_ms {
+                return Err(InstallablePlanError::StoredOutputRetentionTooShort {
+                    node_id: output.node_id,
+                });
+            }
+            reach_ms_by_node.insert(output.node_id, reach_ms);
         }
         let (stored_outputs, query_time_raw_windows) =
-            runtime_inputs_of(dag, &retention_ms_by_node)?;
+            runtime_inputs_of(dag, &retention_ms_by_node, &HashMap::new())?;
         if stored_outputs != self.stored_outputs
             || query_time_raw_windows != self.query_time_raw_windows
         {
@@ -295,7 +381,13 @@ impl InstallablePlan {
     pub fn query_time_reference(&self) -> Result<InstallablePlan, InstallablePlanError> {
         self.validate()?;
         let dag = self.dag.dag.with_every_node_at_query_time()?;
-        InstallablePlan::of_dag(dag, self.query_texts(), None, &HashMap::new())
+        InstallablePlan::of_dag(
+            dag,
+            self.query_texts(),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
     }
 
     fn query_texts(&self) -> Vec<String> {
@@ -347,6 +439,8 @@ fn queries_bound_to_roots(
 struct IndexedDag<'a> {
     nodes: HashMap<PhysicalASAPNodeId, &'a PhysicalASAPDAGNode>,
     inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+    /// Every node after its inputs, from the DAG's node order.
+    children_first: Vec<PhysicalASAPNodeId>,
     /// The nodes whose rows come from raw samples: a `Scan` is reachable
     /// below them without passing a `TimeRange`.
     reading_raw_samples: HashSet<PhysicalASAPNodeId>,
@@ -415,6 +509,7 @@ impl<'a> IndexedDag<'a> {
         IndexedDag {
             nodes,
             inputs,
+            children_first,
             reading_raw_samples,
             re_timed_from_above,
         }
@@ -487,75 +582,325 @@ impl<'a> IndexedDag<'a> {
         }
     }
 
-    /// The pane of raw samples stored output `node` is built from: follow single inputs
-    /// down to a `TimeRange`, then [`Self::window_at`] it.
-    fn pane_of(&self, node: PhysicalASAPNodeId) -> Result<RawSampleWindow, InstallablePlanError> {
-        let without_pane = || InstallablePlanError::StoredOutputWithoutPane { node_id: node };
-        let mut current = node;
-        loop {
-            match self.relational(current) {
-                Some(NonASAPOp::TimeRange { .. }) => return self.window_at(current),
-                Some(NonASAPOp::TimeShift { .. } | NonASAPOp::Scan { .. }) => {
-                    return Err(without_pane())
+    /// What stored output `node`'s build reads: below it, each stored node
+    /// (`stored`) and each raw-sample `TimeRange` it reaches without
+    /// passing another of them, in node order.
+    fn inputs_of_stored(
+        &self,
+        node: PhysicalASAPNodeId,
+        stored: &HashSet<PhysicalASAPNodeId>,
+    ) -> Result<StoredOutputInputs, InstallablePlanError> {
+        let mut raw_ranges = Vec::new();
+        let mut stored_inputs = Vec::new();
+        let mut seen = HashSet::new();
+        let mut pending: Vec<PhysicalASAPNodeId> = self
+            .inputs
+            .get(&node)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if stored.contains(&id) {
+                stored_inputs.push(id);
+                continue;
+            }
+            match self.relational(id) {
+                Some(NonASAPOp::TimeRange { .. }) if self.reading_raw_samples.contains(&id) => {
+                    raw_ranges.push(id);
+                    continue;
                 }
-                _ => current = self.only_input(current).ok_or_else(without_pane)?,
+                Some(NonASAPOp::Scan { .. }) => {
+                    return Err(InstallablePlanError::StoredOutputReadsUnwindowedSource {
+                        node_id: node,
+                    })
+                }
+                _ => pending.extend(self.inputs.get(&id).into_iter().flatten().copied()),
             }
         }
+        raw_ranges.sort_unstable();
+        stored_inputs.sort_unstable();
+        Ok(StoredOutputInputs {
+            raw_sample_windows: raw_ranges
+                .into_iter()
+                .map(|range| self.window_at(range))
+                .collect::<Result<_, _>>()?,
+            stored_outputs: stored_inputs,
+        })
     }
 }
 
-/// Every node of `dag` stored across evaluations with its pane, in node
-/// order, and every window of raw samples read at query time, in node
-/// order; an error for a stored output without a pane or a raw-sample
+/// How far back from the evaluation time the data an output built from
+/// `inputs` summarizes reaches: the farthest of its raw-sample windows and
+/// of its stored inputs (`reach_ms_by_node`, each already computed).
+fn reach_ms_of(
+    inputs: &StoredOutputInputs,
+    reach_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+) -> u64 {
+    let windows = inputs
+        .raw_sample_windows
+        .iter()
+        .map(RawSampleWindow::reach_ms);
+    let stored = inputs
+        .stored_outputs
+        .iter()
+        .map(|id| reach_ms_by_node.get(id).copied().unwrap_or(0));
+    windows.chain(stored).max().unwrap_or(0)
+}
+
+/// For every node of `dag`, the longest range-evaluation span among the
+/// queries that read it (`range_spans_ms[i]` for root `i`); a node no
+/// range-evaluated query reads is absent. One walk per root:
+/// O(roots · (nodes + edges)).
+fn reader_span_ms_by_node(
+    dag: &PhysicalASAPDAG,
+    range_spans_ms: &[u64],
+) -> HashMap<PhysicalASAPNodeId, u64> {
+    let mut inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    for edge in &dag.edges {
+        inputs.entry(edge.consumer).or_default().push(edge.producer);
+    }
+    let mut spans = HashMap::new();
+    for (&root, &span_ms) in dag.roots.iter().zip(range_spans_ms) {
+        if span_ms == 0 {
+            continue;
+        }
+        let mut seen = HashSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if seen.insert(id) {
+                let span = spans.entry(id).or_insert(0);
+                *span = (*span).max(span_ms);
+                pending.extend(inputs.get(&id).into_iter().flatten().copied());
+            }
+        }
+    }
+    spans
+}
+
+/// Every node of `dag` stored across evaluations, in dependency order,
+/// with its coverage, inputs and retention, and every window of raw samples
+/// read at query time other than through a stored output's build, in node
+/// order. `retention_ms_by_node` gives a node's retention (Stage 3's for a
+/// pane, or a plan file's own); otherwise it is how far back its data
+/// reaches, plus, for an output built from stored outputs, its readers'
+/// longest range-evaluation span (`reader_span_ms_by_node`). Then each
+/// stored input is kept as long as the outputs built from it need. An
+/// error for a stored output the runtime cannot build, or a raw-sample
 /// window of an unsupported shape.
 fn runtime_inputs_of(
     dag: &PhysicalASAPDAG,
     retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+    reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
 ) -> Result<(Vec<StoredOutput>, Vec<RawSampleWindow>), InstallablePlanError> {
     let indexed = IndexedDag::new(dag);
-    let mut stored_outputs = Vec::new();
-    // Every raw-sample window with its timing, and the ranges of stored
-    // outputs' panes, which are fed through those outputs' builds.
-    let mut raw_windows = Vec::new();
-    let mut stored_pane_ranges = HashSet::new();
-    for node in &dag.nodes {
-        if matches!(
-            node.materialization,
-            Materialization::MatAtIngestion(_)
-                | Materialization::MatAtQueryKeptAcrossEvaluations(_)
-        ) {
-            let pane = indexed.pane_of(node.id)?;
-            stored_pane_ranges.insert(pane.time_range_node_id);
-            stored_outputs.push(StoredOutput {
-                node_id: node.id,
-                built_at: match node.materialization {
-                    Materialization::MatAtIngestion(_) => StoredOutputBuild::IngestionRun,
-                    _ => StoredOutputBuild::QueryRun,
-                },
-                retention_ms: retention_ms_by_node
-                    .get(&node.id)
-                    .copied()
-                    .unwrap_or_else(|| pane.reach_ms()),
-                pane,
-            });
+    let stored: HashSet<PhysicalASAPNodeId> = dag
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.materialization,
+                Materialization::MatAtIngestion(_)
+                    | Materialization::MatAtQueryKeptAcrossEvaluations(_)
+            )
+        })
+        .map(|node| node.id)
+        .collect();
+    // The IR of each node, which coverage is derived from.
+    let ir = if stored.is_empty() {
+        HashMap::new()
+    } else {
+        dag.operator_nodes()?
+    };
+    let mut stored_outputs: Vec<StoredOutput> = Vec::new();
+    let mut coverage_by_node: HashMap<PhysicalASAPNodeId, SummaryCoverage> = HashMap::new();
+    let mut position_of = HashMap::new();
+    let mut reach_ms_by_node = HashMap::new();
+    // The ranges of stored outputs' raw-sample windows, which are fed
+    // through those outputs' builds.
+    let mut stored_window_ranges = HashSet::new();
+    for &id in indexed
+        .children_first
+        .iter()
+        .filter(|id| stored.contains(id))
+    {
+        let node = indexed.nodes[&id];
+        let inputs = indexed.inputs_of_stored(id, &stored)?;
+        let coverage = coverage_of(id, &inputs, &ir, &coverage_by_node).map_err(|error| {
+            InstallablePlanError::StoredOutputWithoutCoverage {
+                node_id: id,
+                reason: error.to_string(),
+            }
+        })?;
+        coverage_by_node.insert(id, coverage.clone());
+        executor_builds(dag, id, &inputs, &indexed)?;
+        let reach_ms = reach_ms_of(&inputs, &reach_ms_by_node);
+        let span_ms = match inputs.stored_outputs.is_empty() {
+            true => 0,
+            false => reader_span_ms_by_node.get(&id).copied().unwrap_or(0),
+        };
+        stored_window_ranges.extend(
+            inputs
+                .raw_sample_windows
+                .iter()
+                .map(|window| window.time_range_node_id),
+        );
+        reach_ms_by_node.insert(id, reach_ms);
+        position_of.insert(id, stored_outputs.len());
+        stored_outputs.push(StoredOutput {
+            node_id: id,
+            built_at: match node.materialization {
+                Materialization::MatAtIngestion(_) => StoredOutputBuild::IngestionRun,
+                _ => StoredOutputBuild::QueryRun,
+            },
+            coverage: StoredCoverage {
+                definition_id: coverage.definition_id(),
+                selection: coverage.selection,
+            },
+            retention_ms: retention_ms_by_node
+                .get(&id)
+                .copied()
+                .unwrap_or(reach_ms + span_ms),
+            inputs,
+        });
+    }
+    // Outputs before their inputs: an input stays while every output built
+    // from it may still be built.
+    for index in (0..stored_outputs.len()).rev() {
+        let output = &stored_outputs[index];
+        let needed_ms = match output.built_at {
+            StoredOutputBuild::QueryRun => output.retention_ms,
+            StoredOutputBuild::IngestionRun => reach_ms_by_node[&output.node_id],
+        };
+        for input in output.inputs.stored_outputs.clone() {
+            let kept = &mut stored_outputs[position_of[&input]].retention_ms;
+            *kept = (*kept).max(needed_ms);
         }
+    }
+    let mut query_time_raw_windows = Vec::new();
+    for node in &dag.nodes {
         if matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. }))
             && indexed.reading_raw_samples.contains(&node.id)
         {
             // Every raw-sample window must be one the runtime can feed; a
-            // stored output's pane is fed through that output's build.
-            raw_windows.push((node.output_state.timing, indexed.window_at(node.id)?));
+            // stored output's window is fed through that output's build.
+            let window = indexed.window_at(node.id)?;
+            if node.output_state.timing == ExecutionTiming::QueryTime
+                && !stored_window_ranges.contains(&window.time_range_node_id)
+            {
+                query_time_raw_windows.push(window);
+            }
         }
     }
-    let query_time_raw_windows = raw_windows
-        .into_iter()
-        .filter(|(timing, window)| {
-            *timing == ExecutionTiming::QueryTime
-                && !stored_pane_ranges.contains(&window.time_range_node_id)
-        })
-        .map(|(_, window)| window)
-        .collect();
     Ok((stored_outputs, query_time_raw_windows))
+}
+
+/// The coverage of stored output `id` (IR `ir`), built from `inputs`.
+/// A merge's is the union of its inputs' selections under their shared
+/// definition ([`SummaryCoverage::derive`]). A summary built from exactly
+/// one stored output and nothing else, with no selection of its own (a
+/// rollup to a coarser grouping, or across series), takes that input's
+/// selection: its definition is its own sub-DAG with the input replaced by
+/// the input's definition, so the rollups of equal inputs share one
+/// definition. Anything else keeps its own derived coverage.
+fn coverage_of(
+    id: PhysicalASAPNodeId,
+    inputs: &StoredOutputInputs,
+    ir: &HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>,
+    coverage_by_node: &HashMap<PhysicalASAPNodeId, SummaryCoverage>,
+) -> Result<SummaryCoverage, asap_types::ir::properties::summary_coverage::CoverageError> {
+    let node = &ir[&id];
+    let own = SummaryCoverage::derive(node)?;
+    let [input] = inputs.stored_outputs.as_slice() else {
+        return Ok(own);
+    };
+    if !inputs.raw_sample_windows.is_empty()
+        || matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
+        || own.selection != [SelectionBox::default()]
+    {
+        return Ok(own);
+    }
+    let input_coverage = &coverage_by_node[input];
+    let over_definition = with_replaced(node, &ir[input], &input_coverage.definition);
+    Ok(SummaryCoverage {
+        definition: SummaryCoverage::derive(&over_definition)?.definition,
+        selection: input_coverage.selection.clone(),
+    })
+}
+
+/// `node` with every use of `old` (by address) replaced by `new`; nodes
+/// that do not reach `old` are shared, not copied.
+fn with_replaced(
+    node: &Rc<OperatorNode>,
+    old: &Rc<OperatorNode>,
+    new: &Rc<OperatorNode>,
+) -> Rc<OperatorNode> {
+    fn replace(
+        node: &Rc<OperatorNode>,
+        old: &Rc<OperatorNode>,
+        new: &Rc<OperatorNode>,
+        memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    ) -> Rc<OperatorNode> {
+        if Rc::ptr_eq(node, old) {
+            return Rc::clone(new);
+        }
+        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+            return Rc::clone(done);
+        }
+        let children = node.children();
+        let replaced: Vec<Rc<OperatorNode>> = children
+            .iter()
+            .map(|child| replace(child, old, new, memo))
+            .collect();
+        let result = if children
+            .iter()
+            .zip(&replaced)
+            .all(|(a, b)| Rc::ptr_eq(a, b))
+        {
+            Rc::clone(node)
+        } else {
+            let mut next = replaced.into_iter();
+            let mut copy = (**node).clone();
+            copy.operator = node
+                .operator
+                .map_children(|_| next.next().expect("one per child"));
+            Rc::new(copy)
+        };
+        memo.insert(Rc::as_ptr(node), Rc::clone(&result));
+        result
+    }
+    replace(node, old, new, &mut HashMap::new())
+}
+
+/// Whether the executor compiles stored output `node`'s build with its
+/// `inputs` bound as sources, as a runtime runs it; the executor's reason
+/// when it does not.
+fn executor_builds(
+    dag: &PhysicalASAPDAG,
+    node: PhysicalASAPNodeId,
+    inputs: &StoredOutputInputs,
+    indexed: &IndexedDag<'_>,
+) -> Result<(), InstallablePlanError> {
+    use asap_executor::physical_planner::{compile, InputContract};
+    let bound = inputs
+        .raw_sample_windows
+        .iter()
+        .map(|window| window.time_range_node_id)
+        .chain(inputs.stored_outputs.iter().copied())
+        .map(|id| {
+            let schema = std::sync::Arc::new(indexed.nodes[&id].output_schema.clone());
+            (id as u64, InputContract::bounded(schema))
+        })
+        .collect();
+    compile(dag, bound, &[node as u64])
+        .map(|_| ())
+        .map_err(|error| InstallablePlanError::StoredOutputNotExecutable {
+            node_id: node,
+            reason: error.to_string(),
+        })
 }
 
 /// The installable DAG of the timed selected plan, with each expanded
@@ -673,13 +1018,14 @@ mod tests {
             .unwrap();
             compile_physical_asap_dag(&timed).unwrap()
         };
-        match runtime_inputs_of(&export(shifted), &HashMap::new()) {
+        match runtime_inputs_of(&export(shifted), &HashMap::new(), &HashMap::new()) {
             Err(InstallablePlanError::UnsupportedRawSampleWindow { reason, .. }) => {
                 assert_eq!(reason, "a subquery or a TimeShift above the range")
             }
             other => panic!("{other:?}"),
         }
-        let (stored, windows) = runtime_inputs_of(&export(range), &HashMap::new()).unwrap();
+        let (stored, windows) =
+            runtime_inputs_of(&export(range), &HashMap::new(), &HashMap::new()).unwrap();
         assert!(stored.is_empty());
         assert_eq!(
             windows

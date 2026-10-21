@@ -783,3 +783,89 @@ fn design_doc_worked_example() {
         Some(NonASAPOp::Scan { predicates, .. }) if *predicates == vec![Predicate(doubled_above_10)]
     ));
 }
+
+/// The coverage of `node`, which must have one.
+fn coverage_of(
+    node: &OperatorNode,
+) -> asap_types::ir::properties::summary_coverage::SummaryCoverage {
+    node.coverage().expect("a summary state")
+}
+
+/// Equal definitions get equal ids whatever the node, its selection, timing
+/// or guarantee; a different computation (another metric, another column,
+/// another sketch) gets another id.
+#[test]
+fn equal_definitions_get_equal_ids() {
+    let id = |node: &OperatorNode| coverage_of(node).definition_id();
+    let us = latency_where(eq(REGION, "us"));
+    let eu = latency_where(eq(REGION, "eu"));
+    assert_eq!(id(&us), id(&eu));
+    let ingested = (*pane(0, vec![]))
+        .clone()
+        .with_timing(Some(ExecutionTiming::IngestionTime));
+    assert_eq!(id(&ingested), id(&pane(60_000, vec![])));
+    assert_eq!(id(&ingested).len(), 32);
+    let size = kll(filter(table(), eq(REGION, "eu")), "size");
+    assert_ne!(id(&size), id(&eu));
+    assert_ne!(id(&pane(0, vec![])), id(&increase_pane(0, vec![])));
+    assert_ne!(id(&pane(0, vec![])), id(&us));
+}
+
+/// Six 10-minute panes at offsets 0 to 50 minutes share one definition id,
+/// each with its own time selection `(-(i + 1) · 10m, -i · 10m]`; their
+/// merge has the same id and the hour as its selection.
+#[test]
+fn panes_of_an_hour_share_one_definition_with_distinct_times() {
+    let panes: Vec<Rc<OperatorNode>> = (0..6).map(|i| window(i * 600_000, 600_000)).collect();
+    let coverages: Vec<_> = panes.iter().map(|pane| coverage_of(pane)).collect();
+    for (i, coverage) in coverages.iter().enumerate() {
+        let i = i as i64;
+        assert_eq!(coverage.definition_id(), coverages[0].definition_id());
+        assert_eq!(
+            coverage.selection,
+            [SelectionBox {
+                relative_time: relative(-(i + 1) * 600_000, -i * 600_000),
+                ..SelectionBox::default()
+            }]
+        );
+    }
+    let hour = coverage_of(&merge(panes).unwrap());
+    assert_eq!(hour.definition_id(), coverages[0].definition_id());
+    assert_eq!(
+        hour.selection,
+        [SelectionBox {
+            relative_time: relative(-3_600_000, 0),
+            ..SelectionBox::default()
+        }]
+    );
+}
+
+/// A selection round-trips through JSON; columns are a list and bounds
+/// name their kind.
+#[test]
+fn selections_round_trip_through_json() {
+    let selection = SelectionBox {
+        columns: [
+            (column("region"), utf8(&["eu", "us"])),
+            (
+                column("latency"),
+                Constraint::Interval {
+                    lower: Bound::Unbounded,
+                    upper: Bound::Excluded(ScalarValue::Float64(100.0)),
+                },
+            ),
+        ]
+        .into(),
+        relative_time: relative(-120_000, -60_000),
+    };
+    let json = serde_json::to_value(&selection).unwrap();
+    assert_eq!(
+        json["relative_time"],
+        serde_json::json!([{"excluded": -120000}, {"included": -60000}])
+    );
+    assert_eq!(json["columns"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        serde_json::from_value::<SelectionBox>(json).unwrap(),
+        selection
+    );
+}
