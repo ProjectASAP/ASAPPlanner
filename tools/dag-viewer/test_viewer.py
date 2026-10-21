@@ -378,6 +378,47 @@ class ScalarQueryTests(unittest.TestCase):
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
 @unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
+class DefaultSearchTests(unittest.TestCase):
+    """stage_pipeline's default search (plan_installable's) keeps only the
+    selected candidate: the document is valid, the header names the search,
+    and the rejections of candidates it did not keep are listed, not
+    clickable."""
+
+    def setUp(self):
+        self.js = stages_js()
+        # Two queries over two metrics: two components, each searched alone;
+        # q2's approximate top-k has candidates that miss its target.
+        self.doc = stage_pipeline(
+            "--promql", "sum(rate(a[1m]))", "--promql", "topk(5, rate(b[1m]))",
+            "--max-error", "0.01", "--failure-probability", "0.001",
+        )
+
+    def test_document_is_valid_and_holds_the_selected_candidate(self):
+        self.assertEqual(self.doc["search"], "default")
+        self.assertEqual(self.js.call("validateStagePipeline", self.doc), [])
+        physical = self.doc["stage2_physical_asap_optimization"]["candidates"]
+        self.assertEqual([p["id"] for p in physical], [self.doc["stage3_plan_selection"]["selected"]])
+
+    def test_header_names_the_search_and_its_components(self):
+        text = self.js.call("searchText", self.doc)
+        self.assertTrue(text.startswith("default search · "), text)
+        self.assertIn("physical candidates checked", text)
+        self.assertIn("2 independent components searched separately", text)
+        self.assertTrue(self.js.call("searchText", example1()).startswith("exhaustive search · "))
+
+    def test_rejections_of_candidates_not_kept_are_rows_after_the_others(self):
+        doc = dict(self.doc)
+        doc["stage3_plan_selection"] = dict(doc["stage3_plan_selection"], search_rejected=[
+            {"id": "P7", "cause": "accuracy_target_missed", "reason": "q2: misses its target"},
+        ])
+        self.assertEqual(self.js.call("validateStagePipeline", doc), [])
+        rows = self.js.call("stageCandidateRows", doc)
+        self.assertEqual(rows[0]["status"], "selected")
+        self.assertEqual((rows[-1]["id"], rows[-1]["status"], rows[-1]["reason"]), ("P7", "not kept", "q2: misses its target"))
+
+
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+@unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
 class BinaryOperatorTests(unittest.TestCase):
     """A binary operator reads both operands (`lhs`, `rhs`): its node has an
     input edge from each in Stage 0, Stage 1 and Stage 2."""

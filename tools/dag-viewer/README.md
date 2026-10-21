@@ -1,7 +1,13 @@
 # ASAPPlanner Stage Viewer
 
 A browser view of what the planner does with one workload, read from an
-`asap-stage-pipeline/v1` document written by the `stage_pipeline` devtool:
+`asap-stage-pipeline/v1` document written by the `stage_pipeline` devtool.
+`stage_pipeline` plans with the default search, the one `plan_installable`
+runs: it keeps only the best candidate, so the document holds the selected
+plan, the rejections Stage 3 recorded (the first of each cause) and the
+search's report. With `--exhaustive` it composes and prices every candidate
+and the document lists them; the built-in examples are written so. The
+document shows:
 
 - **Stage 0**, the DAG the query-language frontends lower the queries into,
   one root per query;
@@ -28,7 +34,9 @@ To run it, see [RUNNING.md](RUNNING.md).
   Stage 1 candidates that did not compose, each with its reason. The header
   says how many candidates Stage 1 enumerated, how many the document shows
   when it caps them, and why Stage 1 or plan selection failed when it did.
-  Clicking a row shows it in the lanes.
+  Clicking a row shows it in the lanes. The header also names the search and
+  what it checked; under the default search the list has the selected plan
+  and the rejections Stage 3 recorded, which are not clickable.
 - **Three lanes**, stacked top to bottom so each is as wide as the page:
   Stage 0, the chosen Stage 1 candidate, and its Stage 2 candidate
   with each node's timing and Stage 3 cost (`× n` when a node that is not
@@ -62,6 +70,7 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
 ```json
 {
   "format": "asap-stage-pipeline/v1",
+  "search": "default",
   "workload": { "queries": [{ "id": "q1", "language": "promql", "text": "...",
                 "requirements": { "accuracy": { "max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result" },
                                   "repeat_interval_ms": 10000 } }] },
@@ -92,6 +101,11 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
                            "summary": "metric not set; accepted rank (Kll)" }] },
     "selected": "P1",
     "rejected": [{ "id": "P2", "cause": "costlier", "reason": "..." }],
+    "search_rejected": [{ "id": "P5", "cause": "accuracy_target_missed", "reason": "..." }],
+    "search": { "candidates_checked": 206, "components": [{ "queries": [0, 1], "candidates_checked": 204, "selected": "P61-m19" }],
+                "queries": [{ "candidates_checked": 3, "discarded": [{ "choice": [[4, 0]], "cause": "no_accuracy_guarantee", "reason": "..." }] }],
+                "searched_as_one": null, "raw_scan_assignments_skipped": 0, "raw_scan_candidates_skipped": 0,
+                "runner_up_cost_per_second": null },
     "front": []
   }
 }
@@ -132,6 +146,21 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
   or a loss under the cost model (`costlier`, `slower`, `more_memory`,
   `not_lowest_latency_on_pareto_front`, `dominated`,
   `tied_lost_on_enumeration_order`).
+- `search` is `default` (`Stage1ToStage3Search::default`, the search
+  `plan_installable` runs: each query's own candidates checked first,
+  independent components searched separately, raw-scan candidates skipped
+  when raw data is not retained) or `exhaustive` (`--exhaustive`: every
+  candidate composed and priced). Under the default search the document's
+  Stage 1 and Stage 2 hold the selected candidate only (none when selection
+  fails), `combinations` is 1, and `stage3_plan_selection.search` is
+  Stage 3's `SearchReport`: the physical candidates checked, the components
+  searched separately with their selections, and per query its own
+  candidates checked and those discarded with why.
+- `search_rejected` lists the rejections that name no candidate the
+  document holds: under the default search, the first rejection of each
+  cause (their candidates are not kept), and the search's own (e.g. `q2`
+  when every own candidate of that query was discarded). The page lists
+  them after the other rows, not clickable.
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
 

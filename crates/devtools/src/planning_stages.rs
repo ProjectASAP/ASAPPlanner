@@ -8,7 +8,9 @@ use asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_opt
 pub use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::{physical_candidate_count, PhysicalCandidate};
-use asap_plan_selection::pass::run_stage2_and_stage3;
+use asap_plan_selection::pass::{
+    run_stage1_to_stage3_from_pass1, run_stage2_and_stage3, Stage1ToStage3Search,
+};
 pub use asap_plan_selection::pass::{LogicalCandidate, PrunedCandidate};
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
@@ -99,12 +101,12 @@ impl std::fmt::Display for PlanningStagesError {
             Self::TooManyCandidates { limit } => write!(
                 f,
                 "workload has more than {limit} Stage 1 candidates, Pass 2's included; \
-planning it needs early pruning (#673)"
+the exhaustive search refuses it"
             ),
             Self::TooManyPhysicalCandidates { limit } => write!(
                 f,
                 "workload has more than {limit} Stage 2 physical candidates (materialization \
-options included); planning it needs early pruning (#673)"
+options included); the exhaustive search refuses it"
             ),
             Self::Validation(error) => write!(f, "validation: {error}"),
         }
@@ -211,6 +213,48 @@ pub fn run_planning_stages_over(
         stage1_logical_asap_optimization: run.stage1_logical_asap_optimization,
         stage2_physical_asap_optimization: run.stage2_physical_asap_optimization,
         stage2_pruned: run.stage2_pruned,
+        stage3_plan_selection: run.stage3_plan_selection,
+    })
+}
+
+/// The default search over `roots` (query `i` is `roots[i]`, with
+/// workload entry `entries[i]`): the one the planner's own pass and
+/// `plan_installable` run ([`Stage1ToStage3Search::default`]: each query's
+/// own candidates checked first, a whole-workload choice that picks a
+/// discarded one not composed, independent components searched separately,
+/// and, without raw data retained, the candidates that scan it at query
+/// time skipped). It keeps only the best candidate so far, so the run holds
+/// the selected Stage 1 and Stage 2 candidates alone (none when selection
+/// fails), and Stage 3 records the first rejection of each cause and the
+/// search's report (`Selection::search`). `models` should be the ones
+/// `plan_installable` plans with (the executor's summary families and
+/// compile check) to see what it selects. No limit applies.
+pub fn run_default_search_over(
+    roots: Vec<QueryRoot>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<PlanningStagesRun, PlanningStagesError> {
+    validate(&roots)?;
+    let per_computation =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
+            .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
+    let run = run_stage1_to_stage3_from_pass1(
+        per_computation,
+        entries,
+        data,
+        models,
+        Stage1ToStage3Search::default(),
+    );
+    if let Some(Ok(roots)) = run.stage1_selected.as_ref().map(|c| &c.roots) {
+        validate(roots)?;
+    }
+    Ok(PlanningStagesRun {
+        stage0_query_language_frontends: roots,
+        stage1_pass1_per_computation: run.stage1_pass1_per_computation,
+        stage1_logical_asap_optimization: run.stage1_selected.into_iter().collect(),
+        stage2_physical_asap_optimization: run.stage3_selected.into_iter().collect(),
+        stage2_pruned: Vec::new(),
         stage3_plan_selection: run.stage3_plan_selection,
     })
 }

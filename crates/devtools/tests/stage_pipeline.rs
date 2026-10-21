@@ -32,7 +32,7 @@ fn generate_example(example: &str, extra: &[&str]) -> Value {
         std::process::id(),
     ));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
-        .args(["--example", example, "--out"])
+        .args(["--example", example, "--exhaustive", "--out"])
         .arg(&out)
         .args(extra)
         .status()
@@ -354,6 +354,7 @@ fn failure(args: &[&str]) -> (Option<i32>, String) {
 fn workload_above_the_candidate_limit_is_rejected() {
     for limit in ["3", "8"] {
         let (status, stderr) = failure(&[
+            "--exhaustive",
             "--example",
             "planner-layering-1",
             "--max-combinations",
@@ -363,7 +364,7 @@ fn workload_above_the_candidate_limit_is_rejected() {
         assert!(
             stderr.contains(&format!(
                 "workload has more than {limit} Stage 1 candidates, Pass 2's included; \
-                 planning it needs early pruning (#673)"
+                 the exhaustive search refuses it; --exhaustive composes every candidate"
             )),
             "{stderr}"
         );
@@ -371,6 +372,7 @@ fn workload_above_the_candidate_limit_is_rejected() {
     // At Stage 1's 27 candidates, Stage 2's 57 physical candidates (30 maintain
     // pane chains at ingestion time) pass the limit; they are counted, not built.
     let (status, stderr) = failure(&[
+        "--exhaustive",
         "--example",
         "planner-layering-1",
         "--max-combinations",
@@ -380,7 +382,7 @@ fn workload_above_the_candidate_limit_is_rejected() {
     assert!(
         stderr.contains(
             "workload has more than 27 Stage 2 physical candidates (materialization options \
-             included); planning it needs early pruning (#673)"
+             included); the exhaustive search refuses it"
         ),
         "{stderr}"
     );
@@ -399,25 +401,128 @@ fn workload_above_the_candidate_limit_is_rejected() {
     );
 }
 
-/// The default limit is 10^4: nine approximate quantile queries, three
-/// candidates each (3^9 = 19683 Pass 1 combinations), are rejected once the
-/// count passes it.
-#[test]
-fn default_candidate_limit_is_ten_thousand() {
-    let queries: Vec<String> = (1..=9)
-        .map(|i| format!("quantile_over_time(0.99, m{i}[5m])"))
-        .collect();
+/// Nine approximate quantile queries over nine metrics, three candidates
+/// each: 3^9 = 19683 Pass 1 combinations.
+fn nine_quantile_queries() -> Vec<String> {
     let mut args = Vec::new();
-    for query in &queries {
-        args.extend(["--promql", query.as_str()]);
+    for i in 1..=9 {
+        args.extend([
+            "--promql".to_string(),
+            format!("quantile_over_time(0.99, m{i}[5m])"),
+        ]);
     }
-    args.extend(["--max-error", "0.01", "--failure-probability", "0.001"]);
+    args.extend(["--max-error", "0.01", "--failure-probability", "0.001"].map(String::from));
+    args
+}
+
+/// The exhaustive search's default limit is 10^4: the nine quantile
+/// queries' 19683 combinations are rejected once the count passes it, and
+/// the message names the exhaustive search.
+#[test]
+fn exhaustive_default_candidate_limit_is_ten_thousand() {
+    let mut args = nine_quantile_queries();
+    args.push("--exhaustive".into());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (status, stderr) = failure(&args);
     assert_eq!(status, Some(3));
     assert!(
         stderr.contains("workload has more than 10000 Stage 1 candidates"),
         "{stderr}"
     );
+    assert!(stderr.contains("--exhaustive"), "{stderr}");
+}
+
+/// Without `--exhaustive`, the same nine queries plan with the default
+/// search, `plan_installable`'s: each query, reading its own metric, is an
+/// independent component searched on its own, so no limit is reached. The
+/// document holds the selected plan and the search's report.
+#[test]
+fn default_search_plans_the_nine_queries_the_exhaustive_search_refuses() {
+    let args = nine_quantile_queries();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let document = document_of(&args);
+    assert_eq!(document["search"], "default");
+    let selection = &document["stage3_plan_selection"];
+    let selected = selection["selected"].as_str().unwrap();
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(physical.len(), 1);
+    assert_eq!(physical[0]["id"], selected);
+    assert_eq!(
+        selection["search"]["components"].as_array().unwrap().len(),
+        9
+    );
+    assert_eq!(selection["search"]["queries"].as_array().unwrap().len(), 9);
+}
+
+/// `--max-combinations` limits only the exhaustive search.
+#[test]
+fn max_combinations_needs_exhaustive() {
+    let (status, stderr) = failure(&["--promql", "sum(m)", "--max-combinations", "10"]);
+    assert_eq!(status, Some(2));
+    assert!(stderr.contains("needs --exhaustive"), "{stderr}");
+}
+
+/// A 9-query PromQL workload converted from ASAPQuery's random workloads
+/// (seed 862, workload-01), planned as a deployment that keeps no raw data:
+/// the default search plans it (the exhaustive search would enumerate more
+/// than 10^5 Stage 1 candidates) and selects what `plan_installable`
+/// selects with the same settings.
+#[test]
+fn default_search_plans_a_nine_query_workload_as_plan_installable_does() {
+    const WORKLOAD: &str =
+        "../../tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json";
+    const NO_RAW: &str = r#"{"raw_data_retained": false, "query_time_results_retained": false}"#;
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(WORKLOAD);
+    let document = document_of(&[
+        "--workload",
+        path.to_str().unwrap(),
+        "--deployment-capabilities",
+        NO_RAW,
+        "--cost-model",
+        "aws-fargate-us-east-1",
+    ]);
+    assert_eq!(document["search"], "default");
+    let queries = document["workload"]["queries"].as_array().unwrap().len();
+    assert_eq!(queries, 9);
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], queries);
+    let selection = &document["stage3_plan_selection"];
+    let selected = selection["selected"].as_str().unwrap();
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(physical.len(), 1);
+    assert_eq!(physical[0]["id"], selected);
+    let dag: PhysicalASAPDAG = serde_json::from_value(physical[0]["dag"].clone()).unwrap();
+    assert_eq!(dag.roots.len(), queries);
+    assert!(selection["search"]["candidates_checked"].as_u64().unwrap() > 0);
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let workload: asap_types::workload::PlanningWorkload = serde_json::from_str(&text).unwrap();
+    let defaults = asap_plan_selection::PlanSelectionSettings::default();
+    let settings = asap_plan_selection::PlanSelectionSettings {
+        cost_model: asap_plan_selection::CostModel::UsageOverTime(
+            asap_plan_selection::ResourceUnitCost::aws_fargate_us_east_1(defaults.resource_speed),
+        ),
+        ..defaults
+    };
+    let capabilities: asap_planner::DeploymentCapabilities = serde_json::from_str(NO_RAW).unwrap();
+    let models = asap_plan_selection::PlanningModels::builtin()
+        .with_plan_selection(&settings)
+        .with_deployment_capabilities(&capabilities);
+    let plan = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(asap_planner::plan_installable(
+            asap_planner::UserInput::new(
+                &workload,
+                asap_planner::FrontendInput::Promql { histograms: None },
+                models,
+            ),
+        ))
+        .unwrap();
+    assert_eq!(plan.selection.unwrap().selected_candidate_id, selected);
 }
 
 /// The library never caps: without a limit every candidate is planned.
@@ -620,6 +725,7 @@ fn a_target_without_a_metric_shows_the_query_default() {
 #[test]
 fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let query = [
+        "--exhaustive",
         "--promql",
         "quantile_over_time(0.99, m[1m])",
         "--max-error",
@@ -826,6 +932,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     );
 
     let (status, stderr) = failure(&[
+        "--exhaustive",
         "--example",
         "planner-layering-3b",
         "--deployment-capabilities",
@@ -842,6 +949,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
 #[test]
 fn cluster_flags_and_cost_model_3_go_together() {
     let (code, stderr) = failure(&[
+        "--exhaustive",
         "--example",
         "planner-layering-3b",
         "--cluster-memory-bytes",
@@ -853,6 +961,7 @@ fn cluster_flags_and_cost_model_3_go_together() {
         "{stderr}"
     );
     let (code, stderr) = failure(&[
+        "--exhaustive",
         "--example",
         "planner-layering-3b",
         "--cost-model",
@@ -868,7 +977,15 @@ fn cluster_flags_and_cost_model_3_go_together() {
 #[test]
 fn logical_candidate_labels_are_distinct() {
     let document = document_of(&[
-        "--promql", "sum(a)", "--promql", "max(a)", "--promql", "sum(b)", "--promql", "max(b)",
+        "--exhaustive",
+        "--promql",
+        "sum(a)",
+        "--promql",
+        "max(a)",
+        "--promql",
+        "sum(b)",
+        "--promql",
+        "max(b)",
     ]);
     let labels: Vec<&str> = document["stage1_logical_asap_optimization"]["candidates"]
         .as_array()
@@ -913,6 +1030,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     ));
     std::fs::write(&path, workload.to_string()).unwrap();
     let document = document_of(&[
+        "--exhaustive",
         "--workload",
         path.to_str().unwrap(),
         "--deployment-capabilities",
@@ -969,6 +1087,7 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
     );
     assert_eq!(document["stage3_plan_selection"]["selected"], "P1");
     let (code, stderr) = failure(&[
+        "--exhaustive",
         "--example",
         "planner-layering-3b",
         "--plan-selection-settings",
@@ -991,6 +1110,7 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
 #[test]
 fn ignore_accuracy_guarantees_flag_accepts_outputs_without_a_guarantee() {
     let args = [
+        "--exhaustive",
         "--promql",
         "avg by (g) (quantile_over_time(0.99, x[100s]))",
         "--max-error",

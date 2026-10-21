@@ -38,7 +38,8 @@ def write_examples(force: bool) -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         print(f"[examples] writing {example['file']}", flush=True)
         subprocess.run(
-            [str(BINARY), "--example", example["example"], "--out", str(out)],
+            # The built-in examples' stories describe every candidate.
+            [str(BINARY), "--example", example["example"], "--exhaustive", "--out", str(out)],
             cwd=REPO,
             check=True,
         )

@@ -1,5 +1,5 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
-//     --example planner-layering-1 --out planner-layering-example1.json
+//     --example planner-layering-1 --exhaustive --out planner-layering-example1.json
 // (also planner-layering-2: #509 Example 2, three SQL flow statistics;
 // planner-layering-3a and planner-layering-3b: #509 Example 3, Patterns A
 // and B; 3a has 972 candidates, all priced, 64 shown by default)
@@ -16,16 +16,30 @@
 //     --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --out run.json
 //
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
-// four planner stages (#509 MVP):
+// four planner stages (#509 MVP), searched with the default search, the one
+// `plan_installable` runs (`Stage1ToStage3Search::default`: each query's own
+// candidates are checked first, a whole-workload choice that picks a
+// discarded one is not composed, independent components are searched
+// separately, and without raw data retained the candidates that scan it at
+// query time are skipped), over the stage crates' built-in models and the
+// declared capabilities (not the executor's compile check, which
+// `plan_installable` adds). It keeps only the best candidate, so the document
+// holds the selected Stage 1 and Stage 2 candidates, the rejections Stage 3
+// recorded (the first of each cause, under `search_rejected` since their
+// candidates are not kept) and the search's report; `search` is
+// `"default"`. `--exhaustive` instead composes and prices every candidate
+// (the search the default one is tested against, for small workloads and
+// comparison) and the document lists them; `search` is `"exhaustive"`.
 //   - stage0_query_language_frontends: the frontends' workload DAG, one root per query;
 //   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
-//     product), each followed by its Pass 2 candidates (the
+//     product; under the default search, the choices it composes), each
+//     followed by its Pass 2 candidates (the
 //     identical-expression rule's, one per subset of its sharing candidates,
 //     then the summary-capability rule's, one per choice of shared summary
 //     builds), in enumeration order. Every candidate is optimized and
 //     priced; the document shows the first `--max-displayed` (default 64)
-//     and the selected one, with `combinations` (how many exist),
+//     and the selected one, with `combinations` (how many were enumerated),
 //     `capped` (whether some are not shown) and `pass1_pruned` (the
 //     candidates Pass 1 pruned per target, with reasons). A candidate that cannot be
 //     composed carries `error` instead of `dag`;
@@ -54,19 +68,25 @@
 //     computation's price times `multiplier`, the times it is computed:
 //     once if materialized, else once per query (or materialized node)
 //     that reads it, so a shared NotMaterialized node is charged once per
-//     query. When selection fails, `selected` is null, with the rejections,
-//     or with `error` for any other failure. `pane_retention_ms` maps each
+//     query. `search` is the search's report (`SearchReport`: the physical
+//     candidates checked and, per query under the default search, its own
+//     candidates checked and those discarded with why). When selection
+//     fails, `selected` is null, with the rejections (and under
+//     `search_rejected` the search's own, which name no candidate: e.g. a
+//     query whose every own candidate was discarded), or with `error` for
+//     any other failure. `pane_retention_ms` maps each
 //     pane chain the selected plan keeps beyond one evaluation (by node id)
 //     to how far back from the newest evaluation the runtime must keep its
 //     panes: the window plus the longest range-evaluation span reading it.
 // When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
 // `error` and no candidates, and nothing is selected.
 //
-// A workload with more than `--max-combinations` (default 10^4) Stage 1
-// candidates, Pass 2's included, is refused as soon as enumeration passes
-// the limit, and so is one whose Stage 2 physical candidates (one per
-// materialization assignment, counted before they are built) pass it: the
-// run exits with status 3 and the limit, and writes no document.
+// Under `--exhaustive`, a workload with more than `--max-combinations`
+// (default 10^4) Stage 1 candidates, Pass 2's included, is refused as soon
+// as enumeration passes the limit, and so is one whose Stage 2 physical
+// candidates (one per materialization assignment, counted before they are
+// built) pass it: the run exits with status 3 and the limit, and writes no
+// document. The default search has no limit.
 // Planning never caps or truncates the candidates it ranks; only the display
 // does (`--max-displayed`).
 //
@@ -143,8 +163,8 @@ use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_planning_stages_over, PlanningStagesError,
-    PlanningStagesRun,
+    lower_promql_roots, lower_sql_roots, run_default_search_over, run_planning_stages_over,
+    PlanningStagesError, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::promql_metric_names;
@@ -154,7 +174,7 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts, PlanSelectionSettings,
-    Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
+    PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
 };
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
@@ -162,7 +182,8 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
-    QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
+    QueryRecurrence, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
+    SqlDialect,
 };
 use serde_json::{json, Value};
 
@@ -171,17 +192,18 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--ignore-accuracy-guarantees] [--deployment-capabilities <json>] [--max-combinations <n>] [--max-displayed <n>] --out <file>";
+[--plan-selection-settings <file>] [--ignore-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
-/// included) a run enumerates.
+/// included) an exhaustive run enumerates.
 const MAX_COMBINATIONS: usize = 10_000;
 
 /// Why a run wrote no document.
 enum Failure {
     /// Bad arguments or a query that does not plan (exit status 2).
     Usage(String),
-    /// More Stage 1 candidates than `--max-combinations` (exit status 3).
+    /// More Stage 1 or Stage 2 candidates than `--max-combinations` under
+    /// `--exhaustive` (exit status 3).
     TooManyCandidates(PlanningStagesError),
 }
 
@@ -205,7 +227,12 @@ fn main() {
             std::process::exit(2);
         }
         Err(Failure::TooManyCandidates(error)) => {
-            eprintln!("stage_pipeline: {error}");
+            // Only the exhaustive search (`--exhaustive`) counts against
+            // the limit.
+            eprintln!(
+                "stage_pipeline: {error}; --exhaustive composes every candidate, so raise \
+                 --max-combinations or drop --exhaustive to run the default search, which prunes"
+            );
             std::process::exit(3);
         }
     }
@@ -264,6 +291,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut measured_operation_costs_path: Option<String> = None;
     let mut plan_selection_settings_path: Option<String> = None;
     let mut ignore_accuracy_guarantees = false;
+    let mut exhaustive = false;
+    let mut max_combinations_given = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value"));
@@ -299,7 +328,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             }
             "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
             "--max-combinations" => {
-                max_combinations = value()?.parse().map_err(|e| format!("{e}"))?
+                max_combinations = value()?.parse().map_err(|e| format!("{e}"))?;
+                max_combinations_given = true;
             }
             "--cost-model" => cost_model = Some(value()?),
             "--cluster-memory-bytes" => {
@@ -320,6 +350,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--measured-operation-costs" => measured_operation_costs_path = Some(value()?),
             "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
             "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
+            "--exhaustive" => exhaustive = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -330,6 +361,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
+    if max_combinations_given && !exhaustive {
+        return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
+    }
     if plan_selection_settings_path.is_some()
         && (cost_model.is_some()
             || cluster_memory.is_some()
@@ -426,24 +460,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         None => None,
     };
-    let mut document = match (example.as_deref(), queries.is_empty()) {
+    // The workload's queries as the document describes them, the
+    // frontends' roots, the workload entries and the data workload.
+    let (described, roots, entries, data) = match (example.as_deref(), queries.is_empty()) {
         (None, true) if from_file.is_some() => {
             let (workload, catalog) = from_file.expect("checked");
-            let roots = match workload.query_workload.language {
-                QueryLanguage::PromQL => lower_promql_roots(&workload)?,
-                _ => lower_sql_roots(&workload, &catalog)?,
-            };
-            let entries: Vec<_> = workload.query_workload.entries().collect();
-            let data = workload.data_workload.clone().unwrap_or_default();
-            let result = run_planning_stages_over(
-                roots.clone(),
-                &entries,
-                &data,
-                Some(max_combinations),
-                &plan_selection,
-                &deployment_capabilities,
-            );
-            document_of(workload_queries(&workload), &roots, result, max_displayed)?
+            lowered(&workload, &catalog)?
         }
         (Some(example), true) => {
             let (workload, catalog) = match example {
@@ -461,21 +483,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 "planner-layering-3b" => (pattern_b(), SqlCatalog::new()),
                 other => return Err(format!("unknown example {other}").into()),
             };
-            let roots = match workload.query_workload.language {
-                QueryLanguage::PromQL => lower_promql_roots(&workload)?,
-                _ => lower_sql_roots(&workload, &catalog)?,
-            };
-            let entries: Vec<_> = workload.query_workload.entries().collect();
-            let data = workload.data_workload.clone().unwrap_or_default();
-            let result = run_planning_stages_over(
-                roots.clone(),
-                &entries,
-                &data,
-                Some(max_combinations),
-                &plan_selection,
-                &deployment_capabilities,
-            );
-            document_of(workload_queries(&workload), &roots, result, max_displayed)?
+            lowered(&workload, &catalog)?
         }
         (None, false) => {
             let accuracy = match (max_error, failure_probability) {
@@ -537,15 +545,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 described.push(query);
             }
             let data = DataWorkload::sampled_every(metrics, DurationMs(sample_interval_ms));
-            let result = run_planning_stages_over(
-                roots.clone(),
-                &entries,
-                &data,
-                Some(max_combinations),
-                &plan_selection,
-                &deployment_capabilities,
-            );
-            document_of(described, &roots, result, max_displayed)?
+            (described, roots, entries, data)
         }
         _ => {
             return Err(
@@ -553,11 +553,52 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             )
         }
     };
+    let result = match exhaustive {
+        true => run_planning_stages_over(
+            roots.clone(),
+            &entries,
+            &data,
+            Some(max_combinations),
+            &plan_selection,
+            &deployment_capabilities,
+        ),
+        false => run_default_search_over(
+            roots.clone(),
+            &entries,
+            &data,
+            PlanningModels::builtin()
+                .with_plan_selection(&plan_selection)
+                .with_deployment_capabilities(&deployment_capabilities),
+        ),
+    };
+    let mut document = document_of(described, &roots, result, max_displayed)?;
+    document["search"] = json!(if exhaustive { "exhaustive" } else { "default" });
     // Read-only: the deployment inputs the run planned with.
     document["deployment_capabilities"] =
         serde_json::to_value(&deployment_capabilities).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}").into())
+}
+
+/// A workload's queries as the document describes them, the frontends'
+/// roots, the workload entries and the data workload.
+type Lowered = (
+    Vec<Value>,
+    Vec<QueryRoot>,
+    Vec<QueryWorkloadEntry>,
+    DataWorkload,
+);
+
+/// `workload` lowered by its language's frontend (SQL over `catalog`); its
+/// data workload is empty when it declares none.
+fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered, String> {
+    let roots = match workload.query_workload.language {
+        QueryLanguage::PromQL => lower_promql_roots(workload)?,
+        _ => lower_sql_roots(workload, catalog)?,
+    };
+    let entries = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    Ok((workload_queries(workload), roots, entries, data))
 }
 
 /// The document for `run`, whose workload queries are `queries`.
@@ -616,6 +657,16 @@ fn stage_pipeline(queries: Vec<Value>, run: &PlanningStagesRun, max_displayed: u
         .filter(|p| shown.contains(p.from_logical.as_str()))
         .map(|p| json!({ "from_logical": p.from_logical, "display_name": labels[&p.from_logical], "reason": p.reason }))
         .collect();
+    let every_physical: HashSet<&str> = run
+        .stage2_physical_asap_optimization
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect();
+    let stage3 = plan_selection_json(
+        &run.stage3_plan_selection,
+        |id| shown_physical.contains(id),
+        |id| every_physical.contains(id),
+    );
     json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": queries },
@@ -627,7 +678,7 @@ fn stage_pipeline(queries: Vec<Value>, run: &PlanningStagesRun, max_displayed: u
             "candidates": candidates,
         },
         "stage2_physical_asap_optimization": { "candidates": physical, "pruned": pruned },
-        "stage3_plan_selection": plan_selection_json(&run.stage3_plan_selection, |id| shown_physical.contains(id)),
+        "stage3_plan_selection": stage3,
     })
 }
 
@@ -669,14 +720,28 @@ fn pass1_pruned_json(inventory: &PerComputationCandidates<usize>) -> Vec<Value> 
 fn plan_selection_json(
     selection: &Result<Selection, SelectionError>,
     shown: impl Fn(&str) -> bool,
+    is_candidate: impl Fn(&str) -> bool,
 ) -> Value {
     let rejections_json = |rejected: &[Rejection]| -> Vec<Value> {
         rejections_json(rejected.iter().filter(|r| shown(&r.id)))
     };
+    // The rejections of candidates the run did not keep (the default
+    // search keeps only the best; it records the first rejection of each
+    // cause) and the search's own, which name no candidate: a query whose
+    // every own candidate was discarded, or the candidates it skipped.
+    let search_rejected = |rejected: &[Rejection]| -> Vec<Value> {
+        self::rejections_json(rejected.iter().filter(|r| !is_candidate(&r.id)))
+    };
     let selection = match selection {
         Ok(selection) => selection,
         Err(SelectionError::NoValidCandidate(rejected)) => {
-            return json!({ "costs": {}, "selected": null, "rejected": rejections_json(rejected) })
+            let search_rejected = search_rejected(rejected);
+            return json!({
+                "costs": {},
+                "selected": null,
+                "rejected": rejections_json(rejected),
+                "search_rejected": search_rejected,
+            });
         }
         Err(error) => {
             return json!({ "costs": {}, "selected": null, "rejected": [], "error": error.to_string() })
@@ -740,7 +805,9 @@ fn plan_selection_json(
         "accepted": accepted,
         "selected": selection.selected,
         "rejected": rejections_json(&selection.rejected),
+        "search_rejected": search_rejected(&selection.rejected),
         "front": selection.front,
+        "search": selection.search,
         "pane_retention_ms": selection
             .pane_retention_ms
             .iter()
@@ -939,8 +1006,11 @@ mod tests {
             cause: asap_plan_selection::RejectionCause::AccuracyTargetMissed,
             reason: "q1: misses target".into(),
         }];
-        let document =
-            plan_selection_json(&Err(SelectionError::NoValidCandidate(rejected)), |_| true);
+        let document = plan_selection_json(
+            &Err(SelectionError::NoValidCandidate(rejected)),
+            |_| true,
+            |_| true,
+        );
         assert_eq!(
             document,
             json!({
@@ -951,6 +1021,7 @@ mod tests {
                     "cause": "accuracy_target_missed",
                     "reason": "q1: misses target",
                 }],
+                "search_rejected": [],
             })
         );
     }
