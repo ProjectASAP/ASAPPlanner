@@ -170,7 +170,7 @@ function uniqueIds(list, where, errors) {
 const FAILED_CHECK_CAUSES = [
   'failure_probability_resize_failed', 'accuracy_target_missed',
   'count_min_weights_not_proven_non_negative', 'per_entity_aggregate_not_executable',
-  'no_accuracy_guarantee',
+  'executor_cannot_compile', 'no_accuracy_guarantee',
   'raw_data_not_retained', 'latency_bound_exceeded', 'over_cluster_capacity',
 ];
 // Every `stage3_plan_selection.rejected[].cause` Stage 3 writes: the failed
@@ -263,8 +263,10 @@ function validateStagePipeline(doc) {
   (Array.isArray(stage2.pruned) ? stage2.pruned : []).forEach((entry, index) => {
     if (!entry || !logicalIds.has(entry.from_logical)) errors.push(`stage2_physical_asap_optimization.pruned[${index}]: from_logical is not a Stage 1 candidate`);
   });
+  errors.push(...validateDataWorkload(doc.workload.data_workload));
   if (errors.length) return errors;
-  return validateSelection(stage3, physicalById);
+  const selectionErrors = validateSelection(stage3, physicalById);
+  return selectionErrors.length ? selectionErrors : validateStoredOutputs(stage3, physicalById);
 }
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
@@ -358,25 +360,38 @@ function stageCandidateHeader(doc) {
 }
 
 // What the search behind the document did, for the candidate list's
-// header: "default search · 206 physical candidates checked · 2 components
-// searched separately · q3: 1 of 3 own candidates discarded (no accuracy
-// guarantee)"; "" for a document that does not say.
+// header: "default search · 206 physical candidates checked · 2 independent
+// components searched separately · runner-up 2.2e-6 · discarded before
+// composition: no accuracy guarantee ×3 (q3, q4, q5)"; under the
+// exhaustive search, the rejections by cause with their counts. "" for a
+// document that does not say.
 function searchText(doc) {
   const name = { default: 'default search', exhaustive: 'exhaustive search' }[doc.search];
   if (!name) return '';
   const parts = [name];
-  const search = (doc.stage3_plan_selection || {}).search;
+  const selection = doc.stage3_plan_selection || {};
+  const search = selection.search;
+  const cause = (c) => String(c).replace(/_/g, ' ');
   if (search) {
     parts.push(`${search.candidates_checked} physical candidates checked`);
     if ((search.components || []).length) parts.push(`${search.components.length} independent components searched separately`);
+    if (typeof search.runner_up_cost_per_second === 'number') parts.push(`runner-up costs ${Number(search.runner_up_cost_per_second.toPrecision(4))}`);
     const queryIds = ((doc.workload || {}).queries || []).map((q) => q.id);
-    (search.queries || []).forEach((query, index) => {
-      if (!query.discarded.length) return;
-      const causes = [...new Set(query.discarded.map((d) => d.cause.replace(/_/g, ' ')))].join(', ');
-      parts.push(`${queryIds[index] || `q${index + 1}`}: ${query.discarded.length} of ${query.candidates_checked} own candidates discarded (${causes})`);
-    });
+    const byCause = new Map();
+    (search.queries || []).forEach((query, index) => query.discarded.forEach((d) => {
+      if (!byCause.has(d.cause)) byCause.set(d.cause, { count: 0, queries: new Set() });
+      byCause.get(d.cause).count += 1;
+      byCause.get(d.cause).queries.add(queryIds[index] || `q${index + 1}`);
+    }));
+    if (byCause.size) {
+      parts.push(`discarded before composition: ${[...byCause].map(([c, v]) => `${cause(c)} ×${v.count} (${[...v.queries].join(', ')})`).join(', ')}`);
+    }
     if (search.raw_scan_candidates_skipped) parts.push(`${search.raw_scan_candidates_skipped} Stage 1 candidates skipped: they scan raw data at query time`);
     if (search.raw_scan_assignments_skipped) parts.push(`${search.raw_scan_assignments_skipped} Stage 2 assignments skipped: they scan raw data at query time`);
+  }
+  const counts = selection.rejected_by_cause;
+  if (doc.search === 'exhaustive' && counts && Object.keys(counts).length) {
+    parts.push(`rejected: ${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${cause(c)} ×${n}`).join(', ')}`);
   }
   return parts.join(' · ');
 }
@@ -484,6 +499,11 @@ function stageNodeLines(operator, inputSchema) {
       lines.push(`instances: ${summaryInstancesText(op.grouping, op.reduction)}`);
       break;
     case 'SummaryEstimate': lines.push(`query: ${compactWire(op.query)}`); break;
+    case 'PaneChain':
+      lines.push(`summary: ${summaryFamilyText(op.family)}`);
+      lines.push(`${op.pane_count} panes × ${durationText(op.pane_width_ms)}`);
+      if (grouping) lines.push(grouping);
+      break;
     default: break;
   }
   return lines.slice(0, 4);
@@ -547,4 +567,222 @@ function stageLaneElements(dag, options) {
     }));
   });
   return nodes.concat(edges);
+}
+
+// The run's data workload (`workload.data_workload`, the `DataWorkload` the
+// planner planned with): absent in older documents; otherwise an object
+// with `sources`, one `SourceFacts` object per source.
+function validateDataWorkload(dataWorkload) {
+  if (dataWorkload === undefined) return [];
+  const at = 'workload.data_workload';
+  if (!dataWorkload || typeof dataWorkload !== 'object' || Array.isArray(dataWorkload)) return [`${at} must be an object`];
+  const sources = dataWorkload.sources;
+  if (!sources || typeof sources !== 'object' || Array.isArray(sources)) return [`${at}.sources must be an object`];
+  return Object.entries(sources)
+    .filter(([, facts]) => !facts || typeof facts !== 'object' || Array.isArray(facts))
+    .map(([name]) => `${at}.sources.${name} must be an object`);
+}
+
+const STORED_OUTPUT_BUILDS = ['ingestion_run', 'query_run'];
+
+// The selected plan's stored outputs (`stage3_plan_selection.stored_outputs`,
+// from the installable plan): each names its installed node, how it is
+// built, its coverage's definition and its retention, and the node of the
+// selected Stage 2 candidate it is installed from (or null). Absent in older
+// documents; empty without a selection.
+function validateStoredOutputs(selection, physicalById) {
+  const stored = selection.stored_outputs;
+  if (stored === undefined) return [];
+  const at = 'stage3_plan_selection.stored_outputs';
+  if (!Array.isArray(stored)) return [`${at} must be an array`];
+  if (selection.selected === null && stored.length) return [`${at} must be empty without a selected plan`];
+  const selected = selection.selected === null ? null : physicalById.get(selection.selected);
+  const nodeIds = new Set(selected ? selected.dag.nodes.map((node) => node.id) : []);
+  const errors = [];
+  stored.forEach((output, index) => {
+    const where = `${at}[${index}]`;
+    if (!output || typeof output !== 'object') { errors.push(`${where} must be an object`); return; }
+    if (typeof output.node_id !== 'number') errors.push(`${where}: node_id must be a number`);
+    if (!STORED_OUTPUT_BUILDS.includes(output.built_at)) errors.push(`${where}: built_at must be one of ${STORED_OUTPUT_BUILDS.join(', ')}`);
+    if (!output.coverage || typeof output.coverage.definition_id !== 'string') errors.push(`${where}: coverage.definition_id must be a string`);
+    if (!output.inputs || !Array.isArray(output.inputs.raw_sample_windows) || !Array.isArray(output.inputs.stored_outputs)) {
+      errors.push(`${where}: inputs needs raw_sample_windows and stored_outputs arrays`);
+    }
+    if (!(typeof output.retention_ms === 'number' && output.retention_ms >= 0)) errors.push(`${where}: retention_ms must be a non-negative number`);
+    if (output.stage2_node_id !== null && output.stage2_node_id !== undefined && !nodeIds.has(output.stage2_node_id)) {
+      errors.push(`${where}: stage2_node_id ${output.stage2_node_id} is not a node of the selected candidate ${selection.selected}`);
+    }
+  });
+  return errors;
+}
+
+// Milliseconds as the shortest exact unit: "100 ms", "15 s", "10 min", "1 h".
+function durationText(ms) {
+  if (typeof ms !== 'number') return '—';
+  if (ms % 3600000 === 0 && ms >= 3600000) return `${ms / 3600000} h`;
+  if (ms % 60000 === 0 && ms >= 60000) return `${ms / 60000} min`;
+  if (ms % 1000 === 0 && ms >= 1000) return `${ms / 1000} s`;
+  return `${ms} ms`;
+}
+
+// The ids of `queries` (`{id, text}`) whose text names `source` as a whole
+// word: the queries that read it, as far as their text says.
+function queriesNaming(source, queries) {
+  const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const word = new RegExp(`(^|[^A-Za-z0-9_:])${escaped}($|[^A-Za-z0-9_:])`);
+  return queries.filter((query) => word.test(query.text || '')).map((query) => query.id);
+}
+
+// A data workload (`DataWorkload` JSON) as its arrival line and one row per
+// source with the facts it declares; an undeclared fact is "—". `queries`
+// (`{id, text}`) fill each row's `readBy`.
+function dataWorkloadView(dataWorkload, queries) {
+  if (!dataWorkload || typeof dataWorkload !== 'object') return { arrival: 'none declared', rows: [] };
+  const arrival = dataWorkload.arrival;
+  const [kind, body] = typeof arrival === 'string' ? [arrival, {}] : arrival && typeof arrival === 'object' ? Object.entries(arrival)[0] || ['unknown', {}] : ['unknown', {}];
+  const rate = body && typeof body.rows_per_second === 'number' ? ` · ${Number(body.rows_per_second.toPrecision(4))} rows/s` : '';
+  const norms = (n) => (n ? ['l1', 'l2'].filter((k) => typeof n[k] === 'number').map((k) => `${k} ${n[k]}`).join(', ') || '—' : '—');
+  const rows = Object.entries(dataWorkload.sources || {}).map(([name, facts]) => ({
+    name,
+    series: typeof facts.series_count === 'number' ? facts.series_count : '—',
+    type: facts.metric_type || '—',
+    nonNegative: facts.values_non_negative ? 'yes' : String(facts.metric_type).toLowerCase() === 'counter' ? 'yes (counter)' : '—',
+    sampleInterval: facts.sample_interval === undefined || facts.sample_interval === null ? '—' : durationText(facts.sample_interval),
+    streamNorms: norms(facts.stream_norms),
+    maxDistinct: typeof facts.max_distinct_per_evaluation === 'number' ? facts.max_distinct_per_evaluation : '—',
+    readBy: queriesNaming(name, queries || []),
+  }));
+  return { arrival: `${kind}${rate}`, rows };
+}
+
+// The workload query ids whose root reaches node `nodeId` of a physical DAG
+// (Stage 2): the queries that read it, directly or through other nodes.
+function physicalReaders(dag, nodeId, queryIds) {
+  const producers = new Map();
+  dag.edges.forEach((edge) => {
+    if (!producers.has(edge.consumer)) producers.set(edge.consumer, []);
+    producers.get(edge.consumer).push(edge.producer);
+  });
+  const reaches = (start) => {
+    const seen = new Set([start]);
+    const stack = [start];
+    while (stack.length) {
+      const id = stack.pop();
+      if (id === nodeId) return true;
+      (producers.get(id) || []).forEach((p) => { if (!seen.has(p)) { seen.add(p); stack.push(p); } });
+    }
+    return false;
+  };
+  const lane = stageDag(dag, true);
+  return lane.queries.map((query, index) => {
+    const starts = 'node' in query ? [query.node] : stageScalarRefs(query.scalar);
+    return starts.some(reaches) ? (queryIds[index] || `query #${index + 1}`) : null;
+  }).filter(Boolean);
+}
+
+// The selected plan's stored outputs as table rows: the coverage's
+// definition, the Stage 2 node's operator and summary parameters, its pane
+// (a pane chain's panes, newest first), how and when it is built, its
+// retention, the Stage 3 cost of its Stage 2 node and the queries that read
+// it. Empty without a selection.
+function storedOutputRows(doc) {
+  const selection = doc.stage3_plan_selection || {};
+  const stored = Array.isArray(selection.stored_outputs) ? selection.stored_outputs : [];
+  const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === selection.selected);
+  if (!candidate) return [];
+  const queryIds = doc.workload.queries.map((q) => q.id);
+  const nodes = new Map(candidate.dag.nodes.map((node) => [node.id, node]));
+  const perNode = ((selection.costs || {})[selection.selected] || {}).per_node || {};
+  return stored.map((output) => {
+    const node = nodes.get(output.stage2_node_id);
+    const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
+    const summary = kind === 'SummaryAgg' || kind === 'PaneChain' ? summaryFamilyText(body.family) : '';
+    const pane = kind === 'PaneChain' && typeof output.installed_position === 'number'
+      ? `pane ${output.installed_position + 1} of ${output.installed_count} (newest first), ${durationText(body.pane_width_ms)} wide` : '—';
+    const cost = perNode[String(output.stage2_node_id)];
+    return {
+      nodeId: output.node_id,
+      stage2NodeId: node ? output.stage2_node_id : null,
+      definition: output.coverage.definition_id,
+      kind: summary ? `${kind} · ${summary}` : kind,
+      pane,
+      builtAt: output.built_at === 'ingestion_run' ? 'ingestion run' : 'query run (kept across evaluations)',
+      inputs: `${output.inputs.raw_sample_windows.length} raw-sample window(s)` +
+        (output.inputs.stored_outputs.length ? `, stored ${output.inputs.stored_outputs.join(', ')}` : ''),
+      retention: durationText(output.retention_ms),
+      cost: cost ? cost.detail || '' : '',
+      readBy: node ? physicalReaders(candidate.dag, output.stage2_node_id, queryIds) : [],
+    };
+  });
+}
+
+// When a stage document's query runs: its recurrence (`QueryRecurrence`
+// JSON), its predictability and its range evaluation, e.g. "every 20 s ·
+// predictable · range of 1 h in 1 min steps"; "" when the document has none.
+function queryScheduleText(query) {
+  const parts = [];
+  const recurrence = query.recurrence;
+  const [kind, body] = typeof recurrence === 'string' ? [recurrence, null]
+    : recurrence && typeof recurrence === 'object' ? Object.entries(recurrence)[0] || [null, null] : [null, null];
+  if (kind === 'repeated') {
+    const interval = body && typeof body === 'object' ? body.fixed_interval : undefined;
+    parts.push(typeof interval === 'number' ? `every ${durationText(interval)}` : `repeated: ${compactWire(body)}`);
+  } else if (kind === 'one_time') {
+    parts.push(body && body.invocations > 1 ? `${body.invocations} invocations` : 'once');
+    if (body && typeof body.execute_at === 'number') parts.push(`at ${body.execute_at} ms`);
+  } else if (kind === 'unknown') parts.push('recurrence unknown');
+  else if (kind) parts.push(compactWire(recurrence));
+  const predictability = query.predictability;
+  const [pkind] = typeof predictability === 'string' ? [predictability]
+    : predictability && typeof predictability === 'object' ? Object.keys(predictability) : [null];
+  if (pkind) parts.push(pkind.replace(/_/g, ' '));
+  const range = (query.requirements || {}).range_evaluation;
+  if (range && typeof range.span_ms === 'number') parts.push(`range of ${durationText(range.span_ms)} in ${durationText(range.step_ms)} steps`);
+  return parts.join(' · ');
+}
+
+// A candidate's Stage 3 `usage` as one line: CPU, scans, memory, disk,
+// cores and each query's latency.
+function usageText(usage) {
+  if (!usage || typeof usage !== 'object') return '';
+  const n = (x) => (typeof x === 'number' ? Number(x.toPrecision(3)).toLocaleString('en-US') : '—');
+  const latency = (usage.latency_per_query || []).map((l, i) => `q${i + 1} ${n(l.compaction_ms + l.query_ms)} ms`).join(', ');
+  return [`CPU ${n(usage.cpu_ops_per_second)} ops/s`, `scans ${n(usage.scanned_bytes_per_second)} B/s`,
+    `memory ${n(usage.average_memory_bytes)} B average, ${n(usage.peak_memory_bytes)} B peak`, `disk ${n(usage.disk_bytes)} B`,
+    `${n(usage.peak_cpu_cores)} peak cores`].concat(latency ? [`latency ${latency}`] : []).join(' · ');
+}
+
+// The run's deployment capabilities (`DeploymentCapabilities` JSON) as one
+// line: "raw data not retained · query-time results not retained · every
+// summary the planner builds".
+function deploymentText(capabilities) {
+  if (!capabilities || typeof capabilities !== 'object') return '';
+  const summaries = Array.isArray(capabilities.supported_summaries)
+    ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.family} (${(s.readouts || []).join(', ')})`).join(', ')}`
+    : 'every summary the planner builds';
+  return [capabilities.raw_data_retained === false ? 'raw data not retained' : 'raw data retained',
+    capabilities.query_time_results_retained ? 'query-time results retained' : 'query-time results not retained', summaries].join(' · ');
+}
+
+// The queries of a `PlanningWorkload` JSON, batch then repeating (the
+// planner's entry order): each query's text, how often it runs and its
+// accuracy target as text.
+function planningWorkloadQueries(workload) {
+  const qw = (workload && workload.query_workload) || {};
+  const accuracy = (requirements) => accuracyText((requirements || {}).accuracy) || 'exact';
+  const batch = (qw.query_batch || []).map((entry) => ({
+    text: entry.query, runs: entry.invocations > 1 ? `${entry.invocations} times` : 'once', accuracy: accuracy(entry.requirements),
+  }));
+  const repeating = (qw.repeating_queries || []).map((entry) => {
+    const demand = entry.demand || {};
+    const interval = typeof demand === 'object' ? demand.fixed_interval : undefined;
+    return { text: entry.query, runs: typeof interval === 'number' ? `every ${durationText(interval)}` : compactWire(demand), accuracy: accuracy(entry.requirements) };
+  });
+  return batch.concat(repeating);
+}
+
+// Whether `value` is a `PlanningWorkload` JSON (to plan) rather than a
+// stage document (to show).
+function isPlanningWorkload(value) {
+  return !!value && typeof value === 'object' && !isStagePipelineDocument(value) && !!value.query_workload && typeof value.query_workload === 'object';
 }

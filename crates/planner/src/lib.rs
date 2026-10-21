@@ -46,7 +46,7 @@ pub use asap_plan_selection::pass::{
 
 mod installable;
 pub use installable::{
-    plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery,
+    installable_plan_of, plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery,
     PlannerExecutorCompileCheck, PredictedNodeUsage, PredictedQueryUsage, PredictedUsage,
     SelectedPlanReport, StoredCoverage, StoredOutput, StoredOutputBuild, StoredOutputInputs,
 };

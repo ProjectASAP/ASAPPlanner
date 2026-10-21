@@ -27,9 +27,11 @@ pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
     for candidate in logical {
         let mut label = choice_label(&run.stage1_pass1_per_computation, &candidate.choice);
         if let Some(pass2) = &candidate.pass2 {
-            let pass1_roots = logical[pass2.from_pass1_position]
-                .roots
-                .as_deref()
+            // The default search keeps only the selected candidate, so its
+            // Pass 1 candidate may not be in the run.
+            let pass1_roots = logical
+                .get(pass2.from_pass1_position)
+                .and_then(|c| c.roots.as_deref().ok())
                 .unwrap_or_default();
             let candidate_roots = candidate.roots.as_deref().unwrap_or_default();
             label += &pass2_label(pass2, pass1_roots, candidate_roots);
@@ -152,14 +154,13 @@ pub fn pass2_label(
         .shared_builds
         .iter()
         .map(|builds| {
-            let queries = readers(pass1_roots, |node| {
-                builds.iter().any(|b| same_computation(node, b))
-            });
+            let shared = |node: &OperatorNode| builds.iter().any(|b| same_computation(node, b));
+            let queries = readers_in(&[pass1_roots, candidate_roots], shared);
             let family = match builds[0].asap().and_then(ASAPOp::produced_state) {
                 Some(FieldDataType::Sketch(kind, _)) => format!("{:?}", kind.algorithm()),
                 _ => builds[0].operator.kind_name().to_string(),
             };
-            format!("{family} for {}", query_names(&queries))
+            for_queries(family, &queries)
         })
         .collect();
     if !summaries.is_empty() {
@@ -180,11 +181,11 @@ pub fn pass2_label(
         })
         .map(|(_, candidate)| {
             format!(
-                "{} for {} in {} × {} panes",
-                state_name(&candidate.build),
-                query_names(&readers(candidate_roots, |node| is_pane_chain_of(
-                    node, candidate
-                ))),
+                "{} in {} × {} panes",
+                for_queries(
+                    state_name(&candidate.build),
+                    &readers(candidate_roots, |node| is_pane_chain_of(node, candidate))
+                ),
                 candidate.pane_count,
                 duration_name(candidate.pane_width_ms)
             )
@@ -200,31 +201,28 @@ pub fn pass2_label(
         .rollup_candidates
         .iter()
         .map(|candidate| {
-            format!(
-                "{} for {} rolled up from {}",
-                state_name(&candidate.coarse),
-                query_names(&readers(pass1_roots, |n| same_computation(
-                    n,
-                    &candidate.coarse
-                ))),
-                query_names(&readers(pass1_roots, |n| same_computation(
-                    n,
-                    &candidate.finer
-                )))
-            )
+            let roots = [pass1_roots, candidate_roots];
+            let finer = readers_in(&roots, |n| same_computation(n, &candidate.finer));
+            let coarse = readers_in(&roots, |n| same_computation(n, &candidate.coarse));
+            match finer.is_empty() {
+                true => format!(
+                    "{} rolled up",
+                    for_queries(state_name(&candidate.coarse), &coarse)
+                ),
+                false => format!(
+                    "{} rolled up from {}",
+                    for_queries(state_name(&candidate.coarse), &coarse),
+                    query_names(&finer)
+                ),
+            }
         })
         .chain(pass2.topk_reuse_candidates.iter().map(|candidate| {
             let k = match candidate.ranking.non_asap() {
                 Some(NonASAPOp::Limit { n: Some(k), .. }) => *k,
                 _ => 0,
             };
-            format!(
-                "top-k for {} from one top-{k}",
-                query_names(&readers(candidate_roots, |n| same_computation(
-                    n,
-                    &candidate.ranking
-                )))
-            )
+            let queries = readers(candidate_roots, |n| same_computation(n, &candidate.ranking));
+            format!("{} from one top-{k}", for_queries("top-k".into(), &queries))
         }))
         .collect();
     if !reused.is_empty() {
@@ -237,17 +235,36 @@ pub fn pass2_label(
         .iter()
         .map(|candidate| {
             let node = &candidate.nodes[0];
-            format!(
-                "{} ({})",
-                node.operator.kind_name(),
-                query_names(&readers(candidate_roots, |n| same_computation(n, node)))
-            )
+            let queries = readers(candidate_roots, |n| same_computation(n, node));
+            match queries.is_empty() {
+                true => node.operator.kind_name().to_string(),
+                false => format!("{} ({})", node.operator.kind_name(), query_names(&queries)),
+            }
         })
         .collect();
     if !shared.is_empty() {
         label += &format!(" · shared {}", shared.join(", "));
     }
     label
+}
+
+/// `what` with the queries that read it, e.g. "Kll for Q1, Q3"; `what`
+/// alone when none is found (a node later rules rebuilt).
+fn for_queries(what: String, queries: &[usize]) -> String {
+    match queries.is_empty() {
+        true => what,
+        false => format!("{what} for {}", query_names(queries)),
+    }
+}
+
+/// The readers of a node `matches` in the first of `roots` where any query
+/// reads one.
+fn readers_in(roots: &[&[QueryRoot]], matches: impl Fn(&OperatorNode) -> bool) -> Vec<usize> {
+    roots
+        .iter()
+        .map(|roots| readers(roots, &matches))
+        .find(|queries| !queries.is_empty())
+        .unwrap_or_default()
 }
 
 /// Query names for query indices, e.g. "Q1, Q3".

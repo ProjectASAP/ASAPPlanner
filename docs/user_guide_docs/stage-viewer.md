@@ -102,7 +102,22 @@ planner must meet:
   metric that meets ε and δ (the default is the metric the query's result is
   naturally stated in, shown for reference);
 - **latency**: the maximum time an evaluation may take at query time;
-- **every N s**: how often a repeating query runs.
+- **every N s**, **once** or **N invocations**: how often the query runs;
+- **predictable**, **ad hoc** or **unknown**: whether its demand is known
+  ahead of time;
+- **range of … in … steps**: a range query's span and step.
+
+### Data workload
+
+Beside the queries, the facts the planner was given about the data: how it
+arrives (`ingesting · 200000 rows/s`, `at rest`, `mixed`) and, per source
+(a PromQL metric or a SQL table), its series count, metric type, whether
+its values are non-negative, its sample interval, its stream-norm bounds and
+its distinct-count bound, `—` for a fact the workload does not declare. The
+**read by** column lists the queries whose text names the source. The line
+above the table shows the deployment capabilities the plan was made for
+(for example `raw data not retained`). A workload cannot declare labels,
+their hierarchy or their cardinalities, so the panel shows none.
 
 The line under the queries counts the candidates at each stage, for example,
 in Example 1, `Candidates per stage: 1 logical DAG → 27 logical ASAP → 57
@@ -150,7 +165,9 @@ once per evaluation and read by several queries.
 Click a plan to show it in the three lanes. For workloads with many plans,
 the document may carry only the first ones in enumeration order, plus the
 selected one. The list's header then says so, for example `972 candidates
-(document shows 65)` in Example 3a. The selection is made over all plans
+(document shows 64)` in Example 3a: the selected plan, the other valid plans
+cheapest first, then the invalid ones taking each reason in turn, with a
+count per reason. The selection is made over all plans
 either way.
 
 ### The three lanes
@@ -175,6 +192,18 @@ and how many instances it keeps, for example `summary: CmsWithHeap · depth 7
 
 Drag to pan and scroll to zoom.
 
+### Stored outputs
+
+Under the Stage 2 lane, what a deployment runtime would store for the
+selected plan, as `plan_installable` reports it: one row per stored node of
+the installed plan (each pane of a pane chain is its own row), with the
+Stage 2 node it comes from, its coverage definition (equal for two nodes
+that compute the same thing), its operator and summary parameters, which
+pane it is, whether it is built at ingestion or at query time and kept,
+what it reads, how long it is kept, the Stage 3 cost of its Stage 2 node,
+and the queries that read it. Click a row to select its node in the Stage 2
+lane. A plan that computes everything at query time has no stored outputs.
+
 ### Details
 
 Click a node to see:
@@ -189,6 +218,37 @@ Click a node to see:
 - the full operator as JSON.
 
 Click an edge to see the schema and data state it carries.
+
+## Browse workload sets
+
+Click **Workload sets** to list the sets in
+`tools/dag-viewer/workloads/index.json`, one table per set (pick the set in
+the menu). Each row is one workload: its query count, the query labels,
+the queries themselves (open **queries** for each one's text, how often it
+runs and its accuracy target) and the sources they read. Click a row to
+plan the workload: the server runs `stage_pipeline --workload` with the
+default search and the set's deployment capabilities and cost model, and
+the page shows its stages. Planning a 9-query workload takes about 15
+seconds.
+
+| Set | Workloads | What it is |
+| --- | --- | --- |
+| Random mixed · seed-862 | 10 | ASAPQuery's random workloads (seed 862): nine repeating PromQL queries each (sums, quantiles, top-k sums, a top-k increase and a top-k rate) over 10,000 series per metric sampled every 100 ms, lookbacks of 1 to 20 minutes |
+| Random mixed · seed-862-x5 | 10 | The same queries over five times as many series |
+| Random mixed · seed-862-long | 10 | The same queries with three times longer lookbacks |
+
+Each query's target is ε = 0.05 (1 − its accuracy SLA) with δ = 0.3 and no
+metric set. The sets are planned as the MVP deployment: raw data not
+retained, priced at AWS Fargate us-east-1 rates. Without the server (for
+example, when the page is served as static files), workload-01 of each set
+opens its precomputed document, which is also an example tab, and the other
+rows say they need the server.
+
+To add a set, put its `PlanningWorkload` files in
+`tools/dag-viewer/workloads/<set>/` and add an entry to `index.json` (see
+[`tools/dag-viewer/README.md`](../../tools/dag-viewer/README.md#workload-sets)).
+A `PlanningWorkload` file can also be opened directly with **Open stage
+document or workload…**.
 
 ## Plan your own queries
 
@@ -224,6 +284,7 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | --- | --- |
 | `--promql <query>`, `--sql <query>` | A query; repeat and mix for several, in workload order |
 | `--name <name>` | Names the query before it (default `q1`, `q2`, …) |
+| `--workload <file>` | A `PlanningWorkload` JSON file instead of queries: its queries, their requirements and recurrence, and its data workload. Each query's accuracy comes from the file, so `--max-error`, `--failure-probability` and `--accuracy-metric` do not apply. |
 | `--table '<json>'` | A table the SQL queries read, for example `{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}, {"name": "service", "type": "utf8"}], "time_index": 0}`; repeat for several |
 | `--max-error`, `--failure-probability` | Accuracy (ε, δ) for every query; without them the queries are exact |
 | `--accuracy-metric <metric>` | The error metric of that accuracy: `absolute`, `absolute_stream_l1`, `absolute_stream_l2`, `relative` or `rank`. Without it, a plan is accepted in whatever metric meets ε (and δ). |
@@ -239,7 +300,7 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | `--max-combinations <n>` | With `--exhaustive` only: the most candidates a run plans (default 10000), counted at Stage 1 and again at Stage 2; a larger workload is refused with exit status 3 and no document. The default search has no limit. |
 | `--out <file>` | Where to write the document |
 
-Open the document with **Open stage document…**, by dropping the file on the
+Open the document with **Open stage document or workload…**, by dropping the file on the
 page, or, if the file is under `tools/dag-viewer/`, with
 `http://127.0.0.1:8000/?doc=<path relative to tools/dag-viewer>`.
 

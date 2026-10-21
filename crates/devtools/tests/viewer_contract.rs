@@ -286,3 +286,105 @@ fn viewer_categorizes_exactly_the_exported_node_kinds() {
 
     assert_eq!(actual, expected);
 }
+
+/// A JS array of strings declared as `const NAME = [...]` (or
+/// `NAME.concat([...])`) in stages.js, read as the viewer reads it.
+fn stages_js_strings(declaration: &str) -> BTreeSet<String> {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/dag-viewer/stages.js"
+    ));
+    let body = source
+        .split_once(declaration)
+        .unwrap_or_else(|| panic!("stages.js must declare {declaration}"))
+        .1
+        .split_once("];")
+        .expect("the array must end with `];`")
+        .0;
+    body.split('\'')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The serde name of a unit enum variant.
+fn wire_name<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// The viewer knows every `StoredOutputBuild` (`stored_outputs[].built_at`)
+/// and every Stage 3 `RejectionCause`, and splits the causes into failed
+/// checks and losses as `RejectionCause::failed_a_check` does.
+#[test]
+fn viewer_knows_every_stored_output_build_and_rejection_cause() {
+    use asap_plan_selection::RejectionCause as C;
+    use asap_planner::StoredOutputBuild as B;
+    let builds = [B::IngestionRun, B::QueryRun];
+    for build in builds {
+        // A new variant fails to compile here until it is listed above.
+        match build {
+            B::IngestionRun | B::QueryRun => {}
+        }
+    }
+    assert_eq!(
+        stages_js_strings("const STORED_OUTPUT_BUILDS = ["),
+        builds.into_iter().map(wire_name).collect::<BTreeSet<_>>()
+    );
+
+    let causes = [
+        C::FailureProbabilityResizeFailed,
+        C::AccuracyTargetMissed,
+        C::CountMinWeightsNotProvenNonNegative,
+        C::PerEntityAggregateNotExecutable,
+        C::ExecutorCannotCompile,
+        C::NoAccuracyGuarantee,
+        C::RawDataNotRetained,
+        C::LatencyBoundExceeded,
+        C::OverClusterCapacity,
+        C::Costlier,
+        C::Slower,
+        C::MoreMemory,
+        C::NotLowestLatencyOnParetoFront,
+        C::Dominated,
+        C::TiedLostOnEnumerationOrder,
+    ];
+    for cause in causes {
+        match cause {
+            C::FailureProbabilityResizeFailed
+            | C::AccuracyTargetMissed
+            | C::CountMinWeightsNotProvenNonNegative
+            | C::PerEntityAggregateNotExecutable
+            | C::ExecutorCannotCompile
+            | C::NoAccuracyGuarantee
+            | C::RawDataNotRetained
+            | C::LatencyBoundExceeded
+            | C::OverClusterCapacity
+            | C::Costlier
+            | C::Slower
+            | C::MoreMemory
+            | C::NotLowestLatencyOnParetoFront
+            | C::Dominated
+            | C::TiedLostOnEnumerationOrder => {}
+        }
+    }
+    let failed: BTreeSet<String> = causes
+        .into_iter()
+        .filter(|c| c.failed_a_check())
+        .map(wire_name)
+        .collect();
+    let lost: BTreeSet<String> = causes
+        .into_iter()
+        .filter(|c| !c.failed_a_check())
+        .map(wire_name)
+        .collect();
+    assert_eq!(stages_js_strings("const FAILED_CHECK_CAUSES = ["), failed);
+    assert_eq!(
+        stages_js_strings("const REJECTION_CAUSES = FAILED_CHECK_CAUSES.concat(["),
+        lost
+    );
+}
