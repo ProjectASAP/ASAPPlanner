@@ -1649,3 +1649,162 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
         "no raw samples read"
     );
 }
+
+/// [`p99_avg_workload`]'s query with `outer` in place of `avg`, planned
+/// for a deployment that keeps no raw samples.
+async fn plan_p99(outer: &str, values_non_negative: bool) -> InstallablePlan {
+    let mut json = serde_json::to_value(p99_avg_workload(values_non_negative)).unwrap();
+    json["query_workload"]["repeating_queries"][0]["query"] =
+        format!("{outer} by (region, service, job) (quantile_over_time(0.99, data[100s]))").into();
+    let workload: PlanningWorkload = serde_json::from_value(json).unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    plan_installable(UserInput::new(
+        &workload,
+        FrontendInput::Promql { histograms: None },
+        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+    ))
+    .await
+    .expect("a valid plan")
+}
+
+/// `data` samples of series `0..series`, `value(series, step)` every
+/// `interval_ms` over the `steps` steps ending just before `EVALUATION_MS`,
+/// two series per (region, service, job) group; and each group's series'
+/// windows `(EVALUATION_MS - 100 s, EVALUATION_MS]`.
+#[allow(clippy::type_complexity)]
+fn data_samples(
+    series: usize,
+    steps: i64,
+    interval_ms: i64,
+    value: impl Fn(usize, i64) -> f64,
+) -> (
+    Vec<Sample>,
+    BTreeMap<(String, String, String), Vec<Vec<f64>>>,
+) {
+    let mut samples = Vec::new();
+    let mut per_group: BTreeMap<(String, String, String), Vec<Vec<f64>>> = BTreeMap::new();
+    for s in 0..series {
+        let (region, service, job) = (
+            format!("r{}", s % 2),
+            format!("s{}", s / 4),
+            "j".to_string(),
+        );
+        let mut window = Vec::new();
+        for step in 0..steps {
+            let timestamp_ms = EVALUATION_MS - steps * interval_ms + 50 + step * interval_ms;
+            let v = value(s, step);
+            samples.push(Sample {
+                labels: BTreeMap::from([
+                    ("__name__".to_string(), "data".to_string()),
+                    ("region".to_string(), region.clone()),
+                    ("service".to_string(), service.clone()),
+                    ("job".to_string(), job.clone()),
+                    ("instance".to_string(), format!("i{s}")),
+                ]),
+                timestamp_ms,
+                value: v,
+            });
+            if timestamp_ms > EVALUATION_MS - 100_000 {
+                window.push(v);
+            }
+        }
+        per_group
+            .entry((region, service, job))
+            .or_default()
+            .push(window);
+    }
+    (samples, per_group)
+}
+
+/// PromQL's interpolated `quantile_over_time(q, ...)` of `window`.
+fn interpolated_quantile(q: f64, window: &[f64]) -> f64 {
+    let mut sorted = window.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let rank = q * (sorted.len() - 1) as f64;
+    let (low, high) = (rank.floor() as usize, rank.ceil() as usize);
+    sorted[low] + (sorted[high] - sorted[low]) * (rank - low as f64)
+}
+
+/// Runs `plan` over `samples` and checks every group's answer against
+/// `combine` of its series' exact p99s, within the relative error 0.05, and
+/// against the query-time reference.
+fn assert_p99s_within_alpha(
+    plan: &InstallablePlan,
+    samples: &[Sample],
+    per_group: &BTreeMap<(String, String, String), Vec<Vec<f64>>>,
+    combine: impl Fn(&[f64]) -> f64,
+) {
+    let run = run_data_plane(
+        &serde_json::to_string(plan).unwrap(),
+        samples,
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+    let answers = &run.answers_per_query[0];
+    assert_eq!(answers.len(), per_group.len());
+    for (labels, value) in answers {
+        let key = (
+            labels["region"].clone(),
+            labels["service"].clone(),
+            labels["job"].clone(),
+        );
+        let p99s: Vec<f64> = per_group[&key]
+            .iter()
+            .map(|window| interpolated_quantile(0.99, window))
+            .collect();
+        let exact = combine(&p99s);
+        assert!(
+            (value - exact).abs() <= 0.05 * exact.abs(),
+            "{labels:?}: {value} vs exact {exact}"
+        );
+    }
+}
+
+/// A non-negative gauge that reports exactly 0 is still summarized by the
+/// selected DDSketch panes (zero has its own bucket): each series' window
+/// holds the samples 0, 0, 3 and 5 scaled by the series, and every answer
+/// equals the query-time reference's and is within the relative error 0.05
+/// of the exact average of PromQL's interpolated p99s.
+#[tokio::test]
+async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
+    let plan = plan_p99("avg", true).await;
+    assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
+    let (samples, per_group) = data_samples(8, 4, 20_000, |s, step| {
+        (s + 1) as f64 * [0.0, 0.0, 3.0, 5.0][step as usize]
+    });
+    assert!(per_group.values().flatten().all(|window| window.len() == 4));
+    let average = |p99s: &[f64]| p99s.iter().sum::<f64>() / p99s.len() as f64;
+    assert_p99s_within_alpha(&plan, &samples, &per_group, average);
+    // Many samples, a third of them zero.
+    let (samples, per_group) = data_samples(8, 1_100, 100, |s, step| {
+        (s + 1) as f64 * [0.0, 3.0, 5.0][(step % 3) as usize]
+    });
+    assert_p99s_within_alpha(&plan, &samples, &per_group, average);
+}
+
+/// Signed samples (negative, zero and positive) are summarized by the
+/// selected DDSketch panes, through their negative store and zero bucket:
+/// `max` of the per-series p99s carries the relative bound whatever the
+/// samples' sign, and every answer equals the query-time reference's and is
+/// within 0.05 of the exact value, including series whose samples are all
+/// negative.
+#[tokio::test]
+async fn a_ddsketch_over_signed_samples_runs_within_alpha() {
+    let plan = plan_p99("max", false).await;
+    assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
+    let max = |p99s: &[f64]| p99s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    // Series 0..4 cross zero; series 4..8 are all negative.
+    let (samples, per_group) = data_samples(8, 1_100, 100, |s, step| {
+        let scale = (s + 1) as f64;
+        if s < 4 {
+            scale * [-7.0, -3.0, 0.0, 2.0, 4.0][(step % 5) as usize]
+        } else {
+            scale * [-9.0, -8.0, -5.0, -1.0][(step % 4) as usize]
+        }
+    });
+    assert_p99s_within_alpha(&plan, &samples, &per_group, max);
+}

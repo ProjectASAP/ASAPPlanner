@@ -516,7 +516,11 @@ fn per_sample_updates_keep_each_kernels_input_contract() {
     ))
     .unwrap();
     let group = dd.add_group().unwrap();
-    assert!(dd.update(group, -1.0, 0).is_err());
+    // A DDSketch takes zero and negative values, not NaN or ±Inf.
+    dd.update(group, -1.0, 0).unwrap();
+    dd.update(group, 0.0, 0).unwrap();
+    assert!(dd.update(group, f64::NAN, 0).is_err());
+    assert!(dd.update(group, f64::INFINITY, 0).is_err());
     // A keyed family takes items, a value family takes values.
     let mut cms = StateColumnUpdater::new(&keyed_families()[0]).unwrap();
     let group = cms.add_group().unwrap();

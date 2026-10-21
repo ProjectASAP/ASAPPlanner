@@ -447,9 +447,11 @@ fn explicit_merge_changes_pane_cardinality() {
     }
 }
 
-// Typed updates reject invalid domains before publishing any target state.
+// Typed updates reject invalid domains before publishing any target state:
+// a DDSketch takes zero and negative values (its zero bucket and negative
+// store), and refuses NaN, ±Inf and magnitudes beyond its indexable range.
 #[test]
-fn precompute_rejects_nonfinite_and_nonpositive_dds_updates() {
+fn precompute_rejects_nonfinite_and_out_of_range_dds_updates() {
     let source = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let target = FieldDataType::Sketch(
         SketchKind::new(
@@ -459,14 +461,25 @@ fn precompute_rejects_nonfinite_and_nonpositive_dds_updates() {
         GroupingStrategy::default(),
     );
     let program = state_dag(source.clone(), Some(target), false);
-    assert!(native_run(
-        &program,
-        source.clone(),
-        vec![sum_state(20.)],
-        ingestion_context(Limits::default())
-    )
-    .is_ok());
-    for value in [-20., 0., f64::MAX, f64::NAN, f64::INFINITY] {
+    for value in [20., -20., 0.] {
+        assert!(
+            native_run(
+                &program,
+                source.clone(),
+                vec![sum_state(value)],
+                ingestion_context(Limits::default())
+            )
+            .is_ok(),
+            "{value}"
+        );
+    }
+    for value in [
+        f64::MAX,
+        -f64::MAX,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
         assert!(native_run(
             &program,
             source.clone(),
