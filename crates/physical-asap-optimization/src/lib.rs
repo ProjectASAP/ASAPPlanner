@@ -45,7 +45,8 @@
 //!   as Prometheus assumes (it rejects out-of-order samples). Table (SQL)
 //!   sources and mixed data, whose at-rest part may load in any order, are
 //!   not taken to be ordered;
-//! * it is a tumbling-pane chain, or a whole-window build whose readers
+//! * it is a tumbling-pane chain whose readers of known phase all evaluate
+//!   on its pane boundaries, or a whole-window build whose readers
 //!   all run at one fixed interval with a known phase, over a window no
 //!   longer than that interval and not shifted, and none is a range
 //!   evaluation of more than one step per request (one window per request
@@ -60,7 +61,7 @@
 //! Every step reads the
 //! panes of a tumbling-pane chain, so each pane width must divide the step
 //! of every range-evaluated reader. Stage 1 offers only such widths
-//! (`QueryWorkloadEntry::evaluation_grid_ms`); a candidate with a chain off
+//! (`QueryWorkloadEntry::evaluation_grid`); a candidate with a chain off
 //! a reader's step grid fails with
 //! [`PhysicalASAPOptimizationError::PaneWidthOffRangeStep`] and the caller
 //! prunes it with that reason.
@@ -105,6 +106,7 @@ use asap_types::ir::{
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
+use asap_types::physical::{plan_pane_phase, validate_pane_coverage, WindowEdgeCoverage};
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
@@ -194,6 +196,10 @@ pub(crate) enum IngestionPruneReason {
     /// A whole-window build read by a range evaluation of more than one
     /// step per request: it keeps one window per request, not one per step.
     RangeEvaluatedWholeWindow,
+    /// A tumbling-pane chain whose readers evaluate at known phases that are
+    /// not all on one pane boundary (e.g. 20 s panes read at phases 0 and
+    /// 5 s): built once each, its panes cannot end at every evaluation.
+    PanesOffPhase,
     /// Something below it can only run at query time.
     UpstreamAtQueryTime(String),
 }
@@ -674,9 +680,13 @@ fn ingestion_eligibility(
     if is_filtered_build(node) {
         return Err(Why::Filtered);
     }
-    let (family, chain) = match node.asap() {
-        Some(ASAPOp::SummaryAgg { family, .. }) => (family, false),
-        Some(ASAPOp::PaneChain { family, .. }) => (family, true),
+    let (family, chain_pane_width_ms) = match node.asap() {
+        Some(ASAPOp::SummaryAgg { family, .. }) => (family, None),
+        Some(ASAPOp::PaneChain {
+            family,
+            pane_width_ms,
+            ..
+        }) => (family, Some(*pane_width_ms)),
         _ => unreachable!("a materialization candidate is a summary build"),
     };
     if matches!(
@@ -691,7 +701,27 @@ fn ingestion_eligibility(
             return Err(Why::CounterNeedsTimeOrder);
         }
     }
-    if chain {
+    if let Some(pane_width_ms) = chain_pane_width_ms {
+        // A chain's panes are built once each, on one grid: every reader of
+        // known phase must evaluate on its boundaries. A reader of unknown
+        // phase is taken to run with them (`builds_one_pane_per_evaluation`).
+        let mut layout = None;
+        for d in demands.iter().flatten() {
+            let QueryRecurrence::Repeated(demand) = &d.recurrence else {
+                continue;
+            };
+            let reader = plan_pane_phase(demand, pane_width_ms).map_err(|_| Why::PanesOffPhase)?;
+            let Some(phase_ms) = reader.pane_origin_ms else {
+                if matches!(demand, RepeatedDemand::Scheduled(_)) {
+                    // A schedule whose times are not all on one pane phase.
+                    return Err(Why::PanesOffPhase);
+                }
+                continue;
+            };
+            let layout = layout.get_or_insert(reader);
+            validate_pane_coverage(layout, Some(phase_ms), &WindowEdgeCoverage::PaneAligned)
+                .map_err(|_| Why::PanesOffPhase)?;
+        }
         return Ok(());
     }
     if demands.iter().flatten().any(|d| {
@@ -1391,6 +1421,44 @@ mod tests {
                 assert_eq!(node.timing, Some(ExecutionTiming::QueryTime), "{kind}");
             }
         }
+    }
+
+    /// A chain of 1-min panes read by two queries every minute is maintained
+    /// at ingestion time when they evaluate on its pane boundaries (phases
+    /// 0 and 2 min, or one phase unknown), not at phases 0 and 30 s: each
+    /// pane is built once, so the second would read panes 30 s off.
+    #[test]
+    fn a_pane_chain_is_maintained_only_on_its_readers_phases() {
+        use IngestionPruneReason as Why;
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let at = |phase_ms: u64| QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(MINUTE as u32),
+                evaluation_phase: TimestampMs(phase_ms),
+            }),
+            ..every_minute()
+        };
+        let at_ingestion = |demands: [QueryWorkloadEntry; 2]| {
+            let mut memo = HashMap::new();
+            // One chain read by both queries.
+            let implemented = map_roots(&[root.clone(), root.clone()], &mut |n| {
+                implement(n, &mut memo)
+            })
+            .unwrap();
+            materialization_candidates(
+                &implemented,
+                &demands,
+                &arriving(),
+                &DeploymentCapabilities::default(),
+            )
+            .into_iter()
+            .find(|c| matches!(c.node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .expect("the chain is a materialization candidate")
+            .at_ingestion
+        };
+        assert_eq!(at_ingestion([at(0), at(2 * MINUTE)]), Ok(()));
+        assert_eq!(at_ingestion([at(30_000), every_minute()]), Ok(()));
+        assert_eq!(at_ingestion([at(0), at(30_000)]), Err(Why::PanesOffPhase));
     }
 
     /// S4: maintaining state at ingestion time needs arriving data and

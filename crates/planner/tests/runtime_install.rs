@@ -291,6 +291,37 @@ fn run_data_plane(
     evaluation_ms: i64,
     store: &mut SummaryStore,
 ) -> DataPlaneRun {
+    run_data_plane_on(
+        plan_json,
+        samples,
+        evaluation_ms,
+        store,
+        IngestionBuilds::PerEvaluation,
+    )
+}
+
+/// When this stand-in runtime builds a stored output an ingestion run
+/// builds from raw samples.
+#[derive(Clone, Copy)]
+enum IngestionBuilds<'a> {
+    /// For each evaluation, over windows ending at that evaluation.
+    PerEvaluation,
+    /// Tumbling, as a runtime that maintains panes as samples arrive: each
+    /// once, over windows ending on the grid of its window's width at the
+    /// evaluation phase of the first query (in workload order) reading it,
+    /// `phase_ms_per_query[q]`; an evaluation reads the newest one at or
+    /// before it.
+    Tumbling { phase_ms_per_query: &'a [i64] },
+}
+
+/// [`run_data_plane`] with ingestion-run outputs built as `ingestion` says.
+fn run_data_plane_on(
+    plan_json: &str,
+    samples: &[Sample],
+    evaluation_ms: i64,
+    store: &mut SummaryStore,
+    ingestion: IngestionBuilds<'_>,
+) -> DataPlaneRun {
     // The installed plan, read back from its file and checked.
     let installed: InstallablePlan = serde_json::from_str(plan_json).unwrap();
     installed.validate().unwrap();
@@ -303,14 +334,47 @@ fn run_data_plane(
     // Each stored output's state and the time span of its data at this
     // evaluation, `(start_ms, end_ms]`, by node id.
     let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
+    // For a tumbling runtime, each node's pane phase: the evaluation phase
+    // of the first query whose root reaches it.
+    let mut phase_ms_by_node: BTreeMap<u64, i64> = BTreeMap::new();
+    if let IngestionBuilds::Tumbling { phase_ms_per_query } = ingestion {
+        for (&root, &phase_ms) in query_roots(&installed).iter().zip(phase_ms_per_query) {
+            let mut pending = vec![root];
+            while let Some(id) = pending.pop() {
+                if phase_ms_by_node.contains_key(&id) {
+                    continue;
+                }
+                phase_ms_by_node.insert(id, phase_ms);
+                pending.extend(
+                    dag.edges
+                        .iter()
+                        .filter(|edge| edge.consumer as u64 == id)
+                        .map(|edge| edge.producer as u64),
+                );
+            }
+        }
+    }
     for output in &installed.stored_outputs {
+        // The evaluation its windows end at: this one, or for a tumbling
+        // ingestion build the newest point of its grid at or before it.
+        let built_for_ms = match (ingestion, output.built_at) {
+            (IngestionBuilds::Tumbling { .. }, StoredOutputBuild::IngestionRun) => output
+                .inputs
+                .raw_sample_windows
+                .first()
+                .map_or(evaluation_ms, |window| {
+                    let phase_ms = phase_ms_by_node[&(output.node_id as u64)];
+                    evaluation_ms - (evaluation_ms - phase_ms).rem_euclid(window.width_ms)
+                }),
+            _ => evaluation_ms,
+        };
         // The span of the data it summarizes: its windows' and stored
         // inputs' spans together.
         let span = output
             .inputs
             .raw_sample_windows
             .iter()
-            .map(|window| window.bounds_ms(evaluation_ms))
+            .map(|window| window.bounds_ms(built_for_ms))
             .chain(
                 output
                     .inputs
@@ -320,7 +384,7 @@ fn run_data_plane(
             )
             .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
             .expect("a stored output reads something");
-        let key = state_key(output, evaluation_ms);
+        let key = state_key(output, built_for_ms);
         if !store.contains_key(&key) {
             // The build's sources: each raw-sample window's rows, and each
             // stored input's state.
@@ -334,7 +398,7 @@ fn run_data_plane(
                     .filter(|s| s.labels["__name__"] == selector.metric())
                     .cloned()
                     .collect();
-                let (_, end_ms) = window.bounds_ms(evaluation_ms);
+                let (_, end_ms) = window.bounds_ms(built_for_ms);
                 sources.insert(
                     window.time_range_node_id as u64,
                     selector.window_batch(end_ms, &routed).unwrap(),
@@ -584,6 +648,91 @@ async fn an_hour_and_its_offset_twin_both_equal_the_reference() {
     assert_answers_from_pane(&run.answers_per_query[0], 5);
     assert_answers_from_pane(&run.answers_per_query[1], 6);
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// Two copies of `sum by (job) (sum_over_time(m[10m]))`, each every 20 s,
+/// one at phase 0 and one at phase 5 s, over 6 ingesting series of `m`
+/// sampled every second. Panes shared by both must end on both schedules:
+/// 20 s panes end only on the first's, so the second would read
+/// `(t − 605 s, t − 5 s]` instead of `(t − 600 s, t]`. Run by a runtime
+/// that builds each ingestion pane once, on the grid of its width at its
+/// first reader's phase, both answer as the query-time reference, each at
+/// its own evaluation.
+#[tokio::test]
+async fn queries_at_two_phases_read_panes_on_both_schedules() {
+    let entries: Vec<String> = [0, 5_000]
+        .iter()
+        .map(|phase_ms| {
+            format!(
+                r#"{{"query": "sum by (job) (sum_over_time(m[10m]))",
+                  "demand": {{"fixed_interval_at": {{"interval": 20000, "evaluation_phase": {phase_ms}}}}},
+                  "requirements": {{}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
+    let workload: PlanningWorkload = serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 6.0}}}},
+              "sources": {{"m": {{"series_count": 6, "sample_interval": 1000}}}}}}}}"#,
+        entries.join(",")
+    ))
+    .unwrap();
+    // A deployment that keeps no raw samples: the windows are stored.
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan_json = plan_json_for(workload, &capabilities).await;
+    let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    assert!(
+        plan.stored_outputs
+            .iter()
+            .any(|output| output.built_at == StoredOutputBuild::IngestionRun),
+        "{:#?}",
+        plan.stored_outputs
+    );
+    // Samples of `m`, `job` a (instances 1-3) and b (4-6), every second
+    // from 11 minutes before the first evaluation to 10 s after it; each
+    // value distinct, so a window off by 5 s at either edge answers
+    // differently.
+    let samples: Vec<Sample> = (1..=6i64)
+        .flat_map(|instance| {
+            (0..680i64).map(move |step| Sample {
+                labels: BTreeMap::from([
+                    ("__name__".to_string(), "m".to_string()),
+                    (
+                        "job".to_string(),
+                        if instance <= 3 { "a" } else { "b" }.to_string(),
+                    ),
+                    ("instance".to_string(), instance.to_string()),
+                ]),
+                timestamp_ms: EVALUATION_MS - 660_000 + step * 1_000,
+                value: (instance * 1000 + step * step % 997) as f64,
+            })
+        })
+        .collect();
+    // The panes stored across both evaluations.
+    let mut store = SummaryStore::new();
+    // The phase-0 query evaluates at `EVALUATION_MS`, the phase-5 s one
+    // 5 s later; each reads the panes the store holds by then.
+    let phase_ms_per_query = [EVALUATION_MS, EVALUATION_MS + 5_000];
+    for (query, evaluation_ms) in phase_ms_per_query.into_iter().enumerate() {
+        let run = run_data_plane_on(
+            &plan_json,
+            &samples,
+            evaluation_ms,
+            &mut store,
+            IngestionBuilds::Tumbling {
+                phase_ms_per_query: &phase_ms_per_query,
+            },
+        );
+        assert_eq!(run.answers_per_query[query].len(), 2, "one sum per job");
+        assert_eq!(
+            run.answers_per_query[query], run.reference_answers_per_query[query],
+            "query {query} at {evaluation_ms}"
+        );
+    }
 }
 
 /// A plan file of another DAG wire version is refused, and so is the

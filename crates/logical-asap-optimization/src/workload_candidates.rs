@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::workload::QueryWorkloadEntry;
+use asap_types::workload::{EvaluationGrid, QueryWorkloadEntry};
 
 use crate::asap_aware_cse::{
     capability_sharing_candidates, identical_expression_pass2_candidates, pane_candidates,
@@ -72,7 +72,7 @@ pub struct Stage1Candidate {
 /// followed by its own identical-expression candidates. `entries[q]` is
 /// query `q`'s workload entry: the window-composition rule splits only
 /// builds of queries that repeat at a fixed interval, into panes on every
-/// reader's evaluation grid ([`QueryWorkloadEntry::evaluation_grid_ms`]:
+/// reader's evaluation grid ([`QueryWorkloadEntry::evaluation_grid`]:
 /// the interval, or with a range evaluation also its step). A Pass 2
 /// candidate equal to an earlier one of the same Pass 1 candidate (same
 /// nodes, same sharing) is listed once. Lazy and uncapped: a caller that
@@ -99,9 +99,9 @@ pub fn stage1_logical_asap_optimization_skipping<'a, Id: Clone>(
     mut invalid_prefix: impl FnMut(&[usize]) -> Option<usize> + 'a,
     viable: impl Fn(&[QueryRoot]) -> bool + 'a,
 ) -> impl Iterator<Item = Stage1Candidate> + 'a {
-    let evaluation_grid_ms: Vec<Option<u64>> = entries
+    let evaluation_grids: Vec<Option<EvaluationGrid>> = entries
         .iter()
-        .map(QueryWorkloadEntry::evaluation_grid_ms)
+        .map(QueryWorkloadEntry::evaluation_grid)
         .collect();
     let mut choice = Some(vec![0; per_computation.targets.len()]);
     let mut queue = std::collections::VecDeque::new();
@@ -128,7 +128,7 @@ pub fn stage1_logical_asap_optimization_skipping<'a, Id: Clone>(
             queue.extend(choice_candidates(
                 per_computation,
                 &this,
-                &evaluation_grid_ms,
+                &evaluation_grids,
                 from,
                 &viable,
             ));
@@ -148,11 +148,11 @@ pub fn stage1_candidates_of_choice<Id: Clone>(
     choice: &[usize],
     viable: &dyn Fn(&[QueryRoot]) -> bool,
 ) -> Vec<Stage1Candidate> {
-    let evaluation_grid_ms: Vec<Option<u64>> = entries
+    let evaluation_grids: Vec<Option<EvaluationGrid>> = entries
         .iter()
-        .map(QueryWorkloadEntry::evaluation_grid_ms)
+        .map(QueryWorkloadEntry::evaluation_grid)
         .collect();
-    choice_candidates(per_computation, choice, &evaluation_grid_ms, 0, viable)
+    choice_candidates(per_computation, choice, &evaluation_grids, 0, viable)
 }
 
 /// [`stage1_candidates_of_choice`] with each query's evaluation grid, its
@@ -160,7 +160,7 @@ pub fn stage1_candidates_of_choice<Id: Clone>(
 fn choice_candidates<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     choice: &[usize],
-    evaluation_grid_ms: &[Option<u64>],
+    evaluation_grids: &[Option<EvaluationGrid>],
     from: usize,
     viable: &dyn Fn(&[QueryRoot]) -> bool,
 ) -> Vec<Stage1Candidate> {
@@ -170,7 +170,7 @@ fn choice_candidates<Id: Clone>(
         Ok(roots) => {
             let composed_viable = viable(roots);
             (
-                pass2_candidates(roots, evaluation_grid_ms, composed_viable, viable),
+                pass2_candidates(roots, evaluation_grids, composed_viable, viable),
                 composed_viable,
             )
         }
@@ -237,12 +237,12 @@ impl Pass2 {
 }
 
 /// The Pass 2 candidates of the composed candidate with roots `roots`, in
-/// enumeration order, each distinct candidate once. `evaluation_grid_ms[q]`
+/// enumeration order, each distinct candidate once. `evaluation_grids[q]`
 /// is the grid query `q`'s evaluations fall on, if it repeats at a fixed
-/// interval ([`QueryWorkloadEntry::evaluation_grid_ms`]).
+/// interval ([`QueryWorkloadEntry::evaluation_grid`]).
 fn pass2_candidates(
     roots: &[QueryRoot],
-    evaluation_grid_ms: &[Option<u64>],
+    evaluation_grids: &[Option<EvaluationGrid>],
     composed_viable: bool,
     viable: &dyn Fn(&[QueryRoot]) -> bool,
 ) -> Vec<Pass2> {
@@ -255,8 +255,8 @@ fn pass2_candidates(
     if composed_viable {
         found.identical_expression(&none, roots);
     }
-    found.window_composition(&none, roots, evaluation_grid_ms);
-    found.reuse(&none, roots, evaluation_grid_ms);
+    found.window_composition(&none, roots, evaluation_grids);
+    found.reuse(&none, roots, evaluation_grids);
     let candidates = capability_sharing_candidates(roots);
     let pass2_candidates = match summary_capability_pass2_candidates(roots, &candidates) {
         Ok(pass2_candidates) => pass2_candidates,
@@ -275,7 +275,7 @@ fn pass2_candidates(
                 if found.push(&rules, Vec::new(), &roots) {
                     found.identical_expression(&rules, &roots);
                 }
-                found.window_composition(&rules, &roots, evaluation_grid_ms);
+                found.window_composition(&rules, &roots, evaluation_grids);
             }
             // Listed as a candidate that cannot be composed; the other
             // Pass 2 candidates go on.
@@ -345,9 +345,9 @@ impl Pass2List<'_> {
         &mut self,
         rules: &Rules,
         roots: &[QueryRoot],
-        evaluation_grid_ms: &[Option<u64>],
+        evaluation_grids: &[Option<EvaluationGrid>],
     ) {
-        let candidates = pane_candidates(roots, evaluation_grid_ms);
+        let candidates = pane_candidates(roots, evaluation_grids);
         let pass2_candidates = match window_composition_pass2_candidates(roots, &candidates) {
             Ok(pass2_candidates) => pass2_candidates,
             Err(error) => {
@@ -379,7 +379,12 @@ impl Pass2List<'_> {
     /// identical-expression Pass 2 candidates. They are listed eagerly,
     /// like every Pass 2 rule's: more than [`MAX_REUSE_CANDIDATES`] rollup
     /// and top-k reuse candidates together list one error.
-    fn reuse(&mut self, rules: &Rules, roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) {
+    fn reuse(
+        &mut self,
+        rules: &Rules,
+        roots: &[QueryRoot],
+        evaluation_grids: &[Option<EvaluationGrid>],
+    ) {
         let candidates = rollup_candidates(roots);
         // Every rollup subset is combined with every top-k subset: cap the
         // product, not each factor.
@@ -414,7 +419,7 @@ impl Pass2List<'_> {
                         self.identical_expression(&rules, &roots);
                     }
                     self.topk_reuse(&rules, &roots);
-                    self.window_composition(&rules, &roots, evaluation_grid_ms);
+                    self.window_composition(&rules, &roots, evaluation_grids);
                 }
                 Err(error) => self.out.push(Pass2::failed(&rules, error)),
             }

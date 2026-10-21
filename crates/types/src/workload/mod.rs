@@ -369,21 +369,51 @@ pub struct QueryWorkloadEntry {
     pub range_evaluation: Option<RangeEvaluation>,
 }
 
+/// The instants a repeated query evaluates at: every `step_ms`, offset by
+/// `phase_ms` ([`QueryWorkloadEntry::evaluation_grid`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvaluationGrid {
+    /// The spacing of its evaluations, in milliseconds; positive.
+    pub step_ms: u64,
+    /// Where its evaluations fall on that spacing: every evaluation time
+    /// is `phase_ms` modulo `step_ms`, with `phase_ms < step_ms`. `None`
+    /// when the phase is unknown (a plain fixed interval).
+    pub phase_ms: Option<u64>,
+}
+
+impl From<u64> for EvaluationGrid {
+    /// A grid of spacing `step_ms` at an unknown phase.
+    fn from(step_ms: u64) -> Self {
+        Self {
+            step_ms,
+            phase_ms: None,
+        }
+    }
+}
+
 impl QueryWorkloadEntry {
-    /// The grid every evaluation of this query falls on, in milliseconds:
-    /// its fixed interval ([`QueryRecurrence::fixed_interval_ms`]), or with
-    /// a range evaluation of more than one step the greatest common divisor
-    /// of the interval and the step, since each run evaluates at every step
-    /// up to its end. `None` when it does not repeat at a positive fixed
-    /// interval.
-    pub fn evaluation_grid_ms(&self) -> Option<u64> {
+    /// The grid every evaluation of this query falls on: its fixed
+    /// interval ([`QueryRecurrence::fixed_interval_ms`]), or with a range
+    /// evaluation of more than one step the greatest common divisor of the
+    /// interval and the step, since each run evaluates at every step up to
+    /// its end; at the evaluation phase it declares
+    /// ([`RepeatedDemand::FixedIntervalAt`]), if any. `None` when it does
+    /// not repeat at a positive fixed interval.
+    pub fn evaluation_grid(&self) -> Option<EvaluationGrid> {
         let interval_ms = self.recurrence.fixed_interval_ms()?;
-        Some(match self.range_evaluation {
+        let step_ms = match self.range_evaluation {
             Some(range) if range.step_ms > 0 && range.evaluations_per_request() > 1 => {
                 greatest_common_divisor(interval_ms, range.step_ms)
             }
             _ => interval_ms,
-        })
+        };
+        let phase_ms = match &self.recurrence {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                evaluation_phase, ..
+            }) => Some(evaluation_phase.0 % step_ms),
+            _ => None,
+        };
+        Some(EvaluationGrid { step_ms, phase_ms })
     }
 }
 
@@ -1031,10 +1061,25 @@ mod tests {
         let entry = QueryWorkloadEntry::from(&hour);
         assert_eq!(entry.range_evaluation, Some(range));
         // Refreshes every 30 s and steps every 60 s: evaluations on a 30 s grid.
-        assert_eq!(entry.evaluation_grid_ms(), Some(30_000));
+        assert_eq!(entry.evaluation_grid(), Some(EvaluationGrid::from(30_000)));
         assert_eq!(
-            QueryWorkloadEntry::from(&plain).evaluation_grid_ms(),
-            Some(30_000)
+            QueryWorkloadEntry::from(&plain).evaluation_grid(),
+            Some(EvaluationGrid::from(30_000))
+        );
+        // At a known phase, the phase on that grid.
+        let phased = QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(60_000),
+                evaluation_phase: TimestampMs(125_000),
+            }),
+            ..entry.clone()
+        };
+        assert_eq!(
+            phased.evaluation_grid(),
+            Some(EvaluationGrid {
+                step_ms: 60_000,
+                phase_ms: Some(5_000),
+            })
         );
         // A one-step range (span 0) is one evaluation per request: its
         // step does not narrow the grid (refreshing every 60 s at a 45 s
@@ -1049,7 +1094,10 @@ mod tests {
             )),
             ..entry.clone()
         };
-        assert_eq!(one_step.evaluation_grid_ms(), Some(60_000));
+        assert_eq!(
+            one_step.evaluation_grid(),
+            Some(EvaluationGrid::from(60_000))
+        );
 
         let validate = |range: RangeEvaluation| {
             let mut workload = base_workload();
