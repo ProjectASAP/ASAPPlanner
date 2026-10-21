@@ -1,12 +1,10 @@
 //! A Hydra-grouped Count-Min `SummaryAgg` compiles through the physical
 //! planner and answers each group's item point counts from one shared grid.
 use asap_executor::{
-    dag::{
-        operators::{Operator, RowWeight},
-        values::{Batch, SchemaRef, Value},
-        Limits, RunContext, Scope,
-    },
+    operators::{Operator, RowWeight},
     physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
+    runtime::{Limits, RunContext, Scope},
+    values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Reduction};

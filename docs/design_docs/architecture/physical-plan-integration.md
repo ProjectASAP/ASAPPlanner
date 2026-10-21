@@ -23,6 +23,13 @@ The arrows are boundaries, not casts. A logical node does not necessarily
 become one physical node, and a physical operator is not merely a renamed
 logical variant.
 
+Current state: no code lowers a whole candidate to a `PhysicalOperator` DAG.
+The recursive lowering and the physical-DAG estimator that priced its output
+were deleted with no remaining reader. Stage 3 prices each node of a physical
+candidate with `estimate_operator` (`cost/analytical_cost.rs`) over the
+`OperatorStatistics` it derives for that node. The lowering obligations and
+comparison rules below are the contract a whole-DAG lowering must meet.
+
 ## Sources of truth
 
 Each representation is authoritative for a different concern:
@@ -383,7 +390,7 @@ one output row or batch.
 
 ## Comparison and failure behavior
 
-Raw and post-ASAP alternatives must cover the same `ComparisonScope`: arrival
+Raw and post-ASAP alternatives must cover the same comparison scope: arrival
 mode, planning time, workload horizon, recurrence, event-time selection,
 logical sources, ordinary predicates or info-metric matchers, and physical
 source snapshots.

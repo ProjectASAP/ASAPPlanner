@@ -238,7 +238,7 @@ fn weighted_summary_build_yields_within_a_batch() {
         input,
         family,
         vec![0],
-        asap_executor::dag::operators::RowWeight::Column(1),
+        asap_executor::operators::RowWeight::Column(1),
         vec![],
     )
     .unwrap();

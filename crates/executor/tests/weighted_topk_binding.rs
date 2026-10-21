@@ -1,10 +1,10 @@
 //! Planner output binds directly to the shared runtime at a declared rate-value frontier.
 mod common;
-use asap_executor::dag::{
+use asap_executor::{
     operators::Operator,
-    planner::{compile, InputContract, Source},
+    physical_planner::{compile, InputContract, Source},
+    runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
-    Limits, RunContext, Scope,
 };
 use common::{compile_physical_asap_dag, logical_candidates};
 use futures::{executor::block_on, StreamExt};

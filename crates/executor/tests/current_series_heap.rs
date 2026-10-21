@@ -175,7 +175,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
             schema(),
             family,
             vec![3],
-            asap_executor::dag::operators::RowWeight::Column(1),
+            asap_executor::operators::RowWeight::Column(1),
             vec![2],
         )
         .unwrap();

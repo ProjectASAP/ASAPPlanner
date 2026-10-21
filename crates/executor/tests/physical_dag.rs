@@ -1,10 +1,9 @@
 //! Acceptance tests use the library directly, without either backend engine.
 use asap_executor::{
-    dag::{
-        operators::{Expression, Operator, Reduction, SortKey},
-        values::{Batch, SchemaRef, Value},
-        Limits, PhysicalDAG, RunContext, Scope,
-    },
+    operators::{Expression, Operator, Reduction, SortKey},
+    plan::PhysicalDAG,
+    runtime::{Limits, RunContext, Scope},
+    values::{Batch, SchemaRef, Value},
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
@@ -498,7 +497,7 @@ fn exact_state_and_family_validation() {
 // Planner binding rejects unknown computation instead of accepting a fallback.
 #[test]
 fn bind_physical_asap_dag_before_execution() {
-    use asap_executor::dag::planner::bind;
+    use asap_executor::physical_planner::bind;
     use planner_types::ir::properties::ExecutionDataState;
     use planner_types::ir::scalar::{ArithmeticOpKind, ScalarValue};
     use std::collections::BTreeMap;
@@ -553,7 +552,7 @@ fn bind_physical_asap_dag_before_execution() {
         roots: vec![1],
         scalar_roots: vec![],
     };
-    let sources = || -> BTreeMap<u64, asap_executor::dag::planner::Source<'static>> {
+    let sources = || -> BTreeMap<u64, asap_executor::physical_planner::Source<'static>> {
         BTreeMap::from([(
             0,
             Box::new(
@@ -562,7 +561,7 @@ fn bind_physical_asap_dag_before_execution() {
                     vec![Batch::try_new(schema.clone(), vec![vec![Value::Float64(1.)]]).unwrap()],
                 )
                 .unwrap(),
-            ) as asap_executor::dag::planner::Source<'static>,
+            ) as asap_executor::physical_planner::Source<'static>,
         )])
     };
     let native = bind(&dag, sources(), &[1]).unwrap();
@@ -612,7 +611,7 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
 // A deployment source cannot pass a different row shape to bound expressions.
 #[test]
 fn source_batches_must_match_the_bound_schema() {
-    use asap_executor::dag::{self, PhysicalOperator};
+    use asap_executor::{physical_planner, plan::PhysicalOperator, runtime};
     use planner_types::ir::properties::ExecutionDataState;
     use std::{cell::Cell, collections::BTreeMap, rc::Rc};
     struct WrongSource {
@@ -634,9 +633,9 @@ fn source_batches_must_match_the_bound_schema() {
         }
         fn start<'a>(
             &'a self,
-            _: Vec<dag::Input<'a, Batch>>,
+            _: Vec<runtime::Input<'a, Batch>>,
             _: RunContext,
-        ) -> Result<dag::OutputStream<'a, Batch>, dag::Error> {
+        ) -> Result<runtime::OutputStream<'a, Batch>, asap_executor::Error> {
             self.starts.set(self.starts.get() + 1);
             Ok(
                 futures::stream::once(async { Batch::try_new(schema(&[]), vec![vec![]]) })
@@ -667,14 +666,14 @@ fn source_batches_must_match_the_bound_schema() {
     let source = Box::new(WrongSource {
         schema: expected,
         starts: starts.clone(),
-    }) as dag::planner::Source<'static>;
-    let native = dag::planner::bind(&plan, BTreeMap::from([(0, source)]), &[0]).unwrap();
+    }) as physical_planner::Source<'static>;
+    let native = physical_planner::bind(&plan, BTreeMap::from([(0, source)]), &[0]).unwrap();
     assert_eq!(starts.get(), 0);
     let context = RunContext::new(query(), Limits::default()).unwrap();
     let mut output = native.execute(&[0], context).unwrap().remove(0);
     assert!(matches!(
         block_on(output.next()),
-        Some(Err(dag::Error::AtNode { node: 0, .. }))
+        Some(Err(asap_executor::Error::AtNode { node: 0, .. }))
     ));
     assert_eq!(starts.get(), 1);
 }
@@ -720,7 +719,7 @@ fn extrema_preserve_numeric_values_in_the_presence_of_nan() {
 // Planner wire nodes, including grouping and edge roles, are executable at either phase.
 #[test]
 fn planner_semijoin_sort_limit_contract_at_both_phases() {
-    use asap_executor::dag::planner::{bind, Source};
+    use asap_executor::physical_planner::{bind, Source};
     use planner_types::ir::properties::*;
     use planner_types::ir::schema::*;
 
@@ -888,7 +887,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
 // Planner scalar signatures, collection access and null predicates share native execution.
 #[test]
 fn planner_expressions_preserve_collection_and_nullable_types() {
-    use asap_executor::dag::expressions::CompiledExpression;
+    use asap_executor::expressions::CompiledExpression;
     use planner_types::ir::scalar::{CompareOpKind, ScalarValue};
 
     let input_schema = schema(&[(
@@ -1114,7 +1113,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         rates.schema(),
         family,
         vec![0],
-        asap_executor::dag::operators::RowWeight::Column(3),
+        asap_executor::operators::RowWeight::Column(3),
         vec![1],
     )
     .unwrap();

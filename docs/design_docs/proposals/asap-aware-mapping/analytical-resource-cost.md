@@ -5,6 +5,13 @@
 > is what Stage 3 measures resource usage with. The physical-plan adapter and
 > the legacy `CostModel` described below have been removed; Stage 3's cost
 > models 1–3 replace them.
+> The whole-DAG path this document also describes has been deleted, since no
+> stage read it: physical query lowering (`query_physical_lowering`),
+> `EvidenceBackedPhysicalDAG`, `estimate_physical_dag` and its comparison and
+> cache variants, `ComparisonScope`, `CacheProfile`, and the storage and
+> handoff estimators. Stage 3 prices each node with `estimate_operator` over
+> the `OperatorStatistics` it derives for that node. The sections on those
+> deleted parts record the design, not current code.
 > Unsupported operators, arrival modes and missing evidence remain unavailable;
 > proposed extensions are not implied by the implemented formulas.
 
@@ -992,15 +999,9 @@ available, that candidate is unavailable rather than costed as in-memory.
 
 ## Unsupported and future dimensions
 
-The physical-plan adapter can also estimate explicitly evidenced disk/object
-request counts using the optional storage profile. See
-[storage operation estimates](../../../develop_docs/storage-operation-costs.md)
-for units, formulas, evidence requirements, and calibration.
-
-The physical-plan adapter supports explicit network and materialization
-boundaries through optional deployment evidence. See
-[physical boundary estimates](../../../develop_docs/physical-handoff-costs.md)
-for kinds, execution multiplicity, evidence, and calibration.
+Disk/object request counts and network and materialization handoff bytes are
+not estimated. Their estimators (a storage profile and a physical handoff
+profile) were deleted because no planning stage supplied or read them.
 
 An estimate is unavailable when required evidence, a physical formula, or a
 finite horizon is missing. Structural node counts are never substituted.

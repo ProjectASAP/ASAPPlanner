@@ -2,12 +2,11 @@
 //! group) adds each row's `RowWeight` to the row's item: the value of a
 //! weight column, or a constant such as 1 for a row count.
 use asap_executor::{
-    dag::{
-        operators::{Operator, RowWeight},
-        values::{Batch, SchemaRef, Value},
-        Limits, PhysicalDAG, RunContext, Scope,
-    },
+    operators::{Operator, RowWeight},
     physical_planner::compile_node,
+    plan::PhysicalDAG,
+    runtime::{Limits, RunContext, Scope},
+    values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Reduction};

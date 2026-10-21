@@ -84,9 +84,9 @@ pub fn execute_raw_rows(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
     rows: Vec<Vec<asap_executor::values::Value>>,
 ) -> Vec<Vec<asap_executor::values::Value>> {
-    use asap_executor::dag::{
-        planner::bind_with_data_sources,
-        scan::{DataSources, MemorySource},
+    use asap_executor::{
+        physical_planner::bind_with_data_sources,
+        sources::{DataSources, MemorySource},
     };
     use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use asap_types::ir::NonASAPOp;

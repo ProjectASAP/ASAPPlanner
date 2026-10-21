@@ -3,18 +3,10 @@
 //! The CPU payload establishes its unit and operation scope; CPU operations
 //! must never be interpreted as nanoseconds. Byte values can be exact integers
 //! or measurements carrying uncertainty. `None` means unavailable, not zero.
-//! Cache assumptions share this schema namespace but are not additive resource
-//! consumption; their numerical interpretation belongs to an estimator.
 
-pub mod cache;
 pub mod cpu;
 pub mod measurement;
 pub mod physical;
-pub mod physical_handoff;
-pub mod storage;
-pub use cache::{CacheCapacityEvidence, CacheEvidence, CacheProfile};
-pub use physical_handoff::{PhysicalHandoffBytes, PhysicalHandoffKind};
-pub use storage::StorageResources;
 
 pub use cpu::{MeasuredCpu, ModeledCpu};
 pub use measurement::Measurement;

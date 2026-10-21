@@ -12,7 +12,6 @@ formats, evidence, and verification workflows.
 - [Accuracy implementation companion](end-to-end-accuracy-guarantees.md)
 - [Offline sketch evidence](offline-sketch-evidence.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)
-- [Physical handoff cost references](physical-handoff-costs.md), [storage operations](storage-operation-costs.md)
 - [Physical compile coverage for deployment computation](physical-compile-coverage.md)
 
 Historical records of removed APIs:

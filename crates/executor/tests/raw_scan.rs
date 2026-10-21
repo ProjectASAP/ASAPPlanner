@@ -1,9 +1,10 @@
 //! Scan acceptance uses the public connector contract and Planner physical DAGs.
-use asap_executor::dag::{
-    planner::bind_with_data_sources,
-    scan::{DataSources, MemorySource, RawSource},
+use asap_executor::{
+    physical_planner::bind_with_data_sources,
+    runtime::{Limits, OutputStream, RunContext, Scope},
+    sources::{DataSources, MemorySource, RawSource},
     values::{Batch, SchemaRef, Value},
-    Error, Limits, OutputStream, RunContext, Scope,
+    Error,
 };
 use futures::{executor::block_on, stream, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Source};
