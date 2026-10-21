@@ -5,7 +5,6 @@ pub mod dd_sketch;
 pub mod exact;
 pub mod hll_sketch;
 pub mod hydra_cms;
-pub mod hydra_kll;
 pub mod increase;
 pub mod kmv;
 pub mod univmon;
@@ -15,7 +14,6 @@ pub use datasketches_kll::*;
 pub use dd_sketch::*;
 pub use hll_sketch::*;
 pub use hydra_cms::*;
-pub use hydra_kll::*;
 pub use increase::*;
 pub use kmv::*;
 

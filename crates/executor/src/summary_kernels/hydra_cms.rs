@@ -9,7 +9,7 @@
 //! A group's total needs a group-mass query that `asap_sketchlib`'s Hydra
 //! does not offer, so it is not answered here.
 use crate::{AggregateCore, KernelError};
-use asap_sketchlib::{input::HydraCounter, CountMin, DataInput, FastPath, Hydra, Vector2D};
+use asap_sketchlib::{input::HydraCounter, CountMinSketch, DataInput, FastPath, Hydra, Vector2D};
 use planner_types::ir::schema::SketchStatistic;
 use std::sync::Arc;
 
@@ -38,9 +38,9 @@ impl HydraCms {
         if [shared_rows, shared_columns, width, depth].contains(&0) {
             return Err("HydraCms dimensions must be positive".into());
         }
-        let cell = HydraCounter::CM(CountMin::<Vector2D<i32>, FastPath>::with_dimensions(
-            depth, width,
-        ));
+        let cell = HydraCounter::CountMinSketch(
+            CountMinSketch::<Vector2D<i32>, FastPath>::with_dimensions(depth, width),
+        );
         Ok(Self {
             inner: Hydra::with_schema(shared_rows, shared_columns, [GROUP], cell)?,
             width,
@@ -52,8 +52,8 @@ impl HydraCms {
     /// `(shared_rows, shared_columns, width, depth)`.
     pub fn shape(&self) -> (usize, usize, usize, usize) {
         (
-            self.inner.row_num,
-            self.inner.col_num,
+            self.inner.rows,
+            self.inner.cols,
             self.width,
             self.depth,
         )

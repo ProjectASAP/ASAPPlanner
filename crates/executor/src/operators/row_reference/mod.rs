@@ -108,7 +108,7 @@ pub(crate) mod harness {
     }
 
     /// A summary state's content: an exact state serialized, a KLL's size
-    /// and quantiles, a keyed frequency state serialized.
+    /// and quantiles, a keyed frequency state's counters and heap.
     pub(crate) fn state_fingerprint(state: &dyn crate::AggregateCore) -> String {
         use crate::summary_kernels::{
             exact::ExactAccumulator, weighted_frequency::WeightedFrequency,
@@ -127,7 +127,11 @@ pub(crate) mod harness {
             );
         }
         if let Some(frequency) = any.downcast_ref::<WeightedFrequency>() {
-            return serde_json::to_string(frequency).unwrap();
+            return format!(
+                "{frequency:?} {:?} {:?}",
+                frequency.counters(),
+                frequency.rows(usize::MAX)
+            );
         }
         panic!("no fingerprint for this state kind")
     }

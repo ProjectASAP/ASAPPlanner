@@ -833,9 +833,9 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
                 sorted[r.floor() as usize] * (1. - r.fract())
                     + sorted[r.ceil() as usize] * r.fract()
             };
-            let mut sketch = asap_sketchlib::DdSketch::new(alpha);
+            let mut sketch = asap_executor::summary_kernels::DDSketchAccumulator::new(alpha);
             for v in values {
-                sketch.try_update(v).unwrap();
+                sketch.update(v);
             }
             let want = exact(0.9) / exact(0.5);
             let got = sketch.quantile_interpolated(0.9).unwrap()

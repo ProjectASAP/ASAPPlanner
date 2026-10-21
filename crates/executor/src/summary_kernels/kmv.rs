@@ -1,11 +1,11 @@
-//! KMV (k minimum values) distinct-count summary over `asap_sketchlib::KMV`.
+//! KMV (k minimum values) distinct-count summary over `asap_sketchlib::Kmv`.
 //!
-//! Every item is hashed with the library's shared `CANONICAL_HASH_SEED`, and
+//! Every item is hashed with the library's shared `DEFAULT_CANONICAL_SEED_INDEX` seed, and
 //! a merge keeps the `k` smallest distinct hashes of both states, so merging
 //! two states equals building one over the union of their inputs.
 use crate::summary_kernels::factory::AccumulatorUpdater;
 use crate::{AggregateCore, KernelError, KeyByLabelValues};
-use asap_sketchlib::{DataInput, KMV};
+use asap_sketchlib::{DataInput, Kmv};
 use planner_types::ir::schema::SketchStatistic;
 
 /// The smallest `k` the estimate `(k - 1) / U(k)` is defined for.
@@ -13,13 +13,13 @@ pub const KMV_MIN_K: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct KmvAccumulator {
-    pub inner: KMV,
+    pub inner: Kmv,
 }
 
 impl KmvAccumulator {
     pub fn new(k: u32) -> Self {
         Self {
-            inner: KMV::new(k as usize),
+            inner: Kmv::new(k as usize),
         }
     }
 
@@ -28,7 +28,7 @@ impl KmvAccumulator {
     pub fn insert_sample(&mut self, value: f64) {
         if !value.is_nan() {
             let bits = if value == 0.0 { 0 } else { value.to_bits() };
-            self.inner.insert(&DataInput::Bytes(&bits.to_le_bytes()));
+            self.inner.update(&DataInput::Bytes(&bits.to_le_bytes()));
         }
     }
 }
@@ -72,8 +72,9 @@ impl AggregateCore for KmvAccumulator {
         }
     }
 
+    /// sketchlib's count of the struct and the hash slots it holds.
     fn approx_memory_bytes(&self) -> usize {
-        self.inner.approx_memory_bytes()
+        self.inner.memory_bytes()
     }
 }
 
@@ -116,7 +117,7 @@ impl AccumulatorUpdater for KmvAccumulator {
         Ok(())
     }
     fn reset(&mut self) {
-        self.inner = KMV::new(self.inner.k);
+        self.inner = Kmv::new(self.inner.k);
     }
 }
 
@@ -172,7 +173,7 @@ mod tests {
         let k = 256;
         for exact in [k, 5_000] {
             let kmv = build(k, 0..exact);
-            let kth = kmv.inner.k_vals.iter().copied().max().unwrap();
+            let kth = kmv.inner.retained_hashes.iter().copied().max().unwrap();
             let u = (kth as f64 + 1.0) / 18_446_744_073_709_551_616.0;
             assert_eq!(cardinality(&kmv), f64::from(k - 1) / u);
         }
@@ -189,7 +190,7 @@ mod tests {
         let merged = a.merge_with(&b).unwrap();
         let merged = merged.as_any().downcast_ref::<KmvAccumulator>().unwrap();
         let sorted = |s: &KmvAccumulator| {
-            let mut hashes: Vec<u64> = s.inner.k_vals.iter().copied().collect();
+            let mut hashes: Vec<u64> = s.inner.retained_hashes.iter().copied().collect();
             hashes.sort_unstable();
             hashes
         };
@@ -228,7 +229,7 @@ mod tests {
     fn memory_covers_the_retained_hashes() {
         let k = 4096;
         let (empty, full) = (KmvAccumulator::new(k), build(k, 0..20_000));
-        assert_eq!(full.inner.k_vals.len(), k as usize);
+        assert_eq!(full.inner.retained_hashes.len(), k as usize);
         assert!(full.approx_memory_bytes() >= k as usize * 8);
         assert!(full.approx_memory_bytes() > empty.approx_memory_bytes());
     }

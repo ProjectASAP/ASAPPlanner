@@ -8,6 +8,7 @@
 //!
 //! Stored-state encodings belong to deployments. Full plan acceptance is
 //! owned by `binding`, which also validates schemas, expressions and inputs.
+use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
 use crate::Error;
 use planner_types::ir::schema::{
     ExactKind, ExactParams, FieldDataType as SummaryFamilyType, GroupingStrategy, SketchAlgorithm,
@@ -65,8 +66,8 @@ pub fn validate_summary_kernel(
                 // The kernel's shape rules (an odd depth, for the median).
                 (A::CountSketch, P::CountSketch { width, depth })
                     if valid_matrix(*width, *depth)
-                        && asap_sketchlib::WeightedFrequency::check_shape(
-                            asap_sketchlib::FrequencyAlgorithm::CountSketch,
+                        && WeightedFrequency::check_shape(
+                            FrequencyAlgorithm::CountSketch,
                             *width as usize,
                             *depth as usize,
                         )
@@ -99,7 +100,7 @@ pub fn validate_summary_kernel(
                         layers,
                         ..
                     },
-                ) if asap_sketchlib::UnivMon::check_shape(
+                ) if crate::summary_kernels::univmon::check_shape(
                     *heap_size as usize,
                     *sketch_rows as usize,
                     *sketch_cols as usize,

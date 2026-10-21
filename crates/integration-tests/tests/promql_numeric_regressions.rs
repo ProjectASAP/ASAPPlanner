@@ -123,9 +123,9 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     // even though the quantile interpolation does not preserve relative error.
     let alpha = (0.01 - 8.0 * f64::EPSILON) / 2.01;
     let estimate = |q| {
-        let mut sketch = asap_sketchlib::DdSketch::new(alpha);
+        let mut sketch = asap_executor::summary_kernels::DDSketchAccumulator::new(alpha);
         for value in [-1., 1.011] {
-            sketch.try_update(value).unwrap();
+            sketch.update(value);
         }
         sketch.quantile_interpolated(q).unwrap()
     };
@@ -238,26 +238,21 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             }
         }
         for value in [1., 0., 3., -3.] {
-            let mut cms =
-                asap_sketchlib::message_pack_format::portable::countminsketch::new_sketchlib_cms(
-                    5, 128,
-                );
-            let mut cs =
-                asap_sketchlib::message_pack_format::portable::countsketch::CountSketch::new(
-                    5, 128,
-                );
+            use asap_sketchlib::{CountMinSketch, CountSketch, DataInput, RegularPath, Vector2D};
+            let mut cms = CountMinSketch::<Vector2D<f64>, RegularPath>::with_dimensions(5, 128);
+            let mut cs = CountSketch::<Vector2D<f64>, RegularPath>::with_dimensions(5, 128);
             for _ in 0..10 {
                 let weight = contribution(family, update, value);
                 if is_count {
-                    cms.insert_many(&asap_sketchlib::DataInput::String("a".into()), weight);
+                    cms.update_weighted(&DataInput::Str("a"), weight);
                 } else {
-                    cs.update("a", weight);
+                    cs.update_weighted(&DataInput::Str("a"), weight);
                 }
             }
             let got = if is_count {
-                cms.estimate(&asap_sketchlib::DataInput::String("a".into()))
+                cms.estimate(&DataInput::Str("a"))
             } else {
-                cs.estimate("a")
+                cs.estimate(&DataInput::Str("a"))
             };
             assert_eq!(got, if is_count { 10. } else { 10. * value });
         }

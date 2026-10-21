@@ -3,7 +3,6 @@ use crate::summary_kernels::univmon::UnivMonAccumulator;
 use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
 use crate::summary_kernels::{
     CountMinSketchAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator, HydraCms,
-    HydraKllSketchAccumulator,
 };
 use crate::{AggregateCore, KeyByLabelValues};
 use planner_types::ir::schema::{
@@ -172,8 +171,7 @@ impl AccumulatorUpdater for KllAccumulatorUpdater {
     }
 
     fn memory_usage_bytes(&self) -> usize {
-        std::mem::size_of::<DatasketchesKLLAccumulator>()
-            + crate::summary_kernels::datasketches_kll::kll_memory_bytes(self.k)
+        self.acc.approx_memory_bytes()
     }
 }
 
@@ -206,7 +204,7 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
     }
 
     fn update_single(&mut self, value: f64, _timestamp_ms: i64) -> Result<(), String> {
-        self.acc.inner.update(value);
+        self.acc.update(value);
         Ok(())
     }
 
@@ -272,7 +270,7 @@ impl AccumulatorUpdater for CmsAccumulatorUpdater {
         value: f64,
         _timestamp_ms: i64,
     ) -> Result<(), String> {
-        self.acc.inner.update(&key.to_semicolon_str(), value);
+        self.acc.update(&key.to_semicolon_str(), value);
         Ok(())
     }
 
@@ -287,8 +285,7 @@ impl AccumulatorUpdater for CmsAccumulatorUpdater {
     }
 
     fn memory_usage_bytes(&self) -> usize {
-        std::mem::size_of::<CountMinSketchAccumulator>()
-            + self.row_num * self.col_num * std::mem::size_of::<f64>()
+        self.acc.approx_memory_bytes()
     }
 }
 
@@ -363,59 +360,6 @@ impl AccumulatorUpdater for WeightedFrequencyUpdater {
 
     fn memory_usage_bytes(&self) -> usize {
         self.acc.approx_memory_bytes()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HydraKllAccumulatorUpdater
-// ---------------------------------------------------------------------------
-
-pub struct HydraKllAccumulatorUpdater {
-    acc: HydraKllSketchAccumulator,
-    row_num: usize,
-    col_num: usize,
-    k: u16,
-}
-
-impl HydraKllAccumulatorUpdater {
-    pub fn new(row_num: usize, col_num: usize, k: u16) -> Self {
-        Self {
-            acc: HydraKllSketchAccumulator::new(row_num, col_num, k),
-            row_num,
-            col_num,
-            k,
-        }
-    }
-}
-
-impl AccumulatorUpdater for HydraKllAccumulatorUpdater {
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) -> Result<(), String> {
-        Err("update_single called on a keyed updater; use update_keyed".into())
-    }
-
-    fn update_keyed(
-        &mut self,
-        key: &KeyByLabelValues,
-        value: f64,
-        _timestamp_ms: i64,
-    ) -> Result<(), String> {
-        self.acc.update(key, value);
-        Ok(())
-    }
-
-    impl_clone_accumulator_methods!(acc);
-
-    fn reset(&mut self) {
-        self.acc = HydraKllSketchAccumulator::new(self.row_num, self.col_num, self.k);
-    }
-
-    fn is_keyed(&self) -> bool {
-        true
-    }
-
-    fn memory_usage_bytes(&self) -> usize {
-        // Rough estimate: each cell is a KLL sketch
-        std::mem::size_of::<HydraKllSketchAccumulator>() + self.row_num * self.col_num * 4096
     }
 }
 
@@ -506,10 +450,7 @@ pub fn create_planner_accumulator(
             )
         }
         (SketchAlgorithm::Hll, SketchParams::Hll { precision, .. }) => Box::new(HllUpdater {
-            acc: HllSketchAccumulator::new(
-                asap_sketchlib::HllVariant::Regular,
-                u32::from(*precision),
-            ),
+            acc: HllSketchAccumulator::new(*precision).map_err(|e| e.to_string())?,
         }),
         (SketchAlgorithm::Kmv, SketchParams::Kmv { k, .. }) => {
             Box::new(crate::summary_kernels::kmv::KmvAccumulator::new(*k))
@@ -603,10 +544,7 @@ impl AccumulatorUpdater for HllUpdater {
         self.acc.approx_memory_bytes()
     }
     fn update_single(&mut self, value: f64, _: i64) -> Result<(), String> {
-        if !value.is_nan() {
-            let bits = if value == 0.0 { 0 } else { value.to_bits() };
-            self.acc.inner.update(&bits.to_le_bytes());
-        }
+        self.acc.insert_sample(value);
         Ok(())
     }
     fn update_keyed(
@@ -619,8 +557,7 @@ impl AccumulatorUpdater for HllUpdater {
     }
     impl_clone_accumulator_methods!(acc);
     fn reset(&mut self) {
-        self.acc.inner =
-            asap_sketchlib::HllSketch::new(self.acc.inner.variant, self.acc.inner.precision);
+        self.acc.clear();
     }
 }
 

@@ -213,7 +213,7 @@ fn fingerprint(state: &dyn AggregateCore) -> String {
             .join(",");
     }
     if let Some(s) = any.downcast_ref::<WeightedFrequency>() {
-        return serde_json::to_string(s).unwrap();
+        return format!("{s:?} {:?} {:?}", s.counters(), s.rows(usize::MAX));
     }
     if let Some(s) = any.downcast_ref::<asap_executor::summary_kernels::HydraCmsGroup>() {
         // The group's name and its count of every item the samples use.

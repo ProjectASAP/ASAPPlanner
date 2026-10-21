@@ -173,10 +173,9 @@ fn assert_rows_hash_independently(family: &FieldDataType, width: usize, depth: u
             .as_any()
             .downcast_ref::<asap_executor::summary_kernels::weighted_frequency::WeightedFrequency>()
             .expect("the per-row-seeded weighted frequency kernel");
-        let cells = serde_json::to_value(state).unwrap()["cells"].clone();
-        for (index, cell) in cells.as_array().unwrap().iter().enumerate() {
+        for (index, cell) in state.counters().iter().enumerate() {
             let (row, column) = (index / width, index % width);
-            let mut rest = cell.as_f64().unwrap() as i64;
+            let mut rest = *cell as i64;
             let mut position = 0;
             while rest != 0 {
                 let digit = rest.rem_euclid(3);
@@ -237,8 +236,9 @@ fn heap_sketch(
     FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
 }
 
-// The factory's top-k sketches use the same per-row-seeded kernel: past 20
-// rows (where a fixed seed list would repeat) every row stays independent.
+// The factory's top-k sketches hash each row with its own seed: past 20 rows
+// sketchlib derives further seeds from its list, and every row stays
+// independent.
 #[test]
 fn deep_heap_sketch_rows_hash_independently() {
     for algorithm in [
@@ -296,7 +296,7 @@ fn heap_sketch_states_load_as_dag_summary_values() {
 #[test]
 fn factory_and_dag_heap_states_are_interchangeable() {
     use asap_executor::{summary_kernels::weighted_frequency::WeightedFrequency, values::Value};
-    use asap_sketchlib::FrequencyAlgorithm;
+    use asap_executor::summary_kernels::weighted_frequency::FrequencyAlgorithm;
     let estimate = |state: &dyn AggregateCore, i: usize| {
         state
             .as_any()
@@ -377,14 +377,12 @@ fn plain_count_sketch_merge_equals_union_build() {
         .unwrap();
     let union = build_plain_count_sketch(&family, events.iter().copied());
     let cells = |state: &dyn AggregateCore| {
-        serde_json::to_value(
-            state
-                .as_any()
-                .downcast_ref::<asap_executor::summary_kernels::weighted_frequency::WeightedFrequency>()
-                .unwrap(),
-        )
-        .unwrap()["cells"]
-            .clone()
+        state
+            .as_any()
+            .downcast_ref::<asap_executor::summary_kernels::weighted_frequency::WeightedFrequency>()
+            .unwrap()
+            .counters()
+            .to_vec()
     };
     assert_eq!(cells(&*merged), cells(&*union));
     for i in 0..500 {

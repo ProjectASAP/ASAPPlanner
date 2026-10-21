@@ -1,23 +1,40 @@
 //! Count-Min Sketch frequency summary over `asap_sketchlib::CountMinSketch`.
 use crate::{AggregateCore, KernelError, KeyByLabelValues};
-use asap_sketchlib::CountMinSketch;
+use asap_sketchlib::{DataInput, FastPath, Vector2D};
 use planner_types::ir::schema::SketchStatistic;
 
-#[derive(Debug, Clone)]
+/// Float64 Count-Min counters, an item keyed by its text.
+pub type CountMinSketchF64 = asap_sketchlib::CountMinSketch<Vector2D<f64>, FastPath>;
+
+#[derive(Clone)]
 pub struct CountMinSketchAccumulator {
-    pub inner: CountMinSketch,
+    pub inner: CountMinSketchF64,
+}
+
+impl std::fmt::Debug for CountMinSketchAccumulator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CountMinSketchAccumulator")
+            .field("rows", &self.inner.rows())
+            .field("cols", &self.inner.cols())
+            .finish()
+    }
 }
 
 impl CountMinSketchAccumulator {
     pub fn new(row_num: usize, col_num: usize) -> Self {
         Self {
-            inner: CountMinSketch::new(row_num, col_num),
+            inner: CountMinSketchF64::with_dimensions(row_num, col_num),
         }
+    }
+
+    /// Adds `weight` to `item`.
+    pub fn update(&mut self, item: &str, weight: f64) {
+        self.inner.update_weighted(&DataInput::Str(item), weight);
     }
 
     /// Estimated frequency of one item.
     pub fn query_key(&self, key: &KeyByLabelValues) -> f64 {
-        self.inner.estimate(&key.to_semicolon_str())
+        self.inner.estimate(&DataInput::Str(&key.to_semicolon_str()))
     }
 }
 
@@ -38,27 +55,33 @@ impl AggregateCore for CountMinSketchAccumulator {
             .as_any()
             .downcast_ref::<Self>()
             .ok_or("Count-Min Sketch merges only with Count-Min Sketch")?;
-        Ok(Box::new(Self {
-            inner: CountMinSketch::merge_refs(&[&self.inner, &other.inner])?,
-        }))
+        // sketchlib's merge panics on a shape mismatch.
+        if (self.inner.rows(), self.inner.cols()) != (other.inner.rows(), other.inner.cols()) {
+            return Err("Count-Min Sketch merges only with the same shape".into());
+        }
+        let mut merged = self.clone();
+        merged.inner.merge(&other.inner);
+        Ok(Box::new(merged))
     }
 
     /// A bare point count reads the total update weight: every Count-Min row
     /// receives each update exactly once, so one row's mass survives collisions.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            SketchStatistic::PointCount { value: None, .. } => Ok(row_mass(&self.inner.sketch())),
+            SketchStatistic::PointCount { value: None, .. } => Ok(row_mass(&self.inner)),
             _ => Err(format!("{query:?} is not supported by Count-Min Sketch").into()),
         }
     }
 
+    /// sketchlib's count of the struct and its counters.
     fn approx_memory_bytes(&self) -> usize {
-        16 * 1024
+        self.inner.memory_bytes()
     }
 }
 
-pub(crate) fn row_mass(matrix: &[Vec<f64>]) -> f64 {
-    matrix.first().map_or(0.0, |row| row.iter().sum())
+/// The sum of row 0's counters (rows are stored one after another).
+pub(crate) fn row_mass(sketch: &CountMinSketchF64) -> f64 {
+    sketch.as_storage().as_slice()[..sketch.cols()].iter().sum()
 }
 
 #[cfg(test)]
@@ -73,8 +96,8 @@ mod tests {
             CountMinSketchAccumulator::new(3, 128),
         );
         let key = KeyByLabelValues::new_with_labels(vec!["checkout".into()]);
-        a.inner.update(&key.to_semicolon_str(), 2.0);
-        b.inner.update(&key.to_semicolon_str(), 3.0);
+        a.update(&key.to_semicolon_str(), 2.0);
+        b.update(&key.to_semicolon_str(), 3.0);
         let merged = a.merge_with(&b).unwrap();
         let merged = merged
             .as_any()
@@ -91,8 +114,8 @@ mod tests {
             value: None,
         };
         let mut state = CountMinSketchAccumulator::new(2, 1);
-        state.inner.update("a", 3.0);
-        state.inner.update("b", 7.0);
+        state.update("a", 3.0);
+        state.update("b", 7.0);
         assert_eq!(state.estimate(&bare_count).unwrap(), 10.0);
         let merged = state.merge_with(&state).unwrap();
         assert_eq!(merged.estimate(&bare_count).unwrap(), 20.0);

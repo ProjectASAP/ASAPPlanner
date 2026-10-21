@@ -67,7 +67,7 @@ mod tests {
             .as_any_mut()
             .downcast_mut::<DDSketchAccumulator>()
             .unwrap();
-        dd.inner.update(3.0);
+        dd.update(3.0);
         let count = SketchStatistic::PointCount {
             key: planner_types::ir::scalar::ColumnRef::SampleValue,
             value: None,
