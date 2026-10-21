@@ -1396,7 +1396,7 @@ const QUANTILE_BY_WORKLOAD: &str = r#"{"query_workload": {"language": "promql", 
 
 /// Every plan that answers an instant `quantile by (G)` exactly compiles,
 /// so Stage 3 prices the exact baseline next to the sketches: no physical
-/// plan of the 882 is rejected as `executor_cannot_compile`, and accepted
+/// plan (882 of them today) is rejected as `executor_cannot_compile`, and accepted
 /// plans answer Q3 and Q4 exactly.
 #[test]
 fn exact_grouped_quantile_plans_compile_and_are_compared() {
@@ -1413,9 +1413,13 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
         !by_cause.contains_key("executor_cannot_compile"),
         "{by_cause:?}"
     );
-    // Every plan but the selected one is rejected, and only for its cost.
-    let rejected: u64 = by_cause.values().map(|n| n.as_u64().unwrap()).sum();
-    assert_eq!(rejected + 1, 882, "{by_cause:?}");
+    // Every plan but the selected one is rejected only for its cost.
+    assert!(
+        by_cause
+            .keys()
+            .all(|cause| ["costlier", "tied_lost_on_enumeration_order"].contains(&cause.as_str())),
+        "{by_cause:?}"
+    );
     // Accepted plans passed the guarantee check (the selected one among them).
     let accepted = selection["accepted"].as_object().unwrap();
     // Accepted plans include ones that answer Q3 and Q4 without a sketch.

@@ -325,7 +325,7 @@ fn exact_count_finalizes_to_declared_float_value() {
 /// Prometheus's `quantile` test series (`promql/promqltest/testdata/aggregators.test`
 /// in Prometheus v0.314.0), one job per `test` label and one instance per
 /// `point`, all sampled at 50 s.
-const QUANTILE_SAMPLES: &[Sample] = &[
+const QUANTILE_SAMPLES: &[RawDataSample] = &[
     ("data", "two", "a", 50_000, 0.),
     ("data", "two", "b", 50_000, 1.),
     ("data", "three", "a", 50_000, 0.),
@@ -359,7 +359,7 @@ fn assert_rows(actual: &BTreeMap<String, f64>, expected: &[(&str, f64)], query: 
 // An exact instant `quantile by (G)` compiles to the grouped aggregate and
 // returns Prometheus's values: linear interpolation between closest ranks,
 // a NaN sample ordered first (so a rank between NaN and 0 is NaN), and ±Inf
-// for φ outside [0, 1]. The 0.8 and 0.2 rows are Prometheus's own expected
+// for φ outside [0, 1], NaN for a NaN φ. The 0.8, 0.2 and NaN rows are Prometheus's own expected
 // values for `quantile without(point)` over the same series.
 #[test]
 fn exact_grouped_quantile_matches_prometheus() {
@@ -394,6 +394,11 @@ fn exact_grouped_quantile_matches_prometheus() {
             "quantile by (job) (1.5, data)",
             vec![("two", inf), ("three", inf), ("uneven", inf), ("nan", inf)],
         ),
+        // Prometheus answers a NaN φ with NaN for every group.
+        (
+            "quantile by (job) (NaN, data)",
+            vec![("two", nan), ("three", nan), ("uneven", nan), ("nan", nan)],
+        ),
         // One group over every series: sorted [NaN, 0, 0, 0, 0, 1, 1, 1, 1, 2, 4],
         // rank 0.5 * 10 = 5 → 1.
         ("quantile(0.5, data)", vec![("", 1.)]),
@@ -412,7 +417,7 @@ fn exact_grouped_quantile_of_no_series_is_empty() {
         let rows = run(&exact_dag(query), &[], 60_000).unwrap();
         assert!(rows.is_empty(), "{query}: {rows:?}");
     }
-    let one: &[Sample] = &[("data", "solo", "a", 50_000, 3.)];
+    let one: &[RawDataSample] = &[("data", "solo", "a", 50_000, 3.)];
     let query = "quantile by (job) (0.9, data)";
     assert_rows(
         &run(&exact_dag(query), one, 60_000).unwrap(),

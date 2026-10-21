@@ -11,7 +11,7 @@ use asap_executor::Error;
 use futures::{executor::block_on, StreamExt};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The system allocator, counting the bytes allocated now and at peak.
 struct Counting;
@@ -43,6 +43,12 @@ fn run_aggregate(
     measures: Vec<(String, Reduction)>,
     limit_bytes: usize,
 ) -> (Result<(), Error>, usize) {
+    // The allocation counters are process-wide: one run at a time, so a
+    // parallel test's allocations do not count toward this run's peak.
+    static ONE_RUN_AT_A_TIME: Mutex<()> = Mutex::new(());
+    let _running = ONE_RUN_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let field = |name: &str, dtype| Field {
         name: name.into(),
         dtype: FieldDataType::Plain(dtype),
@@ -117,12 +123,12 @@ fn run_aggregate(
 
 const LIMIT_BYTES: usize = 16 << 20;
 
-fn assert_fails_near_the_limit((result, overshoot): (Result<(), Error>, usize)) {
+fn assert_fails_near_the_limit((result, peak_bytes): (Result<(), Error>, usize)) {
     assert!(matches!(result, Err(Error::MemoryLimit)), "{result:?}");
     assert!(
-        overshoot < 2 * LIMIT_BYTES,
+        peak_bytes < 2 * LIMIT_BYTES,
         "allocated {} MiB under a {} MiB limit",
-        overshoot >> 20,
+        peak_bytes >> 20,
         LIMIT_BYTES >> 20
     );
 }
@@ -144,10 +150,10 @@ fn many_groups_in_one_batch_fail_near_the_memory_limit() {
     ));
 }
 
-// An exact grouped quantile keeps every value of its group, so it is
-// charged for the capacity its value lists hold, not only their lengths:
-// 1,000,000 groups of one value each, and one group of 4,000,000 values,
-// both fail near a 16 MiB limit.
+// An exact grouped quantile keeps every value of its group and is charged
+// 8 bytes per value as it adds them (vector growth can hold up to about
+// twice that, within the bound): 1,000,000 groups of one value each, and
+// one group of 4,000,000 values, both fail near a 16 MiB limit.
 #[test]
 fn exact_quantile_values_fail_near_the_memory_limit() {
     let quantile = || vec![("q".into(), Reduction::Quantile { column: 2, q: 0.5 })];

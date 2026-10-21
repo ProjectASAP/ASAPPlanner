@@ -946,7 +946,8 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 let measures = measures
                     .iter()
                     .zip(output_names)
-                    .map(|(m, name)| {
+                    .enumerate()
+                    .map(|(index, (m, name))| {
                         let column = |col: Option<usize>| {
                             col.map(Ok)
                                 .unwrap_or_else(|| named_column(input, &ColumnRef::SampleValue))
@@ -973,9 +974,12 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                             // PromQL `quantile by (G) (φ, v)` exactly: the
                             // group's values, interpolated as Prometheus does.
                             // SQL percentiles order NaN and NULL differently,
-                            // so a relation's quantile has no exact kernel.
+                            // so a relation's quantile has no exact kernel; nor
+                            // has a filtered one, NULL for a group with no
+                            // matching row where the kernel gives NaN.
                             AggIntent::Quantile { col, q, .. }
-                                if input.has_promql_series_identity() =>
+                                if input.has_promql_series_identity()
+                                    && filters.get(index).is_none_or(Option::is_none) =>
                             {
                                 Reduction::Quantile {
                                     column: column(*col)?,

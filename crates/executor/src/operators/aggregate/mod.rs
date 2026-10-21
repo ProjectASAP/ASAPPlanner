@@ -50,9 +50,10 @@ impl Operator {
                             && (groups.is_empty() || plain(&input, *i)?.1),
                     )
                 }
-                Reduction::Quantile { column, q } => {
-                    if plain(&input, *column)?.0 != &DataType::Float64 || q.is_nan() {
-                        return Err(invalid("quantile requires Float64 input and a numeric q"));
+                Reduction::Quantile { column, .. } => {
+                    // A NaN q is allowed: Prometheus answers it with NaN.
+                    if plain(&input, *column)?.0 != &DataType::Float64 {
+                        return Err(invalid("quantile requires Float64 input"));
                     }
                     (DataType::Float64, false)
                 }
@@ -207,6 +208,8 @@ pub enum Reduction {
     /// PromQL `quantile`: linear interpolation between closest ranks.
     Quantile {
         column: usize,
+        /// NaN and ±Inf survive a JSON round trip of the compiled plan.
+        #[serde(with = "planner_types::serde_f64")]
         q: f64,
     },
 }
@@ -276,10 +279,10 @@ mod columnar;
 #[cfg(test)]
 mod row_reference;
 pub(super) mod temporal;
-// Matches Prometheus `quantile`: NaN for no values, ±Inf outside [0, 1],
-// and NaN samples ordered first.
+// Matches Prometheus `quantile`: NaN for no values or a NaN q, ±Inf outside
+// [0, 1], and NaN samples ordered first.
 pub(super) fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
-    if values.is_empty() {
+    if values.is_empty() || q.is_nan() {
         return f64::NAN;
     }
     if q < 0. {
@@ -369,5 +372,6 @@ mod tests {
         assert_eq!(super::quantile(-0.1, vec![1.]), f64::NEG_INFINITY);
         assert_eq!(super::quantile(1.1, vec![1.]), f64::INFINITY);
         assert_eq!(super::quantile(1., vec![2., f64::NAN, 1.]), 2.);
+        assert!(super::quantile(f64::NAN, vec![1., 2.]).is_nan());
     }
 }
