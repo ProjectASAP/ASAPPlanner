@@ -20552,7 +20552,7 @@
           "candidates_checked": 3,
           "discarded": [
             {
-              "cause": "count_min_weights_not_proven_non_negative",
+              "cause": "no_accuracy_guarantee",
               "choice": [
                 [
                   10,
@@ -20563,7 +20563,7 @@
                   0
                 ]
               ],
-              "reason": "CmsWithHeap needs non-negative update weights, and these are not proven non-negative (samples of `data`, which is not declared a counter)"
+              "reason": "the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
             },
             {
               "cause": "no_accuracy_guarantee",
@@ -20585,7 +20585,7 @@
           "candidates_checked": 3,
           "discarded": [
             {
-              "cause": "count_min_weights_not_proven_non_negative",
+              "cause": "no_accuracy_guarantee",
               "choice": [
                 [
                   12,
@@ -20596,7 +20596,7 @@
                   0
                 ]
               ],
-              "reason": "CmsWithHeap needs non-negative update weights, and these are not proven non-negative (samples of `data`, which is not declared a counter)"
+              "reason": "the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
             },
             {
               "cause": "no_accuracy_guarantee",

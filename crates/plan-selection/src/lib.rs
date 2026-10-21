@@ -741,8 +741,8 @@ pub enum RejectionCause {
     /// it and no deployment evidence meets it.
     AccuracyTargetMissed,
     /// A query's plan reads a Count-Min sketch whose update weights are not
-    /// proven non-negative (e.g. samples of a metric not declared a
-    /// counter). The executor cannot run it, so the deployment's accuracy
+    /// proven non-negative (e.g. samples of a metric declared neither a
+    /// counter nor non-negative). The executor cannot run it, so the deployment's accuracy
     /// model cannot accept it either.
     CountMinWeightsNotProvenNonNegative,
     /// It reduces each series' raw samples with an exact aggregate the
@@ -1997,7 +1997,8 @@ pub fn resize_for_failure_probability(
 /// unknown leaves the target unmet. Count-Min is admitted only over update
 /// weights proven non-negative, which its bound and the executor assume: an open
 /// [`WeightDomain::SamplesOfMetric`] requirement is met when `data` declares
-/// the metric a counter ([`confirmed_weights`]), and unmet otherwise.
+/// the metric a counter or non-negative ([`confirmed_weights`]), and unmet
+/// otherwise.
 ///
 /// A target that sets no metric accepts a guarantee in any metric that meets
 /// its ε, δ and scope ([`AccuracyModel::satisfies`]); one that sets a metric
@@ -2048,9 +2049,10 @@ fn accuracy_check(
                 )
             {
                 let unconfirmed = match &input.weight_domain {
-                    WeightDomain::SamplesOfMetric { metric } => {
-                        format!(" (samples of `{metric}`, which is not declared a counter)")
-                    }
+                    WeightDomain::SamplesOfMetric { metric } => format!(
+                        " (samples of `{metric}`, which is not declared a counter or \
+                         non-negative)"
+                    ),
                     WeightDomain::CounterDerivativeOfMetric { metric } => format!(
                         " (rates or increases of `{metric}`, which is not declared a counter)"
                     ),
@@ -2213,11 +2215,15 @@ fn guarantee_check(
     })
 }
 
-/// `domain` with an open [`WeightDomain::SamplesOfMetric`] requirement
-/// answered from `data`'s declared metric types: proven when the metric is
-/// declared a counter, unknown otherwise. No type is inferred from a name.
+/// `domain` with an open requirement answered from `data`'s declared source
+/// facts ([`WeightDomain::confirmed`]): samples are proven when the metric is
+/// declared a counter or non-negative, a counter derivative only when it is
+/// declared a counter; unknown otherwise. No type is inferred from a name.
 pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDomain {
-    domain.confirmed(|metric| declared_counter(data, metric))
+    domain.confirmed(
+        |metric| declared_counter(data, metric),
+        |metric| declared_non_negative(data, metric),
+    )
 }
 
 /// Whether `data` declares every sample of `metric` non-negative: the
@@ -4710,6 +4716,84 @@ mod tests {
         }
     }
 
+    /// A gauge declared non-negative
+    /// ([`SourceFacts::values_non_negative`]) proves its raw samples, and
+    /// plain sums of them, non-negative: the Count-Min-with-heap top-k of
+    /// `topk by (job) (10, sum_over_time(m[1m]))` (the ASAPQuery workloads'
+    /// top-k-sum shape) passes the weight check, and the selected plan carries
+    /// [`NonNegativeWeightProof::DeclaredNonNegativeSamples`]. A rate or
+    /// increase of that gauge stays unproven: a reset correction over a
+    /// gauge can still give a negative value.
+    #[test]
+    fn count_min_over_samples_of_a_gauge_declared_non_negative_is_admitted() {
+        use asap_types::ir::schema::NonNegativeWeightProof;
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
+        let mut gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        gauge.sources.get_mut("m").unwrap().values_non_negative = true;
+        for (query, admitted) in [
+            ("topk by (job) (10, sum_over_time(m[1m]))", true),
+            ("topk(10, sum by (job) (increase(m[5m])))", false),
+        ] {
+            let candidates = all_candidates(query, &target);
+            let count_min: Vec<&PhysicalCandidate> = candidates
+                .iter()
+                .filter(|c| count_min_builds(c).contains(&SketchAlgorithm::CmsWithHeap))
+                .collect();
+            assert!(!count_min.is_empty(), "{query}");
+            let rejected = match select_plan(
+                &candidates,
+                &[entry_with(target.clone(), repeating(10_000))],
+                &gauge,
+                PlanningModels::builtin(),
+            ) {
+                Ok(selection) => selection.rejected,
+                Err(SelectionError::NoValidCandidate(rejected)) => rejected,
+                Err(error) => panic!("{query}: {error}"),
+            };
+            for candidate in &count_min {
+                let weights_rejected = rejected.iter().any(|r| {
+                    r.id == candidate.id
+                        && r.cause == RejectionCause::CountMinWeightsNotProvenNonNegative
+                });
+                assert_eq!(
+                    weights_rejected, !admitted,
+                    "{query}, {}: {rejected:?}",
+                    candidate.id
+                );
+                if !admitted {
+                    continue;
+                }
+                // The proof the executor reads.
+                let proofs: Vec<WeightDomain> = with_confirmed_weights(&candidate.roots, &gauge)
+                    .iter()
+                    .flat_map(root_operators)
+                    .flat_map(OperatorNode::reachable)
+                    .filter_map(|n| match n.asap() {
+                        Some(ASAPOp::SummaryAgg {
+                            input,
+                            family: FieldDataType::Sketch(kind, _),
+                            ..
+                        }) if *kind.algorithm() == SketchAlgorithm::CmsWithHeap => {
+                            Some(input.weight_domain.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!proofs.is_empty(), "{}", candidate.id);
+                assert!(
+                    proofs.iter().all(|domain| *domain
+                        == WeightDomain::NonNegative {
+                            proof: NonNegativeWeightProof::DeclaredNonNegativeSamples
+                        }),
+                    "{}: {proofs:?}",
+                    candidate.id
+                );
+            }
+        }
+    }
+
     /// The sign gate is an indicator that only 1 (proven) opens: any other
     /// value a binder supplies, 0 included, leaves it unbound rather than
     /// reading as a perfect bound. Other statistics pass through.
@@ -4926,6 +5010,14 @@ mod tests {
             domains(&confirmed),
             [WeightDomain::NonNegative {
                 proof: NonNegativeWeightProof::CounterSamples
+            }]
+        );
+        let mut gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        gauge.sources.get_mut("m").unwrap().values_non_negative = true;
+        assert_eq!(
+            domains(&with_confirmed_weights(&p2.roots, &gauge)),
+            [WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::DeclaredNonNegativeSamples
             }]
         );
         assert_eq!(

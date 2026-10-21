@@ -51,8 +51,8 @@ pub(crate) fn source_norm_statistic(norm: &str, source: &str) -> String {
 /// Whether every value folded is non-negative, for values that are raw
 /// samples of `metric` or plain sums of them, e.g.
 /// `values_non_negative[m]`: an indicator, 1 when proven. Plan selection
-/// binds it to 1 when the data workload declares `metric` a counter, and
-/// leaves it unbound otherwise.
+/// binds it to 1 when the data workload declares `metric` a counter or
+/// non-negative, and leaves it unbound otherwise.
 pub fn samples_sign_statistic(metric: &str) -> String {
     format!("{VALUES_NON_NEGATIVE}[{metric}]")
 }

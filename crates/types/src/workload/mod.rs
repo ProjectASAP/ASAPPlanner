@@ -527,7 +527,8 @@ pub struct SourceFacts {
     /// gauge, such as a latency or a queue length. The deployment must
     /// ensure it. Plan selection reads it as the sign of the metric's
     /// samples, which a relative-error bound needs to carry through a
-    /// `sum` or `avg`. Omitted from JSON when `false`.
+    /// `sum` or `avg`, and as proof that Count-Min weights over the raw
+    /// samples are non-negative. Omitted from JSON when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub values_non_negative: bool,
     /// PromQL and MetricsQL only: how often each series of the metric
