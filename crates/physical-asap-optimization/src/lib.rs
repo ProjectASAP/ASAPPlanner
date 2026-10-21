@@ -73,7 +73,9 @@
 //! per-group limit, the shape the PromQL frontend uses for generic `topk`.
 //! A `Project` over the limited rows restores the logical `[keys.., topk_k]`
 //! columns, so an exact root has the same column names as a summary
-//! candidate's and as the frontend declares, and no input column leaks.
+//! candidate's and as the frontend declares. Over PromQL rows it also keeps
+//! the series identity, after them: `topk` answers whole input series, so
+//! each answer carries the chosen series' full label set.
 //! `topk_k` carries the ranked value's type and nullability (the frontend
 //! declares a non-null `Utf8` placeholder); casting the value to `Utf8` would
 //! not make it the same answer.
@@ -765,6 +767,19 @@ fn implement_topk(
         alias: Some(ranked.name.clone()),
         expr: ScalarExpr::Column(value),
     });
+    // PromQL `topk` answers whole input series: rows that carry the series
+    // identity keep it, after the logical columns, so each answer has the
+    // chosen series' full label set and readers of `[keys.., topk_k]` still
+    // find those columns where they were.
+    if let Ok(identity) = resolve_column_ref(
+        &ColumnRef::Named(asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into()),
+        &child.schema,
+    ) {
+        cols.push(ProjectItem {
+            alias: Some(asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into()),
+            expr: ScalarExpr::Column(identity),
+        });
+    }
     Ok(Rc::new(
         OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
             cols,
