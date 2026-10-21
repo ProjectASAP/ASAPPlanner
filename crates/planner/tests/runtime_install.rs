@@ -1254,16 +1254,17 @@ async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, Stri
 
 /// Without raw samples, the only valid plan of the p99 query keeps one
 /// DDSketch per series in one-second panes built at ingestion and merges
-/// the window's panes at query time (P5-m1). A quantile of merged panes is
-/// still one of the samples, so a declared non-negative gauge carries the
-/// sketch's relative bound through `avg`: P5-m1 is selected, its answers
-/// equal the query-time reference's and are within 5% of the exact
-/// averages.
+/// the window's panes at query time. A quantile of merged panes is still
+/// one of the samples, so a declared non-negative gauge carries the
+/// sketch's relative bound through `avg`: that plan is selected (`P3-m1`
+/// in the default search's numbering, `P5-m1` in the exhaustive one's),
+/// its answers equal the query-time reference's and are within 5% of the
+/// exact averages.
 #[tokio::test]
 async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_through_avg() {
     let plan = plan_p99_avg(true).await.expect("a valid plan");
     let selection = plan.selection.as_ref().expect("Stage 3's report");
-    assert_eq!(selection.selected_candidate_id, "P5-m1");
+    assert_eq!(selection.selected_candidate_id, "P3-m1");
     assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
     assert!(
         plan.query_time_raw_windows.is_empty(),
@@ -1370,10 +1371,13 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 }
 
 /// Without the declaration nothing proves `data`'s samples non-negative, so
-/// the merged panes' relative bound does not carry through `avg`: P5-m1 is
-/// rejected, and with no raw samples no plan is valid.
+/// the merged panes' relative bound does not carry through `avg`, and with
+/// no raw samples no plan is valid. The default search keeps the first
+/// rejection of each cause, so the error reports the first candidate that
+/// scans raw data.
 #[tokio::test]
 async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
-    assert!(error.contains("P5-m1"), "{error}");
+    assert!(error.contains("no valid candidate"), "{error}");
+    assert!(error.contains("RawDataNotRetained"), "{error}");
 }
