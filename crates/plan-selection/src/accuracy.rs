@@ -37,8 +37,9 @@ pub trait AccuracyModel {
     /// Whether the deployment accepts `output`, one query's output in a
     /// candidate, for `target` directly, whatever its guarantee says:
     /// missing (Stage 1 had no analytical rule), met or missed. Stage 3 asks
-    /// this for every query output before any guarantee check; when it
-    /// returns `true`, no guarantee or evidence check runs for that output.
+    /// this for every query output; when it returns `true`, the output is
+    /// accepted, and the guarantee and evidence check only records whether
+    /// it would have rejected it (`AcceptedAccuracy::guarantee_check_rejection`).
     /// It does not override the executability check before it: a plan that
     /// reads Count-Min (plain, CmsWithHeap or Hydra Count-Min) over update
     /// weights not proven non-negative is rejected
@@ -83,6 +84,36 @@ impl AccuracyModel for BuiltinAccuracyModel {
 
     fn may_accept_regardless_of_guarantee(&self) -> bool {
         false
+    }
+}
+
+/// Accepts every query output regardless of its guarantee, for comparing
+/// candidates on cost alone (e.g. a benchmark of sketch plans that have no
+/// analytical guarantee); [`Self::satisfies`] is the built-in rule. Selected
+/// by [`PlanSelectionSettings::ignore_accuracy_guarantees`](crate::PlanSelectionSettings::ignore_accuracy_guarantees).
+/// Executability checks still run: Count-Min over update weights not proven
+/// non-negative, and exact per-series aggregates the executor has no kernel
+/// for, are rejected.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IgnoreAccuracyGuarantees;
+
+impl AccuracyModel for IgnoreAccuracyGuarantees {
+    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+        BuiltinAccuracyModel.satisfies(guarantee, target)
+    }
+
+    fn accepts_output_regardless_of_guarantee(
+        &self,
+        _output: &QueryRoot,
+        _target: &AccuracyTarget,
+    ) -> bool {
+        true
+    }
+
+    /// It accepts every output, so no candidate is discarded early for
+    /// its accuracy.
+    fn may_accept_regardless_of_guarantee(&self) -> bool {
+        true
     }
 }
 

@@ -988,3 +988,42 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
     );
     std::fs::remove_file(path).unwrap();
 }
+
+/// `--ignore-accuracy-guarantees` (issue #774): the built-in model rejects
+/// every sketch candidate of an average of p99s as having no guarantee;
+/// with the flag each is valid, accepted regardless of its guarantee, and
+/// records why the guarantee check would have rejected it.
+#[test]
+fn ignore_accuracy_guarantees_flag_accepts_outputs_without_a_guarantee() {
+    let args = [
+        "--promql",
+        "avg by (g) (quantile_over_time(0.99, x[100s]))",
+        "--max-error",
+        "0.01",
+        "--failure-probability",
+        "0.01",
+        "--accuracy-metric",
+        "rank",
+    ];
+    let builtin = document_of(&args);
+    let unguaranteed: Vec<String> = builtin["stage3_plan_selection"]["rejected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["cause"] == "no_accuracy_guarantee")
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!unguaranteed.is_empty(), "{builtin}");
+    let mut ignoring = args.to_vec();
+    ignoring.push("--ignore-accuracy-guarantees");
+    let document = document_of(&ignoring);
+    let accepted = &document["stage3_plan_selection"]["accepted"];
+    for id in &unguaranteed {
+        let query = &accepted[id][0];
+        assert_eq!(query["accepted_regardless_of_guarantee"], true, "{id}");
+        assert_eq!(
+            query["guarantee_check_rejection"], "no_accuracy_guarantee",
+            "{id}: {query}"
+        );
+    }
+}
