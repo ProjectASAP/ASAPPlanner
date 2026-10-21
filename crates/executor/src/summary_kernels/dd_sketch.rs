@@ -121,7 +121,9 @@ mod tests {
             four.inner.add(&v);
         }
         // Rank 0.5 · 3 = 1.5: halfway between 2 and 3.
-        let median = four.estimate(&SketchStatistic::Quantile { q: 0.5 }).unwrap();
+        let median = four
+            .estimate(&SketchStatistic::Quantile { q: 0.5 })
+            .unwrap();
         assert!((median - 2.5).abs() <= alpha * 2.5, "{median}");
     }
 
@@ -133,7 +135,10 @@ mod tests {
         let mut dd = DDSketchAccumulator::new(0.01);
         dd.inner.add(&1.0);
         for q in [-0.1, 1.1, f64::NAN] {
-            assert!(dd.estimate(&SketchStatistic::Quantile { q }).is_err(), "{q}");
+            assert!(
+                dd.estimate(&SketchStatistic::Quantile { q }).is_err(),
+                "{q}"
+            );
         }
     }
 }
