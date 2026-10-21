@@ -55,11 +55,7 @@
 //!
 //! A query repeating every `E` over a window `W` can build its summary as
 //! back-to-back tumbling panes of width `w = gcd(W, E)` (Algorithm 2's
-//! `Tumbling(L)` for one query), merged before each read. A build several
-//! queries read takes the gcd over every reader's `E` and every difference
-//! between two known reader phases, so its panes end on every reader's
-//! evaluations: two readers every 20 s at phases 0 and 5 s split a 10-min
-//! window into 5 s panes. A *pane
+//! `Tumbling(L)` for one query), merged before each read. A *pane
 //! candidate* ([`pane_candidates`]) is a `SummaryAgg` over a range
 //! `TimeRange(W)` whose
 //! family merges in the family-capability table ([`FamilyCapability`]):
@@ -120,7 +116,6 @@ use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, TimeRangeKind,
 };
 use asap_types::ir::{OperatorResultKind as ResultKind, ScalarExpr};
-use asap_types::workload::{greatest_common_divisor, EvaluationGrid};
 
 use crate::accuracy::estimators::size_for_all_readers;
 use crate::per_computation_candidates::{recompose_guarantees, PerComputationCandidateError};
@@ -855,18 +850,16 @@ pub struct WindowCompositionPass2Candidate {
 pub const MAX_PANE_CANDIDATES: usize = 20;
 
 /// The pane candidates of the candidate with query roots `roots`, children
-/// first. `evaluation_grids[q]` is the grid query `q`'s evaluations fall
+/// first. `evaluation_grid_ms[q]` is the grid query `q`'s evaluations fall
 /// on: how often it repeats, or with a range evaluation the greatest common
-/// divisor of that and its step, at its phase if known
-/// (`QueryWorkloadEntry::evaluation_grid`; a plain `u64` is a spacing at an
-/// unknown phase); `None` when it does not repeat at a fixed interval. Each
-/// pane width divides every reader's grid and the difference between any
-/// two known reader phases, so every evaluation of every reader, every
-/// range step included, ends on a boundary of the same panes. A reader of
-/// unknown phase is taken to run with the others.
-pub fn pane_candidates<G: Copy + Into<EvaluationGrid>>(
+/// divisor of that and its step, and of its phase if declared
+/// (`QueryWorkloadEntry::evaluation_grid_ms`); `None` when it does not
+/// repeat at a fixed interval. Each pane width divides every reader's grid,
+/// so with panes anchored at the epoch every evaluation, every range step
+/// included, ends on a pane boundary.
+pub fn pane_candidates(
     roots: &[QueryRoot],
-    evaluation_grids: &[Option<G>],
+    evaluation_grid_ms: &[Option<u64>],
 ) -> Vec<PaneCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -891,16 +884,11 @@ pub fn pane_candidates<G: Copy + Into<EvaluationGrid>>(
                 .filter(|&q| reach[q].contains(&Rc::as_ptr(&build)))
                 .collect();
             let mut width = window_ms;
-            // The first known reader phase, which every other's must match
-            // modulo the width.
-            let mut first_phase_ms = None;
             for &q in &readers {
-                let grid: EvaluationGrid = evaluation_grids.get(q).copied().flatten()?.into();
-                width = greatest_common_divisor(width, grid.step_ms);
-                if let Some(phase_ms) = grid.phase_ms {
-                    let first = *first_phase_ms.get_or_insert(phase_ms);
-                    width = greatest_common_divisor(width, phase_ms.abs_diff(first));
-                }
+                width = asap_types::workload::greatest_common_divisor(
+                    width,
+                    evaluation_grid_ms.get(q).copied().flatten()?,
+                );
             }
             let pane_count = u32::try_from(window_ms / width).ok()?;
             (!readers.is_empty() && pane_count >= 2).then_some(PaneCandidate {
@@ -2231,11 +2219,8 @@ mod tests {
     }
 
     /// The pane candidates of `roots` as (pane width, pane count).
-    fn panes<G: Copy + Into<EvaluationGrid>>(
-        roots: &[QueryRoot],
-        grids: &[Option<G>],
-    ) -> Vec<(u64, u32)> {
-        pane_candidates(roots, grids)
+    fn panes(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<(u64, u32)> {
+        pane_candidates(roots, interval_ms)
             .iter()
             .map(|rule_candidate| (rule_candidate.pane_width_ms, rule_candidate.pane_count))
             .collect()
@@ -2254,40 +2239,7 @@ mod tests {
         assert_eq!(panes(&roots, &[Some(90_000)]), [(30_000, 10)]);
         assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)]);
         assert!(panes(&roots, &[Some(300_000)]).is_empty());
-        assert!(panes(&roots, &[None::<u64>]).is_empty());
-    }
-
-    /// A 10-min window shared by two queries every 20 s: at one phase in
-    /// 20 s panes; at phases 0 and 5 s in 5 s panes, which end on both
-    /// schedules; a reader of unknown phase runs with the other.
-    #[test]
-    fn a_shared_pane_width_divides_the_readers_phase_difference() {
-        let roots = chose(
-            &[
-                ("quantile_over_time(0.99, m[10m])", 0.01),
-                ("quantile_over_time(0.99, m[10m])", 0.01),
-            ],
-            SketchAlgorithm::Kll,
-        );
-        let shared = identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots))
-            .pop()
-            .expect("the two builds shared")
-            .roots;
-        let at = |phase_ms| {
-            Some(EvaluationGrid {
-                step_ms: 20_000,
-                phase_ms: Some(phase_ms),
-            })
-        };
-        let unknown = Some(EvaluationGrid::from(20_000));
-        assert_eq!(panes(&shared, &[at(5_000), at(5_000)]), [(20_000, 30)]);
-        assert_eq!(panes(&shared, &[at(0), at(5_000)]), [(5_000, 120)]);
-        assert_eq!(panes(&shared, &[at(0), unknown]), [(20_000, 30)]);
-        // Unshared, each build keeps its own 20 s panes.
-        assert_eq!(
-            panes(&roots, &[at(0), at(5_000)]),
-            [(20_000, 30), (20_000, 30)]
-        );
+        assert!(panes(&roots, &[None]).is_empty());
     }
 
     /// Past their caps, the pane rule and the reuse subsets name how many

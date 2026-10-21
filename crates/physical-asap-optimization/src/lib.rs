@@ -46,7 +46,7 @@
 //!   sources and mixed data, whose at-rest part may load in any order, are
 //!   not taken to be ordered;
 //! * it is a tumbling-pane chain whose readers of known phase all evaluate
-//!   on its pane boundaries, or a whole-window build whose readers
+//!   on its pane boundaries, anchored at the epoch, or a whole-window build whose readers
 //!   all run at one fixed interval with a known phase, over a window no
 //!   longer than that interval and not shifted, and none is a range
 //!   evaluation of more than one step per request (one window per request
@@ -61,7 +61,7 @@
 //! Every step reads the
 //! panes of a tumbling-pane chain, so each pane width must divide the step
 //! of every range-evaluated reader. Stage 1 offers only such widths
-//! (`QueryWorkloadEntry::evaluation_grid`); a candidate with a chain off
+//! (`QueryWorkloadEntry::evaluation_grid_ms`); a candidate with a chain off
 //! a reader's step grid fails with
 //! [`PhysicalASAPOptimizationError::PaneWidthOffRangeStep`] and the caller
 //! prunes it with that reason.
@@ -106,7 +106,9 @@ use asap_types::ir::{
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
-use asap_types::physical::{plan_pane_phase, validate_pane_coverage, WindowEdgeCoverage};
+use asap_types::physical::{
+    plan_pane_phase, validate_pane_coverage, PaneLayout, WindowEdgeCoverage,
+};
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
@@ -196,9 +198,9 @@ pub(crate) enum IngestionPruneReason {
     /// A whole-window build read by a range evaluation of more than one
     /// step per request: it keeps one window per request, not one per step.
     RangeEvaluatedWholeWindow,
-    /// A tumbling-pane chain whose readers evaluate at known phases that are
-    /// not all on one pane boundary (e.g. 20 s panes read at phases 0 and
-    /// 5 s): built once each, its panes cannot end at every evaluation.
+    /// A tumbling-pane chain read at a known phase off its pane boundaries,
+    /// which are anchored at the epoch (e.g. 20 s panes read at phase 5 s):
+    /// built once each, its panes cannot end at every evaluation.
     PanesOffPhase,
     /// Something below it can only run at query time.
     UpstreamAtQueryTime(String),
@@ -702,10 +704,14 @@ fn ingestion_eligibility(
         }
     }
     if let Some(pane_width_ms) = chain_pane_width_ms {
-        // A chain's panes are built once each, on one grid: every reader of
-        // known phase must evaluate on its boundaries. A reader of unknown
-        // phase is taken to run with them (`builds_one_pane_per_evaluation`).
-        let mut layout = None;
+        // A chain's panes are built once each, on the grid anchored at the
+        // epoch (the plan carries no pane origin): every reader of known
+        // phase must evaluate on its boundaries. A reader of unknown phase
+        // is taken to run on them (`builds_one_pane_per_evaluation`).
+        let epoch_panes = PaneLayout {
+            pane_width_ms,
+            pane_origin_ms: Some(0),
+        };
         for d in demands.iter().flatten() {
             let QueryRecurrence::Repeated(demand) = &d.recurrence else {
                 continue;
@@ -718,9 +724,12 @@ fn ingestion_eligibility(
                 }
                 continue;
             };
-            let layout = layout.get_or_insert(reader);
-            validate_pane_coverage(layout, Some(phase_ms), &WindowEdgeCoverage::PaneAligned)
-                .map_err(|_| Why::PanesOffPhase)?;
+            validate_pane_coverage(
+                &epoch_panes,
+                Some(phase_ms),
+                &WindowEdgeCoverage::PaneAligned,
+            )
+            .map_err(|_| Why::PanesOffPhase)?;
         }
         return Ok(());
     }
@@ -1423,10 +1432,11 @@ mod tests {
         }
     }
 
-    /// A chain of 1-min panes read by two queries every minute is maintained
-    /// at ingestion time when they evaluate on its pane boundaries (phases
-    /// 0 and 2 min, or one phase unknown), not at phases 0 and 30 s: each
-    /// pane is built once, so the second would read panes 30 s off.
+    /// A chain of 1-min panes, anchored at the epoch, read by two queries
+    /// every minute is maintained at ingestion time when they evaluate on
+    /// its pane boundaries (phases 0 and 2 min, or one phase unknown), not
+    /// when one is at phase 30 s: each pane is built once, so it would read
+    /// panes 30 s off.
     #[test]
     fn a_pane_chain_is_maintained_only_on_its_readers_phases() {
         use IngestionPruneReason as Why;
@@ -1457,8 +1467,12 @@ mod tests {
             .at_ingestion
         };
         assert_eq!(at_ingestion([at(0), at(2 * MINUTE)]), Ok(()));
-        assert_eq!(at_ingestion([at(30_000), every_minute()]), Ok(()));
+        assert_eq!(at_ingestion([at(0), every_minute()]), Ok(()));
         assert_eq!(at_ingestion([at(0), at(30_000)]), Err(Why::PanesOffPhase));
+        assert_eq!(
+            at_ingestion([at(30_000), every_minute()]),
+            Err(Why::PanesOffPhase)
+        );
     }
 
     /// S4: maintaining state at ingestion time needs arriving data and

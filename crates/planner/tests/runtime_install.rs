@@ -303,15 +303,14 @@ fn run_data_plane(
 /// When this stand-in runtime builds a stored output an ingestion run
 /// builds from raw samples.
 #[derive(Clone, Copy)]
-enum IngestionBuilds<'a> {
+enum IngestionBuilds {
     /// For each evaluation, over windows ending at that evaluation.
     PerEvaluation,
     /// Tumbling, as a runtime that maintains panes as samples arrive: each
-    /// once, over windows ending on the grid of its window's width at the
-    /// evaluation phase of the first query (in workload order) reading it,
-    /// `phase_ms_per_query[q]`; an evaluation reads the newest one at or
-    /// before it.
-    Tumbling { phase_ms_per_query: &'a [i64] },
+    /// once, over windows ending on the grid of its window's width anchored
+    /// at the epoch (pane end ≡ 0 mod width, as the backend data plane
+    /// builds them); an evaluation reads the newest one at or before it.
+    Tumbling,
 }
 
 /// [`run_data_plane`] with ingestion-run outputs built as `ingestion` says.
@@ -320,7 +319,7 @@ fn run_data_plane_on(
     samples: &[Sample],
     evaluation_ms: i64,
     store: &mut SummaryStore,
-    ingestion: IngestionBuilds<'_>,
+    ingestion: IngestionBuilds,
 ) -> DataPlaneRun {
     // The installed plan, read back from its file and checked.
     let installed: InstallablePlan = serde_json::from_str(plan_json).unwrap();
@@ -334,37 +333,16 @@ fn run_data_plane_on(
     // Each stored output's state and the time span of its data at this
     // evaluation, `(start_ms, end_ms]`, by node id.
     let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
-    // For a tumbling runtime, each node's pane phase: the evaluation phase
-    // of the first query whose root reaches it.
-    let mut phase_ms_by_node: BTreeMap<u64, i64> = BTreeMap::new();
-    if let IngestionBuilds::Tumbling { phase_ms_per_query } = ingestion {
-        for (&root, &phase_ms) in query_roots(&installed).iter().zip(phase_ms_per_query) {
-            let mut pending = vec![root];
-            while let Some(id) = pending.pop() {
-                if phase_ms_by_node.contains_key(&id) {
-                    continue;
-                }
-                phase_ms_by_node.insert(id, phase_ms);
-                pending.extend(
-                    dag.edges
-                        .iter()
-                        .filter(|edge| edge.consumer as u64 == id)
-                        .map(|edge| edge.producer as u64),
-                );
-            }
-        }
-    }
     for output in &installed.stored_outputs {
         // The evaluation its windows end at: this one, or for a tumbling
         // ingestion build the newest point of its grid at or before it.
         let built_for_ms = match (ingestion, output.built_at) {
-            (IngestionBuilds::Tumbling { .. }, StoredOutputBuild::IngestionRun) => output
+            (IngestionBuilds::Tumbling, StoredOutputBuild::IngestionRun) => output
                 .inputs
                 .raw_sample_windows
                 .first()
                 .map_or(evaluation_ms, |window| {
-                    let phase_ms = phase_ms_by_node[&(output.node_id as u64)];
-                    evaluation_ms - (evaluation_ms - phase_ms).rem_euclid(window.width_ms)
+                    evaluation_ms - evaluation_ms.rem_euclid(window.width_ms)
                 }),
             _ => evaluation_ms,
         };
@@ -654,13 +632,27 @@ async fn an_hour_and_its_offset_twin_both_equal_the_reference() {
 /// one at phase 0 and one at phase 5 s, over 6 ingesting series of `m`
 /// sampled every second. Panes shared by both must end on both schedules:
 /// 20 s panes end only on the first's, so the second would read
-/// `(t − 605 s, t − 5 s]` instead of `(t − 600 s, t]`. Run by a runtime
-/// that builds each ingestion pane once, on the grid of its width at its
-/// first reader's phase, both answer as the query-time reference, each at
-/// its own evaluation.
+/// `(t − 605 s, t − 5 s]` instead of `(t − 600 s, t]`.
 #[tokio::test]
 async fn queries_at_two_phases_read_panes_on_both_schedules() {
-    let entries: Vec<String> = [0, 5_000]
+    assert_phased_copies_answer_as_reference(&[0, 5_000]).await;
+}
+
+/// The same two copies, both at phase 5 s. A runtime anchors panes at the
+/// epoch and the plan carries no pane origin, so 20 s panes would end 5 s
+/// before every evaluation: the panes must also end on the phase itself.
+#[tokio::test]
+async fn queries_at_one_nonzero_phase_read_panes_anchored_at_the_epoch() {
+    assert_phased_copies_answer_as_reference(&[5_000, 5_000]).await;
+}
+
+/// Copies of `sum by (job) (sum_over_time(m[10m]))`, each every 20 s, copy
+/// `q` at phase `phases_ms[q]`, over 6 ingesting series of `m` sampled
+/// every second. Run by a runtime that builds each ingestion pane once, on
+/// the grid of its width anchored at the epoch, each answers as the
+/// query-time reference at its own evaluation.
+async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
+    let entries: Vec<String> = phases_ms
         .iter()
         .map(|phase_ms| {
             format!(
@@ -712,20 +704,18 @@ async fn queries_at_two_phases_read_panes_on_both_schedules() {
             })
         })
         .collect();
-    // The panes stored across both evaluations.
+    // The panes stored across every evaluation.
     let mut store = SummaryStore::new();
-    // The phase-0 query evaluates at `EVALUATION_MS`, the phase-5 s one
-    // 5 s later; each reads the panes the store holds by then.
-    let phase_ms_per_query = [EVALUATION_MS, EVALUATION_MS + 5_000];
-    for (query, evaluation_ms) in phase_ms_per_query.into_iter().enumerate() {
+    // Copy `q` evaluates `phases_ms[q]` after `EVALUATION_MS` (on the
+    // 20 s grid); each reads the panes the store holds by then.
+    for (query, phase_ms) in phases_ms.iter().enumerate() {
+        let evaluation_ms = EVALUATION_MS + phase_ms;
         let run = run_data_plane_on(
             &plan_json,
             &samples,
             evaluation_ms,
             &mut store,
-            IngestionBuilds::Tumbling {
-                phase_ms_per_query: &phase_ms_per_query,
-            },
+            IngestionBuilds::Tumbling,
         );
         assert_eq!(run.answers_per_query[query].len(), 2, "one sum per job");
         assert_eq!(
