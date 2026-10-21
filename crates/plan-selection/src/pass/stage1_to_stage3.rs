@@ -497,8 +497,9 @@ fn search_stage2_and_stage3<Id>(
         let id = format!("L{number}");
         if let Ok(roots) = &candidate.roots {
             let implemented = match skip_query_time_raw_scans {
-                // Each candidate keeps its position in the full list, so its
-                // id is the exhaustive search's.
+                // Each candidate keeps its position in its Stage 1
+                // candidate's full list (`P<n>-m<k>`); `<n>` counts only the
+                // Stage 1 candidates enumerated.
                 true => optimize_physical_asap_without_query_time_raw_scans(
                     &id,
                     roots,
