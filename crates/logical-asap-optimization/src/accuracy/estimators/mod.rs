@@ -229,6 +229,11 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
 /// shared state. `None` for no parameters,
 /// parameters of different algorithms, or a shared UnivMon the library
 /// would not build ([`univmon::hash_independent`]).
+///
+/// A KLL's `k` is the exception to the largest value: its rank error grows
+/// as its failure probability shrinks, so each reader's `k` is first
+/// resized to the shared (smallest) failure probability at no larger rank
+/// error ([`kll::shared_k`]), and the shared build meets every reader.
 pub(crate) fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
     use SketchParams as P;
     let (first, rest) = params.split_first()?;
@@ -267,7 +272,7 @@ pub(crate) fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchPar
                     failure_probability: f2,
                 },
             ) => P::Kll {
-                k: k.max(*k2),
+                k: kll::shared_k(k, failure_probability, *k2, *f2),
                 // `None` is the calibration's δ, above any recorded one.
                 failure_probability: min_recorded(failure_probability, *f2),
             },
@@ -436,7 +441,9 @@ mod shared_size_tests {
         else {
             unreachable!()
         };
-        assert_eq!((k, failure_probability), (200, Some(0.001)));
+        // The `k = 200` reader, sized at the calibration's δ = 0.01, is
+        // resized to the shared δ = 0.001 at its own rank error.
+        assert_eq!((k, failure_probability), (258, Some(0.001)));
         assert_eq!(
             size_for_all_readers(&[
                 &SketchParams::DDSketch { alpha: 0.01 },
@@ -455,6 +462,38 @@ mod shared_size_tests {
             None
         );
         assert_eq!(size_for_all_readers(&[]), None);
+    }
+
+    /// A KLL shared by a reader at rank (0.01, δ = 0.01) and one at
+    /// (0.05, δ = 1e-4) meets both: each reader's `k` is resized to the
+    /// shared δ = 1e-4 at no larger rank error (A's 0.00997) before the
+    /// larger is taken (k = 412), not 269 stated at 1e-4 (rank error 0.0151).
+    #[test]
+    fn a_kll_shared_across_failure_probabilities_meets_each_reader() {
+        let readers = [(0.01, 0.01), (0.05, 1e-4)];
+        let params = readers.map(|(eps, delta)| kll::size_params(eps, delta));
+        let shared = size_for_all_readers(&[&params[0], &params[1]]).unwrap();
+        let quantile = SketchStatistic::Quantile { q: 0.99 };
+        let guarantee = sketch_guarantee(&SketchAlgorithm::Kll, &shared, &quantile).unwrap();
+        for (eps, delta) in readers {
+            assert!(
+                satisfies(
+                    &guarantee,
+                    &AccuracyTarget::max_error(eps)
+                        .failure_probability(delta)
+                        .accuracy_metric(AccuracyMetric::Rank)
+                        .accuracy_scope(asap_types::ir::properties::AccuracyScope::PerValue)
+                ),
+                "{shared:?} misses ({eps}, {delta})"
+            );
+        }
+        assert_eq!(
+            shared,
+            SketchParams::Kll {
+                k: 412,
+                failure_probability: Some(1e-4)
+            }
+        );
     }
 
     fn univmon(heap_size: u32, sketch_rows: u32, sketch_cols: u32, layers: u8) -> SketchParams {
