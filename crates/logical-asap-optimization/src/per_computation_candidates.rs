@@ -1723,7 +1723,8 @@ fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<Propaga
 
 /// The metric whose raw samples, or plain sums of them, a composed node's
 /// values are or estimate, or `None`: [`samples_of_metric`]'s strict rule
-/// over a composed candidate. An exact sum accumulator, a renaming and a
+/// over a composed candidate. An exact sum accumulator, a projection of
+/// columns and a
 /// heap estimate whose update weights carry the
 /// [`WeightDomain::SamplesOfMetric`] requirement keep it, and so does a
 /// quantile estimate of those values, built over the raw window or merged
@@ -1791,12 +1792,11 @@ fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
                 _ => None,
             }
         }
+        // Renaming, reordering or dropping columns keeps every value.
         Operator::NonASAP(NonASAPOp::Project { cols, child, .. })
-            if cols.len() == child.schema.fields.len()
-                && cols
-                    .iter()
-                    .enumerate()
-                    .all(|(i, item)| item.expr == ScalarExpr::Column(i)) =>
+            if cols
+                .iter()
+                .all(|item| matches!(item.expr, ScalarExpr::Column(_))) =>
         {
             estimates_samples_of(child)
         }

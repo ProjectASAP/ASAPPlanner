@@ -922,13 +922,15 @@ fn relative_time(from_ms: i64, to_ms: i64) -> Vec<SelectionBox> {
     }]
 }
 
-/// A coarse rollup (`sum by (job)`) built at ingestion from the finer
-/// stored sums (`sum by (job, instance)`): both are listed, the rollup
-/// after the sums it reads, with the sums' time selection under a
-/// definition of its own; built in that order from stored inputs, they
-/// answer as the query-time reference.
+/// A fine and a coarse sum (`sum by (job, instance)` and `sum by (job)`),
+/// both built at ingestion from one stored per-series sum: Stage 1 shares
+/// the per-series sums the two queries read (over scans that project other
+/// labels). The per-series sum is listed first, then each group sum, which
+/// reads only it, with its time selection under a definition of its own;
+/// built in that order from stored inputs, they answer as the query-time
+/// reference.
 #[tokio::test]
-async fn a_rollup_from_finer_stored_sums_is_listed_and_built() {
+async fn group_sums_from_one_stored_per_series_sum_are_listed_and_built() {
     let workload = exact_workload(
         &[
             "sum by (job) (sum_over_time(m[1m]))",
@@ -943,19 +945,29 @@ async fn a_rollup_from_finer_stored_sums_is_listed_and_built() {
     )
     .await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    let [finer, coarse] = plan.stored_outputs.as_slice() else {
+    let [per_series, sums @ ..] = plan.stored_outputs.as_slice() else {
         panic!("{:#?}", plan.stored_outputs);
     };
-    assert!(finer.inputs.stored_outputs.is_empty());
-    assert_eq!(finer.inputs.raw_sample_windows.len(), 1);
-    assert_eq!(coarse.inputs.stored_outputs, [finer.node_id]);
-    assert!(coarse.inputs.raw_sample_windows.is_empty());
-    for output in [finer, coarse] {
+    assert_eq!(sums.len(), 2, "{:#?}", plan.stored_outputs);
+    assert!(per_series.inputs.stored_outputs.is_empty());
+    assert_eq!(per_series.inputs.raw_sample_windows.len(), 1);
+    for sum in sums {
+        assert_eq!(sum.inputs.stored_outputs, [per_series.node_id]);
+        assert!(sum.inputs.raw_sample_windows.is_empty());
+        assert_ne!(
+            sum.coverage.definition_id,
+            per_series.coverage.definition_id
+        );
+    }
+    assert_ne!(
+        sums[0].coverage.definition_id,
+        sums[1].coverage.definition_id
+    );
+    for output in &plan.stored_outputs {
         assert_eq!(output.built_at, StoredOutputBuild::IngestionRun);
         assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
         assert_eq!(output.retention_ms, 60_000);
     }
-    assert_ne!(coarse.coverage.definition_id, finer.coverage.definition_id);
     assert!(plan.query_time_raw_windows.is_empty());
     let run = run_data_plane(
         &plan_json,
@@ -963,14 +975,15 @@ async fn a_rollup_from_finer_stored_sums_is_listed_and_built() {
         EVALUATION_MS,
         &mut SummaryStore::new(),
     );
-    assert_eq!(run.outputs_built, 2);
+    assert_eq!(run.outputs_built, 3);
     assert_eq!(run.answers_per_query[0].len(), 2, "one sum per job");
+    assert_eq!(run.answers_per_query[1].len(), 6, "one sum per series");
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
 }
 
 /// A maximum across series (`max by (job)`) built at ingestion from the
-/// stored per-series maxima: listed after them with their time selection,
-/// under a definition of its own.
+/// stored per-series maxima, which the per-series query reads too: listed
+/// after them with their time selection, under a definition of its own.
 #[tokio::test]
 async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built() {
     let workload = exact_workload(
@@ -987,22 +1000,16 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
     )
     .await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    let [per_series, across, other_per_series] = plan.stored_outputs.as_slice() else {
+    let [per_series, across] = plan.stored_outputs.as_slice() else {
         panic!("{:#?}", plan.stored_outputs);
     };
+    assert!(per_series.inputs.stored_outputs.is_empty());
     assert_eq!(across.inputs.stored_outputs, [per_series.node_id]);
     assert!(across.inputs.raw_sample_windows.is_empty());
-    assert!(other_per_series.inputs.stored_outputs.is_empty());
-    for output in [per_series, across, other_per_series] {
+    for output in [per_series, across] {
         assert_eq!(output.built_at, StoredOutputBuild::IngestionRun);
         assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
     }
-    // The second query's per-series maxima read no `job` column, so they
-    // are another state than the first query's.
-    assert_ne!(
-        per_series.coverage.definition_id,
-        other_per_series.coverage.definition_id
-    );
     assert_ne!(
         across.coverage.definition_id,
         per_series.coverage.definition_id
@@ -1013,7 +1020,7 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
         EVALUATION_MS,
         &mut SummaryStore::new(),
     );
-    assert_eq!(run.outputs_built, 3);
+    assert_eq!(run.outputs_built, 2);
     assert_eq!(run.answers_per_query[0].len(), 2, "one maximum per job");
     assert_eq!(run.answers_per_query[1].len(), 6, "one maximum per series");
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
@@ -1267,6 +1274,11 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
     // search builds only the plans that scan nothing at query time.
     assert!(!selection.selected_candidate_id.is_empty());
     assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
+    assert_eq!(
+        stored_definitions(&plan, "DDSketch").len(),
+        1,
+        "one DDSketch"
+    );
     assert!(
         plan.query_time_raw_windows.is_empty(),
         "no raw samples read"
@@ -1487,6 +1499,69 @@ fn grouped_samples() -> Vec<Sample> {
                 timestamp_ms: EVALUATION_MS - 199_500 + step * 1_000,
                 value: (100 * i) as f64 + 1.0 + ((step * 37 + 11 * i as i64) % 101) as f64,
             });
+        }
+    }
+    samples
+}
+
+/// Quantile queries over one metric and window with different `by` labels
+/// (ASAPQuery's seed-862 quantile queries) share one per-series DDSketch:
+/// planned jointly on a deployment that keeps no raw samples, every stored
+/// DDSketch has one definition, and each query answers as its query-time
+/// reference. Series of `data` carry `region`, `service` and `job`; values
+/// are positive.
+#[tokio::test]
+async fn quantile_queries_with_different_groupings_share_one_per_series_sketch() {
+    let plan_json = jointly_planned(
+        &[
+            "avg by (region) (quantile_over_time(0.99, data[100s]))",
+            "avg by (region, service, job) (quantile_over_time(0.9, data[100s]))",
+            "avg by (service) (quantile_over_time(0.5, data[100s]))",
+        ],
+        r#"{"accuracy": {"accuracy_metric": "relative", "max_error": 0.05,
+            "failure_probability": 0.01, "accuracy_scope": "per_value"}}"#,
+    )
+    .await;
+    let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    let sketches = stored_definitions(&plan, "DDSketch");
+    assert_eq!(sketches.len(), 1, "{sketches:?}");
+    let run = run_data_plane(
+        &plan_json,
+        &grouped_series_samples(),
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query[0].len(), 2, "one answer per region");
+    assert_eq!(run.answers_per_query[1].len(), 6);
+    assert_eq!(run.answers_per_query[2].len(), 3, "one answer per service");
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// The six series of `data` the sharing tests read: `region` east/west,
+/// `service` api/web/db, `job` batch/online; values positive, one every
+/// 10 s over the last two minutes, in time order.
+fn grouped_series_samples() -> Vec<Sample> {
+    let mut samples = Vec::new();
+    for (instance, region, service, job) in [
+        ("s1", "east", "api", "online"),
+        ("s2", "east", "web", "online"),
+        ("s3", "east", "db", "batch"),
+        ("s4", "west", "api", "online"),
+        ("s5", "west", "web", "batch"),
+        ("s6", "west", "db", "batch"),
+    ] {
+        let base: f64 = instance[1..].parse().unwrap();
+        for step in (0..12).rev() {
+            let mut sample = sample(
+                "data",
+                instance,
+                EVALUATION_MS - 5_000 - step * 10_000,
+                base * 10.0 + ((step * 37) % 11) as f64,
+            );
+            sample.labels.insert("region".into(), region.into());
+            sample.labels.insert("service".into(), service.into());
+            sample.labels.insert("job".into(), job.into());
+            samples.push(sample);
         }
     }
     samples
@@ -1969,4 +2044,129 @@ async fn check_compiles_reports_the_executors_error() {
     );
     let error = plan.check_compiles().unwrap_err();
     assert!(error.starts_with("query run: "), "{error}");
+}
+
+/// `queries` every 10 s at `accuracy` (JSON) over six ingesting series of
+/// `data`, a non-negative gauge, planned jointly on a deployment that keeps
+/// no raw samples: the plan file.
+async fn jointly_planned(queries: &[&str], accuracy: &str) -> String {
+    let entries: Vec<String> = queries
+        .iter()
+        .map(|query| {
+            format!(
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval": 10000}},
+                  "requirements": {accuracy},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
+    let workload: PlanningWorkload = serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 0.6}}}},
+              "sources": {{"data": {{"series_count": 6, "sample_interval": 10000,
+                "metric_type": "gauge", "values_non_negative": true}}}}}}}}"#,
+        entries.join(",")
+    ))
+    .unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    plan_json_for(workload, &capabilities).await
+}
+
+/// The definition ids of `plan`'s stored outputs whose node's payload
+/// mentions `family` (e.g. `"DDSketch"`, `"Sum"`).
+fn stored_definitions<'a>(plan: &'a InstallablePlan, family: &str) -> BTreeSet<&'a str> {
+    plan.stored_outputs
+        .iter()
+        .filter(|output| {
+            let node = plan
+                .dag
+                .dag
+                .nodes
+                .iter()
+                .find(|n| n.id == output.node_id)
+                .unwrap();
+            serde_json::to_string(&node.payload)
+                .unwrap()
+                .contains(family)
+        })
+        .map(|output| output.coverage.definition_id.as_str())
+        .collect()
+}
+
+/// A fine and a coarse sum over one metric and window (ASAPQuery's
+/// sum-fine and sum-coarse) store one Sum: both group sums are computed
+/// from one stored per-series Sum (Stage 1 shares the per-series sums the
+/// two queries' scans read), so every stored Sum has one definition, and
+/// both answer as the query-time reference.
+#[tokio::test]
+async fn fine_and_coarse_sums_store_one_sum() {
+    let plan_json = jointly_planned(
+        &[
+            "sum by (region, service, job) (sum_over_time(data[100s]))",
+            "sum by (region) (sum_over_time(data[100s]))",
+        ],
+        "{}",
+    )
+    .await;
+    let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    let sums = stored_definitions(&plan, "\"Sum\"");
+    assert_eq!(sums.len(), 1, "{sums:?}");
+    let run = run_data_plane(
+        &plan_json,
+        &grouped_series_samples(),
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query[0].len(), 6);
+    assert_eq!(run.answers_per_query[1].len(), 2, "one sum per region");
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// Per-series answers planned beside a grouping of the same per-series
+/// values (over a scan with other labels) answer as their query-time
+/// reference, and the two share one stored per-series state: a top-k of
+/// per-series sums keeps each chosen series' labels, and per-series
+/// DDSketch quantiles keep every series' labels.
+#[tokio::test]
+async fn per_series_answers_beside_a_grouping_share_one_state_and_answer_as_the_reference() {
+    for (queries, family, accuracy, answers) in [
+        (
+            [
+                "topk(2, sum_over_time(data[100s]))",
+                "sum by (region) (sum_over_time(data[100s]))",
+            ],
+            "\"Sum\"",
+            "{}",
+            2,
+        ),
+        (
+            [
+                "quantile_over_time(0.9, data[100s])",
+                "avg by (region) (quantile_over_time(0.99, data[100s]))",
+            ],
+            "DDSketch",
+            r#"{"accuracy": {"accuracy_metric": "relative", "max_error": 0.05,
+                "failure_probability": 0.01, "accuracy_scope": "per_value"}}"#,
+            6,
+        ),
+    ] {
+        let plan_json = jointly_planned(&queries, accuracy).await;
+        let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+        assert_eq!(stored_definitions(&plan, family).len(), 1, "{queries:?}");
+        let run = run_data_plane(
+            &plan_json,
+            &grouped_series_samples(),
+            EVALUATION_MS,
+            &mut SummaryStore::new(),
+        );
+        assert_eq!(run.answers_per_query[0].len(), answers, "{queries:?}");
+        assert_eq!(run.answers_per_query[1].len(), 2, "{queries:?}: per region");
+        assert_eq!(
+            run.answers_per_query, run.reference_answers_per_query,
+            "{queries:?}"
+        );
+    }
 }

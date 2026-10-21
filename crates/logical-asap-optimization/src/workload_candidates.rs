@@ -256,7 +256,7 @@ fn pass2_candidates(
         found.identical_expression(&none, roots);
     }
     found.window_composition(&none, roots, evaluation_grid_ms);
-    found.reuse(&none, roots);
+    found.reuse(&none, roots, evaluation_grid_ms);
     let candidates = capability_sharing_candidates(roots);
     let pass2_candidates = match summary_capability_pass2_candidates(roots, &candidates) {
         Ok(pass2_candidates) => pass2_candidates,
@@ -373,11 +373,13 @@ impl Pass2List<'_> {
 
     /// The reuse Pass 2 candidates of `roots`: the exact top-k reuse
     /// rule's, then each rollup Pass 2 candidate followed by its own exact
-    /// top-k reuse Pass 2 candidates; each followed by its
+    /// top-k reuse and window-composition Pass 2 candidates (the finer
+    /// build as tumbling panes, so a deployment can store it and the coarse
+    /// computation rolls up its merged state); each followed by its
     /// identical-expression Pass 2 candidates. They are listed eagerly,
     /// like every Pass 2 rule's: more than [`MAX_REUSE_CANDIDATES`] rollup
     /// and top-k reuse candidates together list one error.
-    fn reuse(&mut self, rules: &Rules, roots: &[QueryRoot]) {
+    fn reuse(&mut self, rules: &Rules, roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) {
         let candidates = rollup_candidates(roots);
         // Every rollup subset is combined with every top-k subset: cap the
         // product, not each factor.
@@ -412,6 +414,7 @@ impl Pass2List<'_> {
                         self.identical_expression(&rules, &roots);
                     }
                     self.topk_reuse(&rules, &roots);
+                    self.window_composition(&rules, &roots, evaluation_grid_ms);
                 }
                 Err(error) => self.out.push(Pass2::failed(&rules, error)),
             }
@@ -497,6 +500,53 @@ mod tests {
             .collect()
     }
 
+    /// A rollup Pass 2 candidate is also built over tumbling panes: for a
+    /// fine and a coarse sum over one window, some Pass 2 candidate answers
+    /// the coarse sum from the fine one and builds the fine one as panes, so
+    /// a deployment that keeps no raw samples can store it and roll the
+    /// coarse sum up from its merged state.
+    #[test]
+    fn a_rollup_is_also_built_over_tumbling_panes() {
+        let roots = [
+            "sum by (region, service, job) (sum_over_time(data[100s]))",
+            "sum by (region) (sum_over_time(data[100s]))",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, q)| {
+            let root = lower_promql(q, asap_types::ir::properties::AccuracyTarget::exact());
+            (
+                i,
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
+            )
+        })
+        .collect();
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let entries: Vec<asap_types::workload::QueryWorkloadEntry> = (0..2)
+            .map(|_| asap_types::workload::QueryWorkloadEntry {
+                query: Default::default(),
+                requirements: Default::default(),
+                predictability: asap_types::workload::Predictability::Predictable {
+                    known_at: None,
+                },
+                recurrence: asap_types::workload::QueryRecurrence::Repeated(
+                    asap_types::workload::RepeatedDemand::FixedInterval(
+                        asap_types::workload::RepetitionInterval(10_000),
+                    ),
+                ),
+                range_evaluation: None,
+            })
+            .collect();
+        assert!(
+            stage1_logical_asap_optimization(&inventory, &entries).any(|candidate| {
+                candidate.roots.is_ok()
+                    && candidate.pass2.as_ref().is_some_and(|pass2| {
+                        !pass2.rollup_candidates.is_empty() && !pass2.pane_candidates.is_empty()
+                    })
+            })
+        );
+    }
+
     /// Skipping an invalid prefix skips exactly the choices that agree with
     /// it there, and keeps the others in enumeration order; a prefix of
     /// length 0 skips every choice.
@@ -571,7 +621,7 @@ mod tests {
             out: Vec::new(),
             viable: &|_| true,
         };
-        found.reuse(&Rules::default(), &roots);
+        found.reuse(&Rules::default(), &roots, &[]);
         let [failed] = found.out.as_slice() else {
             panic!("one error, {} candidates", found.out.len())
         };
