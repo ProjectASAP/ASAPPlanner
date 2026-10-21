@@ -113,13 +113,29 @@ pub(crate) fn hash_independent(rows: u32, cols: u32, layers: u8) -> bool {
 
 /// The relative error of the L2 norm at `cols` columns. Per row, the
 /// squared norm misses by more than `ε₂ F2` with probability at most
-/// `2q/ε₂²` ([`super::column_collision`]), so fixing that at
+/// `2q/ε₂²` ([`column_collision`]), so fixing that at
 /// [`L2_ROW_FAILURE`] gives `ε₂ = √(2q/0.1)`. The norm then misses by at
 /// most `1 − √(1 − ε₂)` (the low side; the high side `√(1 + ε₂) − 1` is
 /// smaller). `None` when `ε₂ ≥ 1`.
 fn l2_relative_error(cols: u32) -> Option<f64> {
-    let f2_error = (2.0 * super::column_collision(cols) / L2_ROW_FAILURE).sqrt();
+    let f2_error = (2.0 * column_collision(cols) / L2_ROW_FAILURE).sqrt();
     (f2_error < 1.0).then(|| 1.0 - (1.0 - f2_error).sqrt())
+}
+
+/// `P(c_i = c_j)` for two keys in a row of a UnivMon layer of `cols`
+/// columns. `asap_sketchlib` takes a UnivMon column as a `⌈log2 cols⌉`-bit
+/// slice of one 128-bit hash modulo `cols` ([`hash_independent`]): uniform
+/// for a power of two, and otherwise at most `9/(8 cols)` (the slice values
+/// past `cols` fold onto the low columns; the worst case,
+/// `cols = ¾ · 2^⌈log2 cols⌉`, doubles a third of them). A standalone
+/// Count Sketch hashes modulo `cols` instead (`count_sketch`).
+fn column_collision(cols: u32) -> f64 {
+    let cols = cols.max(1);
+    if cols.is_power_of_two() {
+        1.0 / f64::from(cols)
+    } else {
+        9.0 / (8.0 * f64::from(cols))
+    }
 }
 
 /// The median of `rows` independent rows misses only when at least

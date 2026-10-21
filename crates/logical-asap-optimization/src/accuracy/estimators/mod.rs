@@ -217,26 +217,12 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
     (tail * (1.0 + 1e-12)).min(1.0)
 }
 
-/// `P(c_i = c_j)` for two keys in a Count Sketch row of `cols` columns.
-/// `asap_sketchlib` takes a column as a `⌈log2 cols⌉`-bit hash slice modulo
-/// `cols`: uniform for a power of two, and otherwise at most `9/(8 cols)`
-/// (the slice values past `cols` fold onto the low columns; the worst case,
-/// `cols = ¾ · 2^⌈log2 cols⌉`, doubles a third of them).
-pub(crate) fn column_collision(cols: u32) -> f64 {
-    let cols = cols.max(1);
-    if cols.is_power_of_two() {
-        1.0 / f64::from(cols)
-    } else {
-        9.0 / (8.0 * f64::from(cols))
-    }
-}
-
 /// The parameters of one state shared by consumers of the same algorithm,
 /// each sized alone with one of `params` (Pass 2's summary-capability
 /// rule): each parameter's largest value, except where a smaller value is
 /// stricter, where it takes the smallest (a KLL's failure probability,
-/// DDSketch's α). Not every bound is monotone in its parameters (a Count
-/// Sketch's collision bound is tighter at a power-of-two width than one
+/// DDSketch's α). Not every bound is monotone in its parameters (a
+/// UnivMon's L2 collision bound is tighter at a power-of-two width than one
 /// column wider), so the shared state is not assumed to meet each
 /// consumer's target: the summary-capability rule composes every guarantee
 /// above it again, and plan selection checks each consumer against the
