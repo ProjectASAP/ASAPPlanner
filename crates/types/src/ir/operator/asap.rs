@@ -756,11 +756,6 @@ fn source_kind(node: &OperatorNode) -> OperatorResultKind {
     }
 }
 
-/// Whether a quantile read from `state` can have no value to rank, and so is
-/// NULL as the SQL aggregate it realizes is: the `SummaryAgg` under it (seen
-/// through `SummaryMerge`) is filtered, or, over a relation, is global (zero
-/// rows give one empty state) or summarizes a nullable column (a group of
-/// NULLs gives an empty state).
 /// The rows a heap sketch's top-k estimate returns: per state row, its `k`
 /// heaviest items, each as the state's partition columns, then the item
 /// columns of the build's update (the inner group labels, or the PromQL
@@ -805,6 +800,11 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
     })
 }
 
+/// Whether a quantile read from `state` can have no value to rank, and so is
+/// NULL as the SQL aggregate it realizes is: the `SummaryAgg` under it (seen
+/// through `SummaryMerge`) is filtered, or, over a relation, is global (zero
+/// rows give one empty state) or summarizes a nullable column (a group of
+/// NULLs gives an empty state).
 fn quantile_may_be_empty(state: &OperatorNode) -> bool {
     match state.asap() {
         Some(ASAPOp::SummaryMerge { children }) => {
