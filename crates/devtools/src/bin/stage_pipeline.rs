@@ -32,6 +32,9 @@
 // `"default"`. `--exhaustive` instead composes and prices every candidate
 // (the search the default one is tested against, for small workloads and
 // comparison) and the document lists them; `search` is `"exhaustive"`.
+// Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
+// guarantees unless `--enforce-accuracy-guarantees` is given (below);
+// `accuracy_guarantees` is `"ignored"` or `"enforced"`.
 //   - stage0_query_language_frontends: the frontends' workload DAG, one root per query;
 //   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
@@ -169,11 +172,15 @@
 // `non_repeating_query_horizon_seconds` and `measured_operation_costs`;
 // an omitted field takes its default). It replaces `--cost-model`, the
 // `--cluster-*` flags and `--measured-operation-costs`.
-// `--ignore-accuracy-guarantees` sets the settings'
-// `ignore_accuracy_guarantees` (also with `--plan-selection-settings`):
-// Stage 3 accepts every query output regardless of its accuracy guarantee,
-// so candidates are compared on cost alone; executability checks still
-// apply.
+// Accuracy guarantees are ignored by default: stage_pipeline sets the
+// settings' `ignore_accuracy_guarantees` (also over
+// `--plan-selection-settings`), so Stage 3 accepts every query output
+// regardless of its accuracy guarantee and candidates are compared on cost
+// alone; executability checks still apply. `--enforce-accuracy-guarantees`
+// clears it, and Stage 3 rejects an output whose guarantee does not meet
+// its query's target, as `plan_installable` does with the default
+// `PlanSelectionSettings`. The document's top-level `accuracy_guarantees` is
+// `"ignored"` or `"enforced"`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
@@ -219,7 +226,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--ignore-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--max-displayed <n>] --out <file>";
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) an exhaustive run enumerates.
@@ -318,7 +325,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut out = None;
     let mut measured_operation_costs_path: Option<String> = None;
     let mut plan_selection_settings_path: Option<String> = None;
-    let mut ignore_accuracy_guarantees = false;
+    let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
     let mut max_combinations_given = false;
     let mut args = args.into_iter();
@@ -377,7 +384,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--out" => out = Some(value()?),
             "--measured-operation-costs" => measured_operation_costs_path = Some(value()?),
             "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
-            "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
+            "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -469,7 +476,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             ..default_settings
         },
     };
-    plan_selection.ignore_accuracy_guarantees |= ignore_accuracy_guarantees;
+    plan_selection.ignore_accuracy_guarantees = !enforce_accuracy_guarantees;
     let from_file = match &workload_path {
         Some(path) if example.is_none() && queries.is_empty() => {
             let text =
@@ -618,6 +625,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     document["workload"]["data_workload"] =
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
     document["search"] = json!(if exhaustive { "exhaustive" } else { "default" });
+    document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
+        "enforced"
+    } else {
+        "ignored"
+    });
     // Read-only: the deployment inputs the run planned with.
     document["deployment_capabilities"] =
         serde_json::to_value(&deployment_capabilities).map_err(|e| e.to_string())?;

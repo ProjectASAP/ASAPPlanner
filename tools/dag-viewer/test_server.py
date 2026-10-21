@@ -142,7 +142,7 @@ class PlanArgsTests(unittest.TestCase):
 
 class WorkloadArgsTests(unittest.TestCase):
     """A PlanningWorkload request becomes `stage_pipeline --workload` with the
-    set's deployment capabilities and cost model."""
+    set's deployment capabilities, cost model and accuracy guarantee mode."""
 
     def test_workload_with_capabilities_and_cost_model(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,12 +155,23 @@ class WorkloadArgsTests(unittest.TestCase):
                                         "--cost-model", "aws-fargate-us-east-1", "--out", "out.json"])
             self.assertEqual(json.loads(Path(path).read_text()), workload)
 
+    def test_workload_enforces_accuracy_guarantees_only_when_asked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "w.json")
+            workload = {"query_workload": {"language": "promql", "query_batch": None, "repeating_queries": []}}
+            enforced = server.workload_args({"workload": workload, "accuracy_guarantees": "enforced"}, path, "out.json")
+            self.assertEqual(enforced[1:], ["--workload", path, "--enforce-accuracy-guarantees", "--out", "out.json"])
+            for mode in (None, "ignored"):
+                args = server.workload_args({"workload": workload, "accuracy_guarantees": mode}, path, "out.json")
+                self.assertNotIn("--enforce-accuracy-guarantees", args)
+
     def test_malformed_requests_are_rejected(self):
         for payload, message in [
             ([], "request must be a JSON object"),
             ({"workload": {}}, "workload must be a PlanningWorkload"),
             ({"workload": {"query_workload": {}}, "deployment_capabilities": 3}, "deployment_capabilities"),
             ({"workload": {"query_workload": {}}, "cost_model": "free"}, "cost_model"),
+            ({"workload": {"query_workload": {}}, "accuracy_guarantees": "off"}, "accuracy_guarantees"),
         ]:
             with self.subTest(message), self.assertRaisesRegex(ValueError, message):
                 server.workload_args(payload, "w.json", "out.json")
@@ -172,6 +183,18 @@ class WorkloadArgsTests(unittest.TestCase):
                                     "cost_model": "aws-fargate-us-east-1"}, "o.json")
         self.assertEqual(args[1:3], ["--workload", str(server.HERE / "workloads/s/w.json")])
         self.assertEqual(args[3:], ["--deployment-capabilities", '{"raw_data_retained":false}', "--cost-model", "aws-fargate-us-east-1", "--out", "o.json"])
+
+    def test_example_args_enforce_accuracy_guarantees_only_when_asked(self):
+        """An entry ignores accuracy guarantees, stage_pipeline's default,
+        unless its accuracy_guarantees is "enforced"."""
+        self.assertEqual(server.example_args({"example": "planner-layering-1", "accuracy_guarantees": "enforced"}, "o.json")[1:],
+                         ["--example", "planner-layering-1", "--exhaustive", "--enforce-accuracy-guarantees", "--out", "o.json"])
+        args = server.example_args({"workload": "w.json", "accuracy_guarantees": "enforced"}, "o.json")
+        self.assertEqual(args[-3:], ["--enforce-accuracy-guarantees", "--out", "o.json"])
+        self.assertNotIn("--enforce-accuracy-guarantees",
+                         server.example_args({"example": "planner-layering-1", "accuracy_guarantees": "ignored"}, "o.json"))
+        with self.assertRaisesRegex(ValueError, "accuracy_guarantees"):
+            server.example_args({"id": "x", "example": "planner-layering-1", "accuracy_guarantees": "off"}, "o.json")
 
 
 class PlanTests(unittest.TestCase):

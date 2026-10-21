@@ -65,9 +65,8 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 pub struct PlanningModels<'a> {
     /// Decides whether a candidate's accuracy guarantee meets its query's
     /// target, and whether the deployment accepts an output regardless of
-    /// its guarantee; [`BuiltinAccuracyModel`] by default. Planning reads it
-    /// through [`Self::effective_accuracy`], which
-    /// [`PlanSelectionSettings::ignore_accuracy_guarantees`] overrides.
+    /// its guarantee; [`BuiltinAccuracyModel`] by default.
+    /// [`PlanSelectionSettings::ignore_accuracy_guarantees`] overrides it.
     pub accuracy: &'a dyn AccuracyModel,
     /// Deployment facts the guarantees need (operand domains, observed
     /// guarantees); [`NoAccuracyEvidence`] by default.
@@ -128,7 +127,7 @@ impl<'a> PlanningModels<'a> {
     /// the plan selection settings set
     /// [`PlanSelectionSettings::ignore_accuracy_guarantees`], overriding
     /// `accuracy`; otherwise `accuracy`.
-    pub fn effective_accuracy(&self) -> &'a dyn AccuracyModel {
+    pub(crate) fn effective_accuracy(&self) -> &'a dyn AccuracyModel {
         if self.plan_selection.ignore_accuracy_guarantees {
             &IGNORE_ACCURACY_GUARANTEES
         } else {

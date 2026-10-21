@@ -34,15 +34,21 @@ def example_args(example: dict, out: str) -> list[str]:
     built-in example (`example`, with the exhaustive search its story
     describes) or a PlanningWorkload file (`workload`, relative to this
     directory, with the default search and the entry's
-    `deployment_capabilities`)."""
+    `deployment_capabilities`). Accuracy guarantees are ignored, as
+    `stage_pipeline` does by default, unless the entry's
+    `accuracy_guarantees` is `"enforced"`."""
+    mode = example.get("accuracy_guarantees", "ignored")
+    if mode not in ("ignored", "enforced"):
+        raise ValueError(f"{example.get('id')}: accuracy_guarantees must be ignored or enforced")
+    enforce = ["--enforce-accuracy-guarantees"] if mode == "enforced" else []
     if "workload" in example:
         args = [str(BINARY), "--workload", str(HERE / example["workload"])]
         if example.get("deployment_capabilities") is not None:
             args.extend(["--deployment-capabilities", json.dumps(example["deployment_capabilities"], separators=(",", ":"))])
         if example.get("cost_model") is not None:
             args.extend(["--cost-model", example["cost_model"]])
-        return args + ["--out", out]
-    return [str(BINARY), "--example", example["example"], "--exhaustive", "--out", out]
+        return args + enforce + ["--out", out]
+    return [str(BINARY), "--example", example["example"], "--exhaustive", *enforce, "--out", out]
 
 
 def write_examples(force: bool) -> None:
@@ -174,7 +180,9 @@ def plan(payload: object) -> dict:
 def workload_args(payload: object, workload_path: str, out: str) -> list[str]:
     """The `stage_pipeline` arguments that plan a PlanningWorkload request:
     `{"workload": <PlanningWorkload JSON>, "deployment_capabilities": <JSON or
-    null>, "cost_model": <a COST_MODELS name or null>}`, the workload written to `workload_path`. `stage_pipeline`
+    null>, "cost_model": <a COST_MODELS name or null>, "accuracy_guarantees":
+    <"ignored", "enforced" or null (ignored, stage_pipeline's default)>}`,
+    the workload written to `workload_path`. `stage_pipeline`
     validates the workload itself. Raises ValueError for a malformed
     request."""
     if not isinstance(payload, dict):
@@ -188,12 +196,17 @@ def workload_args(payload: object, workload_path: str, out: str) -> list[str]:
     cost_model = payload.get("cost_model")
     if cost_model is not None and cost_model not in COST_MODELS:
         raise ValueError(f"cost_model must be one of {', '.join(COST_MODELS)} or null")
+    mode = payload.get("accuracy_guarantees")
+    if mode not in (None, "ignored", "enforced"):
+        raise ValueError("accuracy_guarantees must be ignored, enforced or null")
     Path(workload_path).write_text(json.dumps(workload), encoding="utf-8")
     args = [str(BINARY), "--workload", workload_path]
     if capabilities is not None:
         args.extend(["--deployment-capabilities", json.dumps(capabilities, separators=(",", ":"))])
     if cost_model is not None:
         args.extend(["--cost-model", cost_model])
+    if mode == "enforced":
+        args.append("--enforce-accuracy-guarantees")
     return args + ["--out", out]
 
 

@@ -31,19 +31,25 @@ ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
 ```sh
 cargo run -p asap-devtools --bin stage_pipeline -- \
     --promql "topk by (job) (10, sum_over_time(http_requests_total[1m]))" \
-    --max-error 0.01 --failure-probability 0.001 --out plan.json
+    --max-error 0.01 --failure-probability 0.001 \
+    --enforce-accuracy-guarantees --out plan.json
 ```
 
-The document's `stage3_plan_selection.selected` names the selected plan, and
+Without `--enforce-accuracy-guarantees`, `stage_pipeline` ignores accuracy
+guarantees: every output is accepted whatever its guarantee, and plans are
+compared on cost alone. The document's top-level `accuracy_guarantees` says
+`ignored` or `enforced`. The document's `stage3_plan_selection.selected` names the selected plan, and
 `stage3_plan_selection.costs` holds each shown plan's `cost_per_second`.
 For this query, `selected` is `P1`, the exact plan. The Count-Min top-k
-plan (`P2`) is rejected because the command declares no metric type, so the
-samples are not proven non-negative, and the CountSketch top-k plan (`P3`)
-because its output has no guarantee; `stage3_plan_selection.rejected` gives
-each `cause` (here `accuracy_target_missed`) and reason.
+plan is discarded because the command declares no metric type, so the
+samples are not proven non-negative, and the CountSketch top-k plan
+because its output has no guarantee;
+`stage3_plan_selection.search.queries[0].discarded` gives each `cause`
+(`count_min_weights_not_proven_non_negative`, `no_accuracy_guarantee`) and
+reason.
 Open the document in the [Stage Viewer](stage-viewer.md) to see every
 stage, or run a built-in example of the design document, such as
-`--example planner-layering-1`. The Stage Viewer guide lists every option.
+`--example planner-layering-1 --exhaustive --enforce-accuracy-guarantees`. The Stage Viewer guide lists every option.
 
 ## Inspect a query's logical DAG
 

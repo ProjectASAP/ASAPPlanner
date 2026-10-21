@@ -94,8 +94,9 @@ impl AccuracyModel for BuiltinAccuracyModel {
 /// Executability checks still run: Count-Min over update weights not proven
 /// non-negative, and exact per-series aggregates the executor has no kernel
 /// for, are rejected.
+/// Planning's own: the settings field is the one way to select it.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct IgnoreAccuracyGuarantees;
+pub(crate) struct IgnoreAccuracyGuarantees;
 
 impl AccuracyModel for IgnoreAccuracyGuarantees {
     fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {

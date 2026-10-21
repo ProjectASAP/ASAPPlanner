@@ -36,7 +36,7 @@ structure, three statistics of one input over the same 1-min window:
 `distinct_over_time(flows_src_ip[1m])`,
 `entropy_over_time(flows_src_ip[1m])` and `l2_over_time(flows_src_ip[1m])`,
 with Q1–Q3's targets and a 15-s `sample_interval` on `flows_src_ip`. The
-`stage_pipeline --example planner-layering-2` document plans the SQL
+`stage_pipeline --example planner-layering-2 --enforce-accuracy-guarantees` document plans the SQL
 workload itself.
 
 ## Expected candidates per stage
@@ -152,6 +152,8 @@ strictest size.
 
 ## Devtool
 
-`stage_pipeline --example planner-layering-2` plans the SQL workload with the
-`flows(ts, src_ip)` catalog. The stage viewer has no tab for it; open the
+`stage_pipeline --example planner-layering-2 --enforce-accuracy-guarantees`
+plans the SQL workload with the `flows(ts, src_ip)` catalog (without the
+flag, `stage_pipeline` ignores accuracy guarantees, and none of the plans
+below is rejected for its guarantee). The stage viewer has no tab for it; open the
 document with **Open stage document…**.

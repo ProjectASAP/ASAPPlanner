@@ -94,7 +94,15 @@ class ValidationTests(unittest.TestCase):
         doc = seed862()
         del doc["workload"]["data_workload"]
         del doc["stage3_plan_selection"]["stored_outputs"]
+        del doc["accuracy_guarantees"]
         self.assertEqual(self.validate(doc), [])
+
+    def test_accuracy_guarantees_is_ignored_or_enforced(self):
+        self.assertEqual(self.doc["accuracy_guarantees"], "enforced")
+        for mode in ("ignored", "enforced"):
+            self.assertEqual(self.validate(dict(self.doc, accuracy_guarantees=mode)), [])
+        self.assertEqual(self.validate(dict(self.doc, accuracy_guarantees="off")),
+                         ['accuracy_guarantees must be "ignored" or "enforced"'])
 
     def test_data_workload_and_stored_output_violations_are_reported(self):
         stored = lambda d: d["stage3_plan_selection"]["stored_outputs"]
@@ -428,7 +436,7 @@ class DefaultSearchTests(unittest.TestCase):
     def setUp(self):
         self.js = stages_js()
         # Two queries over two metrics: two components, each searched alone;
-        # q2's approximate top-k has candidates that miss its target.
+        # Accuracy guarantees are ignored (stage_pipeline's default).
         self.doc = stage_pipeline(
             "--promql", "sum(rate(a[1m]))", "--promql", "topk(5, rate(b[1m]))",
             "--max-error", "0.01", "--failure-probability", "0.001",
@@ -439,6 +447,18 @@ class DefaultSearchTests(unittest.TestCase):
         self.assertEqual(self.js.call("validateStagePipeline", self.doc), [])
         physical = self.doc["stage2_physical_asap_optimization"]["candidates"]
         self.assertEqual([p["id"] for p in physical], [self.doc["stage3_plan_selection"]["selected"]])
+
+    def test_guarantees_are_ignored_by_default_and_the_header_says_which(self):
+        self.assertEqual(self.doc["accuracy_guarantees"], "ignored")
+        self.assertTrue(self.js.call("accuracyGuaranteesText", self.doc).startswith("accuracy guarantees ignored"))
+        enforced = stage_pipeline(
+            "--promql", "sum(rate(a[1m]))", "--promql", "topk(5, rate(b[1m]))",
+            "--max-error", "0.01", "--failure-probability", "0.001", "--enforce-accuracy-guarantees",
+        )
+        self.assertEqual(enforced["accuracy_guarantees"], "enforced")
+        self.assertEqual(self.js.call("validateStagePipeline", enforced), [])
+        self.assertEqual(self.js.call("accuracyGuaranteesText", enforced), "accuracy guarantees enforced")
+        self.assertEqual(self.js.call("accuracyGuaranteesText", {}), "")
 
     def test_header_names_the_search_and_its_components(self):
         text = self.js.call("searchText", self.doc)
@@ -730,6 +750,18 @@ class PageTests(unittest.TestCase):
                     self.assertIn(f'"{example["example"]}" =>', tool)
                     self.assertTrue(example["file"].startswith("out/"))
 
+    def test_workload_examples_plan_as_their_set_does(self):
+        """A workload example's precomputed document is planned with its
+        set's settings, so it matches what the server plans for the row."""
+        examples = json.loads((HERE / "examples.json").read_text())
+        sets = json.loads((WORKLOADS / "index.json").read_text())["sets"]
+        by_file = {f"workloads/{entry['file']}": s for s in sets for entry in s["workloads"]}
+        for example in (e for e in examples if "workload" in e):
+            with self.subTest(example["id"]):
+                workload_set = by_file[example["workload"]]
+                for field in ("deployment_capabilities", "cost_model", "accuracy_guarantees"):
+                    self.assertEqual(example.get(field), workload_set.get(field), field)
+
     def test_committed_documents_are_example1_and_the_workload_examples(self):
         examples = json.loads((HERE / "examples.json").read_text())
         committed = {Path(e["file"]).name for e in examples if "workload" in e} | {"planner-layering-example1.json"}
@@ -802,7 +834,9 @@ class AppTests(unittest.TestCase):
         self.assertEqual(js.eval("__els.pick2.value"), selected)
         self.assertEqual(js.eval("__els.pick1.value"), "L1")
         combinations = example1()["stage1_logical_asap_optimization"]["combinations"]
-        self.assertIn(f"{combinations} candidates", js.eval("__els['rank-meta'].textContent"))
+        rank_meta = js.eval("__els['rank-meta'].textContent")
+        self.assertIn(f"{combinations} candidates", rank_meta)
+        self.assertIn("accuracy guarantees enforced", rank_meta)
         self.assertIn("metric not set; accepted exact", self.text(js, "lane2-meta"))
         self.assertGreater(js.eval("__nodes"), 0)
 

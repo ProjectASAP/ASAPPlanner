@@ -8,7 +8,8 @@ windows" and the Pass 2 section. Tests:
 `tests/planner_layering_common/`; the Example 3/4 workloads and the stage
 pipeline in `asap_devtools::{planner_layering_examples, planning_stages}`).
 Devtool: `stage_pipeline --example planner-layering-3a` and
-`planner-layering-3b`. Both run every candidate (972 for 3a: 243 from
+`planner-layering-3b`, with `--enforce-accuracy-guarantees` (without it,
+`stage_pipeline` ignores accuracy guarantees and DDSketch is not rejected). Both run every candidate (972 for 3a: 243 from
 Pass 1, each with 3 Pass 2 shared-input candidates) through plan
 selection; `--max-displayed` (default 64) limits only how many the document
 shows, so 3a selects P485: KLL for all five queries.

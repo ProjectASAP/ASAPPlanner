@@ -31,7 +31,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   labels, the queries (text, how often, accuracy) and the sources they
   read. Clicking a row plans it with the local server (`/api/plan-workload`:
   `stage_pipeline --workload`, default search, the set's
-  `deployment_capabilities` and `cost_model`). Without the server, a row
+  `deployment_capabilities`, `cost_model` and `accuracy_guarantees`). Without the server, a row
   with a precomputed `document` opens it and the others say they need the
   server. `#workload-sets` in the URL opens the section.
 - **Query workload** with each query's accuracy, latency, recurrence,
@@ -102,13 +102,16 @@ deployment capabilities and cost model.
              "description": "...", "source": "where the workloads come from",
              "deployment_capabilities": { "raw_data_retained": false, "query_time_results_retained": false },
              "cost_model": "aws-fargate-us-east-1",
+             "accuracy_guarantees": "enforced",
              "workloads": [{ "id": "workload-01", "file": "random-mixed-seed-862/workload-01.json",
                              "query_labels": ["q01-sum-fine", "..."],
                              "document": "examples/random-mixed-seed-862-workload-01.json" }] }] }
 ```
 
 `deployment_capabilities`, `cost_model` (`usage-over-time`,
-`aws-fargate-us-east-1` or `provisioned-capacity`), `query_labels` (one per
+`aws-fargate-us-east-1` or `provisioned-capacity`), `accuracy_guarantees`
+(`ignored`, the default, or `enforced`: the server then passes
+`--enforce-accuracy-guarantees`), `query_labels` (one per
 query, in entry order) and `document` (a precomputed stage document) are
 optional. A new set is a directory of files and an index entry; no code
 changes. `crates/devtools/tests/stage_pipeline.rs` checks that every file
@@ -117,7 +120,8 @@ parses and passes `PlanningWorkload::validate`.
 The three ASAPQuery sets (seed-862, seed-862-x5, seed-862-long; 10
 workloads each, PromQL queries only) were converted from ASAPQuery's random
 workload manifests with ε = 1 − the accuracy SLA and δ = 0.3, and are
-planned as the MVP deployment: raw data not retained, Fargate prices.
+planned as the MVP deployment: raw data not retained, Fargate prices,
+accuracy guarantees enforced.
 
 ## Query editor
 
@@ -125,7 +129,8 @@ With the local server running, **Query editor** plans SQL and PromQL
 queries with one ε for every query. SQL queries read the tables declared in
 the editor (one column per line, `name TYPE [NOT NULL]`, and an optional
 time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
-`--name` and `--table` and the page shows the result.
+`--name` and `--table` and the page shows the result. Accuracy guarantees
+are ignored, `stage_pipeline`'s default.
 
 ## Document format
 
@@ -135,6 +140,7 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
 {
   "format": "asap-stage-pipeline/v1",
   "search": "default",
+  "accuracy_guarantees": "ignored",
   "workload": { "queries": [{ "id": "q1", "language": "promql", "text": "...",
                 "requirements": { "accuracy": { "max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result" },
                                   "repeat_interval_ms": 10000 },
@@ -222,6 +228,15 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
   or a loss under the cost model (`costlier`, `slower`, `more_memory`,
   `not_lowest_latency_on_pareto_front`, `dominated`,
   `tied_lost_on_enumeration_order`).
+- `accuracy_guarantees` is `ignored` (`stage_pipeline`'s default: Stage 3
+  accepts every query output regardless of its guarantee and compares the
+  candidates on cost alone; every accepted output has
+  `accepted_regardless_of_guarantee: true`, and `guarantee_check_rejection`
+  names the cause the guarantee check would have rejected it with, or is
+  null when its guarantee met the target) or
+  `enforced` (`--enforce-accuracy-guarantees`, as `plan_installable` plans
+  with the default `PlanSelectionSettings`). The Stage 3 header shows it;
+  an older document without it is still valid, any other value is not.
 - `search` is `default` (`Stage1ToStage3Search::default`, the search
   `plan_installable` runs: each query's own candidates checked first,
   independent components searched separately, raw-scan candidates skipped
@@ -289,6 +304,10 @@ shown. If a check fails, it shows the problems instead.
   `examples/planner-layering-example1.json` and workload-01 of each
   ASAPQuery set (0.9, 0.9 and 1.4 MB); `crates/devtools/tests/stage_pipeline.rs`
   checks that they are current. `server.py --regenerate` rewrites them.
+  An entry's `accuracy_guarantees` (`ignored` when absent) says whether it
+  is planned with `--enforce-accuracy-guarantees`; every current entry
+  enforces, since each story is about which plans meet their accuracy
+  target, and a workload example matches its set.
 - `cytoscape.min.js`, `dagre.min.js`, `cytoscape-dagre.js`: vendored, so the
   page works offline.
 

@@ -118,5 +118,6 @@ tests (`analyze_corpora`, `variant_coverage`) show the coverage change.
 - [ ] Unit tests beside the code and one end-to-end test through the stages.
 - [ ] The design document's examples still plan the same, or the change is
       explained: run the `planner_layering_example*` tests and
-      `stage_pipeline --example planner-layering-1` (and `-2`, `-3a`, `-3b`).
+      `stage_pipeline --example planner-layering-1 --enforce-accuracy-guarantees`
+      (and `-2`, `-3a`, `-3b`).
 - [ ] The design, developer and user docs that name what changed are updated.

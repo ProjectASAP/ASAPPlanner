@@ -68,7 +68,8 @@ fn validated_dag(value: &Value, queries: usize) {
 /// the committed fixture is current.
 #[test]
 fn example1_document_is_valid_and_committed_fixture_is_current() {
-    let document = generate(&[]);
+    // Example 1's story is about which plans miss their accuracy target.
+    let document = generate(&["--enforce-accuracy-guarantees"]);
     let committed: Value = serde_json::from_str(
         &std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(COMMITTED))
             .unwrap(),
@@ -451,7 +452,8 @@ fn max_combinations_needs_exhaustive() {
 /// (seed 862, workload-01), planned as a deployment that keeps no raw data:
 /// the default search plans it (the exhaustive search would enumerate more
 /// than 10^5 Stage 1 candidates) and selects what `plan_installable`
-/// selects with the same settings.
+/// selects with the same settings (guarantees enforced, as in
+/// `PlanSelectionSettings::default()`).
 #[test]
 fn default_search_plans_a_nine_query_workload_as_plan_installable_does() {
     const WORKLOAD: &str =
@@ -465,8 +467,10 @@ fn default_search_plans_a_nine_query_workload_as_plan_installable_does() {
         NO_RAW,
         "--cost-model",
         "aws-fargate-us-east-1",
+        "--enforce-accuracy-guarantees",
     ]);
     assert_eq!(document["search"], "default");
+    assert_eq!(document["accuracy_guarantees"], "enforced");
     let queries = document["workload"]["queries"].as_array().unwrap().len();
     assert_eq!(queries, 9);
     validated_dag(&document["stage0_query_language_frontends"]["dag"], queries);
@@ -704,10 +708,12 @@ fn a_target_without_a_metric_shows_the_query_default() {
 /// the document reports, per valid candidate, the metric each was accepted
 /// in and that the target's metric was not set. With `--accuracy-metric rank` only
 /// rank guarantees (and exact plans) are accepted, and the report says so. The workload's
-/// accuracy is the target's own JSON form.
+/// accuracy is the target's own JSON form. Guarantees are enforced, since
+/// the test is about which guarantees meet the target.
 #[test]
 fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let query = [
+        "--enforce-accuracy-guarantees",
         "--exhaustive",
         "--promql",
         "quantile_over_time(0.99, m[1m])",
@@ -763,7 +769,9 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
 /// candidates: cost model 1 (the default) selects the whole-window KLL (P2),
 /// cost model 2 the exact plan (P1), and cost model 3 with a 256 GB cluster
 /// the panes maintained at ingestion time (P3-m1), with no prices and, for
-/// `pareto-front`, the front. Each candidate reports its usage.
+/// `pareto-front`, the front. Each candidate reports its usage. Cost model 3
+/// is run with guarantees enforced: ignoring them, a candidate without a
+/// guarantee fits the cluster better.
 #[test]
 fn cost_model_flag_chooses_how_candidates_are_compared() {
     let selected = |extra: &[&str]| {
@@ -782,6 +790,7 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
         "P1"
     );
     let cluster = selected(&[
+        "--enforce-accuracy-guarantees",
         "--cost-model",
         "cluster-capacity",
         "--cluster-memory-bytes",
@@ -843,7 +852,8 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
 /// `pass1_pruned` says why; the KLL panes gain B3, built at query time and
 /// kept (`P3-m2`, 436.53 cost/s); the whole-window KLL (`P2`) is still
 /// selected. Without raw data, every query-time scan is invalid and B1
-/// (`P3-m1`) is selected. A deployment with an unknown field is refused.
+/// (`P3-m1`) is selected when guarantees are enforced. A deployment with an
+/// unknown field is refused.
 #[test]
 fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     let default = generate_example("planner-layering-3b", &[]);
@@ -902,6 +912,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     let no_raw = generate_example(
         "planner-layering-3b",
         &[
+            "--enforce-accuracy-guarantees",
             "--deployment-capabilities",
             r#"{"raw_data_retained": false}"#,
         ],
@@ -1091,12 +1102,14 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
     std::fs::remove_file(path).unwrap();
 }
 
-/// `--ignore-accuracy-guarantees` (issue #774): the built-in model rejects
-/// every sketch candidate of an average of p99s as having no guarantee;
-/// with the flag each is valid, accepted regardless of its guarantee, and
-/// records why the guarantee check would have rejected it.
+/// stage_pipeline ignores accuracy guarantees by default: every sketch
+/// candidate of an average of p99s, which the built-in model rejects as
+/// having no guarantee under `--enforce-accuracy-guarantees`, is valid with
+/// no flag, accepted regardless of its guarantee, and records why the
+/// guarantee check would have rejected it. The document says which mode it
+/// planned under; there is no `--ignore-accuracy-guarantees`.
 #[test]
-fn ignore_accuracy_guarantees_flag_accepts_outputs_without_a_guarantee() {
+fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     let args = [
         "--exhaustive",
         "--promql",
@@ -1108,18 +1121,20 @@ fn ignore_accuracy_guarantees_flag_accepts_outputs_without_a_guarantee() {
         "--accuracy-metric",
         "rank",
     ];
-    let builtin = document_of(&args);
-    let unguaranteed: Vec<String> = builtin["stage3_plan_selection"]["rejected"]
+    let mut enforcing = args.to_vec();
+    enforcing.push("--enforce-accuracy-guarantees");
+    let enforced = document_of(&enforcing);
+    assert_eq!(enforced["accuracy_guarantees"], "enforced");
+    let unguaranteed: Vec<String> = enforced["stage3_plan_selection"]["rejected"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|r| r["cause"] == "no_accuracy_guarantee")
         .map(|r| r["id"].as_str().unwrap().to_string())
         .collect();
-    assert!(!unguaranteed.is_empty(), "{builtin}");
-    let mut ignoring = args.to_vec();
-    ignoring.push("--ignore-accuracy-guarantees");
-    let document = document_of(&ignoring);
+    assert!(!unguaranteed.is_empty(), "{enforced}");
+    let document = document_of(&args);
+    assert_eq!(document["accuracy_guarantees"], "ignored");
     let accepted = &document["stage3_plan_selection"]["accepted"];
     for id in &unguaranteed {
         let query = &accepted[id][0];
@@ -1129,6 +1144,24 @@ fn ignore_accuracy_guarantees_flag_accepts_outputs_without_a_guarantee() {
             "{id}: {query}"
         );
     }
+    // The flag decides over a settings file's `ignore_accuracy_guarantees`.
+    let settings = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_ignoring_settings.json",
+        std::process::id()
+    ));
+    std::fs::write(&settings, r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
+    let mut from_file = enforcing.clone();
+    from_file.extend(["--plan-selection-settings", settings.to_str().unwrap()]);
+    assert_eq!(document_of(&from_file), enforced);
+    std::fs::remove_file(settings).unwrap();
+    let mut ignoring = args.to_vec();
+    ignoring.push("--ignore-accuracy-guarantees");
+    let (code, stderr) = failure(&ignoring);
+    assert_eq!(code, Some(2));
+    assert!(
+        stderr.contains("unknown argument --ignore-accuracy-guarantees"),
+        "{stderr}"
+    );
 }
 
 /// The workload sets the viewer lists (`tools/dag-viewer/workloads`): every
@@ -1157,6 +1190,9 @@ fn workload_set_index_and_files_validate() {
             )
             .unwrap();
         }
+        if let Some(mode) = set.get("accuracy_guarantees") {
+            assert!(mode == "ignored" || mode == "enforced", "{set}");
+        }
         for entry in set["workloads"].as_array().unwrap() {
             let file = root.join("workloads").join(entry["file"].as_str().unwrap());
             let text = std::fs::read_to_string(&file).unwrap();
@@ -1182,7 +1218,8 @@ fn workload_set_index_and_files_validate() {
 
 /// The committed workload examples (`examples.json` entries with a
 /// `workload`) are current: written with the default search from their
-/// workload file, deployment capabilities and cost model. Each carries its
+/// workload file, deployment capabilities, cost model and accuracy
+/// guarantee mode (`accuracy_guarantees`, ignored when absent). Each carries its
 /// data workload as the file declares it and the selected plan's stored
 /// outputs as `plan_installable` gives them, each mapped to a node of the
 /// selected Stage 2 candidate.
@@ -1211,14 +1248,24 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
     let path = root.join(example["workload"].as_str().unwrap());
     let capabilities = example["deployment_capabilities"].to_string();
     let cost_model = example["cost_model"].as_str().unwrap();
-    let document = document_of(&[
+    let enforce = match example.get("accuracy_guarantees") {
+        None => false,
+        Some(mode) if mode == "ignored" => false,
+        Some(mode) if mode == "enforced" => true,
+        Some(mode) => panic!("accuracy_guarantees {mode}"),
+    };
+    let mut args = vec![
         "--workload",
         path.to_str().unwrap(),
         "--deployment-capabilities",
         &capabilities,
         "--cost-model",
         cost_model,
-    ]);
+    ];
+    if enforce {
+        args.push("--enforce-accuracy-guarantees");
+    }
+    let document = document_of(&args);
     let committed: Value = serde_json::from_str(
         &std::fs::read_to_string(root.join(example["file"].as_str().unwrap())).unwrap(),
     )
@@ -1265,6 +1312,7 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
         cost_model: asap_plan_selection::CostModel::UsageOverTime(
             asap_plan_selection::ResourceUnitCost::aws_fargate_us_east_1(defaults.resource_speed),
         ),
+        ignore_accuracy_guarantees: !enforce,
         ..defaults
     };
     let models = asap_plan_selection::PlanningModels::builtin()

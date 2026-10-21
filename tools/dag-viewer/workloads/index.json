@@ -163,7 +163,8 @@
           ]
         }
       ],
-      "cost_model": "aws-fargate-us-east-1"
+      "cost_model": "aws-fargate-us-east-1",
+      "accuracy_guarantees": "enforced"
     },
     {
       "id": "random-mixed-seed-862-x5",
@@ -327,7 +328,8 @@
           ]
         }
       ],
-      "cost_model": "aws-fargate-us-east-1"
+      "cost_model": "aws-fargate-us-east-1",
+      "accuracy_guarantees": "enforced"
     },
     {
       "id": "random-mixed-seed-862-long",
@@ -491,7 +493,8 @@
           ]
         }
       ],
-      "cost_model": "aws-fargate-us-east-1"
+      "cost_model": "aws-fargate-us-east-1",
+      "accuracy_guarantees": "enforced"
     }
   ]
 }

@@ -231,6 +231,9 @@ function validateStagePipeline(doc) {
     ['stage2_physical_asap_optimization', stage2], ['stage3_plan_selection', stage3],
   ].filter(([, stage]) => !stage || typeof stage !== 'object').map(([name]) => `${name} is missing`);
   if (missing.length) return missing;
+  if (doc.accuracy_guarantees !== undefined && !ACCURACY_GUARANTEE_MODES.includes(doc.accuracy_guarantees)) {
+    errors.push(`accuracy_guarantees must be ${ACCURACY_GUARANTEE_MODES.map((m) => JSON.stringify(m)).join(' or ')}`);
+  }
   errors.push(...validateLogicalDag(stage0.dag, 'stage0_query_language_frontends', queries.length));
 
   const logical = Array.isArray(stage1.candidates) ? stage1.candidates : [];
@@ -357,6 +360,16 @@ function stageCandidateHeader(doc) {
     selection.error ? ` · selection failed: ${selection.error}` : '',
   ].join('');
   return `${logical.combinations ?? 0} candidates${shown}${error}`;
+}
+
+// Whether Stage 3 checked accuracy guarantees (`accuracy_guarantees`), for
+// the candidate list's header; "" for a document that does not say.
+const ACCURACY_GUARANTEE_MODES = ['ignored', 'enforced'];
+function accuracyGuaranteesText(doc) {
+  return {
+    ignored: 'accuracy guarantees ignored: every output accepted, candidates compared on cost alone',
+    enforced: 'accuracy guarantees enforced',
+  }[doc.accuracy_guarantees] || '';
 }
 
 // What the search behind the document did, for the candidate list's

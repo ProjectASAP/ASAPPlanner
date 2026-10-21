@@ -3,6 +3,7 @@
     "id": "example1",
     "name": "1 · dashboard panels",
     "example": "planner-layering-1",
+    "accuracy_guarantees": "enforced",
     "file": "out/example1.json",
     "story": "Two PromQL panels over the last minute, every 10 s: Q1 the exact per-job request rate, Q2 the top-10 series per job within ε = 0.01, δ = 0.001 and 100 ms."
   },
@@ -10,6 +11,7 @@
     "id": "example3a",
     "name": "3a · historical p99 batch",
     "example": "planner-layering-3a",
+    "accuracy_guarantees": "enforced",
     "file": "out/example3a.json",
     "story": "An ad hoc batch of five p99 reports over historical intervals of 1 to 5 years, run once."
   },
@@ -17,6 +19,7 @@
     "id": "example3b",
     "name": "3b · live p99 panel",
     "example": "planner-layering-3b",
+    "accuracy_guarantees": "enforced",
     "file": "out/example3b.json",
     "story": "A p99 panel over the last 5 min, every minute, within 200 ms."
   },
@@ -29,8 +32,9 @@
       "query_time_results_retained": false
     },
     "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
     "file": "examples/random-mixed-seed-862-workload-01.json",
-    "story": "Workload set Random mixed · seed-862, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices). Ten random workloads (seed 862) of nine PromQL queries each (sums, quantiles, top-k sums, top-k increases and top-k rates at several groupings) over a synthetic hierarchy of 4 regions × 5 services × 10 jobs × 50 label_0 values: 10,000 series per metric, sampled every 100 ms, lookbacks of 1 to 20 minutes."
+    "story": "Workload set Random mixed · seed-862, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices, accuracy guarantees enforced). Ten random workloads (seed 862) of nine PromQL queries each (sums, quantiles, top-k sums, top-k increases and top-k rates at several groupings) over a synthetic hierarchy of 4 regions × 5 services × 10 jobs × 50 label_0 values: 10,000 series per metric, sampled every 100 ms, lookbacks of 1 to 20 minutes."
   },
   {
     "id": "random-mixed-seed-862-x5-workload-01",
@@ -41,8 +45,9 @@
       "query_time_results_retained": false
     },
     "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
     "file": "examples/random-mixed-seed-862-x5-workload-01.json",
-    "story": "Workload set Random mixed · seed-862-x5, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices). The seed-862 workloads over five times as many series: 250 label_0 values per job, 50,000 series per metric."
+    "story": "Workload set Random mixed · seed-862-x5, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices, accuracy guarantees enforced). The seed-862 workloads over five times as many series: 250 label_0 values per job, 50,000 series per metric."
   },
   {
     "id": "random-mixed-seed-862-long-workload-01",
@@ -53,7 +58,8 @@
       "query_time_results_retained": false
     },
     "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
     "file": "examples/random-mixed-seed-862-long-workload-01.json",
-    "story": "Workload set Random mixed · seed-862-long, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices). The seed-862 workloads with three times longer lookbacks: 3 to 60 minutes."
+    "story": "Workload set Random mixed · seed-862-long, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices, accuracy guarantees enforced). The seed-862 workloads with three times longer lookbacks: 3 to 60 minutes."
   }
 ]

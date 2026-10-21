@@ -257,7 +257,7 @@
       (logical.capped ? ` (<b>${logical.candidates.length}</b> shown)` : '') +
       ` → <b>${physicalById.size}</b> physical` +
       (selection.selected ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
-    $('rank-meta').textContent = [stageCandidateHeader(doc), searchText(doc)].filter(Boolean).join(' · ');
+    $('rank-meta').textContent = [stageCandidateHeader(doc), accuracyGuaranteesText(doc), searchText(doc)].filter(Boolean).join(' · ');
     renderDataWorkload();
     const sel = selection.selected ? selection.costs[selection.selected] : null;
     $('cost-unit').textContent = sel ? sel.cost_unit.replace(/_/g, ' ') : '';
@@ -393,16 +393,17 @@
 
   // Plan a `PlanningWorkload` JSON with the local server (`stage_pipeline
   // --workload`, default search) under `deploymentCapabilities` and
-  // `costModel` (null: the defaults) and show the document. Resolves to whether it was shown;
-  // rejects when the server could not plan it.
-  function planWorkload(workload, deploymentCapabilities, source, story, costModel) {
+  // `costModel` (null: the defaults), with accuracy guarantees ignored
+  // unless `accuracyGuarantees` is "enforced", and show the document.
+  // Resolves to whether it was shown; rejects when the server could not plan it.
+  function planWorkload(workload, deploymentCapabilities, source, story, costModel, accuracyGuarantees) {
     const ticket = ++loading;
     pressTab(null);
     $('queries').innerHTML = `<span class="status">Planning ${esc(source)} with the local server…</span>`;
     return fetch('/api/plan-workload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workload, deployment_capabilities: deploymentCapabilities || null, cost_model: costModel || null }),
+      body: JSON.stringify({ workload, deployment_capabilities: deploymentCapabilities || null, cost_model: costModel || null, accuracy_guarantees: accuracyGuarantees || null }),
     }).then((r) => r.json().catch(() => ({ error: `HTTP ${r.status}` })).then((result) => {
       if (!r.ok) throw new Error(result.error || `HTTP ${r.status}`);
       if (ticket !== loading) return false;
