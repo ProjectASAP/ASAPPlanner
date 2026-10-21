@@ -14,10 +14,6 @@ use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 #[test]
-#[ignore = "the whole-expression heap keeps the outer top-k's keys indexed against the absorbed \
-            aggregate, so the physical planner rejects its keyed evaluation shape (#639); the \
-            unconfirmed Count-Min heap also has no non-negative weight proof until plan selection \
-            confirms one"]
 fn planner_weighted_topk_binds_at_either_deployment_phase() {
     assert_weighted_binding(SketchAlgorithm::CmsWithHeap);
     assert_weighted_binding(SketchAlgorithm::CountSketchWithHeap);
@@ -46,13 +42,38 @@ fn heap_candidate(
         .unwrap_or_else(|| panic!("missing {algorithm:?} candidate"))
 }
 
+/// `plan` as Stage 3 hands it to the executor when the data declares `m` a
+/// counter: its rate weights' open requirement confirmed non-negative.
+fn confirmed_as_counter(
+    plan: Rc<planner_types::ir::OperatorNode>,
+) -> Rc<planner_types::ir::OperatorNode> {
+    use planner_types::ir::QueryRoot;
+    use planner_types::workload::{MetricType, SourceFacts};
+    let data = DataWorkload {
+        sources: [(
+            "m".to_string(),
+            SourceFacts {
+                metric_type: Some(MetricType::Counter),
+                ..SourceFacts::default()
+            },
+        )]
+        .into(),
+        ..DataWorkload::default()
+    };
+    match asap_plan_selection::with_confirmed_weights(&[QueryRoot::Operator(plan)], &data).remove(0)
+    {
+        QueryRoot::Operator(node) => node,
+        QueryRoot::Scalar(_) => unreachable!("an operator root"),
+    }
+}
+
 fn assert_weighted_binding(algorithm: SketchAlgorithm) {
     let root = lower_promql(
         "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
         AccuracyTarget::max_error(0.1),
     )
     .unwrap();
-    let plan = heap_candidate(root, &algorithm);
+    let plan = confirmed_as_counter(heap_candidate(root, &algorithm));
     let dag = compile_physical_asap_dag(&plan).unwrap();
     let rate_id_of = |dag: &PhysicalASAPDAG| {
         let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {family:FieldDataType::Sketch(kind,_),..})if kind.algorithm()==&algorithm)).unwrap();
@@ -142,6 +163,8 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
             output
         });
         // Two items per `job`: the outer `by(job)` partitions the ranking.
+        // Each row is `[job, topk_2, service]`: the top-k's columns, then
+        // the ranked item's label.
         let schema = &dag
             .nodes
             .iter()
@@ -149,7 +172,8 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
             .unwrap()
             .output_schema;
         let column = |name: &str| schema.fields.iter().position(|f| f.name == name).unwrap();
-        let (job, value) = (column("job"), column("value"));
+        let (job, value) = (column("job"), column("topk_2"));
+        assert_eq!(column("service"), 2);
         let mut ranked = output
             .iter()
             .map(|row| match (&row[job], &row[value]) {

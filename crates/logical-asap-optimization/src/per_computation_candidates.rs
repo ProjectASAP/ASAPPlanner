@@ -961,8 +961,14 @@ fn whole_expression_input(
         input.item = Some(SummaryInputExpr::Column(ColumnRef::Named(
             asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
         )));
-    } else if realized.child.schema.closed {
-        // An encoded label set needs an open PromQL schema.
+    } else if realized.child.schema.closed
+        && (matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
+            || !reads_only_time_series(&realized.child))
+    {
+        // An encoded label set needs an open PromQL schema. PromQL rows that
+        // carry the series identity are closed, but their inner group labels
+        // are item columns. (A SQL top-k keeps its heaps over its per-key
+        // result.)
         return None;
     }
     let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
@@ -2722,7 +2728,9 @@ fn with_names_of(
             .map(|field| field.name.clone())
             .collect()
     };
-    if names(&output) == names(target) {
+    // A top-k's ranked rows may carry their item columns after the
+    // aggregate's ([`ranked_as_topk`]).
+    if names(&output).starts_with(&names(target)) {
         return Ok(output);
     }
     if output.schema.fields.len() != target.schema.fields.len() {
@@ -2773,10 +2781,67 @@ fn whole_expression(
         filter: None,
     }))?;
     sizing.built.borrow_mut().push((state.clone(), key));
-    Ok(OperatorNode::new_shared(Operator::ASAP(
-        ASAPOp::SummaryEstimate {
-            summary_input: state,
-            query: statistic(intent)?,
+    let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: state,
+        query: statistic(intent)?,
+    }))?;
+    ranked_as_topk(target, estimate)
+}
+
+/// A heap's top-k `estimate` (`[partitions.., items.., topk]`, one row per
+/// ranked item) in `target`'s columns: its `[keys.., topk_k]`, with
+/// `topk_k` the estimated Float64 weight, then, over PromQL rows, the item
+/// columns. This is the exact top-k's physical shape (its ranked rows'
+/// value, then their other labels; a SQL result keeps only its logical
+/// columns), so readers of `[keys.., topk_k]` find those columns where they
+/// were.
+fn ranked_as_topk(
+    target: &OperatorNode,
+    estimate: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let (ranked, keys) = target
+        .schema
+        .fields
+        .split_last()
+        .expect("an aggregate outputs its measure");
+    let fields = &estimate.schema.fields;
+    let estimated = fields.len() - 1;
+    let column = |index: usize, name: &str| ProjectItem {
+        alias: Some(name.to_string()),
+        expr: ScalarExpr::Column(index),
+    };
+    // Each key by name among the estimate's partition and item columns.
+    let key_columns = keys
+        .iter()
+        .map(|key| {
+            fields[..estimated]
+                .iter()
+                .position(|field| field.name == key.name)
+                .ok_or(PerComputationCandidateError::Unsupported(
+                    "top-k estimate without a partition column",
+                ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let promql = match target.non_asap() {
+        Some(NonASAPOp::Aggregate { child, .. }) => reads_only_time_series(child),
+        _ => false,
+    };
+    let cols = key_columns
+        .iter()
+        .zip(keys)
+        .map(|(&index, key)| column(index, &key.name))
+        .chain(std::iter::once(column(estimated, &ranked.name)))
+        .chain(
+            (0..estimated)
+                .filter(|index| promql && !key_columns.contains(index))
+                .map(|index| column(index, &fields[index].name)),
+        )
+        .collect();
+    Ok(OperatorNode::new_shared(Operator::NonASAP(
+        NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: estimate,
         },
     ))?)
 }
@@ -2884,10 +2949,14 @@ fn substitute_measure(
                 measure_input(intent, input, filter.as_ref())?,
             )?;
             sizing.built.borrow_mut().push((summary_input.clone(), key));
-            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+            let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input,
                 query: statistic(intent)?,
-            }))?
+            }))?;
+            match intent {
+                AggIntent::TopK { .. } => ranked_as_topk(target, estimate)?,
+                _ => estimate,
+            }
         }
         ComputationCandidate::ExactAccumulator(kinds) => {
             let (AggIntent::Avg { col }, [ExactKind::Sum, ExactKind::Count]) =

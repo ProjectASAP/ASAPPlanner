@@ -12,11 +12,13 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample};
 use asap_planner::{
-    plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
-    OperatorKind, OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
-    PlanSelectionSettings, PlanningModels, PlanningWorkload, SelectionBox, Stage1ToStage3Pass,
-    StoredOutput, StoredOutputBuild, UserInput,
+    plan_installable, DeploymentCapabilities, ExecutorCompileCheck, FrontendInput, InstallablePlan,
+    InstallablePlanError, OperatorKind, OptimizationInput, OptimizationPass, OptimizeError,
+    PhysicalASAPDAG, PlanOutput, PlanSelectionSettings, PlannerExecutorCompileCheck,
+    PlanningModels, PlanningWorkload, SelectionBox, Stage1ToStage3Pass, StoredOutput,
+    StoredOutputBuild, UserInput,
 };
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
     apply_materialization_timings_to_roots, split_shared_by_timing, ASAPOp,
     MaterializationAssignment, OperatorNode, QueryRoot,
@@ -2316,5 +2318,376 @@ async fn per_series_answers_beside_a_grouping_share_one_state_and_answer_as_the_
             run.answers_per_query, run.reference_answers_per_query,
             "{queries:?}"
         );
+    }
+}
+
+/// A heap top-k query `query` (the ASAPQuery workloads' top-k-sum or
+/// counter top-k shape) every 10 s, within 0.05 at failure probability 0.3,
+/// over 10,000 series of `metric` sampled every 100 ms, with `facts` (its
+/// type and sign, as JSON fields).
+fn heap_topk_workload(query: &str, metric: &str, facts: &str) -> PlanningWorkload {
+    serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
+              "query": {query:?},
+              "demand": {{"fixed_interval": 10000}},
+              "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.3}}}},
+              "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100000.0}}}},
+              "sources": {{"{metric}": {{"series_count": 10000, "sample_interval": 100,
+                  {facts}}}}}}}}}"#
+    ))
+    .unwrap()
+}
+
+/// Stage 3's executor check for a deployment that runs only top-k plans
+/// with a heap of this algorithm: any other plan is refused, and such a
+/// plan must compile with the Planner's executor
+/// ([`PlannerExecutorCompileCheck`]). It forces the cheapest such plan that
+/// compiles.
+struct HeapPlansOnly(SketchAlgorithm);
+
+impl ExecutorCompileCheck for HeapPlansOnly {
+    fn compiles(&self, roots: &[QueryRoot]) -> Result<(), String> {
+        let heap = roots
+            .iter()
+            .filter_map(|root| match root {
+                QueryRoot::Operator(node) => Some(node),
+                QueryRoot::Scalar(_) => None,
+            })
+            .flat_map(|node| OperatorNode::reachable(node))
+            .any(|node| {
+                matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
+                    | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
+                    if *kind.algorithm() == self.0)
+            });
+        if !heap {
+            return Err(format!(
+                "this deployment runs only {:?} top-k plans",
+                self.0
+            ));
+        }
+        PlannerExecutorCompileCheck.compiles(roots)
+    }
+}
+
+/// `workload` planned with accuracy guarantees ignored (a top-k estimate
+/// has none) on a deployment that keeps no raw samples; with `heap`, Stage
+/// 3 keeps only plans with a heap of that algorithm ([`HeapPlansOnly`]).
+async fn plan_ignoring_guarantees(
+    workload: &PlanningWorkload,
+    heap: Option<SketchAlgorithm>,
+) -> Result<InstallablePlan, String> {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let settings = PlanSelectionSettings {
+        ignore_accuracy_guarantees: true,
+        ..PlanSelectionSettings::default()
+    };
+    let models = PlanningModels::builtin()
+        .with_deployment_capabilities(&capabilities)
+        .with_plan_selection(&settings);
+    let check = heap.map(HeapPlansOnly);
+    let models = match &check {
+        Some(check) => models.with_executor_compile_check(check),
+        None => models,
+    };
+    plan_installable(UserInput::new(
+        workload,
+        FrontendInput::Promql { histograms: None },
+        models,
+    ))
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The heap sketch `plan` builds: its algorithm and width.
+fn heap_of(plan: &InstallablePlan) -> Option<(SketchAlgorithm, u32)> {
+    plan.dag
+        .dag
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. },
+            ) => match family {
+                FieldDataType::Sketch(kind, _) => match kind.params() {
+                    SketchParams::CmsWithHeap { width, .. }
+                    | SketchParams::CountSketchWithHeap { width, .. } => {
+                        Some((kind.algorithm().clone(), *width))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
+/// The heap of `algorithm`'s point-error bound on an item of a partition
+/// whose items' true values are `values`: `ε·L1` for Count-Min (ε = e/w,
+/// an overestimate), `ε·L2` for Count Sketch (ε = √(3/w)), which is at most
+/// `ε·L1`.
+fn heap_bound(algorithm: &SketchAlgorithm, width: u32, values: &[f64]) -> f64 {
+    let width = f64::from(width);
+    match algorithm {
+        SketchAlgorithm::CmsWithHeap => {
+            std::f64::consts::E / width * values.iter().map(|v| v.abs()).sum::<f64>()
+        }
+        SketchAlgorithm::CountSketchWithHeap => {
+            (3.0 / width).sqrt() * values.iter().map(|v| v * v).sum::<f64>().sqrt()
+        }
+        other => panic!("not a heap: {other:?}"),
+    }
+}
+
+/// Checks a heap top-k plan's `answers` against the `truth` (each item's
+/// exact value, by partition): per partition, `k` answers, the true top `k`
+/// recalled, each item named by its labels (`item_label`, and `partition`
+/// when partitioned), and each estimate within the heap's bound.
+fn assert_heap_topk_answers(
+    answers: &[Answer],
+    truth: &BTreeMap<String, BTreeMap<String, f64>>,
+    (partition, item_label, k): (Option<&str>, &str, usize),
+    (algorithm, width): (&SketchAlgorithm, u32),
+) {
+    let mut answered: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
+    for (labels, value) in answers {
+        let group = partition.map_or(String::new(), |p| labels[p].clone());
+        let item = labels
+            .get(item_label)
+            .unwrap_or_else(|| panic!("{item_label} kept: {labels:?}"));
+        answered
+            .entry(group)
+            .or_default()
+            .push((item.clone(), *value));
+    }
+    assert_eq!(
+        answered.keys().collect::<Vec<_>>(),
+        truth.keys().collect::<Vec<_>>()
+    );
+    for (group, items) in &answered {
+        let exact = &truth[group];
+        let bound = heap_bound(
+            algorithm,
+            width,
+            &exact.values().copied().collect::<Vec<_>>(),
+        );
+        let mut ranked: Vec<(&String, &f64)> = exact.iter().collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(a.1));
+        let top: BTreeSet<&String> = ranked.iter().take(k).map(|(item, _)| *item).collect();
+        assert_eq!(items.len(), k, "{group}: {items:?}");
+        let recalled = items.iter().filter(|(item, _)| top.contains(item)).count();
+        assert_eq!(recalled, k, "{group}: recall of {top:?} in {items:?}");
+        for (item, estimate) in items {
+            let error = estimate - exact[item];
+            assert!(
+                error.abs() <= bound + 1e-9 * exact[item].abs(),
+                "{group}/{item}: {estimate} vs exact {}, bound {bound}",
+                exact[item]
+            );
+            if *algorithm == SketchAlgorithm::CmsWithHeap {
+                assert!(
+                    error >= -1e-9 * exact[item].abs(),
+                    "Count-Min overestimates"
+                );
+            }
+        }
+    }
+}
+
+/// `data` samples of 2 regions with 40 series each, six inside the last
+/// minute per series: series `r` (rank 1..=40) of a region sums to
+/// `1000 / r^1.1` (west at half that), a skewed ranking.
+fn skewed_series_samples() -> (Vec<Sample>, BTreeMap<String, BTreeMap<String, f64>>) {
+    let mut samples = Vec::new();
+    let mut truth: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for (region, scale) in [("east", 1.0), ("west", 0.5)] {
+        for rank in 1..=40 {
+            let instance = format!("{region}-{rank:02}");
+            let sum = scale * 1000.0 / f64::from(rank).powf(1.1);
+            for step in 0..6 {
+                let mut s = sample(
+                    "data",
+                    &instance,
+                    EVALUATION_MS - 55_000 + step * 10_000,
+                    sum / 6.0,
+                );
+                s.labels.insert("region".into(), region.into());
+                samples.push(s);
+            }
+            truth
+                .entry(region.to_string())
+                .or_default()
+                .insert(instance, sum);
+        }
+    }
+    (samples, truth)
+}
+
+/// `workload`'s plan with only `algorithm`'s heap plans allowed (guarantees
+/// ignored): it builds that heap, compiles as a runtime compiles it, and
+/// both it and its query-time reference answer `samples` with the true top
+/// `k` per partition, each named by its labels and within the heap's bound
+/// of `truth` ([`assert_heap_topk_answers`]).
+async fn assert_forced_heap_answers(
+    workload: &PlanningWorkload,
+    algorithm: SketchAlgorithm,
+    (samples, truth): (&[Sample], &BTreeMap<String, BTreeMap<String, f64>>),
+    labels: (Option<&str>, &str, usize),
+) {
+    let plan = plan_ignoring_guarantees(workload, Some(algorithm.clone()))
+        .await
+        .unwrap_or_else(|error| panic!("{algorithm:?}: {error}"));
+    let (built, width) = heap_of(&plan).expect("a heap plan");
+    assert_eq!(built, algorithm);
+    plan.check_compiles().unwrap();
+    let plan_json = serde_json::to_string(&plan).unwrap();
+    let run = run_data_plane(&plan_json, samples, EVALUATION_MS, &mut SummaryStore::new());
+    for answers in [
+        &run.answers_per_query[0],
+        &run.reference_answers_per_query[0],
+    ] {
+        assert_heap_topk_answers(answers, truth, labels, (&algorithm, width));
+    }
+}
+
+/// The ASAPQuery workloads' top-k-sum shape over a gauge,
+/// `topk by (region) (3, sum_over_time(data[1m]))`: the fused
+/// whole-expression Count Sketch heap (one per region over the raw
+/// samples, ranking series identities), forced with guarantees ignored,
+/// compiles, and answers each region's true top 3 series, with their full
+/// labels, within its bound of their exact sums. (A Count-Min heap needs
+/// the weights proven non-negative.)
+#[tokio::test]
+async fn a_forced_heap_topk_sum_plan_compiles_and_answers_within_its_bound() {
+    let workload = heap_topk_workload(
+        "topk by (region) (3, sum_over_time(data[1m]))",
+        "data",
+        r#""metric_type": "gauge""#,
+    );
+    let (samples, truth) = skewed_series_samples();
+    assert_forced_heap_answers(
+        &workload,
+        SketchAlgorithm::CountSketchWithHeap,
+        (&samples, &truth),
+        (Some("region"), "instance", 3),
+    )
+    .await;
+}
+
+/// `data` samples of 2 regions with 40 series each inside the last minute:
+/// series `r` (rank 1..=40) has `round(200 / r^1.1)` samples (at least 1),
+/// a skewed count ranking.
+fn skewed_count_samples() -> (Vec<Sample>, BTreeMap<String, BTreeMap<String, f64>>) {
+    let mut samples = Vec::new();
+    let mut truth: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for region in ["east", "west"] {
+        for rank in 1..=40 {
+            let instance = format!("{region}-{rank:02}");
+            let count = (200.0 / f64::from(rank).powf(1.1)).round().max(1.0) as i64;
+            for step in 0..count {
+                // Spread over (EVALUATION_MS - 59 s, EVALUATION_MS - 1 s].
+                let at = EVALUATION_MS - 1_000 - step * 58_000 / count;
+                let mut s = sample("data", &instance, at, 1.0 + step as f64);
+                s.labels.insert("region".into(), region.into());
+                samples.push(s);
+            }
+            truth
+                .entry(region.to_string())
+                .or_default()
+                .insert(instance, count as f64);
+        }
+    }
+    samples.sort_by_key(|s| s.timestamp_ms);
+    (samples, truth)
+}
+
+/// `topk by (region) (3, count_over_time(data[1m]))`: each forced fused
+/// heap (each sample counts 1) compiles and answers each region's true top
+/// 3 series, with their labels, within its bound of their counts.
+#[tokio::test]
+async fn a_forced_heap_topk_count_plan_compiles_and_answers_within_its_bound() {
+    let workload = heap_topk_workload(
+        "topk by (region) (3, count_over_time(data[1m]))",
+        "data",
+        r#""metric_type": "gauge""#,
+    );
+    let (samples, truth) = skewed_count_samples();
+    for algorithm in [
+        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountSketchWithHeap,
+    ] {
+        assert_forced_heap_answers(
+            &workload,
+            algorithm,
+            (&samples, &truth),
+            (Some("region"), "instance", 3),
+        )
+        .await;
+    }
+}
+
+/// The per-second rate of series `instance` (1 or 2) of job `job` (1..=12)
+/// in [`skewed_counter_samples`]: `50 / job^1.2`, plus a little per
+/// instance, a skewed ranking of the jobs' sums.
+fn skewed_counter_rate(job: i64, instance: i64) -> f64 {
+    50.0 / (job as f64).powf(1.2) + 0.01 * instance as f64
+}
+
+/// `data_total` samples of 12 jobs with 2 series each, every 10 s from 595 s
+/// before `EVALUATION_MS`, each a counter growing linearly at
+/// [`skewed_counter_rate`], as [`counter_samples`].
+fn skewed_counter_samples() -> Vec<Sample> {
+    let mut samples = Vec::new();
+    for job in 1..=12 {
+        for instance in 1..=2 {
+            for step in 0..60 {
+                let mut s = sample(
+                    "data_total",
+                    &format!("{job}-{instance}"),
+                    EVALUATION_MS - 595_000 + step * 10_000,
+                    skewed_counter_rate(job, instance) * (5 + step * 10) as f64,
+                );
+                s.labels.insert("job".into(), format!("j{job:02}"));
+                samples.push(s);
+            }
+        }
+    }
+    samples
+}
+
+/// The ASAPQuery workloads' counter top-k, `topk(3, sum by (job)
+/// (<f>(data_total[5m])))` for `f` `increase` or `rate`: each forced fused
+/// heap (one over the per-series values, ranking jobs) compiles and answers
+/// the true top 3 jobs, with their `job` labels, within its bound of their
+/// exact sums.
+#[tokio::test]
+async fn a_forced_heap_counter_topk_plan_compiles_and_answers_within_its_bound() {
+    let samples = skewed_counter_samples();
+    for (function, seconds) in [("increase", 300.0), ("rate", 1.0)] {
+        let workload = heap_topk_workload(
+            &format!("topk(3, sum by (job) ({function}(data_total[5m])))"),
+            "data_total",
+            r#""metric_type": "counter""#,
+        );
+        // Each job's exact sum over its two series.
+        let truth = BTreeMap::from([(
+            String::new(),
+            (1..=12)
+                .map(|job| {
+                    let sum = skewed_counter_rate(job, 1) + skewed_counter_rate(job, 2);
+                    (format!("j{job:02}"), sum * seconds)
+                })
+                .collect::<BTreeMap<_, _>>(),
+        )]);
+        for algorithm in [
+            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountSketchWithHeap,
+        ] {
+            assert_forced_heap_answers(&workload, algorithm, (&samples, &truth), (None, "job", 3))
+                .await;
+        }
     }
 }

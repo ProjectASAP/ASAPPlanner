@@ -331,6 +331,11 @@ impl ASAPOp {
                 {
                     dtype = DataType::Float64;
                 }
+                if let SketchStatistic::TopK { .. } = query {
+                    if let Some(schema) = topk_estimate_schema(summary_input) {
+                        return Ok(schema);
+                    }
+                }
                 let nullable = matches!(query, SketchStatistic::Quantile { .. })
                     && quantile_may_be_empty(summary_input);
                 let mut schema = input.clone();
@@ -756,6 +761,50 @@ fn source_kind(node: &OperatorNode) -> OperatorResultKind {
 /// through `SummaryMerge`) is filtered, or, over a relation, is global (zero
 /// rows give one empty state) or summarizes a nullable column (a group of
 /// NULLs gives an empty state).
+/// The rows a heap sketch's top-k estimate returns: per state row, its `k`
+/// heaviest items, each as the state's partition columns, then the item
+/// columns of the build's update (the inner group labels, or the PromQL
+/// series identity), then the estimated weight, `topk` (Float64). `None`
+/// when `state` is not a keyed build whose item columns resolve in its
+/// input.
+fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
+    use crate::ir::schema::SummaryInputExpr;
+    let (Some(ASAPOp::SummaryAgg { child, input, .. })
+    | Some(ASAPOp::PaneChain { child, input, .. })) = state.summary_build()
+    else {
+        return None;
+    };
+    let columns = match input.item.as_ref()? {
+        SummaryInputExpr::Column(column) => vec![column],
+        SummaryInputExpr::Tuple(items) => items
+            .iter()
+            .map(|item| match item {
+                SummaryInputExpr::Column(column) => Some(column),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?,
+        _ => return None,
+    };
+    let mut fields: Vec<Field> = state
+        .schema
+        .fields
+        .iter()
+        .filter(|field| field.is_plain())
+        .cloned()
+        .collect();
+    for column in columns {
+        let index = crate::ir::scalar::resolve_column_ref(column, &child.schema).ok()?;
+        fields.push(child.schema.fields[index].clone());
+    }
+    fields.push(Field::plain("topk", DataType::Float64, false));
+    // One row per item: the partition columns alone no longer identify a row.
+    Some(Schema {
+        fields,
+        unique_keys: Vec::new(),
+        ..state.schema.clone()
+    })
+}
+
 fn quantile_may_be_empty(state: &OperatorNode) -> bool {
     match state.asap() {
         Some(ASAPOp::SummaryMerge { children }) => {

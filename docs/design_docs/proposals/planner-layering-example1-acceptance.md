@@ -118,16 +118,12 @@ Invariants:
 * Exact top-*k* is implemented as a sort followed by a limit: each job's
   series sorted by the ranked value, descending, then a `Project` that
   restores the logical root columns `[job, topk_10]`.
-* A summary Q2 is a sketch build node feeding an estimation node. There is no
-  merge node, because there are no window summaries.
+* A summary Q2 is a sketch build node feeding an estimation node, which
+  returns each job's `k` heaviest series, and a `Project` to `[job, topk_10]`
+  followed by each ranked series' identity. There is no merge node, because
+  there are no window summaries.
 * In the whole-window candidates, every node is `NotMaterialized` and runs
   at query time.
-
-Runtime capability check (not part of the doc): every candidate compiles in
-the physical planner. Ignored on two runtime gaps: a candidate's CMS + heap
-weights are an open requirement that only the selected plan's confirmation
-answers, and the heaps' top-*k* estimate output is not the keyed-evaluation
-shape the physical planner builds (#579).
 
 ## Plan selection: 1 plan
 

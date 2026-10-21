@@ -1293,9 +1293,11 @@ impl<'a> PlanSelector<'a> {
             }
         }
         // Only a candidate that may be selected is compiled: the check runs
-        // the executor's own compiler, the costliest check.
+        // the executor's own compiler, the costliest check. It compiles the
+        // plan the executor would run, with each weight requirement Stage 3
+        // confirmed made a proof, as `Selection::plan` holds it.
         if let Some(check) = self.models.executor_compile_check {
-            if let Err(reason) = check.compiles(&sized.roots) {
+            if let Err(reason) = check.compiles(&with_confirmed_weights(&sized.roots, self.data)) {
                 self.reject(&candidate.id, RejectionCause::ExecutorCannotCompile, reason);
                 return Ok(());
             }
