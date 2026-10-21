@@ -1275,7 +1275,7 @@ fn topk_over_bare_selector_by_label_ranks_per_group() {
 }
 
 #[test]
-fn topk_over_bare_selector_ranks_raw_samples() {
+fn topk_over_bare_selector_ranks_raw_data_samples() {
     // Even without `by`, `topk(3, m)` ranks the raw instant-vector samples — it
     // does not sum them. The sort sits directly over the Scan, partition empty.
     let q = lower("topk(3, http_requests_total)");

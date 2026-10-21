@@ -41,7 +41,7 @@ pub type Source<'a> = Box<dyn PhysicalOperator<Batch, SchemaRef> + 'a>;
 
 pub mod precompute;
 // The executor's PromQL row encoding and the timing frontier are internals:
-// a deployment runtime feeds samples with `crate::RawSampleSelector`
+// a deployment runtime feeds samples with `crate::RawDataSampleSelector`
 // and reads the stored outputs from the installable plan. The Planner's own
 // tests reach them with the `test-support` feature.
 #[cfg(feature = "test-support")]
@@ -340,9 +340,9 @@ fn compile_internal(
                 )?;
                 continue;
             }
-            // An exact per-series range reduction over raw samples
+            // An exact per-series range reduction over raw data samples
             // (`quantile/sum/avg/min/max/count/distinct/l2/entropy_over_time`)
-            // reduces each series' raw samples in the window natively. Stage 3
+            // reduces each series' raw data samples in the window natively. Stage 3
             // selects no other (`agg_has_exact_per_entity_kernel`).
             if let Payload::NonASAP(NonASAPOp::Aggregate {
                 reduction: PlannerReduction::PerEntity,
@@ -712,7 +712,7 @@ fn temporal_evaluation_drops_name(node: &PhysicalASAPDAGNode) -> bool {
                         | SketchStatistic::PointCount { .. }
                         | SketchStatistic::FrequencyL2
                         | SketchStatistic::FrequencyEntropy
-                        // A heap ranking series identities over raw samples
+                        // A heap ranking series identities over raw data samples
                         // answers a `sum_over_time` or `count_over_time` per
                         // ranked series.
                         | SketchStatistic::TopK { .. },

@@ -228,7 +228,7 @@ impl FamilyCapability {
                 }
             }
             FieldDataType::Plain(_)
-            | FieldDataType::Sample(..)
+            | FieldDataType::SummarySample(..)
             | FieldDataType::Wavelet(..)
             | FieldDataType::StatModel(..) => (None, &[]),
         };

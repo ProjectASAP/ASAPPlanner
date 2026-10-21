@@ -1,8 +1,8 @@
-//! Exact per-series range reductions over raw samples execute natively
+//! Exact per-series range reductions over raw data samples execute natively
 //! (issue #770): exact `quantile/sum/avg/min/max/count_over_time` reduces
 //! each series' samples in the window with a per-entity `Aggregate`, which
 //! the executor compiles and runs. The window's rows come from
-//! `RawSampleSelector`, as a runtime feeds them.
+//! `RawDataSampleSelector`, as a runtime feeds them.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -13,11 +13,11 @@ use asap_executor::physical_planner::{
 };
 use asap_executor::runtime::Scope;
 use asap_executor::values::Value;
-use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample};
+use asap_executor::{series_labels_of_output_row, RawDataSample, RawDataSampleSelector};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::{
-    compile_physical_asap_dag, PhysicalASAPOperatorPayload, RawSampleWindow,
+    compile_physical_asap_dag, PhysicalASAPOperatorPayload, RawDataSampleWindow,
 };
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{
@@ -33,7 +33,7 @@ const EVALUATION_MS: i64 = 300_000;
 const STALE_MARKER: f64 = f64::from_bits(0x7ff0_0000_0000_0002);
 
 /// `query` lowered exactly, with series identity: a per-entity `Aggregate`
-/// over the window's raw samples, as the exact plan that reduces raw samples
+/// over the window's raw data samples, as the exact plan that reduces raw data samples
 /// runs it.
 fn per_entity_plan(query: &str) -> Rc<OperatorNode> {
     let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
@@ -52,9 +52,9 @@ fn per_entity_plan(query: &str) -> Rc<OperatorNode> {
     root
 }
 
-/// A raw sample of `x` for series `instance` at `timestamp_ms`.
-fn sample(instance: &str, timestamp_ms: i64, value: f64) -> Sample {
-    Sample {
+/// A raw data sample of `x` for series `instance` at `timestamp_ms`.
+fn sample(instance: &str, timestamp_ms: i64, value: f64) -> RawDataSample {
+    RawDataSample {
         labels: BTreeMap::from([
             ("__name__".to_string(), "x".to_string()),
             ("instance".to_string(), instance.to_string()),
@@ -65,7 +65,7 @@ fn sample(instance: &str, timestamp_ms: i64, value: f64) -> Sample {
 }
 
 /// `values` of series `instance`, 10 s apart from 250 s, inside the window.
-fn series(instance: &str, values: &[f64]) -> Vec<Sample> {
+fn series(instance: &str, values: &[f64]) -> Vec<RawDataSample> {
     values
         .iter()
         .enumerate()
@@ -74,9 +74,9 @@ fn series(instance: &str, values: &[f64]) -> Vec<Sample> {
 }
 
 /// Run `query`'s exact per-entity plan at query time over `samples`, fed
-/// through the window's `RawSampleSelector`: each answered series'
+/// through the window's `RawDataSampleSelector`: each answered series'
 /// `instance` and value.
-fn execute(query: &str, samples: &[Sample]) -> Vec<(String, f64)> {
+fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
     let timed = apply_materialization_timings(
         &per_entity_plan(query),
         &MaterializationAssignment::default(),
@@ -107,13 +107,13 @@ fn execute(query: &str, samples: &[Sample]) -> Vec<(String, f64)> {
             PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
         )
     });
-    let window = RawSampleWindow {
+    let window = RawDataSampleWindow {
         time_range_node_id: range.id,
         width_ms: 60_000,
         end_offset_ms: 0,
         scan_node_id: scan.id,
     };
-    let rows = RawSampleSelector::new(&dag, &window)
+    let rows = RawDataSampleSelector::new(&dag, &window)
         .unwrap()
         .window_batch(EVALUATION_MS, samples)
         .unwrap();
@@ -152,7 +152,7 @@ fn execute(query: &str, samples: &[Sample]) -> Vec<(String, f64)> {
 }
 
 /// Asserts `query` over `samples` answers `expected`, a NaN matching a NaN.
-fn assert_answers(query: &str, samples: &[Sample], expected: &[(&str, f64)]) {
+fn assert_answers(query: &str, samples: &[RawDataSample], expected: &[(&str, f64)]) {
     let answers = execute(query, samples);
     let same = answers.len() == expected.len()
         && answers

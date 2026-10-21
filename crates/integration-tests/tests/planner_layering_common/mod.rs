@@ -673,7 +673,7 @@ pub fn assert_ingestion_upstream_is_ingestion(run: &Run) {
 /// window-composition rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WindowForm {
-    /// Rebuilt from the query window's raw samples (no window summary).
+    /// Rebuilt from the query window's raw data samples (no window summary).
     None,
     /// Windows of `length_ms` starting every `slide_ms`.
     Sliding { length_ms: u64, slide_ms: u64 },

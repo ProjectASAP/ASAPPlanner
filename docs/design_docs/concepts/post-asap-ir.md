@@ -1,7 +1,7 @@
 # Post-ASAP IR
 
 The goal of the post-ASAP IR is to represent operations using ASAP primitives
-such as sketches, exact summaries, samples and wavelets, while retaining the
+such as sketches, exact summaries, summary samples and wavelets, while retaining the
 exact query operators that no summary replaces, and supporting operations over
 summary evaluations.
 
@@ -26,7 +26,7 @@ Every variant of [`ASAPOp`](../../../crates/types/src/ir/operator/asap.rs) opera
 over summary state rather than raw data. The summary family, kind/algorithm and
 parameters are committed in the node; the state itself is typed by the
 `FieldDataType` of the output field that carries it (`ExactAggregate`,
-`Sketch`, `Sample`, `Wavelet`, `StatModel`).
+`Sketch`, `SummarySample`, `Wavelet`, `StatModel`).
 
 Implemented:
 

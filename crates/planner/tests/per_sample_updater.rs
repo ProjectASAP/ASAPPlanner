@@ -10,7 +10,9 @@ use asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload as 
 use asap_executor::planner::ir::ASAPOp;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::exact::ExactAccumulator;
-use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample, StateColumnUpdater};
+use asap_executor::{
+    series_labels_of_output_row, RawDataSample, RawDataSampleSelector, StateColumnUpdater,
+};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, PlanningModels, PlanningWorkload,
     UserInput,
@@ -34,7 +36,7 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
               "sources": {"http_requests_total": {"series_count": 1000, "sample_interval": 15000}}}}"#,
     )
     .unwrap();
-    // No raw samples retained: the plan stores rate panes built at ingestion.
+    // No raw data samples retained: the plan stores rate panes built at ingestion.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
@@ -53,12 +55,12 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
         .stored_outputs
         .iter()
         .max_by_key(|output| {
-            output.inputs.raw_sample_windows[0]
+            output.inputs.raw_data_sample_windows[0]
                 .bounds_ms(EVALUATION_MS)
                 .1
         })
         .unwrap();
-    let (start_ms, end_ms) = output.inputs.raw_sample_windows[0].bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = output.inputs.raw_data_sample_windows[0].bounds_ms(EVALUATION_MS);
     // Five one-minute panes, the newest (59 min, 60 min].
     assert_eq!(plan.stored_outputs.len(), 5);
     assert_eq!((start_ms, end_ms), (3_540_000, 3_600_000));
@@ -88,7 +90,7 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
             asap_executor::planner::ir::schema::ExactParams::Rate,
         )
     );
-    let samples: Vec<Sample> = ["a", "b", "c"]
+    let samples: Vec<RawDataSample> = ["a", "b", "c"]
         .iter()
         .flat_map(|instance| {
             let mut value = 0.0;
@@ -98,7 +100,7 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
                 } else {
                     value + 10.0
                 };
-                Sample {
+                RawDataSample {
                     labels: BTreeMap::from([
                         ("__name__".to_string(), "http_requests_total".to_string()),
                         ("instance".to_string(), instance.to_string()),
@@ -111,9 +113,10 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
         .collect();
 
     // The executor's pane build: the pane's input batch through the plan.
-    let selector = RawSampleSelector::new(dag, &output.inputs.raw_sample_windows[0]).unwrap();
+    let selector =
+        RawDataSampleSelector::new(dag, &output.inputs.raw_data_sample_windows[0]).unwrap();
     let input = selector.window_batch(end_ms, &samples).unwrap();
-    let window = output.inputs.raw_sample_windows[0].time_range_node_id as u64;
+    let window = output.inputs.raw_data_sample_windows[0].time_range_node_id as u64;
     let compiled = compile(
         dag,
         BTreeMap::from([(window, InputContract::bounded(input.schema().clone()))]),
@@ -249,7 +252,7 @@ async fn answers(
 /// A runtime builds every stored pane sample by sample, installs each as a
 /// batch with `Batch::try_from_columns` (no DAG run), and answers the query
 /// from them: the same answers as the plan's query-time reference over the
-/// raw samples.
+/// raw data samples.
 #[tokio::test]
 async fn panes_installed_from_per_sample_states_answer_the_query() {
     use asap_executor::arrow::array::{DictionaryArray, TimestampMillisecondArray, UInt32Array};
@@ -269,7 +272,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
               "sources": {"http_requests_total": {"series_count": 1000, "sample_interval": 15000}}}}"#,
     )
     .unwrap();
-    // No raw samples retained: five one-minute rate panes built at ingestion.
+    // No raw data samples retained: five one-minute rate panes built at ingestion.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
@@ -284,7 +287,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     let dag = &plan.dag.dag;
     // What the runtime received: 3 series, a counter sample every 15 s over
     // the hour (one series resets), the last at the evaluation time.
-    let samples: Vec<Sample> = ["a", "b", "c"]
+    let samples: Vec<RawDataSample> = ["a", "b", "c"]
         .iter()
         .flat_map(|instance| {
             let mut value = 0.0;
@@ -294,7 +297,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
                 } else {
                     value + 7.0
                 };
-                Sample {
+                RawDataSample {
                     labels: BTreeMap::from([
                         ("__name__".to_string(), "http_requests_total".to_string()),
                         ("instance".to_string(), instance.to_string()),
@@ -309,7 +312,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     let mut panes = BTreeMap::new();
     for output in &plan.stored_outputs {
         // The pane's window, `(start_ms, end_ms]`, at this evaluation.
-        let (start_ms, end_ms) = output.inputs.raw_sample_windows[0].bounds_ms(EVALUATION_MS);
+        let (start_ms, end_ms) = output.inputs.raw_data_sample_windows[0].bounds_ms(EVALUATION_MS);
         // The stored node's family and output schema, from the plan.
         let node = dag.nodes.iter().find(|n| n.id == output.node_id).unwrap();
         let mut id = output.node_id;
@@ -391,13 +394,13 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     let roots: Vec<u64> = plan.queries.iter().map(|q| q.root_node_id as u64).collect();
     // The query's answers from the installed panes.
     let from_panes = answers(dag, panes, &roots, query.clone()).await;
-    // The plan's query-time reference over the raw samples.
+    // The plan's query-time reference over the raw data samples.
     let reference = plan.query_time_reference().unwrap();
     let raw = reference
         .query_time_raw_windows
         .iter()
         .map(|window| {
-            let selector = RawSampleSelector::new(&reference.dag.dag, window).unwrap();
+            let selector = RawDataSampleSelector::new(&reference.dag.dag, window).unwrap();
             let (_, end_ms) = window.bounds_ms(EVALUATION_MS);
             (
                 window.time_range_node_id as u64,

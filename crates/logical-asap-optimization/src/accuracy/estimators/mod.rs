@@ -59,7 +59,7 @@ fn bounded_guarantee(
 /// committed parameters by inverting the same sizing formulas
 /// [`crate::realization::default_size_params`] uses. Exact for a plain value
 /// or an exact aggregate. `None` when the family has no error model
-/// (`Sample`, `Wavelet`, `StatModel`, and sketch evaluations without a
+/// (`SummarySample`, `Wavelet`, `StatModel`, and sketch evaluations without a
 /// certified bound): Pass 1 then leaves the guarantee `None` and keeps the
 /// candidate for plan selection to decide.
 pub fn local_guarantee(
@@ -73,9 +73,9 @@ pub fn local_guarantee(
         ))),
         FieldDataType::Sketch(kind, _) => sketch_guarantee(kind.algorithm(), kind.params(), query),
         // No error model is registered for these families.
-        FieldDataType::Sample(..) | FieldDataType::Wavelet(..) | FieldDataType::StatModel(..) => {
-            None
-        }
+        FieldDataType::SummarySample(..)
+        | FieldDataType::Wavelet(..)
+        | FieldDataType::StatModel(..) => None,
     }
 }
 /// `params` with the parameters its per-value failure probability depends

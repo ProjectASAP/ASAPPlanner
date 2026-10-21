@@ -184,7 +184,7 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
 }
 
 /// `sum by (job) (sum_over_time(m[5m]))`: the nested sums (L1) and their
-/// merge into one accumulator over the raw samples (L2). Plan selection
+/// merge into one accumulator over the raw data samples (L2). Plan selection
 /// picks the merge, which builds no per-series state and answers the same
 /// per-job sums.
 #[test]
@@ -411,7 +411,7 @@ fn every_candidate_answers_alike(query: &str) {
 
 /// A per-series sum drops the metric name, so grouping by `__name__` over
 /// the nested sums groups every series under the empty name; a merge over
-/// the raw samples would group them under `m`. Every candidate answers as
+/// the raw data samples would group them under `m`. Every candidate answers as
 /// the nested sums.
 #[test]
 fn nested_sum_by_the_metric_name_answers_as_the_nested_sums() {
@@ -452,7 +452,7 @@ fn reuse_answers_alike(queries: &[&str]) {
 }
 
 /// Coarse sums (over merged nested sums), minima and maxima rolled up from
-/// the finer ones answer as computed from the raw samples.
+/// the finer ones answer as computed from the raw data samples.
 #[test]
 fn rollups_answer_as_the_coarse_computations() {
     for queries in [
@@ -479,7 +479,7 @@ fn exact_topk_reuse_answers_as_each_topk() {
 /// A fine and a coarse sum beside two differently grouped quantiles: every
 /// candidate that shares the quantiles' DDSketch (summary-capability rule)
 /// and rolls the coarse sum up from the fine one (rollup rule) answers each
-/// sum as its Pass 1 candidate does (computed from the raw samples), and
+/// sum as its Pass 1 candidate does (computed from the raw data samples), and
 /// each quantile as the candidate with the same shared build and no rollup.
 #[test]
 fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {

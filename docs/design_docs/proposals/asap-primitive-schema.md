@@ -72,7 +72,7 @@ Based on our requirement, each field should contain the following information.
 
    | Level | Code | Values | KLL example |
    |---|---|---|---|
-   | Family | `FieldDataType` variant | `ExactAggregate`, `Sketch`, `Sample`, `Wavelet`, `StatModel` | `Sketch` |
+   | Family | `FieldDataType` variant | `ExactAggregate`, `Sketch`, `SummarySample`, `Wavelet`, `StatModel` | `Sketch` |
    | Category (sketches only) | `SketchCategory` | `Quantile`, `Frequency`, `Cardinality`, `TopK`, `Universal` | `Quantile` |
    | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
    | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
@@ -1097,8 +1097,9 @@ pub enum FieldDataType {
     /// Sketch state: the chosen sketch (category, algorithm, parameters), and
     /// whether each group has its own sketch or all groups share one.
     Sketch(SketchKind, GroupingStrategy),
-    /// Sample state: the sampling method, and its parameters.
-    Sample(SamplingKind, SamplingParams),
+    /// Summary sample state: the sampling method, and its parameters.
+    #[serde(rename = "Sample")]
+    SummarySample(SamplingKind, SamplingParams),
     /// Wavelet state: the transform, and its parameters.
     Wavelet(WaveletKind, WaveletParams),
     /// Statistical-model state: the model kind, and its parameters.

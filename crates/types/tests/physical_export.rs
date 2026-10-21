@@ -503,8 +503,8 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
 /// A window 600,000 ms wide ending 300,000 ms before T = 3,600,000 covers
 /// `(2,700,000, 3,300,000]`, and reaches 900,000 ms back.
 #[test]
-fn a_raw_sample_window_ends_its_offset_before_the_evaluation() {
-    let window = asap_types::ir::physical_export::RawSampleWindow {
+fn a_raw_data_sample_window_ends_its_offset_before_the_evaluation() {
+    let window = asap_types::ir::physical_export::RawDataSampleWindow {
         time_range_node_id: 1,
         width_ms: 600_000,
         end_offset_ms: 300_000,

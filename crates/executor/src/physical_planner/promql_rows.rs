@@ -105,7 +105,7 @@ enum SeriesColumn {
 pub(crate) fn series_batch(
     schema: &SchemaRef,
     output: SchemaRef,
-    samples: &[&crate::Sample],
+    samples: &[&crate::RawDataSample],
 ) -> Result<crate::values::Batch, Error> {
     use crate::values::{Batch, Value};
     use arrow::array::{

@@ -25,12 +25,15 @@ fn merge_exact_states(
 
 /// PromQL counter evaluations omit a series with fewer than two samples. Other
 /// state/type/range failures remain errors rather than empty results.
-pub fn insufficient_counter_samples(state: &dyn AggregateCore, statistic: Statistic) -> bool {
+pub fn insufficient_counter_raw_data_samples(
+    state: &dyn AggregateCore,
+    statistic: Statistic,
+) -> bool {
     matches!(statistic, Statistic::Rate | Statistic::Increase)
         && state
             .as_any()
             .downcast_ref::<ExactAccumulator>()
-            .is_some_and(|state| state.insufficient_counter_samples(statistic, &None))
+            .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, &None))
 }
 
 /// Merge already selected exact panes and read one population. `None` means
@@ -43,7 +46,7 @@ pub fn exact_evaluation(
     key: Option<&KeyByLabelValues>,
 ) -> Result<Option<f64>, String> {
     let merged = merge_exact_states(states)?;
-    if merged.insufficient_counter_samples(statistic, &key.cloned()) {
+    if merged.insufficient_counter_raw_data_samples(statistic, &key.cloned()) {
         return Ok(None);
     }
     merged

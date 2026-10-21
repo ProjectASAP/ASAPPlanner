@@ -172,7 +172,7 @@ impl ExactAccumulator {
     pub fn family(&self) -> &SummaryFamilyType {
         &self.family
     }
-    pub(crate) fn insufficient_counter_samples(
+    pub(crate) fn insufficient_counter_raw_data_samples(
         &self,
         statistic: Statistic,
         key: &Option<KeyByLabelValues>,
@@ -185,7 +185,7 @@ impl ExactAccumulator {
             (None, None) => Some(&self.scalar),
             _ => None,
         };
-        state.is_some_and(ScalarState::insufficient_counter_samples)
+        state.is_some_and(ScalarState::insufficient_counter_raw_data_samples)
     }
     pub fn is_keyed(&self) -> bool {
         self.keyed.is_some()
@@ -296,7 +296,7 @@ impl ScalarState {
     }
 
     /// Whether a counter has fewer than two ordered samples (PromQL omits it).
-    pub(crate) fn insufficient_counter_samples(&self) -> bool {
+    pub(crate) fn insufficient_counter_raw_data_samples(&self) -> bool {
         match self {
             ScalarState::Counter(None) => true,
             ScalarState::Counter(Some(counter)) => {

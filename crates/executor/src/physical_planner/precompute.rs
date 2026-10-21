@@ -41,22 +41,22 @@ pub fn population_schema(family: SummaryFamilyType) -> SchemaRef {
     })
 }
 
-/// Raw sample rows at a precompute boundary. `$population` holds the series'
+/// Raw data sample rows at a precompute boundary. `$population` holds the series'
 /// complete label set, so it is the complete source identity of per-series
 /// summaries; `$timestamp` is the sample time and `value` a finite sample
 /// (stale markers are not samples). Rows are what the boundary's source scan
 /// selected; the deployment decides which rows and panes they are. Label sets
 /// must be canonical (sorted, unique, no empty values), since they are the
-/// population identity: build rows with [`raw_sample_row`].
-pub fn raw_sample_schema() -> SchemaRef {
+/// population identity: build rows with [`raw_data_sample_row`].
+pub fn raw_data_sample_schema() -> SchemaRef {
     let mut schema = (*population_schema(SummaryFamilyType::Plain(DataType::Float64))).clone();
     schema.fields[1].name = "$timestamp".into();
     Arc::new(schema)
 }
 
-/// A raw sample row whose label set is sorted, unique and omits empty values,
+/// A raw data sample row whose label set is sorted, unique and omits empty values,
 /// so one series always has one population identity.
-pub fn raw_sample_row(
+pub fn raw_data_sample_row(
     labels: &BTreeMap<String, String>,
     timestamp_ms: i64,
     value: f64,
@@ -81,7 +81,7 @@ pub fn raw_sample_row(
     ]
 }
 
-/// Input contract of a precompute boundary: raw sample rows for a raw time
+/// Input contract of a precompute boundary: raw data sample rows for a raw time
 /// series scan (or a `TimeRange`, optionally over stacked `TimeShift`s, of
 /// one), otherwise the stored population of its summary state.
 pub fn boundary_schema(
@@ -139,7 +139,7 @@ pub fn boundary_schema(
             "raw sample boundary requires labels, a timestamp and one Float64 value",
         ));
     }
-    Ok(raw_sample_schema())
+    Ok(raw_data_sample_schema())
 }
 
 /// Validate the adapter layout during installed-plan recovery without lowering operators.
@@ -425,8 +425,8 @@ fn fragment(
             };
             // Item identities resolve against the complete label set of raw
             // samples; finalized evaluations carry no such identity.
-            let raw = *input == raw_sample_schema();
-            // A unit-frequency summary (HLL) observes each raw sample value.
+            let raw = *input == raw_data_sample_schema();
+            // A unit-frequency summary (HLL) observes each raw data sample value.
             let unit_frequency = raw
                 && crate::capability::is_unit_sample_frequency(update)
                 && matches!(family, SummaryFamilyType::Sketch(kind, _) if !matches!(
@@ -610,7 +610,7 @@ fn fragment(
     CompiledPhysicalDAG::from_operators(sources, operators, vec![root])
 }
 
-/// Resolve keyed item identities over raw sample rows: labels (absent labels
+/// Resolve keyed item identities over raw data sample rows: labels (absent labels
 /// read as empty, as in PromQL), the sample value, or the canonical encoding
 /// of the label set less excluded labels.
 fn raw_items(

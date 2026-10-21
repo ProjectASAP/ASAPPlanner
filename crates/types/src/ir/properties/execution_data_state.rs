@@ -155,7 +155,7 @@ pub enum ExecutionDataStateError {
         materialization: Materialization,
     },
     /// A summary build with a filter placed at ingestion time. An
-    /// ingestion-time build reads raw samples, which carry none of the
+    /// ingestion-time build reads raw data samples, which carry none of the
     /// query's columns the filter reads, so only a query-time build can
     /// apply it.
     #[error("{operator} has a filter, which only a query-time build can apply")]

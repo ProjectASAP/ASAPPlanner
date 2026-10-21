@@ -129,12 +129,12 @@ fn replace(
     )
 }
 
-/// One raw sample: series, timestamp (ms) and value.
-type Sample = (&'static str, i64, f64);
+/// One raw data sample: series, timestamp (ms) and value.
+type RawDataSample = (&'static str, i64, f64);
 
 /// Two series, four positive samples per minute in [0, 5m), each
 /// `phase_ms` after its 15-s step (0: on the pane boundaries).
-fn samples(phase_ms: i64) -> Vec<Sample> {
+fn samples(phase_ms: i64) -> Vec<RawDataSample> {
     let mut rows = vec![];
     for (s, series) in ["a", "b"].into_iter().enumerate() {
         for minute in 0..PANES {
@@ -197,7 +197,7 @@ fn schema_of(dag: &PhysicalASAPDAG, id: u64) -> Arc<Schema> {
 
 /// Raw rows for each `TimeRange` input. A deployment supplies pane `i` with
 /// the samples in `[T - (i+1)·w, T - i·w)`; a single build reads all samples.
-fn raw_inputs(exported: &Exported, samples: &[Sample]) -> BTreeMap<u64, Batch> {
+fn raw_inputs(exported: &Exported, samples: &[RawDataSample]) -> BTreeMap<u64, Batch> {
     exported
         .ranges
         .iter()
@@ -261,7 +261,10 @@ fn contracts(inputs: &BTreeMap<u64, Batch>) -> BTreeMap<u64, InputContract> {
 
 /// Compile `root` with everything at query time (Pattern B2: panes rebuilt
 /// from raw rows at query time).
-fn compile_at_query_time(root: &Rc<OperatorNode>, samples: &[Sample]) -> Result<Exported, String> {
+fn compile_at_query_time(
+    root: &Rc<OperatorNode>,
+    samples: &[RawDataSample],
+) -> Result<Exported, String> {
     let exported = export(root, &MaterializationAssignment::default());
     let inputs = raw_inputs(&exported, samples);
     compile(
@@ -273,7 +276,7 @@ fn compile_at_query_time(root: &Rc<OperatorNode>, samples: &[Sample]) -> Result<
     Ok(exported)
 }
 
-fn execute(root: &Rc<OperatorNode>, samples: &[Sample]) -> Vec<Vec<Value>> {
+fn execute(root: &Rc<OperatorNode>, samples: &[RawDataSample]) -> Vec<Vec<Value>> {
     let exported = compile_at_query_time(root, samples).unwrap();
     let inputs = raw_inputs(&exported, samples);
     let plan = compile(
@@ -290,7 +293,7 @@ fn execute(root: &Rc<OperatorNode>, samples: &[Sample]) -> Vec<Vec<Value>> {
 fn execute_retained(
     root: &Rc<OperatorNode>,
     panes: &[Rc<OperatorNode>],
-    samples: &[Sample],
+    samples: &[RawDataSample],
 ) -> Vec<Vec<Value>> {
     let mut assignment = MaterializationAssignment::default();
     for pane in panes {
@@ -303,7 +306,10 @@ fn execute_retained(
 /// option assigns it (`MatAtIngestion` on the chain), then expanded: each
 /// pane carries the chain's timing and materialization, so the panes are
 /// built in ingestion runs and merged in the query run.
-fn execute_maintained_chain(planned: &Rc<OperatorNode>, samples: &[Sample]) -> Vec<Vec<Value>> {
+fn execute_maintained_chain(
+    planned: &Rc<OperatorNode>,
+    samples: &[RawDataSample],
+) -> Vec<Vec<Value>> {
     let chain = OperatorNode::reachable(planned)
         .into_iter()
         .find(|n| matches!(n.asap(), Some(ASAPOp::PaneChain { .. })))
@@ -328,7 +334,7 @@ fn execute_maintained_chain(planned: &Rc<OperatorNode>, samples: &[Sample]) -> V
 fn execute_retained_as(
     root: &Rc<OperatorNode>,
     assignment: &MaterializationAssignment,
-    samples: &[Sample],
+    samples: &[RawDataSample],
 ) -> Vec<Vec<Value>> {
     let exported = export(root, assignment);
     let inputs = raw_inputs(&exported, samples);
@@ -385,7 +391,7 @@ fn values(rows: &[Vec<Value>]) -> Vec<f64> {
 fn assert_pane_merge_matches_single_build(
     query: &str,
     accuracy: AccuracyTarget,
-    samples: &[Sample],
+    samples: &[RawDataSample],
 ) -> Vec<f64> {
     let single = single_build(query, accuracy);
     let (panes, pane_builds) = tumbling_panes(&single);
@@ -483,7 +489,7 @@ fn exact_increase_off_the_pane_boundaries_matches_single_build() {
 
 /// The single build of `query`, evaluated at `evaluation_ms` over every
 /// sample, as values.
-fn whole_build_values_at(query: &str, evaluation_ms: i64, samples: &[Sample]) -> Vec<f64> {
+fn whole_build_values_at(query: &str, evaluation_ms: i64, samples: &[RawDataSample]) -> Vec<f64> {
     let root = single_build(query, AccuracyTarget::exact());
     let exported = export(&root, &MaterializationAssignment::default());
     let inputs: BTreeMap<u64, Batch> = exported
@@ -612,7 +618,7 @@ fn exact_increase_over_tumbling_panes_matches_single_build() {
 fn exact_increase_over_an_empty_middle_pane_matches_single_build() {
     let middle = 2 * PANE_MS..3 * PANE_MS;
     for emptied in [&["a"][..], &["a", "b"]] {
-        let gapped: Vec<Sample> = samples(0)
+        let gapped: Vec<RawDataSample> = samples(0)
             .into_iter()
             .filter(|(series, ts, _)| !(emptied.contains(series) && middle.contains(ts)))
             .collect();

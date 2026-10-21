@@ -36,7 +36,7 @@
 //! * the data workload is continuously ingesting or mixed (unknown arrival
 //!   counts as not ingesting);
 //! * every query reading it repeats and is predictable;
-//! * it has no filter: an ingestion-time build reads raw samples, which
+//! * it has no filter: an ingestion-time build reads raw data samples, which
 //!   carry none of the columns a filter reads;
 //! * if it is a counter state (`Rate`, `Increase`, `IRate`), whose update
 //!   needs each series' samples in time order, the data is continuously

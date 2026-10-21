@@ -133,7 +133,7 @@
 //! computation, its scanning included; the units are what the operator
 //! processes ([`OperatorKind`]: samples a scan reads, rows a build inserts,
 //! states a merge reads, groups an estimate reads, ...). A query-time scan
-//! is the fetch and decode of raw samples from the database holding them,
+//! is the fetch and decode of raw data samples from the database holding them,
 //! so a plan that reads raw data pays for it. A sketch whose parameters
 //! no entry has exactly is priced between the two measured configurations
 //! of the same sketch nearest in state size, on a log scale, or from the
@@ -185,7 +185,7 @@
 //! Disk holds state materialized on `Medium::Disk` (Stage 2 places none
 //! there yet) and the raw data query-time scans read: per source, the
 //! longest window a scan reads. A deployment that does not retain raw data
-//! ([`asap_logical_asap_optimization::DeploymentCapabilities::raw_data_retained`]) keeps no raw samples
+//! ([`asap_logical_asap_optimization::DeploymentCapabilities::raw_data_retained`]) keeps no raw data samples
 //! after they arrive, so a candidate with a query-time scan is invalid,
 //! with the window it would read as the reason.
 //!
@@ -246,7 +246,7 @@ use crate::cost::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use asap_logical_asap_optimization::accuracy::composition::{
-    parse_samples_sign_statistic, parse_source_norm_statistic, DIVISION_OPERAND_DOMAINS,
+    parse_raw_data_samples_sign_statistic, parse_source_norm_statistic, DIVISION_OPERAND_DOMAINS,
     INPUT_ROW_COUNT, PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
 };
 use asap_logical_asap_optimization::accuracy::estimators::with_failure_probability;
@@ -745,7 +745,7 @@ pub enum RejectionCause {
     /// counter nor non-negative). The executor cannot run it, so the deployment's accuracy
     /// model cannot accept it either.
     CountMinWeightsNotProvenNonNegative,
-    /// It reduces each series' raw samples with an exact aggregate the
+    /// It reduces each series' raw data samples with an exact aggregate the
     /// executor has no kernel for (e.g. `stddev_over_time`), so the
     /// executor cannot compile it
     /// ([`asap_types::ir::operator::agg_has_exact_per_entity_kernel`]).
@@ -1998,7 +1998,7 @@ pub fn resize_for_failure_probability(
 /// symbolic statistics are bound first ([`bound_root_guarantee`]); one still
 /// unknown leaves the target unmet. Count-Min is admitted only over update
 /// weights proven non-negative, which its bound and the executor assume: an open
-/// [`WeightDomain::SamplesOfMetric`] requirement is met when `data` declares
+/// [`WeightDomain::RawDataSamplesOfMetric`] requirement is met when `data` declares
 /// the metric a counter or non-negative ([`confirmed_weights`]), and unmet
 /// otherwise.
 ///
@@ -2051,7 +2051,7 @@ fn accuracy_check(
                 )
             {
                 let unconfirmed = match &input.weight_domain {
-                    WeightDomain::SamplesOfMetric { metric } => format!(
+                    WeightDomain::RawDataSamplesOfMetric { metric } => format!(
                         " (samples of `{metric}`, which is not declared a counter or \
                          non-negative)"
                     ),
@@ -2247,7 +2247,7 @@ fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
         .is_some_and(|facts| facts.metric_type == Some(MetricType::Counter))
 }
 
-/// `roots` with every open [`WeightDomain::SamplesOfMetric`] requirement
+/// `roots` with every open [`WeightDomain::RawDataSamplesOfMetric`] requirement
 /// replaced by its answer from `data` ([`confirmed_weights`]): the form of a
 /// selected plan the executor runs, which reads no data workload. The same
 /// `Rc` where nothing changes.
@@ -2336,7 +2336,7 @@ fn bound_root_guarantee(
 }
 
 /// `guarantee` with the statistics `value` supplies bound. A sign gate
-/// ([`samples_sign_statistic`](asap_logical_asap_optimization::accuracy::composition::samples_sign_statistic))
+/// ([`raw_data_samples_sign_statistic`](asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic))
 /// is an indicator that only 1 (proven) opens: any other value leaves it
 /// unbound, so it can never read as a perfect bound.
 fn bind_statistics(
@@ -2345,7 +2345,7 @@ fn bind_statistics(
 ) -> AccuracyGuarantee {
     guarantee.bind(&|statistic| {
         let supplied = value(statistic);
-        match parse_samples_sign_statistic(statistic) {
+        match parse_raw_data_samples_sign_statistic(statistic) {
             Some(_) => supplied.filter(|v| *v == 1.0),
             None => supplied,
         }
@@ -2362,7 +2362,7 @@ fn workload_statistic(statistic: &str, series: Option<u64>, data: &DataWorkload)
     // The sign of one metric's samples: proven (1) when the metric is
     // declared a counter or declared non-negative; nothing is inferred from
     // its name.
-    if let Some(metric) = parse_samples_sign_statistic(statistic) {
+    if let Some(metric) = parse_raw_data_samples_sign_statistic(statistic) {
         return declared_non_negative(data, metric).then_some(1.0);
     }
     if statistic == INPUT_ROW_COUNT {
@@ -2979,7 +2979,8 @@ fn price_at_scale(
     // structure is not that sketch), inherited by the merges, estimates and
     // finalizations over it.
     let mut family_of: HashMap<PhysicalASAPNodeId, StateFamily<'_>> = HashMap::new();
-    let sketch_size = |params: &SketchParams| sketch_shape(params, StateSamples::UNKNOWN).1 as f64;
+    let sketch_size =
+        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
     for node in &dag.nodes {
         let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
         let producers = producers_of.get(&node.id).map_or(&[][..], Vec::as_slice);
@@ -3053,9 +3054,9 @@ fn price_at_scale(
             rows,
             bytes: rows * width,
         };
-        // Whether a summary built here sees raw samples (its producer a
+        // Whether a summary built here sees raw data samples (its producer a
         // scan or a time range) of sources all declared non-negative.
-        let raw_samples_non_negative = || {
+        let raw_data_samples_non_negative = || {
             let raw = producers.first().is_some_and(|producer| {
                 matches!(
                     nodes[producer].payload,
@@ -3246,11 +3247,11 @@ fn price_at_scale(
                 // At query time, each state sees its group's input rows; at
                 // ingestion time, the rows of a window one second of
                 // arriving rows does not bound.
-                let samples = StateSamples {
-                    per_state: (!ingestion).then(|| input.rows / group_count.max(1)),
-                    non_negative: raw_samples_non_negative(),
+                let input_rows = StateInputRows {
+                    rows_per_state: (!ingestion).then(|| input.rows / group_count.max(1)),
+                    non_negative: raw_data_samples_non_negative(),
                 };
-                let (depth, state_bytes) = summary_shape(family, samples);
+                let (depth, state_bytes) = summary_shape(family, input_rows);
                 let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
                 let out = EdgeStatistics {
                     rows: group_count,
@@ -3289,11 +3290,11 @@ fn price_at_scale(
                     true => input.rows * *pane_width_ms / 1_000,
                     false => input.rows / u64::from(*pane_count).max(1),
                 };
-                let samples = StateSamples {
-                    per_state: Some(rows_per_pane / group_count.max(1)),
-                    non_negative: raw_samples_non_negative(),
+                let input_rows = StateInputRows {
+                    rows_per_state: Some(rows_per_pane / group_count.max(1)),
+                    non_negative: raw_data_samples_non_negative(),
                 };
-                let (depth, state_bytes) = summary_shape(family, samples);
+                let (depth, state_bytes) = summary_shape(family, input_rows);
                 let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
                 let out = EdgeStatistics {
                     rows: states,
@@ -3989,7 +3990,7 @@ fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
 
 /// For a deployment that does not retain raw data, every query-time scan
 /// of `dag` with the window it would read, as a rejection reason (`None`
-/// without one). Raw samples are then not kept after they arrive, so no
+/// without one). Raw data samples are then not kept after they arrive, so no
 /// window of them is there to scan at query time: only ingestion-time work
 /// reads raw rows. `nodes` and `kept_chains` are `dag`'s ([`node_map`],
 /// [`kept_pane_chains`]).
@@ -4023,7 +4024,7 @@ fn raw_data_violation(
 }
 
 /// Why the executor cannot compile `dag`, if it cannot: an exact per-entity
-/// `Aggregate` (a per-series range reduction over raw samples) the executor
+/// `Aggregate` (a per-series range reduction over raw data samples) the executor
 /// does not run. It runs one with a single measure that has an exact
 /// per-entity kernel ([`agg_has_exact_per_entity_kernel`]), no measure
 /// filter and no `HAVING`.
@@ -4134,7 +4135,7 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 }
 
 /// Update operations per input row and bytes per state, from the sketch's
-/// parameters and `samples` (the samples one state sees), modelled on what
+/// parameters and `input_rows` (the rows one state folds), modelled on what
 /// `asap_sketchlib` allocates:
 /// - Count-Min / Count-Sketch: `depth × width` 8-byte counters, plus a
 ///   24-byte entry per heap slot for the top-k variants;
@@ -4156,39 +4157,41 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 /// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
 /// for UnivMon, the same per layer it updates ([`univmon_expected_layers`]);
 /// 1 for every other sketch.
-fn summary_shape(family: &FieldDataType, samples: StateSamples) -> (f64, u64) {
+fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u64) {
     match family {
-        FieldDataType::Sketch(kind, _) => sketch_shape(kind.params(), samples),
+        FieldDataType::Sketch(kind, _) => sketch_shape(kind.params(), input_rows),
         FieldDataType::ExactAggregate(..) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
         _ => (1.0, 8),
     }
 }
 
 /// What one summary state's bytes depend on besides its parameters (only
-/// a DDSketch's do): the samples it sees and their sign.
+/// a DDSketch's do): the input rows it folds and the sign of their values.
+/// The rows are whatever its producer emits (raw data samples, rates, sums),
+/// not a summary sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct StateSamples {
-    /// Samples one state sees; `None` when unknown, which sizes it for
+struct StateInputRows {
+    /// Input rows one state folds; `None` when unknown, which sizes it for
     /// every value it can be assumed to see.
-    per_state: Option<u64>,
-    /// Whether every sample is declared non-negative, so a DDSketch fills
-    /// no negative store.
+    rows_per_state: Option<u64>,
+    /// Whether every value folded is proven non-negative (raw data samples of
+    /// sources declared non-negative), so a DDSketch fills no negative store.
     non_negative: bool,
 }
 
-impl StateSamples {
-    /// Unknown samples of unknown sign: the most a state is assumed to hold.
+impl StateInputRows {
+    /// Unknown rows of unknown sign: the most a state is assumed to hold.
     const UNKNOWN: Self = Self {
-        per_state: None,
+        rows_per_state: None,
         non_negative: false,
     };
 }
 
 /// [`summary_shape`] of one sketch: its update operations per row and its
-/// bytes per state. With [`StateSamples::UNKNOWN`], the bytes are also the
+/// bytes per state. With [`StateInputRows::UNKNOWN`], the bytes are also the
 /// size the measured table interpolates between
 /// ([`measured_operation_costs`]).
-fn sketch_shape(params: &SketchParams, samples: StateSamples) -> (f64, u64) {
+fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
     match params {
         SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
             (f64::from(*depth), 8 * u64::from(*width) * u64::from(*depth))
@@ -4207,7 +4210,7 @@ fn sketch_shape(params: &SketchParams, samples: StateSamples) -> (f64, u64) {
             8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
         ),
         SketchParams::Kll { k, .. } => (1.0, 8 * kll_items(*k)),
-        SketchParams::DDSketch { alpha } => (1.0, ddsketch_state_bytes(*alpha, samples)),
+        SketchParams::DDSketch { alpha } => (1.0, ddsketch_state_bytes(*alpha, input_rows)),
         SketchParams::Hll { precision, .. } => (1.0, 1u64 << (*precision).min(63)),
         SketchParams::Kmv { k, .. } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
         SketchParams::UnivMon {
@@ -4257,29 +4260,29 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
 
 /// Bins `asap_sketchlib`'s DDSketch grows a bucket store by
-/// (`GROW_CHUNK`): a store's first sample allocates this many around its
-/// bin, and a sample past either end adds at least this many more.
+/// (`GROW_CHUNK`): a store's first value allocates this many around its
+/// bin, and a value past either end adds at least this many more.
 const DDSKETCH_GROW_CHUNK_BINS: u64 = 128;
 
 /// Bytes of one `asap_sketchlib` DDSketch with relative accuracy `alpha`
-/// over `samples`: its struct (144 bytes), plus, for the positive store and,
-/// unless the samples are declared non-negative, the negative store, 8
+/// over `input_rows`: its struct (144 bytes), plus, for the positive store
+/// and, unless the values are proven non-negative, the negative store, 8
 /// bytes per allocated bin. A store allocates one 128-bin chunk around its
-/// first sample, then 128-bin chunks on each side as samples reach past
+/// first value, then 128-bin chunks on each side as values reach past
 /// it: `128 · (1 + 2 · ⌈(spanned − 128)⁺ / 256⌉)` bins, where `spanned`
-/// is the bins its samples can touch, at most one per sample and at most
+/// is the bins its values can touch, at most one per value and at most
 /// [`ddsketch_bins`] over the assumed value range. E.g. 1,168 bytes for ten
-/// non-negative samples at α = 0.05, and 3,216 for many over nine decades.
-fn ddsketch_state_bytes(alpha: f64, samples: StateSamples) -> u64 {
+/// non-negative values at α = 0.05, and 3,216 for many over nine decades.
+fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     let range_bins = ddsketch_bins(alpha);
-    let spanned = samples
-        .per_state
-        .map_or(range_bins, |per_state| range_bins.min(per_state.max(1)));
+    let spanned = input_rows
+        .rows_per_state
+        .map_or(range_bins, |rows| range_bins.min(rows.max(1)));
     let side_chunks = spanned
         .saturating_sub(DDSKETCH_GROW_CHUNK_BINS)
         .div_ceil(2 * DDSKETCH_GROW_CHUNK_BINS);
     let store_bytes = 8 * DDSKETCH_GROW_CHUNK_BINS * (1 + 2 * side_chunks);
-    let stores = if samples.non_negative { 1 } else { 2 };
+    let stores = if input_rows.non_negative { 1 } else { 2 };
     std::mem::size_of::<asap_sketchlib::sketches::DdSketch>() as u64 + stores * store_bytes
 }
 
@@ -4587,12 +4590,12 @@ mod tests {
         assert!(p2.reason.contains("non-negative"), "{}", p2.reason);
     }
 
-    /// Count-Min over raw samples of `m` is admitted only when the data
+    /// Count-Min over raw data samples of `m` is admitted only when the data
     /// workload declares `m` a counter: a gauge, an undeclared metric or a
     /// counter under another name leaves the requirement unmet. Admitted,
     /// the top-k still needs evidence about its output.
     #[test]
-    fn count_min_over_samples_needs_a_declared_counter() {
+    fn count_min_over_raw_data_samples_needs_a_declared_counter() {
         use asap_types::workload::MetricType;
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let with_types = |types: &[(&str, MetricType)]| with_metric_types(data(), types);
@@ -4719,15 +4722,15 @@ mod tests {
     }
 
     /// A gauge declared non-negative
-    /// ([`SourceFacts::values_non_negative`]) proves its raw samples, and
+    /// ([`SourceFacts::values_non_negative`]) proves its raw data samples, and
     /// plain sums of them, non-negative: the Count-Min-with-heap top-k of
     /// `topk by (job) (10, sum_over_time(m[1m]))` (the ASAPQuery workloads'
     /// top-k-sum shape) passes the weight check, and the selected plan carries
-    /// [`NonNegativeWeightProof::DeclaredNonNegativeSamples`]. A rate or
+    /// [`NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples`]. A rate or
     /// increase of that gauge stays unproven: a reset correction over a
     /// gauge can still give a negative value.
     #[test]
-    fn count_min_over_samples_of_a_gauge_declared_non_negative_is_admitted() {
+    fn count_min_over_raw_data_samples_of_a_gauge_declared_non_negative_is_admitted() {
         use asap_types::ir::schema::NonNegativeWeightProof;
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
@@ -4787,7 +4790,7 @@ mod tests {
                 assert!(
                     proofs.iter().all(|domain| *domain
                         == WeightDomain::NonNegative {
-                            proof: NonNegativeWeightProof::DeclaredNonNegativeSamples
+                            proof: NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples
                         }),
                     "{}: {proofs:?}",
                     candidate.id
@@ -4801,14 +4804,14 @@ mod tests {
     /// reading as a perfect bound. Other statistics pass through.
     #[test]
     fn the_sign_gate_opens_only_at_one() {
-        use asap_logical_asap_optimization::accuracy::composition::samples_sign_statistic;
+        use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Product {
                 factors: vec![
                     BoundExpr::Constant { value: 0.01 },
                     BoundExpr::Unknown {
-                        statistic: samples_sign_statistic("m"),
+                        statistic: raw_data_samples_sign_statistic("m"),
                     },
                 ],
             },
@@ -4847,15 +4850,15 @@ mod tests {
     /// unknown for a gauge, an undeclared metric or a counter by another
     /// name.
     #[test]
-    fn sign_of_counter_samples_is_bound_from_the_declared_type() {
-        use asap_logical_asap_optimization::accuracy::composition::samples_sign_statistic;
+    fn sign_of_counter_raw_data_samples_is_bound_from_the_declared_type() {
+        use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Product {
                 factors: vec![
                     BoundExpr::Constant { value: 0.01 },
                     BoundExpr::Unknown {
-                        statistic: samples_sign_statistic("m"),
+                        statistic: raw_data_samples_sign_statistic("m"),
                     },
                 ],
             },
@@ -4977,7 +4980,7 @@ mod tests {
                 .collect()
         };
         let proven = [WeightDomain::NonNegative {
-            proof: asap_types::ir::schema::NonNegativeWeightProof::CounterSamples,
+            proof: asap_types::ir::schema::NonNegativeWeightProof::CounterRawDataSamples,
         }];
         let selection = run.stage3_plan_selection.as_ref().unwrap();
         assert_eq!(domains(&selection.plan), proven, "{selection:?}");
@@ -5004,14 +5007,14 @@ mod tests {
         };
         assert_eq!(
             domains(&p2.roots),
-            [WeightDomain::SamplesOfMetric { metric: "m".into() }]
+            [WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }]
         );
         let counter = with_metric_types(data(), &[("m", MetricType::Counter)]);
         let confirmed = with_confirmed_weights(&p2.roots, &counter);
         assert_eq!(
             domains(&confirmed),
             [WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::CounterSamples
+                proof: NonNegativeWeightProof::CounterRawDataSamples
             }]
         );
         let mut gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
@@ -5019,7 +5022,7 @@ mod tests {
         assert_eq!(
             domains(&with_confirmed_weights(&p2.roots, &gauge)),
             [WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::DeclaredNonNegativeSamples
+                proof: NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples
             }]
         );
         assert_eq!(
@@ -6059,7 +6062,7 @@ mod tests {
         assert!(reason.contains("not declared a counter"), "{reason}");
     }
 
-    /// The ids of `candidates` whose DAG reduces raw samples per series with
+    /// The ids of `candidates` whose DAG reduces raw data samples per series with
     /// an exact `Aggregate`.
     fn with_per_entity_aggregate(candidates: &[PhysicalCandidate]) -> Vec<String> {
         candidates
@@ -6080,7 +6083,7 @@ mod tests {
     }
 
     /// The executor has no exact per-series `stddev_over_time`: each
-    /// candidate that reduces raw samples with one is rejected as
+    /// candidate that reduces raw data samples with one is rejected as
     /// `PerEntityAggregateNotExecutable` and never selected (issue #770).
     #[test]
     fn a_per_entity_aggregate_the_executor_cannot_run_is_rejected() {
@@ -6287,7 +6290,7 @@ mod tests {
             assert_eq!(
                 summary_shape(
                     &FieldDataType::ExactAggregate(kind, params),
-                    StateSamples::UNKNOWN
+                    StateInputRows::UNKNOWN
                 ),
                 (1.0, 56)
             );
@@ -6310,7 +6313,7 @@ mod tests {
                     ),
                     GroupingStrategy::default(),
                 ),
-                StateSamples::UNKNOWN
+                StateInputRows::UNKNOWN
             )
             .1,
             144 + 2 * 8 * 1_152
@@ -6339,21 +6342,21 @@ mod tests {
         let pareto: Vec<f64> = (0..10)
             .map(|i| (1.0 - (f64::from(i) + 0.5) / 10.0).powf(-0.5))
             .collect();
-        let non_negative = |per_state| StateSamples {
-            per_state,
+        let non_negative = |rows_per_state| StateInputRows {
+            rows_per_state,
             non_negative: true,
         };
         assert_eq!(library_ddsketch_bytes(alpha, &pareto), 1_168);
         assert_eq!(ddsketch_state_bytes(alpha, non_negative(Some(10))), 1_168);
         // Signed values fill both stores.
         let signed: Vec<f64> = pareto.iter().map(|v| -v).chain(pareto.clone()).collect();
-        let signed_samples = StateSamples {
-            per_state: Some(20),
+        let signed_rows = StateInputRows {
+            rows_per_state: Some(20),
             non_negative: false,
         };
         assert_eq!(
             library_ddsketch_bytes(alpha, &signed),
-            ddsketch_state_bytes(alpha, signed_samples)
+            ddsketch_state_bytes(alpha, signed_rows)
         );
         // Many samples over the assumed nine decades, the first at the
         // bottom or at the middle of the range: the range's 208 bins, in
@@ -6383,7 +6386,7 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
                     GroupingStrategy::default(),
                 ),
-                StateSamples::UNKNOWN,
+                StateInputRows::UNKNOWN,
             )
             .1
         };
@@ -6411,7 +6414,7 @@ mod tests {
                     SketchKind::new(algorithm, params),
                     GroupingStrategy::default(),
                 ),
-                StateSamples::UNKNOWN,
+                StateInputRows::UNKNOWN,
             )
             .1
         };
@@ -6467,7 +6470,7 @@ mod tests {
                     ),
                     GroupingStrategy::default(),
                 ),
-                StateSamples::UNKNOWN,
+                StateInputRows::UNKNOWN,
             )
             .1
         };
@@ -6497,7 +6500,7 @@ mod tests {
                     ),
                     GroupingStrategy::default(),
                 ),
-                StateSamples::UNKNOWN,
+                StateInputRows::UNKNOWN,
             )
             .0
         };
@@ -7466,7 +7469,7 @@ mod tests {
                 unreachable!()
             };
             // One state per series: data() declares 10 000.
-            let state = 10_000.0 * summary_shape(family, StateSamples::UNKNOWN).1 as f64;
+            let state = 10_000.0 * summary_shape(family, StateInputRows::UNKNOWN).1 as f64;
             let byte_seconds = if materialization == AT_INGESTION {
                 2.0 * state
             } else {
@@ -7876,7 +7879,7 @@ mod tests {
         candidates
     }
 
-    /// The raw samples the scan `scan` reads per computation, from its
+    /// The raw data samples the scan `scan` reads per computation, from its
     /// priced detail (`scan <n> samples; ...`).
     fn scanned_samples(cost: &CandidateCost, scan: PhysicalASAPNodeId) -> u64 {
         let detail = &cost.per_node[&scan].detail;
@@ -7942,7 +7945,7 @@ mod tests {
         else {
             unreachable!()
         };
-        let (_, state_bytes) = summary_shape(family, StateSamples::UNKNOWN);
+        let (_, state_bytes) = summary_shape(family, StateInputRows::UNKNOWN);
         let chain_cost = &kept.per_node[&chain];
         assert!(chain_cost.detail.contains("; x 0.0167/s"), "{chain_cost:?}");
         // One state per series: arriving() declares 10 000.
@@ -8135,7 +8138,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(*pane_count, 5);
-        let (depth, state_bytes) = summary_shape(family, StateSamples::UNKNOWN);
+        let (depth, state_bytes) = summary_shape(family, StateInputRows::UNKNOWN);
         let recurrence = [repeating(MINUTE)];
         let without_memory = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let work = &price(dag, &recurrence, &arriving(10_000.0), &without_memory)
@@ -8845,7 +8848,7 @@ mod tests {
             ],
             ..MeasuredOperationCosts::default()
         };
-        let size = |params: &SketchParams| sketch_shape(params, StateSamples::UNKNOWN).1 as f64;
+        let size = |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
         let at = |k| {
             lookup(
                 &table,
@@ -8908,7 +8911,7 @@ mod tests {
 
     /// The physical candidates of a per-series p99 over 5 min, queried every
     /// minute over data arriving at 10,000 rows per second: each Stage 1
-    /// choice (the exact rebuild from raw samples, KLL, DDSketch, ...)
+    /// choice (the exact rebuild from raw data samples, KLL, DDSketch, ...)
     /// with each Stage 2 materialization, ids `P<choice>-m<k>`.
     fn quantile_candidates() -> Vec<PhysicalCandidate> {
         let root = lower_promql("quantile_over_time(0.99, m[5m])", p99_target());
@@ -8943,7 +8946,7 @@ mod tests {
     }
 
     /// Whether `candidate` builds no summary: it rebuilds the quantile
-    /// exactly from raw samples.
+    /// exactly from raw data samples.
     fn exact_rebuild(candidate: &PhysicalCandidate) -> bool {
         !candidate.dag.nodes.iter().any(|n| {
             matches!(
@@ -9040,7 +9043,7 @@ mod tests {
     /// Calibration keeps the unmeasured nodes on the measured scale. A
     /// table measuring the KLL as expensive (150 ns per row) and one exact
     /// operator as cheap (the time range, 2 ns per row), but not the exact
-    /// plan's scan and aggregate, made the exact rebuild from raw samples
+    /// plan's scan and aggregate, made the exact rebuild from raw data samples
     /// look cheapest while the formulas kept its scan and aggregate at
     /// their 1-ns scale; with the calibration factor the KLL maintained at
     /// ingestion time (B1) is selected. With the full table, the exact
@@ -9107,9 +9110,9 @@ mod tests {
         assert!(cost("P1-m1") > cost("EXACT"));
     }
 
-    /// Reading raw samples from the database holding them is the
+    /// Reading raw data samples from the database holding them is the
     /// deployment's cost. With every operator measured, the exact rebuild
-    /// from raw samples at query time is the cheapest plan for a p99 every
+    /// from raw data samples at query time is the cheapest plan for a p99 every
     /// minute while its raw reads are free (0 ns per sample fetched and
     /// decoded at query time); priced at 200 ns per sample, it costs more
     /// than the KLL maintained at ingestion time (B1), which is selected.
@@ -9256,7 +9259,7 @@ mod tests {
         };
         let formula = memory(None);
         let half = memory(Some(
-            sketch_shape(&kll, StateSamples::UNKNOWN).1 as f64 / 2.0,
+            sketch_shape(&kll, StateInputRows::UNKNOWN).1 as f64 / 2.0,
         ));
         assert!(half < formula && half > 0.0, "{half} vs {formula}");
     }

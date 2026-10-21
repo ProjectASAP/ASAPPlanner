@@ -76,7 +76,7 @@ pub struct Schema {
 
 pub struct Field {
     pub name: String,
-    pub dtype: FieldDataType,          // Plain(DataType) | ExactAggregate(..) | Sketch(..) | Sample(..) | Wavelet(..) | StatModel(..)
+    pub dtype: FieldDataType,          // Plain(DataType) | ExactAggregate(..) | Sketch(..) | SummarySample(..) | Wavelet(..) | StatModel(..)
     pub nullable: bool,
     pub table: Option<String>,         // SQL table/alias qualifier; None for PromQL labels
 }

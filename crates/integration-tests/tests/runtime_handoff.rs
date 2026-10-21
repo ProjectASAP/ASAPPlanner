@@ -46,7 +46,7 @@ fn example4b() -> PlanningWorkload {
     .expect("Example 4b parses")
 }
 
-/// A deployment that keeps no raw samples: every summary must be built at
+/// A deployment that keeps no raw data samples: every summary must be built at
 /// ingestion time.
 fn without_raw_data() -> DeploymentCapabilities {
     DeploymentCapabilities {
@@ -97,7 +97,7 @@ async fn export_carries_the_selected_materialization() {
     );
 }
 
-/// What a runtime that keeps no raw samples gets from one facade call.
+/// What a runtime that keeps no raw data samples gets from one facade call.
 async fn installable(workload: &PlanningWorkload) -> InstallablePlan {
     let capabilities = without_raw_data();
     let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
@@ -165,8 +165,8 @@ async fn installable_plan_has_its_pane_chains_expanded() {
         .stored_outputs
         .iter()
         .map(|o| {
-            assert_eq!(o.inputs.raw_sample_windows[0].width_ms, 600_000);
-            o.inputs.raw_sample_windows[0].end_offset_ms
+            assert_eq!(o.inputs.raw_data_sample_windows[0].width_ms, 600_000);
+            o.inputs.raw_data_sample_windows[0].end_offset_ms
         })
         .collect();
     offsets.sort();
@@ -273,7 +273,7 @@ async fn two_queries_on_one_chain_store_its_six_panes_once() {
 }
 
 /// Planned with raw data kept (everything at query time), so each query's
-/// range is a query-time raw-sample window.
+/// range is a query-time raw-data-sample window.
 async fn installable_at_query_time(query: &str) -> Result<InstallablePlan, PlanError> {
     let workload = repeating(&[query]);
     plan_installable(UserInput::new(
@@ -284,13 +284,13 @@ async fn installable_at_query_time(query: &str) -> Result<InstallablePlan, PlanE
     .await
 }
 
-/// A raw-sample window whose position is not a fixed offset from the
+/// A raw-data-sample window whose position is not a fixed offset from the
 /// evaluation time (a subquery or an offset above the range, an `@`
 /// anchor below it), or that ends after the evaluation (a negative offset,
 /// which no ingestion run can build in time), is refused with its reason,
 /// not passed on with a wrong window or dropped; a plain range is listed.
 #[tokio::test]
-async fn raw_sample_windows_of_unsupported_shapes_are_refused() {
+async fn raw_data_sample_windows_of_unsupported_shapes_are_refused() {
     for (query, reason) in [
         (
             "max_over_time(rate(latency_ms[5m])[1h:1m])",
@@ -306,7 +306,7 @@ async fn raw_sample_windows_of_unsupported_shapes_are_refused() {
         ),
     ] {
         match installable_at_query_time(query).await {
-            Err(PlanError::Installable(InstallablePlanError::UnsupportedRawSampleWindow {
+            Err(PlanError::Installable(InstallablePlanError::UnsupportedRawDataSampleWindow {
                 reason: refused,
                 ..
             })) => assert_eq!(refused, reason, "{query}"),

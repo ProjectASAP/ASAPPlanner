@@ -1,6 +1,6 @@
 //! A runtime's samples reach the executor as Arrow columns (issue #762):
 //! the planner-layering #509 Example 4b plan, one pane fed through its
-//! `RawSampleSelector` and built by the executor, read through the public
+//! `RawDataSampleSelector` and built by the executor, read through the public
 //! batch API only.
 
 use std::collections::BTreeMap;
@@ -12,7 +12,7 @@ use asap_executor::physical_planner::{compile, InputContract, Source};
 use asap_executor::planner::ir::schema::PROMQL_SERIES_IDENTITY;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::Batch;
-use asap_executor::{RawSampleSelector, Sample};
+use asap_executor::{RawDataSample, RawDataSampleSelector};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, PlanningModels, PlanningWorkload,
     UserInput,
@@ -38,7 +38,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
               "sources": {"latency_ms": {"series_count": 1000, "sample_interval": 1000}}}}"#,
     )
     .unwrap();
-    // The deployment keeps no raw samples, so every pane is built at
+    // The deployment keeps no raw data samples, so every pane is built at
     // ingestion and stored.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
@@ -53,24 +53,24 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     ))
     .await
     .unwrap();
-    // The newest pane: its node, and the raw-sample window it reads.
+    // The newest pane: its node, and the raw-data-sample window it reads.
     let output = plan
         .stored_outputs
         .iter()
         .max_by_key(|output| {
-            output.inputs.raw_sample_windows[0]
+            output.inputs.raw_data_sample_windows[0]
                 .bounds_ms(EVALUATION_MS)
                 .1
         })
         .unwrap();
     // The pane's window at this evaluation, `(start_ms, end_ms]`.
-    let (start_ms, end_ms) = output.inputs.raw_sample_windows[0].bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = output.inputs.raw_data_sample_windows[0].bounds_ms(EVALUATION_MS);
     // What the runtime received: series `a` and `b`, one sample every 10 s
     // over the pane's ten minutes.
-    let samples: Vec<Sample> = ["a", "b"]
+    let samples: Vec<RawDataSample> = ["a", "b"]
         .iter()
         .flat_map(|instance| {
-            (1..=60).map(move |step| Sample {
+            (1..=60).map(move |step| RawDataSample {
                 labels: BTreeMap::from([
                     ("__name__".to_string(), "latency_ms".to_string()),
                     ("instance".to_string(), instance.to_string()),
@@ -82,7 +82,8 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         .collect();
     // The pane's Scan and TimeRange, prepared once for the window.
     let selector =
-        RawSampleSelector::new(&plan.dag.dag, &output.inputs.raw_sample_windows[0]).unwrap();
+        RawDataSampleSelector::new(&plan.dag.dag, &output.inputs.raw_data_sample_windows[0])
+            .unwrap();
     // The pane's input: the 120 samples as Arrow columns.
     let input: Batch = selector.window_batch(end_ms, &samples).unwrap();
     assert_eq!(input.num_rows(), 120);
@@ -108,7 +109,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     assert_eq!(values.value(0), 1.0);
 
     // The executor's pane build, cut at the pane's TimeRange.
-    let window = output.inputs.raw_sample_windows[0].time_range_node_id as u64;
+    let window = output.inputs.raw_data_sample_windows[0].time_range_node_id as u64;
     let compiled = compile(
         &plan.dag.dag,
         BTreeMap::from([(window, InputContract::bounded(input.schema().clone()))]),

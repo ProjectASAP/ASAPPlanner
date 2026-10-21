@@ -81,7 +81,7 @@ fn declared_classic_bucket_fixes_the_false_negative() {
 
 #[test]
 fn declared_raw_extension_and_native_gap_override_the_heuristic() {
-    // A metric merely NAMED `…_bucket` that actually holds raw samples / a native
+    // A metric merely NAMED `…_bucket` that actually holds raw data samples / a native
     // histogram: the heuristic wrongly routes it to bucket interpolation.
     let q = "histogram_quantile(0.9, foo_bucket)";
     assert_eq!(
@@ -92,7 +92,7 @@ fn declared_raw_extension_and_native_gap_override_the_heuristic() {
     assert_eq!(
         with_meta(
             q,
-            HistogramCatalog::new().with("foo_bucket", HistogramKind::RawSamples)
+            HistogramCatalog::new().with("foo_bucket", HistogramKind::RawDataSamples)
         ),
         "Q",
         "raw samples are sketch-able"
@@ -106,7 +106,7 @@ fn declared_raw_extension_and_native_gap_override_the_heuristic() {
 fn undeclared_metric_falls_back_to_the_heuristic() {
     // A catalog that doesn't mention the queried metric leaves the structural
     // decision in place.
-    let catalog = HistogramCatalog::new().with("some_other_metric", HistogramKind::RawSamples);
+    let catalog = HistogramCatalog::new().with("some_other_metric", HistogramKind::RawDataSamples);
     assert_eq!(
         with_meta(
             "histogram_quantile(0.9, sum by (le) (x_bucket))",
@@ -129,7 +129,7 @@ fn the_catalog_does_not_leak_across_calls() {
     // thread-local that isn't cleaned up).
     let _ = with_meta(
         "histogram_quantile(0.9, foo_bucket)",
-        HistogramCatalog::new().with("foo_bucket", HistogramKind::RawSamples),
+        HistogramCatalog::new().with("foo_bucket", HistogramKind::RawDataSamples),
     );
     // `foo_bucket` would be sketch-able under that catalog, but with none it must
     // revert to the heuristic (the `_bucket` name → HistogramQuantile).

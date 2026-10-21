@@ -10,7 +10,7 @@ use asap_executor::operators::Operator as ExecutorOperator;
 use asap_executor::physical_planner::{compile, InputContract, Source};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
-use asap_executor::{series_labels_of_output_row, RawSampleSelector, Sample};
+use asap_executor::{series_labels_of_output_row, RawDataSample, RawDataSampleSelector};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, ExecutorCompileCheck, FrontendInput, InstallablePlan,
     InstallablePlanError, OperatorKind, OptimizationInput, OptimizationPass, OptimizeError,
@@ -58,8 +58,8 @@ fn workload(queries: &[&str]) -> PlanningWorkload {
 }
 
 /// One sample of `metric` for series `instance`.
-fn sample(metric: &str, instance: &str, timestamp_ms: i64, value: f64) -> Sample {
-    Sample {
+fn sample(metric: &str, instance: &str, timestamp_ms: i64, value: f64) -> RawDataSample {
+    RawDataSample {
         labels: BTreeMap::from([
             ("__name__".to_string(), metric.to_string()),
             ("instance".to_string(), instance.to_string()),
@@ -76,7 +76,7 @@ fn sample(metric: &str, instance: &str, timestamp_ms: i64, value: f64) -> Sample
 /// which 10-minute pane before `EVALUATION_MS` it falls in: `1000 × pane +
 /// base + 0..=100`, with base 100 for `a` and 300 for `b` (pane 0 is the
 /// newest), so an answer read from the wrong panes is visibly off.
-fn remote_write_samples() -> Vec<Sample> {
+fn remote_write_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for (instance, base) in [("a", 100.0), ("b", 300.0)] {
         for step in 0..426 {
@@ -178,7 +178,7 @@ fn assert_answers_from_pane(answers: &[Answer], pane: i64) {
 /// The control plane: plan `queries` for a deployment that keeps no raw
 /// samples, with its cost model read from JSON, and write the plan file.
 async fn plan_json(queries: &[&str]) -> String {
-    // What the deployment keeps: no raw samples, no query-time results
+    // What the deployment keeps: no raw data samples, no query-time results
     // across evaluations. Supported summaries are left unrestricted, so the
     // Planner offers only what its own executor runs.
     let capabilities = DeploymentCapabilities {
@@ -284,12 +284,12 @@ fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
 /// The data plane at evaluation time `evaluation_ms`: from `plan_json`,
 /// `samples` and the states earlier evaluations left in `store`, build each
 /// stored output the store lacks once, in the plan's order, from its
-/// raw-sample windows and stored inputs; answer every query; drop the
+/// raw-data-sample windows and stored inputs; answer every query; drop the
 /// states past their retention; and answer the queries again with the
 /// query-time reference.
 fn run_data_plane(
     plan_json: &str,
-    samples: &[Sample],
+    samples: &[RawDataSample],
     evaluation_ms: i64,
     store: &mut SummaryStore,
 ) -> DataPlaneRun {
@@ -303,7 +303,7 @@ fn run_data_plane(
 }
 
 /// When this stand-in runtime builds a stored output an ingestion run
-/// builds from raw samples.
+/// builds from raw data samples.
 #[derive(Clone, Copy)]
 enum IngestionBuilds {
     /// For each evaluation, over windows ending at that evaluation.
@@ -318,7 +318,7 @@ enum IngestionBuilds {
 /// [`run_data_plane`] with ingestion-run outputs built as `ingestion` says.
 fn run_data_plane_on(
     plan_json: &str,
-    samples: &[Sample],
+    samples: &[RawDataSample],
     evaluation_ms: i64,
     store: &mut SummaryStore,
     ingestion: IngestionBuilds,
@@ -341,7 +341,7 @@ fn run_data_plane_on(
         let built_for_ms = match (ingestion, output.built_at) {
             (IngestionBuilds::Tumbling, StoredOutputBuild::IngestionRun) => output
                 .inputs
-                .raw_sample_windows
+                .raw_data_sample_windows
                 .first()
                 .map_or(evaluation_ms, |window| {
                     evaluation_ms - evaluation_ms.rem_euclid(window.width_ms)
@@ -352,7 +352,7 @@ fn run_data_plane_on(
         // inputs' spans together.
         let span = output
             .inputs
-            .raw_sample_windows
+            .raw_data_sample_windows
             .iter()
             .map(|window| window.bounds_ms(built_for_ms))
             .chain(
@@ -366,14 +366,14 @@ fn run_data_plane_on(
             .expect("a stored output reads something");
         let key = state_key(output, built_for_ms);
         if !store.contains_key(&key) {
-            // The build's sources: each raw-sample window's rows, and each
+            // The build's sources: each raw-data-sample window's rows, and each
             // stored input's state.
             let mut sources = BTreeMap::new();
-            for window in &output.inputs.raw_sample_windows {
+            for window in &output.inputs.raw_data_sample_windows {
                 // Prepared once per window: routes by metric, applies the Scan.
-                let selector = RawSampleSelector::new(dag, window).unwrap();
+                let selector = RawDataSampleSelector::new(dag, window).unwrap();
                 // Only the samples of the selector's metric reach it.
-                let routed: Vec<Sample> = samples
+                let routed: Vec<RawDataSample> = samples
                     .iter()
                     .filter(|s| s.labels["__name__"] == selector.metric())
                     .cloned()
@@ -442,10 +442,10 @@ fn run_data_plane_on(
             ),
         }
     }
-    // Raw samples read at query time, other than through stored outputs.
+    // Raw data samples read at query time, other than through stored outputs.
     for window in &installed.query_time_raw_windows {
         // The window's selector and its end at this evaluation.
-        let selector = RawSampleSelector::new(dag, window).unwrap();
+        let selector = RawDataSampleSelector::new(dag, window).unwrap();
         let (_, end_ms) = window.bounds_ms(evaluation_ms);
         inputs.insert(
             window.time_range_node_id as u64,
@@ -477,7 +477,7 @@ fn run_data_plane_on(
         .iter()
         .map(|window| {
             // The window's selector and its end at this evaluation.
-            let selector = RawSampleSelector::new(reference_dag, window).unwrap();
+            let selector = RawDataSampleSelector::new(reference_dag, window).unwrap();
             let (_, end_ms) = window.bounds_ms(evaluation_ms);
             (
                 window.time_range_node_id as u64,
@@ -672,7 +672,7 @@ async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
         entries.join(",")
     ))
     .unwrap();
-    // A deployment that keeps no raw samples: the windows are stored.
+    // A deployment that keeps no raw data samples: the windows are stored.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
@@ -690,9 +690,9 @@ async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
     // from 11 minutes before the first evaluation to 10 s after it; each
     // value distinct, so a window off by 5 s at either edge answers
     // differently.
-    let samples: Vec<Sample> = (1..=6i64)
+    let samples: Vec<RawDataSample> = (1..=6i64)
         .flat_map(|instance| {
-            (0..680i64).map(move |step| Sample {
+            (0..680i64).map(move |step| RawDataSample {
                 labels: BTreeMap::from([
                     ("__name__".to_string(), "m".to_string()),
                     (
@@ -775,7 +775,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
         sample("latency_ms", "a", EVALUATION_MS - 100, 10.0),
         sample("latency_ms", "b", EVALUATION_MS - 200, 100.0),
     ];
-    let selector = RawSampleSelector::new(dag, window).unwrap();
+    let selector = RawDataSampleSelector::new(dag, window).unwrap();
     let rows = selector.window_batch(EVALUATION_MS, &samples).unwrap();
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
@@ -787,7 +787,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     assert_eq!(answered[0].1, 110.0);
 }
 
-/// A deployment that keeps raw samples and query-time results across
+/// A deployment that keeps raw data samples and query-time results across
 /// evaluations (#509 Example 4's B3), with a dashboard panel
 /// (`max_over_time(latency_ms[5m])` every minute over 1M series sampled
 /// every 1.5 s, answered as the last hour at 1-minute steps): Stage 3
@@ -821,11 +821,11 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
         .stored_outputs
         .iter()
         .all(|o| o.built_at == StoredOutputBuild::QueryRun
-            && o.inputs.raw_sample_windows[0].width_ms == 60_000));
+            && o.inputs.raw_data_sample_windows[0].width_ms == 60_000));
     let pane_ranges: BTreeSet<_> = installed
         .stored_outputs
         .iter()
-        .map(|o| o.inputs.raw_sample_windows[0].time_range_node_id)
+        .map(|o| o.inputs.raw_data_sample_windows[0].time_range_node_id)
         .collect();
     assert!(installed
         .query_time_raw_windows
@@ -853,14 +853,14 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
 }
 
 /// An exact per-series quantile under a group average (issue #770), on a
-/// deployment that keeps raw samples: Stage 3 selects the exact plan, which
-/// reads each series' raw samples in the window at query time, and the
+/// deployment that keeps raw data samples: Stage 3 selects the exact plan, which
+/// reads each series' raw data samples in the window at query time, and the
 /// executor runs it. Series `a` (1..=10) and `b` (10, 20, ..., 100) are in
 /// `east`, `c` (constantly 5) in `west`; a sample of each before the window
 /// is not read. Per series, p99 interpolates between its two largest
 /// samples (rank 0.99 × 9 = 8.91): 9.91 for `a`, 99.1 for `b`, 5 for `c`.
 #[tokio::test]
-async fn an_exact_per_series_quantile_runs_from_raw_samples() {
+async fn an_exact_per_series_quantile_runs_from_raw_data_samples() {
     let workload: PlanningWorkload = serde_json::from_str(
         r#"{"query_workload": {"language": "promql", "repeating_queries": [{
               "query": "avg by (region) (quantile_over_time(0.99, latency_ms[100s]))",
@@ -1034,11 +1034,11 @@ async fn forced_plan_json(
 
 /// Samples of `m` for six series, `job` a (instances 1, 2, 3) and b (4, 5,
 /// 6), every 10 s over the last 10 minutes; each value distinct.
-fn job_samples() -> Vec<Sample> {
+fn job_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for instance in 1..=6 {
         for step in 0..60 {
-            samples.push(Sample {
+            samples.push(RawDataSample {
                 labels: BTreeMap::from([
                     ("__name__".to_string(), "m".to_string()),
                     (
@@ -1091,10 +1091,10 @@ async fn group_sums_from_one_stored_per_series_sum_are_listed_and_built() {
     };
     assert_eq!(sums.len(), 2, "{:#?}", plan.stored_outputs);
     assert!(per_series.inputs.stored_outputs.is_empty());
-    assert_eq!(per_series.inputs.raw_sample_windows.len(), 1);
+    assert_eq!(per_series.inputs.raw_data_sample_windows.len(), 1);
     for sum in sums {
         assert_eq!(sum.inputs.stored_outputs, [per_series.node_id]);
-        assert!(sum.inputs.raw_sample_windows.is_empty());
+        assert!(sum.inputs.raw_data_sample_windows.is_empty());
         assert_ne!(
             sum.coverage.definition_id,
             per_series.coverage.definition_id
@@ -1146,7 +1146,7 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
     };
     assert!(per_series.inputs.stored_outputs.is_empty());
     assert_eq!(across.inputs.stored_outputs, [per_series.node_id]);
-    assert!(across.inputs.raw_sample_windows.is_empty());
+    assert!(across.inputs.raw_data_sample_windows.is_empty());
     for output in [per_series, across] {
         assert_eq!(output.built_at, StoredOutputBuild::IngestionRun);
         assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
@@ -1201,7 +1201,7 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
         merge.inputs.stored_outputs,
         panes.iter().map(|pane| pane.node_id).collect::<Vec<_>>()
     );
-    assert!(merge.inputs.raw_sample_windows.is_empty());
+    assert!(merge.inputs.raw_data_sample_windows.is_empty());
     assert_eq!(merge.built_at, StoredOutputBuild::QueryRun);
     assert_eq!(merge.coverage.selection, relative_time(-300_000, 0));
     assert_eq!(merge.retention_ms, 300_000 + 3_600_000);
@@ -1230,7 +1230,7 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
 
 /// Example 4b's six 10-minute panes at offsets 0 to 50 minutes share one
 /// definition id, each with its own time selection; each reads its pane of
-/// raw samples and nothing stored.
+/// raw data samples and nothing stored.
 #[tokio::test]
 async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     let plan: InstallablePlan =
@@ -1238,10 +1238,10 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
             .unwrap();
     assert_eq!(plan.stored_outputs.len(), 6);
     let mut panes: Vec<&StoredOutput> = plan.stored_outputs.iter().collect();
-    panes.sort_by_key(|o| o.inputs.raw_sample_windows[0].end_offset_ms);
+    panes.sort_by_key(|o| o.inputs.raw_data_sample_windows[0].end_offset_ms);
     for (i, pane) in panes.iter().enumerate() {
         let i = i as i64;
-        let [window] = pane.inputs.raw_sample_windows.as_slice() else {
+        let [window] = pane.inputs.raw_data_sample_windows.as_slice() else {
             panic!("{pane:?}");
         };
         assert_eq!(
@@ -1310,7 +1310,7 @@ async fn topk_answers_carry_the_chosen_series_labels() {
 
 /// Samples of `data` for `topk_answers_carry_the_chosen_series_labels`:
 /// three per series inside the last minute, each a third of its sum.
-fn topk_samples() -> Vec<Sample> {
+fn topk_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for (instance, region, service, sum) in [
         ("e1", "east", "api", 6.0),
@@ -1394,7 +1394,7 @@ fn p99_avg_workload(values_non_negative: bool) -> PlanningWorkload {
     .unwrap()
 }
 
-/// [`p99_avg_workload`] planned for a deployment that keeps no raw samples.
+/// [`p99_avg_workload`] planned for a deployment that keeps no raw data samples.
 async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, String> {
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
@@ -1409,7 +1409,7 @@ async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, Stri
     .map_err(|error| error.to_string())
 }
 
-/// Without raw samples, the only valid plan of the p99 query keeps one
+/// Without raw data samples, the only valid plan of the p99 query keeps one
 /// DDSketch per series in one-second panes built at ingestion and merges
 /// the window's panes at query time. A quantile
 /// of merged panes is still one of the samples, so a declared non-negative
@@ -1447,7 +1447,9 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
         .and_then(|node| node.guarantee.clone())
         .expect("the query's guarantee");
     let sign =
-        asap_logical_asap_optimization::accuracy::composition::samples_sign_statistic("data");
+        asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic(
+            "data",
+        );
     let bound = guarantee.bind(&|statistic| match statistic {
         "input_row_count" => Some(1_000.0),
         _ => (statistic == sign).then_some(1.0),
@@ -1478,7 +1480,7 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
         for step in 0..1_100i64 {
             let timestamp_ms = evaluation_ms - 110_000 + 50 + step * 100;
             let value = 10.0 * (series + 1) as f64 + ((step * 37 + series * 11) % 997) as f64;
-            samples.push(Sample {
+            samples.push(RawDataSample {
                 labels: BTreeMap::from([
                     ("__name__".to_string(), "data".to_string()),
                     ("region".to_string(), region.clone()),
@@ -1535,10 +1537,10 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 
 /// Without the declaration nothing proves `data`'s samples non-negative, so
 /// the merged panes' relative bound does not carry through `avg`: no
-/// merged-pane DDSketch candidate is accepted, and with no raw samples no
+/// merged-pane DDSketch candidate is accepted, and with no raw data samples no
 /// plan is valid. The joint search discards the sketch candidates before
 /// composition (they have no bound to meet the target), and the plans left
-/// all scan raw samples at query time, so its error reports that. The
+/// all scan raw data samples at query time, so its error reports that. The
 /// exhaustive search keeps every candidate and shows each merged-pane
 /// DDSketch candidate rejected for missing the target with no relative
 /// bound.
@@ -1636,11 +1638,11 @@ fn average_of_p99s_workload() -> PlanningWorkload {
 /// `g="2"`, one every second from 200 s before `EVALUATION_MS` to it, off
 /// the second boundaries: series `i`'s value is `100 × i + 1..=101`, all
 /// positive, which DDSketch needs at run time (nothing declares it here).
-fn grouped_samples() -> Vec<Sample> {
+fn grouped_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for (i, (instance, g)) in [("a", "1"), ("b", "1"), ("c", "2")].iter().enumerate() {
         for step in 0..200 {
-            samples.push(Sample {
+            samples.push(RawDataSample {
                 labels: BTreeMap::from([
                     ("__name__".to_string(), "x".to_string()),
                     ("instance".to_string(), instance.to_string()),
@@ -1656,7 +1658,7 @@ fn grouped_samples() -> Vec<Sample> {
 
 /// Quantile queries over one metric and window with different `by` labels
 /// (ASAPQuery's seed-862 quantile queries) share one per-series DDSketch:
-/// planned jointly on a deployment that keeps no raw samples, every stored
+/// planned jointly on a deployment that keeps no raw data samples, every stored
 /// DDSketch has one definition, and each query answers as its query-time
 /// reference. Series of `data` carry `region`, `service` and `job`; values
 /// are positive.
@@ -1690,7 +1692,7 @@ async fn quantile_queries_with_different_groupings_share_one_per_series_sketch()
 /// The six series of `data` the sharing tests read: `region` east/west,
 /// `service` api/web/db, `job` batch/online; values positive, one every
 /// 10 s over the last two minutes, in time order.
-fn grouped_series_samples() -> Vec<Sample> {
+fn grouped_series_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for (instance, region, service, job) in [
         ("s1", "east", "api", "online"),
@@ -1721,7 +1723,7 @@ fn grouped_series_samples() -> Vec<Sample> {
 /// `EVALUATION_MS` over [`grouped_samples`]: PromQL's p99 (linear
 /// interpolation at rank `0.99 × (n − 1)`) of each series' samples in
 /// `(EVALUATION_MS − 100 s, EVALUATION_MS]`, averaged per group.
-fn exact_average_of_p99s(samples: &[Sample]) -> BTreeMap<String, f64> {
+fn exact_average_of_p99s(samples: &[RawDataSample]) -> BTreeMap<String, f64> {
     let mut per_series: BTreeMap<(String, String), Vec<f64>> = BTreeMap::new();
     for s in samples
         .iter()
@@ -1746,8 +1748,8 @@ fn exact_average_of_p99s(samples: &[Sample]) -> BTreeMap<String, f64> {
         .collect()
 }
 
-/// Issue #774: without raw samples retained, every candidate of an average
-/// of p99s fails a check (the exact ones scan raw samples at query time,
+/// Issue #774: without raw data samples retained, every candidate of an average
+/// of p99s fails a check (the exact ones scan raw data samples at query time,
 /// the sketch ones have no guarantee), so planning fails. With
 /// `ignore_accuracy_guarantees` loaded from the settings JSON, the cheapest
 /// sketch plan is selected, the report marks its output as accepted without
@@ -1875,7 +1877,7 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
 }
 
 /// [`p99_avg_workload`]'s query with `outer` in place of `avg`, planned
-/// for a deployment that keeps no raw samples.
+/// for a deployment that keeps no raw data samples.
 async fn plan_p99(outer: &str, values_non_negative: bool) -> InstallablePlan {
     let mut json = serde_json::to_value(p99_avg_workload(values_non_negative)).unwrap();
     json["query_workload"]["repeating_queries"][0]["query"] =
@@ -1905,7 +1907,7 @@ fn data_samples(
     interval_ms: i64,
     value: impl Fn(usize, i64) -> f64,
 ) -> (
-    Vec<Sample>,
+    Vec<RawDataSample>,
     BTreeMap<(String, String, String), Vec<Vec<f64>>>,
 ) {
     let mut samples = Vec::new();
@@ -1920,7 +1922,7 @@ fn data_samples(
         for step in 0..steps {
             let timestamp_ms = EVALUATION_MS - steps * interval_ms + 50 + step * interval_ms;
             let v = value(s, step);
-            samples.push(Sample {
+            samples.push(RawDataSample {
                 labels: BTreeMap::from([
                     ("__name__".to_string(), "data".to_string()),
                     ("region".to_string(), region.clone()),
@@ -1957,7 +1959,7 @@ fn interpolated_quantile(q: f64, window: &[f64]) -> f64 {
 /// against the query-time reference.
 fn assert_p99s_within_alpha(
     plan: &InstallablePlan,
-    samples: &[Sample],
+    samples: &[RawDataSample],
     per_group: &BTreeMap<(String, String, String), Vec<Vec<f64>>>,
     combine: impl Fn(&[f64]) -> f64,
 ) {
@@ -2053,7 +2055,7 @@ fn counter_topk_workload(function: &str) -> PlanningWorkload {
 }
 
 /// The per-second rate of series `instance` (1 or 2) of job `job` (1..=12)
-/// in [`counter_samples`]: distinct for every series and every job's sum.
+/// in [`counter_raw_data_samples`]: distinct for every series and every job's sum.
 fn counter_rate(job: i64, instance: i64) -> f64 {
     job as f64 + 0.1 * instance as f64
 }
@@ -2062,7 +2064,7 @@ fn counter_rate(job: i64, instance: i64) -> f64 {
 /// 595 s before `EVALUATION_MS`: each a counter growing linearly at
 /// [`counter_rate`], so its 5-minute `increase` is 300 × its rate (the
 /// samples 5 s inside each window end extrapolate to them exactly).
-fn counter_samples() -> Vec<Sample> {
+fn counter_raw_data_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for job in 1..=12 {
         for instance in 1..=2 {
@@ -2081,7 +2083,7 @@ fn counter_samples() -> Vec<Sample> {
     samples
 }
 
-/// Issue: with guarantees ignored and no raw samples, the counter top-k
+/// Issue: with guarantees ignored and no raw data samples, the counter top-k
 /// queries selected exact per-series panes followed by a query-time
 /// CountSketchWithHeap top-k the executor cannot compile ("invalid keyed
 /// evaluation shape or capacity"). The selected plan must be one the
@@ -2126,7 +2128,7 @@ async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
         let plan_json = serde_json::to_string(&plan).unwrap();
         let run = run_data_plane(
             &plan_json,
-            &counter_samples(),
+            &counter_raw_data_samples(),
             EVALUATION_MS,
             &mut SummaryStore::new(),
         );
@@ -2198,7 +2200,7 @@ async fn check_compiles_reports_the_executors_error() {
 
 /// `queries` every 10 s at `accuracy` (JSON) over six ingesting series of
 /// `data`, a non-negative gauge, planned jointly on a deployment that keeps
-/// no raw samples: the plan file.
+/// no raw data samples: the plan file.
 async fn jointly_planned(queries: &[&str], accuracy: &str) -> String {
     let entries: Vec<String> = queries
         .iter()
@@ -2503,7 +2505,7 @@ fn assert_heap_topk_answers(
 /// `data` samples of 2 regions with 40 series each, six inside the last
 /// minute per series: series `r` (rank 1..=40) of a region sums to
 /// `1000 / r^1.1` (west at half that), a skewed ranking.
-fn skewed_series_samples() -> (Vec<Sample>, BTreeMap<String, BTreeMap<String, f64>>) {
+fn skewed_series_samples() -> (Vec<RawDataSample>, BTreeMap<String, BTreeMap<String, f64>>) {
     let mut samples = Vec::new();
     let mut truth: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
     for (region, scale) in [("east", 1.0), ("west", 0.5)] {
@@ -2537,7 +2539,7 @@ fn skewed_series_samples() -> (Vec<Sample>, BTreeMap<String, BTreeMap<String, f6
 async fn assert_forced_heap_answers(
     workload: &PlanningWorkload,
     algorithm: SketchAlgorithm,
-    (samples, truth): (&[Sample], &BTreeMap<String, BTreeMap<String, f64>>),
+    (samples, truth): (&[RawDataSample], &BTreeMap<String, BTreeMap<String, f64>>),
     labels: (Option<&str>, &str, usize),
 ) {
     let plan = plan_ignoring_guarantees(workload, Some(algorithm.clone()))
@@ -2583,7 +2585,7 @@ async fn a_forced_heap_topk_sum_plan_compiles_and_answers_within_its_bound() {
 /// `data` samples of 2 regions with 40 series each inside the last minute:
 /// series `r` (rank 1..=40) has `round(200 / r^1.1)` samples (at least 1),
 /// a skewed count ranking.
-fn skewed_count_samples() -> (Vec<Sample>, BTreeMap<String, BTreeMap<String, f64>>) {
+fn skewed_count_samples() -> (Vec<RawDataSample>, BTreeMap<String, BTreeMap<String, f64>>) {
     let mut samples = Vec::new();
     let mut truth: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
     for region in ["east", "west"] {
@@ -2633,7 +2635,7 @@ async fn a_forced_heap_topk_count_plan_compiles_and_answers_within_its_bound() {
 }
 
 /// The per-second rate of series `instance` (1 or 2) of job `job` (1..=12)
-/// in [`skewed_counter_samples`]: `50 / job^1.2`, plus a little per
+/// in [`skewed_counter_raw_data_samples`]: `50 / job^1.2`, plus a little per
 /// instance, a skewed ranking of the jobs' sums.
 fn skewed_counter_rate(job: i64, instance: i64) -> f64 {
     50.0 / (job as f64).powf(1.2) + 0.01 * instance as f64
@@ -2641,8 +2643,8 @@ fn skewed_counter_rate(job: i64, instance: i64) -> f64 {
 
 /// `data_total` samples of 12 jobs with 2 series each, every 10 s from 595 s
 /// before `EVALUATION_MS`, each a counter growing linearly at
-/// [`skewed_counter_rate`], as [`counter_samples`].
-fn skewed_counter_samples() -> Vec<Sample> {
+/// [`skewed_counter_rate`], as [`counter_raw_data_samples`].
+fn skewed_counter_raw_data_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for job in 1..=12 {
         for instance in 1..=2 {
@@ -2668,7 +2670,7 @@ fn skewed_counter_samples() -> Vec<Sample> {
 /// exact sums.
 #[tokio::test]
 async fn a_forced_heap_counter_topk_plan_compiles_and_answers_within_its_bound() {
-    let samples = skewed_counter_samples();
+    let samples = skewed_counter_raw_data_samples();
     for (function, seconds) in [("increase", 300.0), ("rate", 1.0)] {
         let workload = heap_topk_workload(
             &format!("topk(3, sum by (job) ({function}(data_total[5m])))"),
