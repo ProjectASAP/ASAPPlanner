@@ -59,6 +59,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 id: 0,
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                     children: vec![],
+                    newest_panes: None,
                 }),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 materialization: planner_types::physical::Materialization::MatAtIngestion(
@@ -282,7 +283,10 @@ fn try_state_dag(
 ) -> Result<CompiledPhysicalDAG, asap_executor::Error> {
     let mut nodes = vec![PhysicalASAPDAGNode {
         id: 0,
-        payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![] }),
+        payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
+            children: vec![],
+            newest_panes: None,
+        }),
         output_state: ExecutionDataState::INGESTION_SUMMARY,
         materialization: planner_types::physical::Materialization::MatAtIngestion(
             planner_types::physical::Medium::Memory,
@@ -293,7 +297,10 @@ fn try_state_dag(
     if merge {
         nodes.push(PhysicalASAPDAGNode {
             id: 1,
-            payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![0] }),
+            payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
+                children: vec![0],
+                newest_panes: None,
+            }),
             ..nodes[0].clone()
         });
     }

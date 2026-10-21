@@ -201,7 +201,10 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             child: (),
             evaluation: PopulationStatistic::Sum,
         },
-        ASAPOp::SummaryMerge { children: vec![] },
+        ASAPOp::SummaryMerge {
+            children: vec![],
+            newest_panes: None,
+        },
         ASAPOp::PaneChain {
             child: (),
             family: family.clone(),

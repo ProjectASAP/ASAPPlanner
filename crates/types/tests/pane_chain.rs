@@ -74,7 +74,11 @@ fn chain(input: Rc<OperatorNode>) -> Rc<OperatorNode> {
 }
 
 fn merge(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children })).unwrap()
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children,
+        newest_panes: None,
+    }))
+    .unwrap()
 }
 
 fn relative_time(node: &OperatorNode) -> (Bound<i64>, Bound<i64>) {
@@ -153,7 +157,7 @@ fn expansion_merges_the_panes() {
     let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = expanded.asap() else {
         panic!("{:?}", expanded.operator)
     };
-    let Some(ASAPOp::SummaryMerge { children }) = summary_input.asap() else {
+    let Some(ASAPOp::SummaryMerge { children, .. }) = summary_input.asap() else {
         panic!("{:?}", summary_input.operator)
     };
     assert_eq!(children.len(), 5);

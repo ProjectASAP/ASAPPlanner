@@ -61,6 +61,7 @@ fn summary_projection_survives_recovery() {
                 id: 0,
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                     children: vec![],
+                    newest_panes: None,
                 }),
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
@@ -197,7 +198,10 @@ fn summary_merge_without_inputs_is_rejected() {
     let dag = PhysicalASAPDAG {
         nodes: vec![PhysicalASAPDAGNode {
             id: 0,
-            payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![] }),
+            payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
+                children: vec![],
+                newest_panes: None,
+            }),
             output_schema: schema,
             output_state: ExecutionDataState::INGESTION_SUMMARY,
             materialization: Default::default(),

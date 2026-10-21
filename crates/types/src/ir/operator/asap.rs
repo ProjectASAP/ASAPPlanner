@@ -59,6 +59,13 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// [`PaneChain`](ASAPOp::PaneChain), into one state per group.
     SummaryMerge {
         children: Vec<C>,
+        /// Merge only the newest `n` panes of the one `PaneChain` this
+        /// merge reads, `1 ≤ n <` its `pane_count`: the state of one build
+        /// over the newest `n · pane_width_ms` of the chain's window, so a
+        /// query over a shorter window reads a chain kept for a longer one.
+        /// `None` merges every input state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        newest_panes: Option<u32>,
     },
     /// A tumbling-pane window summary (#509 Pass 2, window-composition
     /// rule): the `SummaryAgg` with these `family`, `input`, `reduction`,
@@ -125,7 +132,7 @@ impl<C> ASAPOp<C> {
             }
             SummarySubtract { left, right } => vec![left, right],
             SummaryJoin { outer, inner, .. } => vec![outer, inner],
-            SummaryMerge { children } => children.iter().collect(),
+            SummaryMerge { children, .. } => children.iter().collect(),
         }
     }
 
@@ -188,8 +195,12 @@ impl<C> ASAPOp<C> {
                 child: f(child),
                 evaluation: evaluation.clone(),
             },
-            SummaryMerge { children } => SummaryMerge {
+            SummaryMerge {
+                children,
+                newest_panes,
+            } => SummaryMerge {
                 children: children.iter().map(&mut f).collect(),
+                newest_panes: *newest_panes,
             },
             SummarySubtract { left, right } => SummarySubtract {
                 left: f(left),
@@ -255,7 +266,7 @@ impl ASAPOp {
             ASAPOp::SummaryAgg { family, .. }
             | ASAPOp::PaneChain { family, .. }
             | ASAPOp::SummaryJoin { family, .. } => Some(family),
-            ASAPOp::SummaryMerge { children } => children.first().and_then(|child| {
+            ASAPOp::SummaryMerge { children, .. } => children.first().and_then(|child| {
                 child
                     .schema
                     .fields
@@ -347,10 +358,10 @@ impl ASAPOp {
                 schema
             }
             FinalizeExactAccumulator { child } => {
-                // Merged panes finalize as one build over their whole window.
-                if let Some(chain) = super::pane_chain::merged_chain(child) {
+                // Merged panes finalize as one build over their window.
+                if super::pane_chain::merged_chain(child).is_some() {
                     return FinalizeExactAccumulator {
-                        child: Rc::new(super::pane_chain::whole_window_build(chain)?),
+                        child: Rc::new(super::pane_chain::merged_window_build(child)?),
                     }
                     .output_schema();
                 }
@@ -497,7 +508,7 @@ impl ASAPOp {
                     .output_schema()?
                 }
             }
-            SummaryMerge { children } => {
+            SummaryMerge { children, .. } => {
                 self.validate_inputs()?;
                 children[0].schema.clone()
             }
@@ -540,7 +551,26 @@ impl ASAPOp {
             }
         };
         match self {
-            SummaryMerge { children } => {
+            SummaryMerge {
+                children,
+                newest_panes,
+            } => {
+                if let Some(n) = newest_panes {
+                    let pane_count = match children.as_slice() {
+                        [chain] => match chain.asap() {
+                            Some(PaneChain { pane_count, .. }) => Some(*pane_count),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if !pane_count.is_some_and(|count| (1..count).contains(n)) {
+                        return Err(SchemaDerivationError::InvalidScalarSignature(
+                            "a merge of the newest panes reads one pane chain, and fewer \
+                             panes than it has"
+                                .into(),
+                        ));
+                    }
+                }
                 let Some(first) = children.first() else {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "summary merge requires at least one state input".into(),
@@ -807,7 +837,7 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
 /// NULLs gives an empty state).
 fn quantile_may_be_empty(state: &OperatorNode) -> bool {
     match state.asap() {
-        Some(ASAPOp::SummaryMerge { children }) => {
+        Some(ASAPOp::SummaryMerge { children, .. }) => {
             children.iter().any(|child| quantile_may_be_empty(child))
         }
         Some(

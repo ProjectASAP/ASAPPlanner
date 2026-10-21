@@ -305,6 +305,7 @@ fn reused(run: &Stage1ToStage3Run<usize>, id: &str) -> Vec<String> {
     let only = |rollup_candidates, topk_reuse_candidates| Pass2Candidate {
         shared_builds: Vec::new(),
         pane_candidates: Vec::new(),
+        shared_pane_chains: Vec::new(),
         rollup_candidates,
         topk_reuse_candidates,
         sharing_candidates: Vec::new(),

@@ -40,6 +40,9 @@ pub struct Pass2Candidate {
     pub shared_builds: Vec<Vec<Rc<OperatorNode>>>,
     /// Window-composition rule: the builds built as tumbling panes.
     pub pane_candidates: Vec<PaneCandidate>,
+    /// Window-composition rule: groups of positions in `pane_candidates`
+    /// whose builds read one shared chain, each merging its newest panes.
+    pub shared_pane_chains: Vec<Vec<usize>>,
     /// Rollup rule: the Pass 1 candidate's coarse builds answered from
     /// finer ones.
     pub rollup_candidates: Vec<RollupCandidate>,
@@ -197,6 +200,7 @@ fn choice_candidates<Id: Clone>(
                 from_pass1_position: from,
                 shared_builds: rules.shared_builds,
                 pane_candidates: rules.pane_candidates,
+                shared_pane_chains: rules.shared_pane_chains,
                 rollup_candidates: rules.rollup_candidates,
                 topk_reuse_candidates: rules.topk_reuse_candidates,
                 sharing_candidates,
@@ -222,6 +226,7 @@ struct Pass2 {
 struct Rules {
     shared_builds: Vec<Vec<Rc<OperatorNode>>>,
     pane_candidates: Vec<PaneCandidate>,
+    shared_pane_chains: Vec<Vec<usize>>,
     rollup_candidates: Vec<RollupCandidate>,
     topk_reuse_candidates: Vec<TopKReuseCandidate>,
 }
@@ -359,6 +364,7 @@ impl Pass2List<'_> {
         for pass2_candidate in pass2_candidates {
             let rules = Rules {
                 pane_candidates: pass2_candidate.pane_candidates,
+                shared_pane_chains: pass2_candidate.shared_chains,
                 ..rules.clone()
             };
             match pass2_candidate.roots {

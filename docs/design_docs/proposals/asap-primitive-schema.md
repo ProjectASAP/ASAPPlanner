@@ -666,6 +666,7 @@ With an exact target, the planner can keep all latencies per job in one maintain
 
 - **On `main` (since #560):** implemented. All children must be state with exactly one state field and identical schemas.
 - **#646 (open):** also requires equal `definition`s and selections that do not overlap, and computes the merged coverage.
+- **Newest panes:** an optional `newest_panes: n` merges only the newest `n` panes of the one `PaneChain` the merge reads (`1 ≤ n <` its pane count). Its coverage is one build over those panes' window, so one chain kept for the longest window serves every query whose window, on the same panes, ends at the same time and is shorter.
 - **Planned:** a `group_by` field, so one operator does both merge and rollup:
 
 ```rust

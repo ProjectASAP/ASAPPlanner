@@ -226,7 +226,8 @@ pub(crate) type CoverageMemo = HashMap<*const OperatorNode, SummaryCoverage>;
 
 impl SummaryCoverage {
     /// Coverage of a `SummaryAgg`, `PaneChain` or `SummaryMerge`. A chain
-    /// covers what one build over its whole window does. A merge fails unless
+    /// covers what one build over its whole window does, and a merge of its
+    /// newest panes what one build over their window does. A merge fails unless
     /// every input has the same definition and their selections are
     /// pairwise disjoint; a family whose merge is idempotent
     /// ([`MergeInputRule::MayOverlap`] in the family-capability
@@ -271,7 +272,19 @@ impl SummaryCoverage {
                     }
                 })?,
             ),
-            Some(ASAPOp::SummaryMerge { children }) => {
+            // The newest panes of one chain cover what one build over their
+            // window does.
+            Some(ASAPOp::SummaryMerge {
+                newest_panes: Some(_),
+                ..
+            }) => of_summary_agg(
+                &crate::ir::operator::pane_chain::merged_window_build(node).map_err(|error| {
+                    CoverageError::PaneChainExpansion {
+                        reason: error.to_string(),
+                    }
+                })?,
+            ),
+            Some(ASAPOp::SummaryMerge { children, .. }) => {
                 let inputs = children
                     .iter()
                     .map(|child| Self::derive_memoized(child, memo))

@@ -95,7 +95,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
-use asap_types::ir::operator::pane_chain::{merged_chain, whole_window_build};
+use asap_types::ir::operator::pane_chain::{merged_chain, merged_window_build};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::guarantee::{
     AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator, GuaranteeSource,
@@ -1693,7 +1693,8 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
 
 /// The guarantee of an estimate or finalized value read from merged
 /// tumbling panes ([`merged_chain`]): the guarantee of the same read of one
-/// build over the panes' whole window ([`whole_window_build`]) when the
+/// build over the merged panes' window ([`merged_window_build`]: the whole
+/// chain's, or its newest panes') when the
 /// family's merged error for that read is exact or the same as that build's
 /// (the family-capability table); none when it is approximate (evidence
 /// only, for plan selection to judge) or the family has no merge. `None` for
@@ -1725,7 +1726,7 @@ fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarante
         return Some(None);
     }
     let chain = merged_chain(state)?;
-    let Ok(mut whole) = whole_window_build(chain) else {
+    let Ok(mut whole) = merged_window_build(state) else {
         return Some(None);
     };
     // The whole window's range over the chain's input carries the guarantee
@@ -4882,6 +4883,7 @@ mod tests {
         let merged = Rc::new(
             OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![chain],
+                newest_panes: None,
             }))
             .unwrap(),
         );

@@ -3318,22 +3318,21 @@ fn price_at_scale(
                     ),
                 )
             }
-            Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
-                // One operation per input state; one state per group out,
-                // each pane of a chain being a state of its group.
-                let mut states = 0;
+            Payload::ASAP(ASAPOp::SummaryMerge { newest_panes, .. }) => {
+                // One operation per input state read; one state per group
+                // out, each pane of a chain being a state of its group. A
+                // merge of a chain's newest `n` panes reads `n` per group.
                 let mut group_count = 0;
                 for producer in producers {
-                    let rows = output[producer].rows;
                     let panes = match &nodes[producer].payload {
                         Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => {
                             u64::from(*pane_count)
                         }
                         _ => 1,
                     };
-                    states += rows;
-                    group_count = group_count.max(rows / panes.max(1));
+                    group_count = group_count.max(output[producer].rows / panes.max(1));
                 }
+                let states = merged_states(*newest_panes, producers, &output, nodes);
                 let out = EdgeStatistics {
                     rows: group_count,
                     bytes: input.bytes.div_ceil(input.rows.max(1)) * group_count,
@@ -3376,8 +3375,8 @@ fn price_at_scale(
         // reads, otherwise the rows of its (first) input.
         let units = match &node.payload {
             Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
-            Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
-                producers.iter().map(|p| output[p].rows).sum()
+            Payload::ASAP(ASAPOp::SummaryMerge { newest_panes, .. }) => {
+                merged_states(*newest_panes, producers, &output, nodes)
             }
             _ => input.rows,
         };
@@ -3894,6 +3893,29 @@ fn chain_input_offset_ms(
         current = *child;
     }
     u64::try_from(offset_ms).unwrap_or(0)
+}
+
+/// The input states a `SummaryMerge` over `producers` reads: every row of
+/// each, or of the one pane chain whose newest `newest_panes` it merges,
+/// that many panes' states per group.
+fn merged_states(
+    newest_panes: Option<u32>,
+    producers: &[PhysicalASAPNodeId],
+    output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
+    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
+) -> u64 {
+    producers
+        .iter()
+        .map(|p| {
+            let rows = output[p].rows;
+            match (newest_panes, &nodes[p].payload) {
+                (Some(n), Payload::ASAP(ASAPOp::PaneChain { pane_count, .. })) => {
+                    rows / u64::from(*pane_count).max(1) * u64::from(n)
+                }
+                _ => rows,
+            }
+        })
+        .sum()
 }
 
 /// The panes a chain in `retention_ms` ([`pane_retention_ms`]) keeps
@@ -8782,6 +8804,128 @@ mod tests {
             };
             assert_eq!(selection.front, expected_front, "{objective:?}");
         }
+    }
+
+    /// Every Pass 2 window-composition candidate of a per-series p50 over
+    /// 2 min and a p99 over 5 min, both every minute, with both builds in
+    /// 1-min panes: `shared` picks one chain read by both (the 2-min query
+    /// merging its newest 2 panes) or a chain each. Its physical candidate
+    /// with every chain maintained at ingestion time.
+    fn nested_windows_at_ingestion(shared: bool, rows_per_s: f64) -> PhysicalCandidate {
+        use asap_logical_asap_optimization::per_computation_candidates as pcc;
+        let queries = [
+            "quantile_over_time(0.5, m[2m])",
+            "quantile_over_time(0.99, m[5m])",
+        ];
+        let inventory = pcc::generate_per_computation_candidates(
+            queries
+                .iter()
+                .enumerate()
+                .map(|(q, query)| (q, QueryRoot::Operator(lower_promql(query, p99_target()))))
+                .collect(),
+        )
+        .unwrap();
+        let kll: Vec<usize> = inventory
+            .targets
+            .iter()
+            .map(|target| {
+                target
+                    .choices
+                    .candidates
+                    .iter()
+                    .position(|c| {
+                        matches!(c, pcc::ComputationCandidate::Summary(SketchAlgorithm::Kll))
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let roots: Vec<_> = pcc::compose_logical_candidate(&inventory, &kll)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        let rule_candidates = asap_logical_asap_optimization::asap_aware_cse::pane_candidates(
+            &roots,
+            &[Some(u64::from(MINUTE)), Some(u64::from(MINUTE))],
+        );
+        let roots =
+            asap_logical_asap_optimization::asap_aware_cse::window_composition_pass2_candidates(
+                &roots,
+                &rule_candidates,
+            )
+            .unwrap()
+            .into_iter()
+            .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty() != shared)
+            .unwrap()
+            .roots
+            .unwrap();
+        optimize_physical_asap(
+            "L1",
+            &roots,
+            &[every_minute(), every_minute()],
+            &arriving(rows_per_s),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|c| {
+            c.dag.nodes.iter().all(|n| match n.payload {
+                Payload::ASAP(ASAPOp::PaneChain { .. }) => {
+                    matches!(n.materialization, Materialization::MatAtIngestion(_))
+                }
+                _ => n.materialization == Materialization::NotMaterialized,
+            })
+        })
+        .unwrap()
+    }
+
+    /// One chain of 5 panes maintained at ingestion time serves a 5-min and
+    /// a 2-min window: the 2-min query's merge reads its newest 2 panes per
+    /// series, the 5-min query's all 5, and the plan costs less than a chain
+    /// per query, since each arriving row updates one pane instead of two.
+    #[test]
+    fn a_merge_of_the_newest_panes_is_priced_by_the_panes_it_reads() {
+        let rows_per_s = 10_000.0;
+        let shared = nested_windows_at_ingestion(true, rows_per_s);
+        let chains: Vec<_> = shared
+            .dag
+            .nodes
+            .iter()
+            .filter(|n| is_chain(&n.payload))
+            .collect();
+        assert_eq!(chains.len(), 1);
+        let recurrence = [repeating(MINUTE), repeating(MINUTE)];
+        let settings = PlanSelectionSettings::default();
+        let cost = price(&shared.dag, &recurrence, &arriving(rows_per_s), &settings).unwrap();
+        let states_read = |newest: Option<u32>| -> u64 {
+            let merge = shared
+                .dag
+                .nodes
+                .iter()
+                .find(|n| {
+                    matches!(&n.payload, Payload::ASAP(ASAPOp::SummaryMerge { newest_panes, .. })
+                        if *newest_panes == newest)
+                })
+                .unwrap();
+            let detail = &cost.per_node[&merge.id].detail;
+            detail
+                .strip_prefix("merge ")
+                .and_then(|rest| rest.split(' ').next())
+                .and_then(|states| states.parse().ok())
+                .unwrap_or_else(|| panic!("not a merge: {detail}"))
+        };
+        let (newest_two, all_five) = (states_read(Some(2)), states_read(None));
+        assert!(all_five > 0);
+        assert_eq!(newest_two * 5, all_five * 2);
+        let separate = nested_windows_at_ingestion(false, rows_per_s);
+        let separate_cost =
+            price(&separate.dag, &recurrence, &arriving(rows_per_s), &settings).unwrap();
+        assert!(
+            cost.cost_per_second.unwrap() < separate_cost.cost_per_second.unwrap(),
+            "{:?} vs {:?}",
+            cost.cost_per_second,
+            separate_cost.cost_per_second
+        );
     }
 
     /// With more than one ingest worker, each worker beyond the first holds

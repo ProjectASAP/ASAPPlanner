@@ -174,26 +174,63 @@ pub fn pass2_label(
     // Window-composition rule, e.g. "Kll for Q1 in 5 × 1m panes": the
     // queries that read the pane chain the build became. Identical builds
     // in different queries become one structurally identical chain, listed
-    // once with all its readers.
-    let panes: Vec<String> = pass2
-        .pane_candidates
+    // once with all its readers. A chain shared by nested windows is listed
+    // once, as its longest member's, with the queries that merge only its
+    // newest panes, e.g. "one Kll for Q1, Q2 in 30 × 10s panes (Q1 newest
+    // 6)".
+    let candidates = &pass2.pane_candidates;
+    let group_of = |i: usize| pass2.shared_pane_chains.iter().find(|g| g.contains(&i));
+    let longest = |group: &[usize]| {
+        group
+            .iter()
+            .copied()
+            .max_by_key(|&m| candidates[m].pane_count)
+    };
+    let panes: Vec<String> = candidates
         .iter()
         .enumerate()
-        .filter(|(i, candidate)| {
-            !pass2.pane_candidates[..*i]
+        .filter(|&(i, candidate)| match group_of(i) {
+            Some(group) => longest(group) == Some(i),
+            None => !candidates[..i]
                 .iter()
-                .any(|earlier| same_pane_chain(earlier, candidate))
+                .any(|earlier| same_pane_chain(earlier, candidate)),
         })
-        .map(|(_, candidate)| {
-            format!(
-                "{} in {} × {} panes",
+        .map(|(i, candidate)| {
+            let shared = group_of(i).is_some();
+            let chain = |node: &OperatorNode| is_pane_chain_of(node, candidate, shared);
+            let mut text = format!(
+                "{}{} in {} × {} panes",
+                if shared { "one " } else { "" },
                 for_queries(
                     state_name(&candidate.build),
-                    &readers(candidate_roots, |node| is_pane_chain_of(node, candidate))
+                    &readers(candidate_roots, chain)
                 ),
                 candidate.pane_count,
                 duration_name(candidate.pane_width_ms)
-            )
+            );
+            let newest: Vec<String> = group_of(i)
+                .into_iter()
+                .flatten()
+                .map(|&m| candidates[m].pane_count)
+                .filter(|&n| n < candidate.pane_count)
+                .map(|n| {
+                    let reads_newest = |node: &OperatorNode| match node.asap() {
+                        Some(ASAPOp::SummaryMerge {
+                            children,
+                            newest_panes,
+                        }) => *newest_panes == Some(n) && children.iter().any(|c| chain(c)),
+                        _ => false,
+                    };
+                    format!(
+                        "{} newest {n}",
+                        query_names(&readers(candidate_roots, reads_newest))
+                    )
+                })
+                .collect();
+            if !newest.is_empty() {
+                text += &format!(" ({})", newest.join(", "));
+            }
+            text
         })
         .collect();
     if !panes.is_empty() {
@@ -314,8 +351,9 @@ fn same_computation(a: &OperatorNode, b: &OperatorNode) -> bool {
 
 /// Whether `node` is the pane chain `candidate`'s build became: the same
 /// family, update, grouping and filter, over the build's window input, in
-/// `candidate`'s panes.
-fn is_pane_chain_of(node: &OperatorNode, candidate: &PaneCandidate) -> bool {
+/// `candidate`'s panes. With `any_size`, the family at any size: a chain
+/// shared by nested windows is sized for all its readers.
+fn is_pane_chain_of(node: &OperatorNode, candidate: &PaneCandidate, any_size: bool) -> bool {
     let (
         Some(ASAPOp::PaneChain {
             child,
@@ -340,7 +378,14 @@ fn is_pane_chain_of(node: &OperatorNode, candidate: &PaneCandidate) -> bool {
         return false;
     };
     (*pane_width_ms, *pane_count) == (candidate.pane_width_ms, candidate.pane_count)
-        && family == build_family
+        && (family == build_family
+            || any_size
+                && match (family, build_family) {
+                    (FieldDataType::Sketch(a, g), FieldDataType::Sketch(b, h)) => {
+                        a.algorithm() == b.algorithm() && g == h
+                    }
+                    _ => false,
+                })
         && input == build_input
         && reduction == build_reduction
         && grouping == build_grouping
