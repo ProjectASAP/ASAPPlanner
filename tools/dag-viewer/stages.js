@@ -803,6 +803,7 @@ function dataWorkloadView(dataWorkload, queries) {
     sampleInterval: facts.sample_interval === undefined || facts.sample_interval === null ? '—' : durationText(facts.sample_interval),
     streamNorms: norms(facts.stream_norms),
     maxDistinct: typeof facts.max_distinct_per_evaluation === 'number' ? facts.max_distinct_per_evaluation : '—',
+    distinctValuesPerLabel: Object.entries(facts.distinct_values_per_label || {}).map(([label, count]) => `${label} ${count}`).join(', ') || '—',
     readBy: queriesNaming(name, queries || []),
   }));
   return { arrival: `${kind}${rate}`, rows };
