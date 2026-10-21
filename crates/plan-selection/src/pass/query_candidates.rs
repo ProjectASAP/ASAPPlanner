@@ -167,7 +167,7 @@ fn query_digits<Id>(
                 || per_computation.targets[t]
                     .fused
                     .as_ref()
-                    .is_some_and(|fused| read[fused.absorbs])
+                    .is_some_and(|fused| fused.absorbs.iter().any(|&a| read[a]))
         })
         .collect()
 }

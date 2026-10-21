@@ -50,6 +50,7 @@
 //! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49 |
 //! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
 //! | `topk(k, count_over_time(…))` / `topk(k, sum_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count/Sum]}` |
+//! | `topk(k, sum by (G) (count_over_time\|sum_over_time\|rate\|increase\|irate(…)))` | `Aggregate{[TopK{k}]}` over the explicit grouped `Aggregate{[Sum]}` and per-series aggregate |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
 //! | `m{f}` / `m{f}[w]` | `TimeRange{ingestion, Instant, Scan{predicates}}` / `TimeRange{w, Range, Scan}` |
 //! | `a OP b` | `BinaryOp{vector_match}` |
@@ -790,6 +791,9 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
             child: Rc::new(child),
         },
         Outer::TopK { k, descending } => {
+            // A sum of per-series counter values, or of per-series sums or
+            // counts of raw samples (`sum by (G) (sum_over_time(m[W]))`): a
+            // weighted ranking of the groups.
             let weighted_counter_ranking = matches!(
                 &child,
                 Unresolved::Aggregate {
@@ -797,11 +801,15 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
                     child: sum_child,
                     ..
                 } if matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-                    && matches!(sum_child.as_ref(), Unresolved::Aggregate { measures, .. }
+                    && matches!(sum_child.as_ref(), Unresolved::Aggregate { measures, reduction, .. }
                         if matches!(
                             measures.as_slice(),
                             [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
-                        ))
+                        ) || (matches!(reduction, Reduction::PerEntity)
+                            && matches!(
+                                measures.as_slice(),
+                                [AggIntent::Sum { .. } | AggIntent::Count { .. }]
+                            )))
             );
             let direct_counter_ranking = matches!(&child, Unresolved::Aggregate {
                 measures, reduction: Reduction::PerEntity, ..

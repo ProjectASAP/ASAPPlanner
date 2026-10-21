@@ -2696,3 +2696,124 @@ async fn a_forced_heap_counter_topk_plan_compiles_and_answers_within_its_bound()
         }
     }
 }
+
+/// `data` samples of 40 regions with 3 series each, inside the last
+/// minute: region `r` (rank 1..=40) sums to `1000 / r^1.1` over
+/// its series (a skewed ranking of the regions) and holds `3 ·
+/// round(200 / r^1.1)` samples (a skewed count ranking), returned with each
+/// region's exact sum and exact count.
+fn skewed_region_samples() -> (Vec<Sample>, BTreeMap<String, f64>, BTreeMap<String, f64>) {
+    let mut samples = Vec::new();
+    let mut sums = BTreeMap::new();
+    let mut counts = BTreeMap::new();
+    for rank in 1..=40i64 {
+        let region = format!("r{rank:02}");
+        let sum = 1000.0 / (rank as f64).powf(1.1);
+        let per_series_steps = (200.0 / (rank as f64).powf(1.1)).round().max(1.0) as i64;
+        for series in 0..3 {
+            let instance = format!("{region}-{series}");
+            for step in 0..per_series_steps {
+                // Spread over (EVALUATION_MS - 59 s, EVALUATION_MS - 1 s].
+                let at = EVALUATION_MS - 1_000 - step * 58_000 / per_series_steps;
+                let mut s = sample("data", &instance, at, sum / 3.0 / per_series_steps as f64);
+                s.labels.insert("region".into(), region.clone());
+                samples.push(s);
+            }
+        }
+        sums.insert(region.clone(), sum);
+        counts.insert(region, (3 * per_series_steps) as f64);
+    }
+    samples.sort_by_key(|s| s.timestamp_ms);
+    (samples, sums, counts)
+}
+
+/// The ASAPQuery workloads' grouped top-k-sum shape,
+/// `topk(3, sum by (region) (<f>(data[1m])))` for `f` `sum_over_time` or
+/// `count_over_time`: each forced fused heap (one over the raw samples,
+/// keyed by `region`, weighted by the sample value or by one) compiles and
+/// answers the true top 3 regions within its bound of their exact sums or
+/// counts, each named by its `region` label alone, as the exact top-k's.
+/// A Count-Min heap over sample values needs the gauge declared
+/// non-negative; a Count Sketch heap takes any gauge.
+#[tokio::test]
+async fn a_forced_heap_grouped_topk_sum_plan_compiles_and_answers_within_its_bound() {
+    let (samples, sums, counts) = skewed_region_samples();
+    let gauge = r#""metric_type": "gauge""#;
+    let non_negative = r#""metric_type": "gauge", "values_non_negative": true"#;
+    for (function, truth, facts, algorithm) in [
+        (
+            "sum_over_time",
+            &sums,
+            non_negative,
+            SketchAlgorithm::CmsWithHeap,
+        ),
+        (
+            "sum_over_time",
+            &sums,
+            gauge,
+            SketchAlgorithm::CountSketchWithHeap,
+        ),
+        (
+            "count_over_time",
+            &counts,
+            gauge,
+            SketchAlgorithm::CmsWithHeap,
+        ),
+        (
+            "count_over_time",
+            &counts,
+            gauge,
+            SketchAlgorithm::CountSketchWithHeap,
+        ),
+    ] {
+        let query = format!("topk(3, sum by (region) ({function}(data[1m])))");
+        let workload = heap_topk_workload(&query, "data", facts);
+        let truth = BTreeMap::from([(String::new(), truth.clone())]);
+        let plan = plan_ignoring_guarantees(&workload, Some(algorithm.clone()))
+            .await
+            .unwrap_or_else(|error| panic!("{query} {algorithm:?}: {error}"));
+        let (built, width) = heap_of(&plan).expect("a heap plan");
+        assert_eq!(built, algorithm, "{query}");
+        plan.check_compiles().unwrap();
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        let run = run_data_plane(
+            &plan_json,
+            &samples,
+            EVALUATION_MS,
+            &mut SummaryStore::new(),
+        );
+        for answers in [
+            &run.answers_per_query[0],
+            &run.reference_answers_per_query[0],
+        ] {
+            assert_heap_topk_answers(answers, &truth, (None, "region", 3), (&algorithm, width));
+            for (labels, _) in answers.iter() {
+                assert_eq!(
+                    labels.keys().collect::<Vec<_>>(),
+                    ["region"],
+                    "{query} {algorithm:?}: the group label alone"
+                );
+            }
+        }
+        // The installed plan (stored states) answers as its query-time
+        // reference does, within the heap's bound.
+        let bound = heap_bound(
+            &algorithm,
+            width,
+            &truth[""].values().copied().collect::<Vec<_>>(),
+        );
+        let reference: BTreeMap<_, _> = run.reference_answers_per_query[0]
+            .iter()
+            .map(|(labels, value)| (labels.clone(), *value))
+            .collect();
+        for (labels, value) in &run.answers_per_query[0] {
+            let expected = reference
+                .get(labels)
+                .unwrap_or_else(|| panic!("{query} {algorithm:?}: {labels:?} in the reference"));
+            assert!(
+                (value - expected).abs() <= bound,
+                "{query} {algorithm:?}: {value} vs {expected}"
+            );
+        }
+    }
+}
