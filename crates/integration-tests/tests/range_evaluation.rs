@@ -49,7 +49,7 @@ fn keeping_query_time_results() -> DeploymentCapabilities {
     }
 }
 
-/// `query` every `interval_ms` over 1M series of `m` sampled every 15 s,
+/// `query` every `interval_ms` over 1M series of `m` sampled every 1.5 s,
 /// arriving continuously, exact, answered as `range`.
 fn exact_panel(query: &str, interval_ms: u32, range: Option<RangeEvaluation>) -> PlanningWorkload {
     PlanningWorkload {
@@ -72,7 +72,7 @@ fn exact_panel(query: &str, interval_ms: u32, range: Option<RangeEvaluation>) ->
                 "m".to_string(),
                 SourceFacts {
                     series_count: Some(1_000_000),
-                    sample_interval: Some(DurationMs(15_000)),
+                    sample_interval: Some(DurationMs(1_500)),
                     ..SourceFacts::default()
                 },
             )]
@@ -243,12 +243,12 @@ fn no_range_evaluation_leaves_every_price_unchanged() {
 
 /// The example where declaring the range makes Stage 3 prefer sharing:
 /// `max_over_time(m[5m])` every minute over 1M series. As one evaluation
-/// per minute, rebuilding the window (P1, 2.0833 cost/s) beats the kept
-/// panes (P2-m2, 4.5133: 32 MB of per-series maxima kept) and the panes
-/// maintained at ingestion (P2-m1, 6.5133). As a dashboard over the last
-/// hour at 1-minute steps, rebuilding costs 61 times as much (127.0833),
-/// while the kept panes add only the per-step merges and 1 h of panes
-/// (70.5133), and B1 72.5133: the kept panes are selected, and without
+/// per minute, rebuilding the window (P1, 20.6833 cost/s) beats the kept
+/// panes (P2-m2, 32.2333: 224 MB of 56-byte per-series maxima kept) and the
+/// panes maintained at ingestion (P2-m1, 46.2333). As a dashboard over the
+/// last hour at 1-minute steps, rebuilding costs 61 times as much
+/// (1,261.6833), while the kept panes add only the per-step merges and 1 h
+/// of panes (458.2333), and B1 472.2333: the kept panes are selected, and without
 /// query-time retention, the ingestion-time panes.
 #[test]
 fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
@@ -265,12 +265,12 @@ fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
     );
     let ingestion = with_chain(&range, Materialization::MatAtIngestion(Medium::Memory));
     for (run, id, expected) in [
-        (&none, "P1", 2.083_333),
-        (&none, kept.as_str(), 4.513_333),
-        (&none, ingestion.as_str(), 6.513_333),
-        (&range, "P1", 127.083_333),
-        (&range, kept.as_str(), 70.513_333),
-        (&range, ingestion.as_str(), 72.513_333),
+        (&none, "P1", 20.683_333),
+        (&none, kept.as_str(), 32.233_333),
+        (&none, ingestion.as_str(), 46.233_335),
+        (&range, "P1", 1_261.683_333),
+        (&range, kept.as_str(), 458.233_333),
+        (&range, ingestion.as_str(), 472.233_335),
     ] {
         assert!(
             (cost(run, id) - expected).abs() < 1e-5,

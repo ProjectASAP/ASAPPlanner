@@ -104261,7 +104261,7 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 16481088,
+          "peak_memory_bytes": 112485888,
           "scanned_bytes_per_second": 38400000.0
         }
       },
@@ -104358,7 +104358,7 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 16481088,
+          "peak_memory_bytes": 112485888,
           "scanned_bytes_per_second": 38400000.0
         }
       },
@@ -104449,7 +104449,7 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 16481088,
+          "peak_memory_bytes": 112485888,
           "scanned_bytes_per_second": 38400000.0
         }
       },
@@ -104552,12 +104552,12 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 64481040,
+          "peak_memory_bytes": 448485840,
           "scanned_bytes_per_second": 38400000.0
         }
       },
       "P4-m1": {
-        "cost_per_second": 12.940212599999999,
+        "cost_per_second": 54.94021260000001,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -104567,8 +104567,8 @@
             "price_source": "analytical"
           },
           "1": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -104641,7 +104641,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 56000000.0,
+          "average_memory_bytes": 392000000.0,
           "cpu_ops_per_second": 3700211.0,
           "disk_bytes": 192000000,
           "latency_per_query": [
@@ -104655,7 +104655,7 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 72481040,
+          "peak_memory_bytes": 504485840,
           "scanned_bytes_per_second": 22400016.0
         }
       },
@@ -104752,12 +104752,12 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 64481040,
+          "peak_memory_bytes": 448485840,
           "scanned_bytes_per_second": 38400000.0
         }
       },
       "P5-m1": {
-        "cost_per_second": 12.940212599999999,
+        "cost_per_second": 54.94021260000001,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -104767,8 +104767,8 @@
             "price_source": "analytical"
           },
           "1": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -104841,7 +104841,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 56000000.0,
+          "average_memory_bytes": 392000000.0,
           "cpu_ops_per_second": 3700211.0,
           "disk_bytes": 192000000,
           "latency_per_query": [
@@ -104855,7 +104855,7 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 72481040,
+          "peak_memory_bytes": 504485840,
           "scanned_bytes_per_second": 22400016.0
         }
       },
@@ -104958,12 +104958,12 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 64481040,
+          "peak_memory_bytes": 448485840,
           "scanned_bytes_per_second": 38400000.0
         }
       },
       "P6-m1": {
-        "cost_per_second": 12.940212599999999,
+        "cost_per_second": 54.9402126,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -105027,8 +105027,8 @@
             "price_source": "analytical"
           },
           "7": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -105047,7 +105047,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 56000000.0,
+          "average_memory_bytes": 392000000.0,
           "cpu_ops_per_second": 3700211.0,
           "disk_bytes": 192000000,
           "latency_per_query": [
@@ -105061,7 +105061,7 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 72481040,
+          "peak_memory_bytes": 504485840,
           "scanned_bytes_per_second": 22400016.0
         }
       },
@@ -105158,12 +105158,12 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 64481040,
+          "peak_memory_bytes": 448485840,
           "scanned_bytes_per_second": 38400000.0
         }
       },
       "P7-m1": {
-        "cost_per_second": 12.940212599999999,
+        "cost_per_second": 54.9402126,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -105227,8 +105227,8 @@
             "price_source": "analytical"
           },
           "7": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -105247,7 +105247,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 56000000.0,
+          "average_memory_bytes": 392000000.0,
           "cpu_ops_per_second": 3700211.0,
           "disk_bytes": 192000000,
           "latency_per_query": [
@@ -105261,7 +105261,7 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 72481040,
+          "peak_memory_bytes": 504485840,
           "scanned_bytes_per_second": 22400016.0
         }
       },
@@ -105364,12 +105364,12 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 112480992,
+          "peak_memory_bytes": 784485792,
           "scanned_bytes_per_second": 38400000.0
         }
       },
       "P8-m1": {
-        "cost_per_second": 13.540212599999998,
+        "cost_per_second": 55.540212600000004,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -105433,8 +105433,8 @@
             "price_source": "analytical"
           },
           "7": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -105453,7 +105453,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 56000000.0,
+          "average_memory_bytes": 392000000.0,
           "cpu_ops_per_second": 4300211.0,
           "disk_bytes": 192000000,
           "latency_per_query": [
@@ -105467,12 +105467,12 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 120480992,
+          "peak_memory_bytes": 840485792,
           "scanned_bytes_per_second": 22400016.0
         }
       },
       "P8-m2": {
-        "cost_per_second": 13.540212599999998,
+        "cost_per_second": 55.54021260000001,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -105482,8 +105482,8 @@
             "price_source": "analytical"
           },
           "1": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -105556,7 +105556,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 56000000.0,
+          "average_memory_bytes": 392000000.0,
           "cpu_ops_per_second": 4300211.0,
           "disk_bytes": 192000000,
           "latency_per_query": [
@@ -105570,12 +105570,12 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 120480992,
+          "peak_memory_bytes": 840485792,
           "scanned_bytes_per_second": 22400016.0
         }
       },
       "P8-m3": {
-        "cost_per_second": 17.940215199999997,
+        "cost_per_second": 101.94021520000001,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -105585,8 +105585,8 @@
             "price_source": "analytical"
           },
           "1": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -105639,8 +105639,8 @@
             "price_source": "analytical"
           },
           "7": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -105659,7 +105659,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 112000000.0,
+          "average_memory_bytes": 784000000.0,
           "cpu_ops_per_second": 3300212.0,
           "disk_bytes": 0,
           "latency_per_query": [
@@ -105673,7 +105673,7 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 128480992,
+          "peak_memory_bytes": 896485792,
           "scanned_bytes_per_second": 6400032.0
         }
       },
@@ -105770,12 +105770,12 @@
             }
           ],
           "peak_cpu_cores": 2,
-          "peak_memory_bytes": 112480992,
+          "peak_memory_bytes": 784485792,
           "scanned_bytes_per_second": 38400000.0
         }
       },
       "P9-m1": {
-        "cost_per_second": 13.540212599999998,
+        "cost_per_second": 55.540212600000004,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -105839,8 +105839,8 @@
             "price_source": "analytical"
           },
           "7": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -105859,7 +105859,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 56000000.0,
+          "average_memory_bytes": 392000000.0,
           "cpu_ops_per_second": 4300211.0,
           "disk_bytes": 192000000,
           "latency_per_query": [
@@ -105873,12 +105873,12 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 120480992,
+          "peak_memory_bytes": 840485792,
           "scanned_bytes_per_second": 22400016.0
         }
       },
       "P9-m2": {
-        "cost_per_second": 13.540212599999998,
+        "cost_per_second": 55.54021260000001,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -105888,8 +105888,8 @@
             "price_source": "analytical"
           },
           "1": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -105962,7 +105962,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 56000000.0,
+          "average_memory_bytes": 392000000.0,
           "cpu_ops_per_second": 4300211.0,
           "disk_bytes": 192000000,
           "latency_per_query": [
@@ -105976,12 +105976,12 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 120480992,
+          "peak_memory_bytes": 840485792,
           "scanned_bytes_per_second": 22400016.0
         }
       },
       "P9-m3": {
-        "cost_per_second": 17.940215199999997,
+        "cost_per_second": 101.94021520000001,
         "cost_unit": "cost_per_second",
         "per_node": {
           "0": {
@@ -105991,8 +105991,8 @@
             "price_source": "analytical"
           },
           "1": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -106033,8 +106033,8 @@
             "price_source": "analytical"
           },
           "6": {
-            "cost_per_second": 7.133334,
-            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 56000000 bytes",
+            "cost_per_second": 49.133334,
+            "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
             "price_source": "analytical"
           },
@@ -106059,7 +106059,7 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
         "usage": {
-          "average_memory_bytes": 112000000.0,
+          "average_memory_bytes": 784000000.0,
           "cpu_ops_per_second": 3300212.0,
           "disk_bytes": 0,
           "latency_per_query": [
@@ -106073,7 +106073,7 @@
             }
           ],
           "peak_cpu_cores": 3,
-          "peak_memory_bytes": 128480992,
+          "peak_memory_bytes": 896485792,
           "scanned_bytes_per_second": 6400032.0
         }
       }
@@ -106289,7 +106289,7 @@
       {
         "cause": "costlier",
         "id": "P4-m1",
-        "reason": "costlier: 12.940 vs 7.940 cost_per_second"
+        "reason": "costlier: 54.940 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
@@ -106299,7 +106299,7 @@
       {
         "cause": "costlier",
         "id": "P5-m1",
-        "reason": "costlier: 12.940 vs 7.940 cost_per_second"
+        "reason": "costlier: 54.940 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
@@ -106309,7 +106309,7 @@
       {
         "cause": "costlier",
         "id": "P6-m1",
-        "reason": "costlier: 12.940 vs 7.940 cost_per_second"
+        "reason": "costlier: 54.940 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
@@ -106319,7 +106319,7 @@
       {
         "cause": "costlier",
         "id": "P7-m1",
-        "reason": "costlier: 12.940 vs 7.940 cost_per_second"
+        "reason": "costlier: 54.940 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
@@ -106329,17 +106329,17 @@
       {
         "cause": "costlier",
         "id": "P8-m1",
-        "reason": "costlier: 13.540 vs 7.940 cost_per_second"
+        "reason": "costlier: 55.540 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
         "id": "P8-m2",
-        "reason": "costlier: 13.540 vs 7.940 cost_per_second"
+        "reason": "costlier: 55.540 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
         "id": "P8-m3",
-        "reason": "costlier: 17.940 vs 7.940 cost_per_second"
+        "reason": "costlier: 101.940 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
@@ -106349,17 +106349,17 @@
       {
         "cause": "costlier",
         "id": "P9-m1",
-        "reason": "costlier: 13.540 vs 7.940 cost_per_second"
+        "reason": "costlier: 55.540 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
         "id": "P9-m2",
-        "reason": "costlier: 13.540 vs 7.940 cost_per_second"
+        "reason": "costlier: 55.540 vs 7.940 cost_per_second"
       },
       {
         "cause": "costlier",
         "id": "P9-m3",
-        "reason": "costlier: 17.940 vs 7.940 cost_per_second"
+        "reason": "costlier: 101.940 vs 7.940 cost_per_second"
       }
     ],
     "search": {

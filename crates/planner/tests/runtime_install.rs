@@ -787,10 +787,10 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
 
 /// A deployment that keeps raw samples and query-time results across
 /// evaluations (#509 Example 4's B3), with a dashboard panel
-/// (`max_over_time(latency_ms[5m])` every minute over 1M series, answered
-/// as the last hour at 1-minute steps): Stage 3 keeps five 1-minute panes
-/// built at query time, and feeds their ranges only through those builds,
-/// so no window is listed twice. The first evaluation, with an empty
+/// (`max_over_time(latency_ms[5m])` every minute over 1M series sampled
+/// every 1.5 s, answered as the last hour at 1-minute steps): Stage 3
+/// keeps five 1-minute panes built at query time, and feeds their ranges
+/// only through those builds, so no window is listed twice. The first evaluation, with an empty
 /// store, builds all five in its query run; the next, a minute later,
 /// reuses the four still in its window and builds only the newest. Each
 /// evaluation's answers (each series' newest-pane maximum) equal the
@@ -808,8 +808,8 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
               "requirements": {},
               "predictability": {"predictable": {"known_at": null}},
               "range_evaluation": {"step_ms": 60000, "span_ms": 3600000}}]},
-            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 66666.67}},
-              "sources": {"latency_ms": {"series_count": 1000000, "sample_interval": 15000}}}}"#,
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 666666.67}},
+              "sources": {"latency_ms": {"series_count": 1000000, "sample_interval": 1500}}}}"#,
     )
     .unwrap();
     let plan_json = plan_json_for(workload, &capabilities).await;
@@ -1178,10 +1178,19 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
         query_time_results_retained: true,
         ..DeploymentCapabilities::default()
     };
-    let workload = exact_workload(
+    let mut workload = exact_workload(
         &["max_over_time(m[5m])"],
         r#", "range_evaluation": {"step_ms": 60000, "span_ms": 3600000}"#,
     );
+    // Declared as sampled every second, so that keeping the panes is
+    // cheaper than rebuilding the window at every step; the samples the
+    // run reads are every 10 s, and exact answers do not depend on it.
+    let facts = workload
+        .data_workload
+        .as_mut()
+        .and_then(|data| data.sources.get_mut("m"))
+        .unwrap();
+    facts.sample_interval = Some(asap_types::workload::DurationMs(1_000));
     let plan_json = forced_plan_json(&workload, &capabilities, merges_kept).await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
     let (merge, panes) = plan.stored_outputs.split_last().unwrap();
