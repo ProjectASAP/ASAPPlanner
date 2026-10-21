@@ -559,6 +559,114 @@ class WorkloadViewTests(unittest.TestCase):
         self.assertIn("δ=0.3", queries[0]["accuracy"])
 
 
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+class PanesAndPathsTests(unittest.TestCase):
+    """Display only: a pane chain expands into its panes on request, each
+    node lists the queries whose root reaches it, and the query and node
+    neighborhoods the page highlights. The seed-862 plan keeps six pane
+    chains; queries q1-q7 read metric "data", q8 and q9 "data_total"."""
+
+    def setUp(self):
+        self.js = stages_js()
+        self.doc = seed862()
+        self.selected = self.doc["stage2_physical_asap_optimization"]["candidates"][0]
+        self.dag = self.selected["dag"]
+        self.query_ids = [q["id"] for q in self.doc["workload"]["queries"]]
+        self.chain = next(n for n in self.dag["nodes"] if "PaneChain" in n["payload"].get("ASAP", {}))
+        self.body = self.chain["payload"]["ASAP"]["PaneChain"]
+
+    def elements(self, **options):
+        return self.js.call("stageLaneElements", self.dag, dict({"physical": True, "queryIds": self.query_ids}, **options))
+
+    def node(self, elements, element_id):
+        return next(e for e in lane_nodes(elements) if e["data"]["id"] == element_id)
+
+    def test_chains_stay_collapsed_by_default_and_print_their_panes(self):
+        chain = self.node(self.elements(), f"n{self.chain['id']}")
+        self.assertEqual(chain["data"]["kind"], "PaneChain")
+        self.assertIn(f"{self.body['pane_count']} panes × 20 s", chain["data"]["label"])
+        self.assertTrue(chain["data"]["expandable"])
+
+    def test_an_expanded_chain_shows_each_pane_with_its_time_range_shift_and_window(self):
+        count, chain_id = self.body["pane_count"], self.chain["id"]
+        elements = self.elements(expandedChains=[chain_id])
+        ids = {e["data"]["id"] for e in lane_nodes(elements)}
+        self.assertNotIn(f"n{chain_id}", ids)
+        panes = [e for e in lane_nodes(elements) if e["data"].get("paneOf") == chain_id]
+        kinds = sorted(e["data"]["kind"] for e in panes)
+        # One build, one TimeRange per pane; a TimeShift for every pane but the newest.
+        self.assertEqual(kinds.count("pane"), count)
+        self.assertEqual(kinds.count("TimeRange"), count)
+        self.assertEqual(kinds.count("TimeShift"), count - 1)
+        newest = self.node(elements, f"n{chain_id}p0")
+        self.assertIn("pane 1 of 30", newest["data"]["label"])
+        self.assertIn("window t−20 s … t", newest["data"]["label"])
+        oldest = self.node(elements, f"n{chain_id}p{count - 1}")
+        self.assertIn("window t−10 min … t−9 min 40 s", oldest["data"]["label"])
+        shift = self.node(elements, f"n{chain_id}p1s")
+        self.assertIn("shift: 20 s", shift["data"]["label"])
+        edges = [(e["data"]["source"], e["data"]["target"]) for e in lane_edges(elements)]
+        child = f"n{self.body['child']}"
+        # The chain's input feeds every pane's window; every pane feeds the chain's readers.
+        self.assertIn((child, f"n{chain_id}p0r"), edges)
+        self.assertIn((child, f"n{chain_id}p1s"), edges)
+        self.assertIn((f"n{chain_id}p1s", f"n{chain_id}p1r"), edges)
+        self.assertIn((f"n{chain_id}p1r", f"n{chain_id}p1"), edges)
+        readers = {c for (p, c) in [(e["producer"], e["consumer"]) for e in self.dag["edges"]] if p == chain_id}
+        for reader in readers:
+            self.assertEqual(sum(1 for edge in edges if edge == (f"n{chain_id}p0", f"n{reader}")), 1)
+            self.assertEqual(sum(1 for (p, c) in edges if c == f"n{reader}" and p.startswith(f"n{chain_id}p") and not p.endswith(("r", "s"))), count)
+
+    def test_each_node_lists_the_queries_reaching_it_and_shared_nodes_say_so(self):
+        elements = self.elements()
+        # The quantile queries q3-q5 share one scan, one pane chain of
+        # DDSketches; q3 and q4 also share its merge.
+        scans = [e for e in lane_nodes(elements) if e["data"]["kind"] == "Scan"]
+        shared = next(e for e in scans if e["data"]["reachedBy"] == ["q3", "q4", "q5"])
+        self.assertIn("shared ×3", shared["data"]["label"])
+        merge = next(e for e in lane_nodes(elements) if e["data"]["kind"] == "SummaryMerge" and e["data"]["reachedBy"] == ["q3", "q4"])
+        self.assertIn("shared ×2", merge["data"]["label"])
+        root = self.node(elements, f"n{self.dag['roots'][8]}")
+        self.assertEqual(root["data"]["reachedBy"], ["q9"])
+        self.assertNotIn("shared", root["data"]["label"])
+
+    def test_logical_lanes_list_the_queries_reaching_each_node_too(self):
+        stage0 = self.doc["stage0_query_language_frontends"]["dag"]
+        elements = self.js.call("stageLaneElements", stage0, {"physical": False, "queryIds": self.query_ids})
+        self.assertTrue(all(e["data"]["reachedBy"] for e in lane_nodes(elements)))
+
+    def test_a_query_reaches_its_nodes_and_edges_only(self):
+        elements = self.elements()
+        kept = set(self.js.call("stageQueryElementIds", elements, "q9"))
+        nodes = {e["data"]["id"] for e in lane_nodes(elements) if e["data"]["id"] in kept}
+        self.assertEqual(nodes, {e["data"]["id"] for e in lane_nodes(elements) if "q9" in e["data"]["reachedBy"]})
+        for edge in lane_edges(elements):
+            self.assertEqual(edge["data"]["id"] in kept, edge["data"]["source"] in nodes and edge["data"]["target"] in nodes)
+        self.assertNotIn(f"n{self.chain['id']}", kept)
+
+    def test_a_node_neighborhood_is_everything_upstream_and_downstream(self):
+        elements = self.elements()
+        chain = f"n{self.chain['id']}"
+        kept = set(self.js.call("stageNeighborhoodIds", elements, chain))
+        self.assertIn(chain, kept)
+        self.assertIn(f"n{self.body['child']}", kept)  # upstream: the scan
+        for root in (self.dag["roots"][0], self.dag["roots"][1]):  # downstream: q1's and q2's roots
+            self.assertIn(f"n{root}", kept)
+        self.assertNotIn(f"n{self.dag['roots'][8]}", kept)  # q9 reads another metric
+
+    def test_stored_outputs_group_by_pane_chain(self):
+        groups = self.js.call("storedOutputGroups", self.doc)
+        self.assertEqual(len(groups), 6)
+        self.assertEqual(sum(len(g["panes"]) for g in groups), len(self.doc["stage3_plan_selection"]["stored_outputs"]))
+        first = groups[0]
+        self.assertEqual(first["stage2NodeId"], self.chain["id"])
+        self.assertEqual(first["panesText"], "30 × 20 s")
+        self.assertEqual((first["builtAt"], first["retention"]), ("ingestion run", "10 min"))
+        self.assertEqual(first["readBy"], ["q1", "q2"])
+        self.assertEqual(first["panes"][0]["window"], "t−20 s … t")
+        self.assertEqual(first["panes"][1]["window"], "t−40 s … t−20 s")
+
+
 class WorkloadSetTests(unittest.TestCase):
     """workloads/index.json lists sets of PlanningWorkload files; the Rust
     test validates each file with `PlanningWorkload::validate`."""
@@ -646,10 +754,20 @@ function MutationObserver() { this.observe = function () {}; }
 var URLSearchParams = function (s) { this.get = (k) => { const m = s.match(new RegExp('[?&]' + k + '=([^&]*)')); return m ? decodeURIComponent(m[1]) : null; }; };
 var __nodes = 0;
 var __taps = {};
+var __dimmed = {};
+var __rendered = {};
 function cytoscape(o) {
   __nodes += o.elements.length;
   const lane = o.container.id;
-  return { on(event, what, fn) { __taps[lane + ' ' + what] = fn; }, destroy() {}, style() {} };
+  __rendered[lane] = o.elements;
+  __dimmed[lane] = [];
+  const element = (e) => ({ id() { return e.data.id; }, data() { return e.data; }, length: 1,
+    toggleClass(name, on) { if (name === 'dimmed' && on) __dimmed[lane].push(e.data.id); }, select() {}, unselect() {} });
+  const all = () => { const list = o.elements.map(element); list.unselect = () => {}; return list; };
+  return { on(event, what, fn) { __taps[lane + ' ' + (typeof what === 'function' ? 'background' : what)] = typeof what === 'function' ? what : fn; },
+    destroy() {}, style() {}, elements: all, batch(fn) { __dimmed[lane] = []; fn(); },
+    getElementById(id) { const e = o.elements.find((x) => x.data.id === id); return e ? element(e) : { length: 0 }; },
+    center() {} };
 }
 function fetch(u) { return Promise.resolve({ ok: u in __files, status: 404, json() { return Promise.resolve(JSON.parse(__files[u])); } }); }
 """
@@ -670,6 +788,9 @@ class AppTests(unittest.TestCase):
         js.eval((HERE / "app.js").read_text())
         time.sleep(0.05)
         return js
+
+    def ev(self, js, expression):
+        return json.loads(js.eval(f"JSON.stringify({expression})"))
 
     def text(self, js, element):
         return js.eval(f"__els[{json.dumps(element)}].innerHTML.replace(/<[^>]+>/g, '')")
@@ -748,7 +869,6 @@ class AppTests(unittest.TestCase):
         self.assertIn("raw data not retained", js.eval("__els.deployment.textContent"))
         stored = len(seed862()["stage3_plan_selection"]["stored_outputs"])
         self.assertIn(f"{stored} stored outputs", self.text(js, "stored-meta"))
-        self.assertEqual(js.eval("(__els.storedOutputs.innerHTML.match(/data-node=/g) || []).length"), stored)
         self.assertIn("every 20 s · predictable", self.text(js, "queries"))
         self.assertIn("Stage 3 usage: CPU", self.text(js, "lane2-meta"))
 
@@ -768,6 +888,67 @@ class AppTests(unittest.TestCase):
         self.assertIn("q01-sum-fine", table)
         self.assertIn("no server", js.eval("__els.setsServer.textContent"))
         self.assertIn("Random mixed · seed-862 (10)", js.eval("__els.setPick.innerHTML"))
+
+    def test_stored_outputs_table_has_one_row_per_pane_chain(self):
+        js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
+        self.assertEqual(js.eval("(__els.storedOutputs.innerHTML.match(/data-node=/g) || []).length"), 6)
+        self.assertIn("300 stored outputs in 6 groups", self.text(js, "stored-meta"))
+        self.assertIn("30 × 20 s", self.text(js, "storedOutputs"))
+
+    def test_picking_a_query_dims_what_it_does_not_reach(self):
+        js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
+        self.assertIn('value="q9"', js.eval("__els.queryPick.innerHTML"))
+        js.eval("__els.queryPick.__on.change({ target: { value: 'q9' } })")
+        dimmed = set(self.ev(js, "__dimmed.cy2"))
+        rendered = self.ev(js, "__rendered.cy2")
+        reached = {e["data"]["id"] for e in rendered if "source" not in e["data"] and "q9" in e["data"]["reachedBy"]}
+        self.assertTrue(dimmed)
+        self.assertFalse(dimmed & reached)
+        self.assertTrue(js.eval("__dimmed.cy0.length") > 0)
+        js.eval("__els.queryPick.__on.change({ target: { value: '' } })")
+        self.assertEqual(js.eval("__dimmed.cy2.length"), 0)
+
+    def test_tapping_a_pane_chain_expands_it_and_a_pane_collapses_it(self):
+        js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
+        chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "PaneChain")
+        js.eval(f"__taps['cy2 node']({{ target: __rendered.cy2.find((e) => e.data.id === {json.dumps(chain['data']['id'])}) && {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(chain['data']['id'])}).data; }}, id() {{ return {json.dumps(chain['data']['id'])}; }} }} }})")
+        ids = {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")}
+        self.assertNotIn(chain["data"]["id"], ids)
+        pane = chain["data"]["id"] + "p0"
+        self.assertIn(pane, ids)
+        js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(pane)}).data; }}, id() {{ return {json.dumps(pane)}; }} }} }})")
+        self.assertIn(chain["data"]["id"], {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")})
+
+    def test_an_expanded_chain_stays_expanded_after_switching_plans_and_back(self):
+        doc = json.loads(SEED862.read_text())
+        physical = doc["stage2_physical_asap_optimization"]
+        selected = doc["stage3_plan_selection"]["selected"]
+        copy = json.loads(json.dumps(next(c for c in physical["candidates"] if c["id"] == selected)))
+        copy["id"] = "P-copy"
+        physical["candidates"].append(copy)
+        doc["stage3_plan_selection"]["rejected"].append({"id": "P-copy", "cause": "costlier", "reason": "a copy of the selected plan"})
+        js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
+        chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "PaneChain")["data"]["id"]
+        tap = lambda id_: js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(id_)}).data; }}, id() {{ return {json.dumps(id_)}; }} }} }})")
+        ids = lambda: {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")}
+        tap(chain)
+        self.assertIn(chain + "p0", ids())
+        js.eval("__els.pick2.__on.change({ target: { value: 'P-copy' } })")
+        self.assertIn(chain, ids())
+        js.eval(f"__els.pick2.__on.change({{ target: {{ value: {json.dumps(selected)} }} }})")
+        self.assertIn(chain + "p0", ids())
+        self.assertNotIn(chain, ids())
+
+    def test_tapping_a_node_highlights_its_neighborhood_and_lists_its_queries(self):
+        js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
+        scan = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "Scan")
+        js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(scan['data']['id'])}).data; }}, id() {{ return {json.dumps(scan['data']['id'])}; }} }} }})")
+        self.assertIn("queries reaching it", self.text(js, "details"))
+        self.assertIn(", ".join(scan["data"]["reachedBy"]), self.text(js, "details"))
+        self.assertTrue(js.eval("__dimmed.cy2.length") > 0)
+        self.assertNotIn(scan["data"]["id"], self.ev(js, "__dimmed.cy2"))
+        js.eval("__taps['cy2 background']({ target: { isNode: false } })")
+        self.assertEqual(js.eval("__dimmed.cy2.length"), 0)
 
     def test_an_invalid_document_shows_an_error(self):
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})

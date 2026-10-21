@@ -191,7 +191,19 @@ Data flows from the bottom up. Node colors:
   estimate, finalize);
 - dashed: a standalone scalar query, such as `time()` or `1 + 2`.
 
-A thick border marks a query's result. A sketch build shows its configuration
+A thick border marks a query's result, and `shared ×n` marks a node that n
+queries' roots reach (n > 1). A pane chain (`PaneChain`, tumbling panes a
+summary is built in) is one node that says how many panes of what width it
+has, for example `30 panes × 20 s`. Click it to draw each pane, newest
+first: a `TimeShift` by the pane's offset (none for the newest), a
+`TimeRange` of one pane, and the pane's build with its window relative to
+the evaluation time `t`, for example `window t−40 s … t−20 s`. Click a pane
+to fold the chain again.
+
+To follow one query, pick it in **highlight query** above the lanes: every
+lane dims what that query's root does not reach. Click a node to dim
+everything except what it reads and what reads it; click the background to
+go back. A sketch build shows its configuration
 and how many instances it keeps, for example `summary: CmsWithHeap · depth 7
 · heap 100 · width 272` and `instances: one per group`.
 
@@ -200,13 +212,13 @@ Drag to pan and scroll to zoom.
 ### Stored outputs
 
 Under the Stage 2 lane, what a deployment runtime would store for the
-selected plan, as `plan_installable` reports it: one row per stored node of
-the installed plan (each pane of a pane chain is its own row), with the
-Stage 2 node it comes from, its coverage definition (equal for two nodes
-that compute the same thing), its operator and summary parameters, which
-pane it is, whether it is built at ingestion or at query time and kept,
-what it reads, how long it is kept, the Stage 3 cost of its Stage 2 node,
-and the queries that read it. Click a row to select its node in the Stage 2
+selected plan, as `plan_installable` reports it: one row per Stage 2 node,
+with its coverage definition (equal for two nodes that compute the same
+thing), its operator and summary parameters, its panes (`30 × 20 s` for a
+pane chain), whether it is built at ingestion or at query time and kept,
+how long it is kept, the Stage 3 cost of its Stage 2 node, and the queries
+that read it. Open **installed nodes** in a pane chain's row for each pane
+the runtime installs: its node id, its window and how long it is kept. Click a row to select its node in the Stage 2
 lane. A plan that computes everything at query time has no stored outputs.
 
 ### Details
@@ -214,6 +226,7 @@ lane. A plan that computes everything at query time has no stored outputs.
 Click a node to see:
 
 - its operator and node id;
+- the queries whose root reaches it;
 - for a summary, its parameters and instances;
 - which query it answers;
 - when it runs and its Stage 3 cost;
