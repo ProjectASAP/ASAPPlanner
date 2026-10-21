@@ -733,8 +733,8 @@ The planner implements a subset of the window-composition rule today:
 `Tumbling(L)` only, as a `PaneChain` (one node for all `W_q / L` panes)
 read through a `SummaryMerge`, with `L = gcd(W_q, E_q)` for each query. Two
 or more queries share one chain when their builds have the same family (at
-any size) and the same summary input data, their windows end at the same
-time, and their pane widths are equal. The shared chain has the most panes
+any size), the same summary input data and the same output column names,
+their windows end at the same time, and their pane widths are equal. The shared chain has the most panes
 any of them reads and is sized for all of them, each parameter at its
 largest value among them, as the summary-capability rule sizes a shared
 build. Each query merges only its own newest `W_q / L` panes

@@ -44,7 +44,7 @@ pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
 /// How many of its chain's panes, newest first, a summary-state node with
 /// a [`merged_chain`] merges: the merge's `newest_panes`, otherwise the
 /// chain's `pane_count`. `None` for any other node.
-pub fn merged_pane_count(state: &OperatorNode) -> Option<u32> {
+fn merged_pane_count(state: &OperatorNode) -> Option<u32> {
     let Some(ASAPOp::PaneChain { pane_count, .. }) = merged_chain(state)?.asap() else {
         return None;
     };

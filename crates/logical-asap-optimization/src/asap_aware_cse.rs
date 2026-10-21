@@ -74,7 +74,8 @@
 //!
 //! Nested windows share one chain: when a subset holds builds of one family
 //! (at any size) over the same input below their ranges, read the same way,
-//! in panes of one width but different counts ([`nested_window_groups`]),
+//! with the same output column names, in panes of one width but different
+//! counts ([`nested_window_groups`]),
 //! the subset also comes as a Pass 2 candidate in which each such group
 //! reads one chain of its most panes, sized for every member
 //! ([`size_for_all_readers`]). Every window ends at the evaluation time, so
@@ -1008,7 +1009,8 @@ pub fn window_composition_pass2_candidates(
 /// shared chain, in groups of two or more with at least two pane counts:
 /// builds of one family ([`same_family`], at any size) that read the same
 /// input below their ranges the same way (item and weight, grouping and
-/// filter), in panes of one width. Their windows end at the same time, so
+/// filter), with the same output column names (each reader reads the
+/// shared chain's columns by position), in panes of one width. Their windows end at the same time, so
 /// each is the newest panes of the longest: one chain of the most panes,
 /// sized for every reader ([`size_for_all_readers`]), serves them all.
 fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<Vec<usize>> {
@@ -2708,9 +2710,16 @@ mod tests {
             .try_into()
             .unwrap_or_else(|c: Vec<_>| panic!("one chain, found {}", c.len()));
         assert_eq!(family(&chain), strict);
-        for root in shared_roots {
-            assert!(operator(root).guarantee.is_some());
-        }
+        // The 1-min query keeps its own guarantee; the 5-min one reads the
+        // stricter state, so its guarantee is the 1-min build's size's,
+        // not its own looser one.
+        let guarantee = |root: &QueryRoot| operator(root).guarantee.clone().unwrap();
+        assert_eq!(guarantee(&shared_roots[0]), guarantee(&roots[0]));
+        assert_ne!(guarantee(&shared_roots[1]), guarantee(&roots[1]));
+        assert_eq!(
+            guarantee(&shared_roots[1]).spec,
+            guarantee(&shared_roots[0]).spec
+        );
     }
     /// The composed candidate of `queries` with every target at its exact
     /// option (an exact accumulator, or plain exact execution).

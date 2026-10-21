@@ -208,11 +208,16 @@ pub fn pass2_label(
                 candidate.pane_count,
                 duration_name(candidate.pane_width_ms)
             );
-            let newest: Vec<String> = group_of(i)
+            let mut counts: Vec<u32> = group_of(i)
                 .into_iter()
                 .flatten()
                 .map(|&m| candidates[m].pane_count)
                 .filter(|&n| n < candidate.pane_count)
+                .collect();
+            counts.sort_unstable();
+            counts.dedup();
+            let newest: Vec<String> = counts
+                .into_iter()
                 .map(|n| {
                     let reads_newest = |node: &OperatorNode| match node.asap() {
                         Some(ASAPOp::SummaryMerge {

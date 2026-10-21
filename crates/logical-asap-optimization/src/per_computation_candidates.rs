@@ -1726,25 +1726,25 @@ fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarante
         return Some(None);
     }
     let chain = merged_chain(state)?;
-    let Ok(mut whole) = merged_window_build(state) else {
+    let Ok(mut window_build) = merged_window_build(state) else {
         return Some(None);
     };
-    // The whole window's range over the chain's input carries the guarantee
-    // composed over that input.
+    // The merged panes' window range over the chain's input carries the
+    // guarantee composed over that input.
     let ASAPOp::PaneChain { child: input, .. } = chain.asap()? else {
         return Some(None);
     };
-    if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut whole.operator {
+    if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut window_build.operator {
         let mut timed = (**range).clone();
         timed.guarantee = composed_guarantee(&timed);
         debug_assert!(Rc::ptr_eq(timed.children()[0], input));
         *range = Rc::new(timed);
     }
-    let whole = Rc::new(whole);
+    let window_build = Rc::new(window_build);
     let reader = OperatorNode::with_schema(
         node.operator.map_children(|child| {
             if Rc::ptr_eq(child, state) {
-                Rc::clone(&whole)
+                Rc::clone(&window_build)
             } else {
                 Rc::clone(child)
             }
