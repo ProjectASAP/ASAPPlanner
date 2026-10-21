@@ -981,8 +981,8 @@ pub enum SearchedAsOne {
     NotAdditive,
     /// The combination of the components' selections is not a candidate
     /// the joint search enumerates: the Pass 2 rules combine only some
-    /// rewrites (rollup and top-k reuse are not combined with summary
-    /// sharing or panes), and cap their candidates over the whole workload.
+    /// rewrites (top-k reuse is not combined with panes), and cap their
+    /// candidates over the whole workload.
     NotInJointSpace,
 }
 

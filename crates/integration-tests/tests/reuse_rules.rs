@@ -475,3 +475,101 @@ fn exact_topk_reuse_answers_as_each_topk() {
         "topk by (job) (2, sum_over_time(m[5m]))",
     ]);
 }
+
+/// A fine and a coarse sum beside two differently grouped quantiles: every
+/// candidate that shares the quantiles' DDSketch (summary-capability rule)
+/// and rolls the coarse sum up from the fine one (rollup rule) answers each
+/// sum as its Pass 1 candidate does (computed from the raw samples), and
+/// each quantile as the candidate with the same shared build and no rollup.
+#[test]
+fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
+    let queries = [
+        (
+            "sum by (job) (sum_over_time(m[5m]))",
+            AccuracyTarget::exact(),
+        ),
+        (
+            "sum by (job, series) (sum_over_time(m[5m]))",
+            AccuracyTarget::exact(),
+        ),
+        (
+            "avg by (job, series) (quantile_over_time(0.99, m[5m]))",
+            AccuracyTarget::max_error(0.05).failure_probability(0.3),
+        ),
+        (
+            "avg by (job) (quantile_over_time(0.95, m[5m]))",
+            AccuracyTarget::max_error(0.05).failure_probability(0.3),
+        ),
+    ];
+    let roots = queries
+        .iter()
+        .enumerate()
+        .map(|(i, (query, accuracy))| {
+            let root = lower_promql(query, accuracy.clone()).unwrap();
+            let root = promql_rows::with_series_identity(&root).unwrap();
+            (i, QueryRoot::Operator(root))
+        })
+        .collect();
+    let run = run_stage1_to_stage3_with(
+        roots,
+        &vec![exact(repeating()); queries.len()],
+        &data(),
+        PlanningModels::builtin(),
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
+    )
+    .unwrap();
+    let implemented = |id: &str| {
+        run.stage2_physical_asap_optimization
+            .iter()
+            .any(|c| c.from_logical == id)
+    };
+    let logical = &run.stage1_logical_asap_optimization;
+    let mut checked = 0;
+    for candidate in logical.iter().filter(|c| implemented(&c.id)) {
+        let Some(pass2) = &candidate.pass2 else {
+            continue;
+        };
+        if pass2.shared_builds.is_empty() || pass2.rollup_candidates.is_empty() {
+            continue;
+        }
+        let from = &logical[pass2.from_pass1_position].id;
+        // For a candidate without panes: the candidate with the same shared
+        // builds and nothing else.
+        let unrolled = logical
+            .iter()
+            .filter(|c| implemented(&c.id) && pass2.pane_candidates.is_empty())
+            .find(|c| {
+                c.pass2.as_ref().is_some_and(|p| {
+                    p.from_pass1_position == pass2.from_pass1_position
+                        && p.shared_builds == pass2.shared_builds
+                        && p.pane_candidates.is_empty()
+                        && p.rollup_candidates.is_empty()
+                        && p.topk_reuse_candidates.is_empty()
+                        && p.sharing_candidates.is_empty()
+                })
+            });
+        for q in 0..2 {
+            assert_eq!(
+                execute(&physical_root(&run, &candidate.id, q)),
+                execute(&physical_root(&run, from, q)),
+                "{} Q{}",
+                candidate.id,
+                q + 1
+            );
+        }
+        if let Some(unrolled) = unrolled {
+            for q in 2..4 {
+                assert_eq!(
+                    execute(&physical_root(&run, &candidate.id, q)),
+                    execute(&physical_root(&run, &unrolled.id, q)),
+                    "{} Q{} against {}",
+                    candidate.id,
+                    q + 1,
+                    unrolled.id
+                );
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "some candidate shares a summary and rolls up");
+}

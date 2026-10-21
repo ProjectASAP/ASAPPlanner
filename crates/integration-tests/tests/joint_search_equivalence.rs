@@ -759,3 +759,123 @@ fn without_raw_data_planner_layering_examples_select_the_exhaustive_plan() {
         }
     }
 }
+
+/// A fine and a coarse sum and two quantiles grouped differently, as
+/// ASAPQuery's random workloads ask them, in a deployment that keeps no
+/// raw data: the cheapest plan shares one DDSketch between the quantiles
+/// (summary-capability rule) and answers the coarse sum by rolling up the
+/// fine one (rollup rule). Both searches select it, and it is cheaper than
+/// every candidate that applies only one of the two rules.
+#[test]
+fn a_shared_summary_is_combined_with_a_rollup() {
+    let entry = |query: &str, interval_ms: u32| RepeatingEntry {
+        query: Query(query.into()),
+        demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval_ms)),
+        requirements: QueryRequirements {
+            accuracy: AccuracyTarget::max_error(0.05).failure_probability(0.3),
+            max_latency_ms: None,
+        },
+        predictability: Predictability::Predictable { known_at: None },
+        range_evaluation: None,
+    };
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: None,
+            repeating_queries: Some(vec![
+                entry(
+                    "sum by (region, service, job) (sum_over_time(m[10m]))",
+                    20_000,
+                ),
+                entry("sum by (region, service) (sum_over_time(m[10m]))", 20_000),
+                entry(
+                    "avg by (region, service, job) (quantile_over_time(0.99, m[100s]))",
+                    1_000,
+                ),
+                entry("avg by (region) (quantile_over_time(0.95, m[100s]))", 1_000),
+            ]),
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 100_000.0,
+            },
+            sources: [(
+                "m".to_string(),
+                SourceFacts {
+                    series_count: Some(10_000),
+                    metric_type: Some(MetricType::Gauge),
+                    values_non_negative: true,
+                    sample_interval: Some(DurationMs(100)),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into(),
+        }),
+    };
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let deployment = no_raw_data();
+    let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+    let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
+    let exhaustive = run_stage1_to_stage3_with(
+        indexed(),
+        &entries,
+        &data,
+        models,
+        Stage1ToStage3Search::exhaustive(),
+    )
+    .unwrap();
+    assert_equivalent("shared summary and rollup", &roots, &entries, &data, models);
+
+    let rules = |logical: &str| {
+        let pass2 = exhaustive
+            .stage1_logical_asap_optimization
+            .iter()
+            .find(|l| l.id == logical)
+            .unwrap()
+            .pass2
+            .as_ref();
+        (
+            pass2.map_or(0, |p| p.shared_builds.len()),
+            pass2.map_or(0, |p| p.rollup_candidates.len()),
+        )
+    };
+    let shared_builds = |logical: &str| {
+        exhaustive
+            .stage1_logical_asap_optimization
+            .iter()
+            .find(|l| l.id == logical)
+            .and_then(|l| l.pass2.as_ref())
+            .map_or(Vec::new(), |p| p.shared_builds.clone())
+    };
+    let selected = exhaustive.selected().unwrap();
+    assert_eq!(
+        rules(&selected.from_logical),
+        (1, 1),
+        "one shared DDSketch and one rollup"
+    );
+    let shared = shared_builds(&selected.from_logical);
+    assert!(
+        format!("{:?}", shared[0][0]).contains("DDSketch"),
+        "the shared build is a DDSketch: {:?}",
+        shared[0][0]
+    );
+    let selection = exhaustive.stage3_plan_selection.as_ref().unwrap();
+    let cost = |id: &str| selection.costs[id].cost_per_second.unwrap();
+    let cheapest_with_one_rule = exhaustive
+        .stage2_physical_asap_optimization
+        .iter()
+        .filter(|p| selection.costs.contains_key(&p.id))
+        .filter(|p| {
+            let (shared, rollups) = rules(&p.from_logical);
+            shared == 0 || rollups == 0
+        })
+        .map(|p| cost(&p.id))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        cost(&selected.id) < cheapest_with_one_rule,
+        "{} is not cheaper than {cheapest_with_one_rule}",
+        cost(&selected.id)
+    );
+}
