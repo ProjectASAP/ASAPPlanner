@@ -919,6 +919,26 @@ class AppTests(unittest.TestCase):
         js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(pane)}).data; }}, id() {{ return {json.dumps(pane)}; }} }} }})")
         self.assertIn(chain["data"]["id"], {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")})
 
+    def test_an_expanded_chain_stays_expanded_after_switching_plans_and_back(self):
+        doc = json.loads(SEED862.read_text())
+        physical = doc["stage2_physical_asap_optimization"]
+        selected = doc["stage3_plan_selection"]["selected"]
+        copy = json.loads(json.dumps(next(c for c in physical["candidates"] if c["id"] == selected)))
+        copy["id"] = "P-copy"
+        physical["candidates"].append(copy)
+        doc["stage3_plan_selection"]["rejected"].append({"id": "P-copy", "cause": "costlier", "reason": "a copy of the selected plan"})
+        js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
+        chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "PaneChain")["data"]["id"]
+        tap = lambda id_: js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(id_)}).data; }}, id() {{ return {json.dumps(id_)}; }} }} }})")
+        ids = lambda: {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")}
+        tap(chain)
+        self.assertIn(chain + "p0", ids())
+        js.eval("__els.pick2.__on.change({ target: { value: 'P-copy' } })")
+        self.assertIn(chain, ids())
+        js.eval(f"__els.pick2.__on.change({{ target: {{ value: {json.dumps(selected)} }} }})")
+        self.assertIn(chain + "p0", ids())
+        self.assertNotIn(chain, ids())
+
     def test_tapping_a_node_highlights_its_neighborhood_and_lists_its_queries(self):
         js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
         scan = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "Scan")

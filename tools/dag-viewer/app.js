@@ -40,18 +40,19 @@
   }
 
   // Per lane: what it draws (to redraw it with a pane chain expanded or
-  // collapsed), its elements, and the PaneChain node ids drawn as panes.
+  // collapsed) and its elements; per drawn DAG, the PaneChain node ids drawn
+  // as panes, so switching plans and back keeps each plan's expanded chains.
   const drawn = [null, null, null];
   const laneElements = [[], [], []];
-  const expanded = [new Set(), new Set(), new Set()];
+  const expandedByDag = new WeakMap();
+  const expandedOf = (dag) => { if (!expandedByDag.has(dag)) expandedByDag.set(dag, new Set()); return expandedByDag.get(dag); };
   // The query whose path the lanes highlight ('' for none).
   let highlightedQuery = '';
 
   function render(i, dag, physical, costPerNode) {
     if (cys[i]) cys[i].destroy();
-    if (!drawn[i] || drawn[i].dag !== dag) expanded[i] = new Set();
     drawn[i] = { dag, physical, costPerNode };
-    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds, expandedChains: [...expanded[i]] })
+    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds, expandedChains: [...expandedOf(dag)] })
       .map((el) => ({ data: el.data, classes: [el.classes, el.data.rootFor && el.data.rootFor.length ? 'root' : ''].join(' ').trim() }));
     laneElements[i] = elements;
     const cy = cytoscape({
@@ -72,8 +73,8 @@
   // A PaneChain expands into its panes; a pane collapses its chain; any
   // other node is shown and its upstream and downstream highlighted.
   function tapNode(d, i) {
-    if (d.expandable) { expanded[i].add(d.nodeId); redraw(i); showNode(d, i); return; }
-    if (d.kind === 'pane') { expanded[i].delete(d.paneOf); redraw(i); return; }
+    if (d.expandable) { expandedOf(drawn[i].dag).add(d.nodeId); redraw(i); showNode(d, i); return; }
+    if (d.kind === 'pane') { expandedOf(drawn[i].dag).delete(d.paneOf); redraw(i); return; }
     showNode(d, i);
     dim(i, new Set(stageNeighborhoodIds(laneElements[i], d.id)));
   }
@@ -341,7 +342,9 @@
     if (current.physical !== selected) selectPhysical(selected);
     const cy = cys[2];
     if (!cy) return;
-    const node = cy.getElementById(`n${id}`);
+    // An expanded pane chain is drawn as its panes: select the newest.
+    let node = cy.getElementById(`n${id}`);
+    if (!node || node.length === 0) node = cy.getElementById(`n${id}p0`);
     if (!node || node.length === 0) return;
     cy.elements().unselect();
     node.select();
