@@ -306,10 +306,10 @@ pub(crate) fn realize_keyed_additive_summary_input(
     };
     let counter_input = derivative_of.is_some();
     // `sum by (G) (sum_over_time(m[W]))` or `... count_over_time ...`: the
-    // grouped sum of per-series sums (counts) of raw samples is their sum
+    // grouped sum of per-series sums (counts) of raw data samples is their sum
     // (count) by `G`, so the heap reads those samples.
     let samples = summed_per_series_samples(child);
-    // A raw sample's count or a count's row weighs one.
+    // A raw data sample's count or a count's row weighs one.
     let counted = match &samples {
         Some((_, inner)) => matches!(inner, AggIntent::Count { .. }),
         None => matches!(measures.as_slice(), [AggIntent::Count { .. }]),
@@ -400,10 +400,10 @@ pub(crate) fn realize_keyed_additive_summary_input(
     })
 }
 
-/// The raw sample rows and the per-series `sum` or `count` over them when
+/// The raw data sample rows and the per-series `sum` or `count` over them when
 /// `grouped` is a grouped `sum` (not by `without`, nor by the metric name
 /// the per-series result drops) of the value of a per-series `sum` or
-/// `count` of raw samples (`sum by (G) (sum_over_time(m[W]))`), neither
+/// `count` of raw data samples (`sum by (G) (sum_over_time(m[W]))`), neither
 /// filtered nor with `HAVING`; `None` otherwise. The grouped sum is then the
 /// sum (count) of those samples by `G`.
 fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>, AggIntent)> {

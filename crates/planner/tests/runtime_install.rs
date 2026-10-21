@@ -2702,7 +2702,11 @@ async fn a_forced_heap_counter_topk_plan_compiles_and_answers_within_its_bound()
 /// its series (a skewed ranking of the regions) and holds `3 ·
 /// round(200 / r^1.1)` samples (a skewed count ranking), returned with each
 /// region's exact sum and exact count.
-fn skewed_region_samples() -> (Vec<Sample>, BTreeMap<String, f64>, BTreeMap<String, f64>) {
+fn skewed_region_raw_data_samples() -> (
+    Vec<RawDataSample>,
+    BTreeMap<String, f64>,
+    BTreeMap<String, f64>,
+) {
     let mut samples = Vec::new();
     let mut sums = BTreeMap::new();
     let mut counts = BTreeMap::new();
@@ -2729,7 +2733,7 @@ fn skewed_region_samples() -> (Vec<Sample>, BTreeMap<String, f64>, BTreeMap<Stri
 
 /// The ASAPQuery workloads' grouped top-k-sum shape,
 /// `topk(3, sum by (region) (<f>(data[1m])))` for `f` `sum_over_time` or
-/// `count_over_time`: each forced fused heap (one over the raw samples,
+/// `count_over_time`: each forced fused heap (one over the raw data samples,
 /// keyed by `region`, weighted by the sample value or by one) compiles and
 /// answers the true top 3 regions within its bound of their exact sums or
 /// counts, each named by its `region` label alone, as the exact top-k's.
@@ -2737,7 +2741,7 @@ fn skewed_region_samples() -> (Vec<Sample>, BTreeMap<String, f64>, BTreeMap<Stri
 /// non-negative; a Count Sketch heap takes any gauge.
 #[tokio::test]
 async fn a_forced_heap_grouped_topk_sum_plan_compiles_and_answers_within_its_bound() {
-    let (samples, sums, counts) = skewed_region_samples();
+    let (samples, sums, counts) = skewed_region_raw_data_samples();
     let gauge = r#""metric_type": "gauge""#;
     let non_negative = r#""metric_type": "gauge", "values_non_negative": true"#;
     for (function, truth, facts, algorithm) in [

@@ -792,7 +792,7 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
         },
         Outer::TopK { k, descending } => {
             // A sum of per-series counter values, or of per-series sums or
-            // counts of raw samples (`sum by (G) (sum_over_time(m[W]))`): a
+            // counts of raw data samples (`sum by (G) (sum_over_time(m[W]))`): a
             // weighted ranking of the groups.
             let weighted_group_ranking = matches!(
                 &child,

@@ -312,7 +312,7 @@ over the inner aggregate's input), and the nested sum, a grouped `sum` over a
 offered beside the unfused pair's: in `topk by (job) (10, sum_over_time(m[1m]))`
 the options are the exact top-*k* over the exact per-series sum, or the fused
 computation's Count-Min or Count Sketch with a top-*k* heap. In
-`topk(10, sum by (job) (sum_over_time(m[1m])))` the heap reads the raw samples
+`topk(10, sum by (job) (sum_over_time(m[1m])))` the heap reads the raw data samples
 beneath the grouped sum, so it absorbs both the grouped sum and the per-series
 sum. Like every target's options, a fused computation's are exact or a summary.
 

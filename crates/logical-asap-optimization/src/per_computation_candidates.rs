@@ -57,7 +57,7 @@
 //! A fused computation's candidate reads the absorbed targets' input instead:
 //! the whole-expression top-k is one heap `SummaryAgg` keyed by the ranked
 //! item → `SummaryEstimate` (over a grouped sum of per-series sums or counts,
-//! it reads the per-series target's input, the raw samples); the nested sum is `SummaryAgg` with the exact
+//! it reads the per-series target's input, the raw data samples); the nested sum is `SummaryAgg` with the exact
 //! `Sum` family grouped by the outer keys → `FinalizeExactAccumulator`.
 //!
 //! The substituted output keeps the aggregate's column names. The measures
@@ -288,7 +288,7 @@ pub struct ComputationTarget {
 pub struct FusedComputation {
     /// The indices in [`PerComputationCandidates::targets`] of the targets
     /// it absorbs: the one directly beneath, then, for a whole-expression
-    /// heap over the raw samples beneath a grouped sum of per-series sums or
+    /// heap over the raw data samples beneath a grouped sum of per-series sums or
     /// counts (`topk(k, sum by (G) (sum_over_time(m[W])))`), the per-series
     /// target beneath that, then the targets any of these targets' own fused
     /// computations absorb. None of them is computed when this is picked.
@@ -878,7 +878,7 @@ fn nested_sum_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, AggInten
 /// the ranked item and weighted by the summed value. Those heaps over the
 /// exact per-item result leave the top-k's own candidates: the fused
 /// computation replaces them. Over a grouped sum of per-series sums or
-/// counts of raw samples, the heap reads those samples and absorbs the
+/// counts of raw data samples, the heap reads those samples and absorbs the
 /// per-series target too. Applied only when the inner aggregate has no other
 /// consumer, so absorbing it removes its work, when neither has a filter or
 /// `HAVING`, and when the keyed-additive rule realizes it
@@ -909,7 +909,7 @@ fn add_whole_expression_targets(
         let Some((input, ..)) = whole_expression_input(&target.aggregate) else {
             continue;
         };
-        // A heap over the raw samples beneath a grouped sum of per-series
+        // A heap over the raw data samples beneath a grouped sum of per-series
         // sums or counts also absorbs the per-series target, when the
         // grouped sum is its only consumer.
         let mut absorbs = vec![inner];
@@ -4397,17 +4397,17 @@ mod tests {
     }
 
     /// `topk(k, sum by (G) (sum_over_time(m[W])))` and its `count_over_time`
-    /// form rank the groups `G` by the sum (count) of their raw samples: the
+    /// form rank the groups `G` by the sum (count) of their raw data samples: the
     /// top-k keeps its exact candidate and gets the fused whole-expression
     /// Count-Min and CountSketch heaps, which absorb both the grouped sum and
     /// the per-series sum (count) beneath it. Composed, no aggregate is
-    /// computed: the heap reads the range selector's raw samples, keyed by
+    /// computed: the heap reads the range selector's raw data samples, keyed by
     /// `G` (less the top-k's own `by` labels, its partitions), weighted by
     /// the sample value (a sum, an open requirement on `m`) or by one (a
     /// count, proven non-negative).
     #[test]
-    fn whole_expression_topk_over_a_grouped_sum_of_range_sums_reads_the_samples() {
-        let samples = WeightDomain::SamplesOfMetric { metric: "m".into() };
+    fn whole_expression_topk_over_a_grouped_sum_of_range_sums_reads_the_raw_data_samples() {
+        let samples = WeightDomain::RawDataSamplesOfMetric { metric: "m".into() };
         let unit = WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::UnitCount,
         };
@@ -4485,7 +4485,7 @@ mod tests {
                 };
                 assert!(
                     matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })),
-                    "{query}: the heap reads the raw samples"
+                    "{query}: the heap reads the raw data samples"
                 );
                 assert_eq!(
                     input.item,
@@ -4713,12 +4713,12 @@ mod tests {
         assert_eq!(inventory.combinations(), enumerated);
     }
 
-    /// The shapes a heap over the raw samples cannot answer do not get one:
+    /// The shapes a heap over the raw data samples cannot answer do not get one:
     /// `bottomk` stays a sort and limit (no top-k target), and a grouped sum
     /// `without` labels or by the metric name (which the per-series sum drops)
     /// gets no heap that absorbs the per-series sum and reads the samples.
     #[test]
-    fn grouped_range_sums_a_samples_heap_cannot_rank_get_no_fused_heap() {
+    fn grouped_range_sums_a_raw_data_samples_heap_cannot_rank_get_no_fused_heap() {
         let is_topk = |t: &ComputationTarget| {
             matches!(
                 t.aggregate.non_asap(),

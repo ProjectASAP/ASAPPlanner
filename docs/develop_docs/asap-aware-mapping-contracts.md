@@ -47,7 +47,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   data facts is left to Stage 3.
 - **Fused computations.** `FusedComputation { absorbs, candidates, pruned }`
   replaces the targets beneath (the whole-expression top-k, the nested sum).
-  It absorbs the target directly beneath and, for a heap over the raw samples
+  It absorbs the target directly beneath and, for a heap over the raw data samples
   beneath a grouped sum of per-series sums or counts, the per-series target
   too. A whole-workload choice keeps one digit per target; a fused pick with
   a non-first digit on an absorbed target is skipped, so each plan is
