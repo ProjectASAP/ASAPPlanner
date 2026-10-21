@@ -2097,8 +2097,9 @@ fn stored_definitions<'a>(plan: &'a InstallablePlan, family: &str) -> BTreeSet<&
 }
 
 /// A fine and a coarse sum over one metric and window (ASAPQuery's
-/// sum-fine and sum-coarse) store one Sum: the coarse sum is rolled up from
-/// the fine sum's merged panes, so every stored Sum has one definition, and
+/// sum-fine and sum-coarse) store one Sum: both group sums are computed
+/// from one stored per-series Sum (Stage 1 shares the per-series sums the
+/// two queries' scans read), so every stored Sum has one definition, and
 /// both answer as the query-time reference.
 #[tokio::test]
 async fn fine_and_coarse_sums_store_one_sum() {
@@ -2122,4 +2123,50 @@ async fn fine_and_coarse_sums_store_one_sum() {
     assert_eq!(run.answers_per_query[0].len(), 6);
     assert_eq!(run.answers_per_query[1].len(), 2, "one sum per region");
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// Per-series answers planned beside a grouping of the same per-series
+/// values (over a scan with other labels) answer as their query-time
+/// reference, and the two share one stored per-series state: a top-k of
+/// per-series sums keeps each chosen series' labels, and per-series
+/// DDSketch quantiles keep every series' labels.
+#[tokio::test]
+async fn per_series_answers_beside_a_grouping_share_one_state_and_answer_as_the_reference() {
+    for (queries, family, accuracy, answers) in [
+        (
+            [
+                "topk(2, sum_over_time(data[100s]))",
+                "sum by (region) (sum_over_time(data[100s]))",
+            ],
+            "\"Sum\"",
+            "{}",
+            2,
+        ),
+        (
+            [
+                "quantile_over_time(0.9, data[100s])",
+                "avg by (region) (quantile_over_time(0.99, data[100s]))",
+            ],
+            "DDSketch",
+            r#"{"accuracy": {"accuracy_metric": "relative", "max_error": 0.05,
+                "failure_probability": 0.01, "accuracy_scope": "per_value"}}"#,
+            6,
+        ),
+    ] {
+        let plan_json = jointly_planned(&queries, accuracy).await;
+        let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+        assert_eq!(stored_definitions(&plan, family).len(), 1, "{queries:?}");
+        let run = run_data_plane(
+            &plan_json,
+            &grouped_series_samples(),
+            EVALUATION_MS,
+            &mut SummaryStore::new(),
+        );
+        assert_eq!(run.answers_per_query[0].len(), answers, "{queries:?}");
+        assert_eq!(run.answers_per_query[1].len(), 2, "{queries:?}: per region");
+        assert_eq!(
+            run.answers_per_query, run.reference_answers_per_query,
+            "{queries:?}"
+        );
+    }
 }

@@ -112,7 +112,10 @@ fn samples() -> Vec<(&'static str, &'static str, i64, f64)> {
     rows
 }
 
-/// Execute `root` at query time, every raw `TimeRange` input fed `samples`.
+/// Execute `root` at query time, every raw `TimeRange` input fed the
+/// `samples` in its window: `(end - range, end]`, where `end` is the
+/// evaluation time moved back by a `TimeShift` directly below (a tumbling
+/// pane's).
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     let timed = apply_materialization_timings(
         root,
@@ -120,21 +123,32 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
         &mut TimingMemo::new(),
     )
     .unwrap();
+    // Tumbling panes run as their panes, each over its own window.
+    let timed = asap_types::ir::operator::pane_chain::expand_pane_chains(&timed).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     let dag = compiled.dag;
     let inputs: BTreeMap<u64, Batch> = dag
         .nodes
         .iter()
-        .filter(|node| {
-            matches!(
-                compiled.node_ids.operator_node(node.id).unwrap().operator,
-                Operator::NonASAP(NonASAPOp::TimeRange { .. })
-            )
+        .filter_map(|node| {
+            let Operator::NonASAP(NonASAPOp::TimeRange { range, child, .. }) =
+                &compiled.node_ids.operator_node(node.id).unwrap().operator
+            else {
+                return None;
+            };
+            let back_ms = match child.non_asap() {
+                Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms,
+                _ => 0,
+            };
+            let end = EVALUATION_MS - back_ms;
+            let start = end - range.as_millis() as i64;
+            Some((node, start, end))
         })
-        .map(|node| {
+        .map(|(node, start, end)| {
             let schema: Arc<Schema> = Arc::new(node.output_schema.clone());
             let rows = samples()
                 .into_iter()
+                .filter(|&(_, _, ts, _)| start < ts && ts <= end)
                 .map(|(job, series, ts, value)| {
                     let labels = BTreeMap::from([
                         ("__name__".to_string(), "m".to_string()),
@@ -414,15 +428,7 @@ fn reuse_answers_alike(queries: &[&str]) {
     let reusing: Vec<(String, String)> = run
         .stage1_logical_asap_optimization
         .iter()
-        // A reuse candidate also built as tumbling panes reads each pane's
-        // window, which `execute` (one batch per `TimeRange`) does not feed;
-        // panes are checked by the window-composition tests.
-        .filter(|c| {
-            !reused(&run, &c.id).is_empty()
-                && c.pass2
-                    .as_ref()
-                    .is_some_and(|p| p.pane_candidates.is_empty())
-        })
+        .filter(|c| !reused(&run, &c.id).is_empty())
         .map(|c| {
             let from = c.pass2.as_ref().unwrap().from_pass1_position;
             (

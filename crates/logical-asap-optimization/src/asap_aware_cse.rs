@@ -29,11 +29,16 @@
 //!
 //! Composition sizes each consumer's summary build alone, for its own
 //! accuracy target. The *members* of a [`CapabilitySharingCandidate`] are summary
-//! builds of one candidate that chose the same family (same
-//! [`SketchAlgorithm`]) over the same input sub-DAG (window, `WHERE` and
-//! time range included), item and weight, grouping and filter, and whose
-//! every reader is an estimate the family answers
-//! ([`FamilyCapability::answers`]); they differ only in their sizes.
+//! builds of one candidate that chose the same family (the same
+//! [`SketchAlgorithm`](asap_types::ir::schema::SketchAlgorithm) at any
+//! size, or the same per-series exact accumulator) over the same input
+//! sub-DAG (window, `WHERE` and time range included), item and weight,
+//! grouping and filter, and whose every reader is an estimate the family
+//! answers ([`FamilyCapability::answers`]) or, for an exact accumulator,
+//! its finalization. They differ in their sizes, or, for per-series builds
+//! over one metric's scans without label matchers, in the labels those
+//! scans project: the shared build is over the scan with every member's
+//! labels, and each other member's readers keep only their own columns.
 //! [`summary_capability_pass2_candidates`] returns one Pass 2 candidate per
 //! choice, for each capability sharing candidate, of no sharing or one
 //! subset of two or more of its members
@@ -104,8 +109,7 @@ use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{
-    ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergeInputRule, SketchAlgorithm,
-    SketchKind,
+    ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergeInputRule, SketchKind,
 };
 use asap_types::ir::SortKey;
 use asap_types::ir::{
@@ -354,14 +358,16 @@ impl Sharing<'_> {
 }
 
 /// Summary builds the summary-capability rule can make one build: builds
-/// of one family over the same input data that differ only in size, in the
-/// order a children-first walk of the roots meets them.
+/// of one family over the same input data that differ only in size, or in
+/// the labels their per-series scans project, in the order a children-first
+/// walk of the roots meets them.
 #[derive(Debug, Clone)]
 pub struct CapabilitySharingCandidate {
     /// The family the first member builds: every member builds this sketch
     /// algorithm at some size, or this exact accumulator.
     pub family: FieldDataType,
-    /// The summary builds (`SummaryAgg`), at least two, not all of one size.
+    /// The summary builds (`SummaryAgg`), at least two, not all equal (in
+    /// size or in the labels their scans project).
     pub members: Vec<Rc<OperatorNode>>,
 }
 
@@ -1692,6 +1698,7 @@ mod tests {
     use crate::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::schema_support::with_promql_series_identity;
+    use asap_types::ir::schema::SketchAlgorithm;
 
     fn roots(queries: &[&str]) -> Vec<QueryRoot> {
         queries
