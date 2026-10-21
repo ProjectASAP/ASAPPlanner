@@ -509,14 +509,51 @@ function stageNodeLines(operator, inputSchema) {
   return lines.slice(0, 4);
 }
 
+// Per node id of a stage DAG (`stageDag`'s shape), the indices of the
+// queries whose root reaches it: its root, or a node its root reads,
+// directly or through other nodes; a standalone scalar query reaches the
+// operators it reads and everything below them.
+function stageQueryReach(lane) {
+  const producers = new Map();
+  lane.edges.forEach((edge) => {
+    if (!producers.has(edge.consumer)) producers.set(edge.consumer, []);
+    producers.get(edge.consumer).push(edge.producer);
+  });
+  const reach = new Map();
+  lane.queries.forEach((query, index) => {
+    const stack = 'node' in query ? [query.node] : stageScalarRefs(query.scalar);
+    const seen = new Set(stack);
+    while (stack.length) {
+      const id = stack.pop();
+      if (!reach.has(id)) reach.set(id, []);
+      reach.get(id).push(index);
+      (producers.get(id) || []).forEach((p) => { if (!seen.has(p)) { seen.add(p); stack.push(p); } });
+    }
+  });
+  return reach;
+}
+
+// A pane's window relative to the evaluation time `t`: pane `k` (0 is the
+// newest) of width `width` covers "t−(k+1)·width … t−k·width".
+function paneWindowText(k, width) {
+  const end = k === 0 ? 't' : `t−${durationText(k * width)}`;
+  return `t−${durationText((k + 1) * width)} … ${end}`;
+}
+
 // A stage DAG (`dag`, as the document writes it) as cytoscape elements:
 // one node per operator (`n<id>`), one `Scalar` node per standalone scalar
 // query (`s<query position>`) over the nodes it reads, and one edge per
-// input. Options: `physical` (a Stage 2 DAG: nodes show their timing),
-// `costPerNode` (the candidate's Stage 3 `per_node` costs), `queryIds` (the
-// workload's query ids, to mark each query's root).
+// input. Each node lists the queries whose root reaches it (`reachedBy`;
+// "shared ×n" in its box when n > 1). Options: `physical` (a Stage 2 DAG:
+// nodes show their timing), `costPerNode` (the candidate's Stage 3
+// `per_node` costs), `queryIds` (the workload's query ids, to mark each
+// query's root), `expandedChains` (ids of PaneChain nodes to draw as their
+// panes: per pane `k`, newest first, a TimeShift by k panes (`n<id>p<k>s`,
+// none for the newest), a TimeRange of one pane (`n<id>p<k>r`) and the
+// pane's build (`n<id>p<k>`), each pane fed by the chain's input and read by
+// the chain's readers). Display only: the document keeps the chain.
 function stageLaneElements(dag, options) {
-  const { physical = false, costPerNode = null, queryIds = [] } = options || {};
+  const { physical = false, costPerNode = null, queryIds = [], expandedChains = [] } = options || {};
   const group = typeof nodeGroup === 'function' ? nodeGroup : () => 'rel';
   const lane = stageDag(dag, physical);
   const byId = new Map(lane.nodes.map((node) => [node.id, node]));
@@ -528,45 +565,121 @@ function stageLaneElements(dag, options) {
     if (!rootFor.has(query.node)) rootFor.set(query.node, []);
     rootFor.get(query.node).push(queryIds[index] || `query #${index + 1}`);
   });
+  const queryName = (index) => queryIds[index] || `query #${index + 1}`;
+  const reach = stageQueryReach(lane);
+  const reachedBy = (id) => (reach.get(id) || []).map(queryName);
+  const expanded = new Set(lane.nodes.filter((node) => node.kind === 'PaneChain' && expandedChains.includes(node.id)).map((node) => node.id));
 
-  const nodes = lane.nodes.map((node) => {
+  const nodes = [];
+  lane.nodes.forEach((node) => {
     const input = inputOf.get(node.id);
     const operator = physical ? node.raw.payload : node.raw.operator;
+    const queries = reachedBy(node.id);
+    if (expanded.has(node.id)) {
+      const body = node.body;
+      const width = body.pane_width_ms;
+      for (let k = 0; k < body.pane_count; k += 1) {
+        const id = `n${node.id}p${k}`;
+        const common = { paneOf: node.id, pane: k, reachedBy: queries, rootFor: [], timing: node.timing, node: node.raw };
+        if (k > 0) {
+          nodes.push({ data: Object.assign({ id: `${id}s`, nodeId: `${node.id}p${k}s`, kind: 'TimeShift', group: group('TimeShift'),
+            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: 'pane' });
+        }
+        nodes.push({ data: Object.assign({ id: `${id}r`, nodeId: `${node.id}p${k}r`, kind: 'TimeRange', group: group('TimeRange'),
+          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: 'pane' });
+        nodes.push({ data: Object.assign({ id, nodeId: `${node.id}p${k}`, kind: 'pane', group: 'summary',
+          label: [`pane ${k + 1} of ${body.pane_count}`, `summary: ${summaryFamilyText(body.family)}`, `window ${paneWindowText(k, width)}`,
+            'click to collapse'].join('\n') }, common), classes: 'pane' });
+      }
+      return;
+    }
     const lines = stageNodeLines(operator, input && input.schema);
     const cost = costPerNode ? costPerNode[String(node.id)] : undefined;
     if (physical && node.timing !== undefined) lines.push(`⏱ ${formatTiming(node.timing)}`);
     if (cost && typeof cost.cost_per_second === 'number') {
       lines.push(`cost ${Number(cost.cost_per_second.toPrecision(3))}${cost.multiplier === 1 || cost.multiplier === undefined ? '' : ` × ${cost.multiplier}`}`);
     }
+    if (queries.length > 1) lines.push(`shared ×${queries.length}`);
     const roots = rootFor.get(node.id) || [];
     if (roots.length) lines.push(`root of ${roots.join(', ')}`);
-    return {
+    if (node.kind === 'PaneChain') lines.push('click to expand');
+    nodes.push({
       data: {
         id: `n${node.id}`, nodeId: node.id, kind: node.kind, group: group(node.kind), label: lines.join('\n'),
-        rootFor: roots, timing: node.timing, cost, node: node.raw,
+        rootFor: roots, reachedBy: queries, timing: node.timing, cost, node: node.raw, expandable: node.kind === 'PaneChain',
       },
       classes: node.timing !== undefined && formatTiming(node.timing) === 'ingestion time' ? 'ingestionTime' : '',
-    };
+    });
   });
-  const edges = lane.edges.map((edge, index) => ({
-    data: { id: `e${index}`, source: `n${edge.producer}`, target: `n${edge.consumer}`, edge: edge.raw },
-  }));
+  const edges = [];
+  const edge = (id, source, target, raw) => edges.push({ data: { id, source, target, edge: raw } });
+  lane.edges.forEach((e, index) => {
+    const into = expanded.has(e.consumer);
+    const from = expanded.has(e.producer);
+    if (!into && !from) { edge(`e${index}`, `n${e.producer}`, `n${e.consumer}`, e.raw); return; }
+    // An expanded chain's input feeds each pane's window; each pane feeds
+    // the chain's readers.
+    const panes = (chain) => byId.get(chain).body.pane_count;
+    if (into) {
+      for (let k = 0; k < panes(e.consumer); k += 1) {
+        const pane = `n${e.consumer}p${k}`;
+        edge(`e${index}p${k}`, `n${e.producer}`, k > 0 ? `${pane}s` : `${pane}r`, e.raw);
+        if (k > 0) edge(`e${index}p${k}s`, `${pane}s`, `${pane}r`, null);
+        edge(`e${index}p${k}r`, `${pane}r`, pane, null);
+      }
+    }
+    if (from) {
+      for (let k = 0; k < panes(e.producer); k += 1) {
+        edge(`e${index}q${k}`, `n${e.producer}p${k}`, into ? `n${e.consumer}p0r` : `n${e.consumer}`, e.raw);
+      }
+    }
+  });
   lane.queries.forEach((query, index) => {
     if (!('scalar' in query)) return;
     const id = `s${index}`;
-    const queryId = queryIds[index] || `query #${index + 1}`;
+    const queryId = queryName(index);
     nodes.push({
       data: {
-        id, nodeId: id, kind: 'Scalar', group: group('Scalar'), rootFor: [queryId], node: { Scalar: query.scalar },
+        id, nodeId: id, kind: 'Scalar', group: group('Scalar'), rootFor: [queryId], reachedBy: [queryId], node: { Scalar: query.scalar },
         label: `Scalar\n${stageScalarText(query.scalar)}\nroot of ${queryId}`,
       },
       classes: '',
     });
     stageScalarRefs(query.scalar).forEach((producer, k) => edges.push({
-      data: { id: `${id}e${k}`, source: `n${producer}`, target: id, edge: null },
+      data: { id: `${id}e${k}`, source: expanded.has(producer) ? `n${producer}p0` : `n${producer}`, target: id, edge: null },
     }));
   });
   return nodes.concat(edges);
+}
+
+// The element ids (nodes and edges) of `elements` that query `queryId`
+// reaches: the nodes listing it in `reachedBy`, and the edges between two
+// of them.
+function stageQueryElementIds(elements, queryId) {
+  const nodes = new Set(elements.filter((e) => !('source' in e.data) && (e.data.reachedBy || []).includes(queryId)).map((e) => e.data.id));
+  const edges = elements.filter((e) => 'source' in e.data && nodes.has(e.data.source) && nodes.has(e.data.target)).map((e) => e.data.id);
+  return [...nodes, ...edges];
+}
+
+// The element ids of `elements` upstream and downstream of node `nodeId`
+// (an element id): the node, every node it reads or that reads it,
+// directly or through others, and the edges along those paths.
+function stageNeighborhoodIds(elements, nodeId) {
+  const edges = elements.filter((e) => 'source' in e.data);
+  const walk = (from, to) => {
+    const seen = new Set([nodeId]);
+    const stack = [nodeId];
+    const along = [];
+    while (stack.length) {
+      const id = stack.pop();
+      edges.filter((e) => e.data[to] === id).forEach((e) => {
+        along.push(e.data.id);
+        if (!seen.has(e.data[from])) { seen.add(e.data[from]); stack.push(e.data[from]); }
+      });
+    }
+    return [...seen, ...along];
+  };
+  return [...new Set([...walk('source', 'target'), ...walk('target', 'source')])];
 }
 
 // The run's data workload (`workload.data_workload`, the `DataWorkload` the
@@ -616,13 +729,18 @@ function validateStoredOutputs(selection, physicalById) {
   return errors;
 }
 
-// Milliseconds as the shortest exact unit: "100 ms", "15 s", "10 min", "1 h".
+// Milliseconds in units, largest first: "100 ms", "15 s", "10 min",
+// "9 min 40 s", "1 h".
 function durationText(ms) {
   if (typeof ms !== 'number') return '—';
-  if (ms % 3600000 === 0 && ms >= 3600000) return `${ms / 3600000} h`;
-  if (ms % 60000 === 0 && ms >= 60000) return `${ms / 60000} min`;
-  if (ms % 1000 === 0 && ms >= 1000) return `${ms / 1000} s`;
-  return `${ms} ms`;
+  if (ms === 0) return '0 s';
+  const units = [[3600000, 'h'], [60000, 'min'], [1000, 's'], [1, 'ms']];
+  const parts = [];
+  let left = ms;
+  units.forEach(([size, name]) => {
+    if (left >= size) { parts.push(`${Math.floor(left / size)} ${name}`); left %= size; }
+  });
+  return parts.join(' ');
 }
 
 // The ids of `queries` (`{id, text}`) whose text names `source` as a whole
@@ -658,26 +776,7 @@ function dataWorkloadView(dataWorkload, queries) {
 // The workload query ids whose root reaches node `nodeId` of a physical DAG
 // (Stage 2): the queries that read it, directly or through other nodes.
 function physicalReaders(dag, nodeId, queryIds) {
-  const producers = new Map();
-  dag.edges.forEach((edge) => {
-    if (!producers.has(edge.consumer)) producers.set(edge.consumer, []);
-    producers.get(edge.consumer).push(edge.producer);
-  });
-  const reaches = (start) => {
-    const seen = new Set([start]);
-    const stack = [start];
-    while (stack.length) {
-      const id = stack.pop();
-      if (id === nodeId) return true;
-      (producers.get(id) || []).forEach((p) => { if (!seen.has(p)) { seen.add(p); stack.push(p); } });
-    }
-    return false;
-  };
-  const lane = stageDag(dag, true);
-  return lane.queries.map((query, index) => {
-    const starts = 'node' in query ? [query.node] : stageScalarRefs(query.scalar);
-    return starts.some(reaches) ? (queryIds[index] || `query #${index + 1}`) : null;
-  }).filter(Boolean);
+  return (stageQueryReach(stageDag(dag, true)).get(nodeId) || []).map((index) => queryIds[index] || `query #${index + 1}`);
 }
 
 // The selected plan's stored outputs as table rows: the coverage's
@@ -710,8 +809,48 @@ function storedOutputRows(doc) {
       inputs: `${output.inputs.raw_sample_windows.length} raw-sample window(s)` +
         (output.inputs.stored_outputs.length ? `, stored ${output.inputs.stored_outputs.join(', ')}` : ''),
       retention: durationText(output.retention_ms),
+      window: output.inputs.raw_sample_windows.map((w) => `t−${durationText(w.end_offset_ms + w.width_ms)} … ${w.end_offset_ms ? `t−${durationText(w.end_offset_ms)}` : 't'}`).join(', ') || '—',
+      position: output.installed_position,
       cost: cost ? cost.detail || '' : '',
       readBy: node ? physicalReaders(candidate.dag, output.stage2_node_id, queryIds) : [],
+    };
+  });
+}
+
+// The selected plan's stored outputs grouped by the Stage 2 node they are
+// installed from: one group per pane chain (its panes, newest first, with
+// "count × width"), one per other node. Each group has its Stage 2 node,
+// definition(s), kind, how it is built, its retention (a range when the
+// panes differ), the Stage 3 cost and the queries that read it.
+function storedOutputGroups(doc) {
+  const rows = storedOutputRows(doc);
+  const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === (doc.stage3_plan_selection || {}).selected);
+  const nodes = new Map(candidate ? candidate.dag.nodes.map((node) => [node.id, node]) : []);
+  const groups = [];
+  const byNode = new Map();
+  rows.forEach((row) => {
+    const key = row.stage2NodeId === null ? `installed ${row.nodeId}` : row.stage2NodeId;
+    if (!byNode.has(key)) { byNode.set(key, []); groups.push(key); }
+    byNode.get(key).push(row);
+  });
+  const joined = (values) => [...new Set(values)].join(', ');
+  return groups.map((key) => {
+    const panes = byNode.get(key).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    const first = panes[0];
+    const node = nodes.get(first.stage2NodeId);
+    const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
+    const retention = panes.map((p) => p.retention);
+    return {
+      stage2NodeId: first.stage2NodeId,
+      nodeIds: panes.map((p) => p.nodeId),
+      definition: joined(panes.map((p) => p.definition)),
+      kind: first.kind,
+      panesText: kind === 'PaneChain' ? `${body.pane_count} × ${durationText(body.pane_width_ms)}` : '—',
+      builtAt: joined(panes.map((p) => p.builtAt)),
+      retention: new Set(retention).size === 1 ? retention[0] : `${retention[0]} … ${retention[retention.length - 1]}`,
+      cost: first.cost,
+      readBy: first.readBy,
+      panes,
     };
   });
 }

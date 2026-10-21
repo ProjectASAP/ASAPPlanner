@@ -28,6 +28,8 @@
       { selector: 'node.root', style: { 'border-width': 3.5, 'border-color': tok('--accent') } },
       { selector: 'node:selected', style: { 'overlay-color': tok('--accent'), 'overlay-opacity': 0.14, 'overlay-padding': 5 } },
       { selector: 'edge', style: { width: 1.6, 'line-color': tok('--edge'), 'target-arrow-color': tok('--edge'), 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 0.9 } },
+      { selector: '.dimmed', style: { opacity: 0.15 } },
+      { selector: 'node.pane', style: { 'border-style': 'dashed' } },
       { selector: 'edge:selected', style: { 'line-color': tok('--accent'), 'target-arrow-color': tok('--accent'), width: 2.6 } },
     ];
   }
@@ -37,18 +39,59 @@
     $(`lane${i}-meta`).textContent = text;
   }
 
+  // Per lane: what it draws (to redraw it with a pane chain expanded or
+  // collapsed), its elements, and the PaneChain node ids drawn as panes.
+  const drawn = [null, null, null];
+  const laneElements = [[], [], []];
+  const expanded = [new Set(), new Set(), new Set()];
+  // The query whose path the lanes highlight ('' for none).
+  let highlightedQuery = '';
+
   function render(i, dag, physical, costPerNode) {
     if (cys[i]) cys[i].destroy();
-    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds })
+    if (!drawn[i] || drawn[i].dag !== dag) expanded[i] = new Set();
+    drawn[i] = { dag, physical, costPerNode };
+    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds, expandedChains: [...expanded[i]] })
       .map((el) => ({ data: el.data, classes: [el.classes, el.data.rootFor && el.data.rootFor.length ? 'root' : ''].join(' ').trim() }));
+    laneElements[i] = elements;
     const cy = cytoscape({
       container: $('cy' + i), elements, style: style(),
       layout: { name: window.cytoscapeDagre ? 'dagre' : 'breadthfirst', rankDir: 'BT', nodeSep: 18, rankSep: 34, padding: 14, directed: true },
       wheelSensitivity: 0.25, minZoom: 0.2, maxZoom: 2.5, boxSelectionEnabled: false,
     });
-    cy.on('tap', 'node', (e) => showNode(e.target.data(), i));
+    cy.on('tap', 'node', (e) => tapNode(e.target.data(), i));
     cy.on('tap', 'edge', (e) => showEdge(e.target.data(), i));
+    // A tap on the background clears a node's highlight back to the query's.
+    cy.on('tap', (e) => { if (e.target === cy || typeof e.target.isNode !== 'function') dim(i, queryKeep(i)); });
     cys[i] = cy;
+    dim(i, queryKeep(i));
+  }
+
+  function redraw(i) { const d = drawn[i]; render(i, d.dag, d.physical, d.costPerNode); }
+
+  // A PaneChain expands into its panes; a pane collapses its chain; any
+  // other node is shown and its upstream and downstream highlighted.
+  function tapNode(d, i) {
+    if (d.expandable) { expanded[i].add(d.nodeId); redraw(i); showNode(d, i); return; }
+    if (d.kind === 'pane') { expanded[i].delete(d.paneOf); redraw(i); return; }
+    showNode(d, i);
+    dim(i, new Set(stageNeighborhoodIds(laneElements[i], d.id)));
+  }
+
+  // The element ids lane `i` keeps bright for the highlighted query, or
+  // null (nothing dimmed).
+  function queryKeep(i) { return highlightedQuery ? new Set(stageQueryElementIds(laneElements[i], highlightedQuery)) : null; }
+
+  // Dim every element of lane `i` not in `keep` (null: none).
+  function dim(i, keep) {
+    const cy = cys[i];
+    if (!cy || !cy.batch) return;
+    cy.batch(() => cy.elements().forEach((el) => el.toggleClass('dimmed', keep !== null && !keep.has(el.id()))));
+  }
+
+  function highlightQuery(id) {
+    highlightedQuery = id;
+    cys.forEach((cy, i) => dim(i, queryKeep(i)));
   }
 
   const fmtCost = (x) => (Math.abs(x) >= 100 ? x.toFixed(1) : String(Number(x.toPrecision(3))));
@@ -70,6 +113,9 @@
       items.push(['instances', summaryInstancesText(body.grouping, body.reduction)]);
     }
     if (d.rootFor && d.rootFor.length) items.push(['query root of', d.rootFor.join(', ')]);
+    if (d.reachedBy) items.push(['queries reaching it', d.reachedBy.join(', ') || 'none']);
+    if (d.paneOf !== undefined) items.push(['pane', `${d.pane + 1} of ${body.pane_count} of PaneChain ${d.paneOf}, window ${paneWindowText(d.pane, body.pane_width_ms)}`]);
+    if (d.expandable) items.push(['panes', `${body.pane_count} × ${durationText(body.pane_width_ms)} (click the chain to show them, a pane to hide them)`]);
     if (d.timing !== undefined) items.push(['runs at', formatTiming(d.timing)]);
     if (n.materialization) items.push(['materialization', compactWire(n.materialization)]);
     if (n.output_state && n.output_state.primitive) items.push(['output primitive', compactWire(n.output_state.primitive)]);
@@ -188,6 +234,9 @@
     $('story').textContent = story || '';
     $('story').hidden = !story;
     queryIds = doc.workload.queries.map((q) => q.id);
+    highlightedQuery = '';
+    $('queryPick').innerHTML = '<option value="">all queries</option>' + queryIds.map((q) => `<option value="${esc(q)}">${esc(q)}</option>`).join('');
+    $('queryPick').value = '';
     const logical = doc.stage1_logical_asap_optimization;
     const physical = doc.stage2_physical_asap_optimization;
     const selection = doc.stage3_plan_selection;
@@ -251,10 +300,10 @@
       : '<span class="status">No source declared.</span>';
   }
 
-  // The selected plan's stored outputs; a row selects its Stage 2 node.
+  // The selected plan's stored outputs, one row per Stage 2 node (a pane
+  // chain's panes listed inside its row); a row selects its Stage 2 node.
   function renderStoredOutputs() {
     const selection = doc.stage3_plan_selection;
-    const stored = storedOutputRows(doc);
     if (!selection.selected) {
       $('stored-meta').textContent = 'no plan selected';
       $('storedOutputs').innerHTML = '';
@@ -265,17 +314,22 @@
       $('storedOutputs').innerHTML = '';
       return;
     }
+    const groups = storedOutputGroups(doc);
+    const count = groups.reduce((n, g) => n + g.panes.length, 0);
     $('stored-meta').innerHTML = selection.stored_outputs_error
       ? `<span class="error">no installable plan: ${esc(selection.stored_outputs_error)}</span>`
-      : `<b>${stored.length}</b> stored output${stored.length === 1 ? '' : 's'} of <b>${esc(selection.selected)}</b>` +
-        (stored.length ? '' : ': nothing is kept across evaluations; every query computes at query time');
-    $('storedOutputs').innerHTML = stored.length ? table(
-      ['node', 'Stage 2 node', 'definition', 'kind', 'pane', 'built at', 'inputs', 'retention', 'Stage 3 cost', 'read by'],
-      stored.map((r) => `<tr class="clickable" tabindex="0" data-node="${r.stage2NodeId === null ? '' : esc(r.stage2NodeId)}"><td>${esc(r.nodeId)}</td><td>${r.stage2NodeId === null ? '—' : esc(r.stage2NodeId)}</td>` +
-        `<td class="wrap">${esc(r.definition)}</td><td class="wrap">${esc(r.kind)}</td><td class="wrap">${esc(r.pane)}</td><td>${esc(r.builtAt)}</td><td class="wrap">${esc(r.inputs)}</td>` +
-        `<td>${esc(r.retention)}</td><td class="wrap">${esc(r.cost)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
+      : `<b>${count}</b> stored output${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected)}</b>` +
+        (count ? '' : ': nothing is kept across evaluations; every query computes at query time');
+    const panes = (g) => (g.panes.length > 1
+      ? `<details><summary>${esc(g.panes.length)} installed nodes</summary><ul>${g.panes.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.pane)} · window ${esc(p.window)} · kept ${esc(p.retention)}</li>`).join('')}</ul></details>`
+      : `node ${esc(g.panes[0].nodeId)} · window ${esc(g.panes[0].window)}`);
+    $('storedOutputs').innerHTML = groups.length ? table(
+      ['Stage 2 node', 'definition', 'kind', 'panes', 'built at', 'retention', 'installed', 'Stage 3 cost', 'read by'],
+      groups.map((g) => `<tr class="clickable" tabindex="0" data-node="${g.stage2NodeId === null ? '' : esc(g.stage2NodeId)}"><td>${g.stage2NodeId === null ? '—' : esc(g.stage2NodeId)}</td>` +
+        `<td class="wrap">${esc(g.definition)}</td><td class="wrap">${esc(g.kind)}</td><td>${esc(g.panesText)}</td><td>${esc(g.builtAt)}</td>` +
+        `<td>${esc(g.retention)}</td><td class="wrap">${panes(g)}</td><td class="wrap">${esc(g.cost)}</td><td class="wrap">${esc(g.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
     $('storedOutputs').querySelectorAll('tr.clickable').forEach((tr) => {
-      const pick = () => { if (tr.dataset.node !== '') selectStage2Node(Number(tr.dataset.node)); };
+      const pick = (e) => { if (e && e.target && e.target.closest && e.target.closest('details')) return; if (tr.dataset.node !== '') selectStage2Node(Number(tr.dataset.node)); };
       tr.addEventListener('click', pick);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
     });
@@ -377,6 +431,7 @@
   });
 
   $('pick1').addEventListener('change', (e) => selectLogical(e.target.value));
+  $('queryPick').addEventListener('change', (e) => highlightQuery(e.target.value));
   $('pick2').addEventListener('change', (e) => selectPhysical(e.target.value));
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', restyle);
   new MutationObserver(restyle).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });

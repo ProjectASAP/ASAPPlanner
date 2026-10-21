@@ -84,7 +84,7 @@ h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter
 /* Stage 0, 1 and 2 stack top to bottom, each as wide as the page allows. */
 .lanes { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
 .lane .panel-head { align-items: center; }
-.lane select { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; min-width: 0; }
+#queryPick, .lane select { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; min-width: 0; }
 .lane-meta { padding: 6px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); min-height: 30px; overflow-wrap: anywhere; }
 .lane-meta b { color: var(--fg); font-family: var(--font-mono); font-weight: 500; font-variant-numeric: tabular-nums; }
 .cy { height: 560px; width: 100%; }
@@ -204,6 +204,8 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
     </section>
 
     <div style="display:grid; gap:12px; min-width:0">
+      <div class="toolbar"><label><span class="eyebrow">highlight query</span> <select id="queryPick" aria-label="Highlight one query's path"></select></label>
+        <span class="hint-inline">Dims what the query's root does not reach. Click a node to highlight what it reads and what reads it, the background to clear; click a pane chain to show its panes.</span></div>
       <div class="lanes">
         <section class="panel lane" aria-labelledby="lane0-title">
           <div class="panel-head"><div><div class="eyebrow">Stage 0</div><h2 id="lane0-title">Query-language frontends</h2></div></div>

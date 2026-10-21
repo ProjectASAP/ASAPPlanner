@@ -62,16 +62,26 @@ To run it, see [RUNNING.md](RUNNING.md).
   heap 100 · width 272`) and whether there is one per group, one per
   series, or one shared instance. A standalone scalar query (`time()`,
   `scalar(v)`, `1 + 2`) is a dashed `Scalar` node over the nodes it reads.
-  Query roots have a thick border.
+  Query roots have a thick border. A node that several queries' roots reach
+  says `shared ×n`. A `PaneChain` is one node (`30 panes × 20 s`); clicking
+  it draws its panes, newest first, each a `TimeShift` by its offset (none
+  for the newest), a `TimeRange` of one pane and the pane's build with its
+  window (`window t−40 s … t−20 s`), and clicking a pane folds them back.
+  This is display only: the document keeps the chain.
+- **Highlighting**: the **highlight query** menu dims, in every lane, what
+  that query's root does not reach. Clicking a node dims everything but
+  what it reads and what reads it, directly or through other nodes; clicking
+  the background goes back to the query's highlight.
 - **Stored outputs** under the Stage 2 lane: the selected plan's stored
-  outputs as `plan_installable` gives them, one row per installed node: its
-  Stage 2 node, coverage definition, operator and summary parameters, pane
-  (`pane 1 of 30 (newest first), 20 s wide`), how it is built, its inputs,
-  retention, the Stage 2 node's Stage 3 cost and the queries that read it.
-  Clicking a row selects its node in the Stage 2 lane. Stage 3 predicts no
+  outputs as `plan_installable` gives them, one row per Stage 2 node: its
+  coverage definition, operator and summary parameters, panes (`30 × 20 s`
+  for a pane chain), how it is built, its retention, the Stage 3 cost and the
+  queries that read it. A chain's row lists its installed panes (node id,
+  pane, window, retention) under **installed**. Clicking a row selects its
+  node in the Stage 2 lane. Stage 3 predicts no
   per-node state size, so the table has none. The lane's header also shows
   the shown candidate's Stage 3 usage.
-- **Details**: click a node for its operator, timing, materialization,
+- **Details**: click a node for its operator, the queries reaching it, timing, materialization,
   output schema, guarantee and Stage 3 cost; click an edge for its schema
   and data state.
 
@@ -261,7 +271,8 @@ shown. If a check fails, it shows the problems instead.
 
 - `index.html`, `app.js`: the page.
 - `stages.js`: document checks, the candidate list, lane elements and node
-  labels; no DOM.
+  labels, pane-chain expansion, the queries reaching each node and the
+  highlighted neighborhoods; no DOM. `stages.test.mjs`: its Node tests.
 - `node-style.js`: the operator-kind table (`KIND_CATEGORY_JSON`, checked
   against the IR by `crates/devtools/tests/viewer_contract.rs`) and the
   node groups.
@@ -287,6 +298,13 @@ From `tools/dag-viewer`:
 
 ```bash
 python3 -m unittest test_viewer test_server
+```
+
+`stages.js` also has Node tests, which load the elements into the vendored
+cytoscape (headless), from the repository root:
+
+```bash
+node --test tools/dag-viewer/stages.test.mjs
 ```
 
 The JavaScript runs in V8 through `py_mini_racer` (`pip install
