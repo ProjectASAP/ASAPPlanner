@@ -1254,11 +1254,11 @@ async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, Stri
 
 /// Without raw samples, the only valid plan of the p99 query keeps one
 /// DDSketch per series in one-second panes built at ingestion and merges
-/// the window's panes at query time (P5-m1). A quantile of merged panes is
-/// still one of the samples, so a declared non-negative gauge carries the
-/// sketch's relative bound through `avg`: P5-m1 is selected, its answers
-/// equal the query-time reference's and are within 5% of the exact
-/// averages.
+/// the window's panes at query time (P3-m1 in the joint search). A quantile
+/// of merged panes is still one of the samples, so a declared non-negative
+/// gauge carries the sketch's relative bound through `avg`: that plan is
+/// selected, its answers equal the query-time reference's and are within
+/// 5% of the exact averages.
 #[tokio::test]
 async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_through_avg() {
     let plan = plan_p99_avg(true).await.expect("a valid plan");
@@ -1370,12 +1370,86 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 }
 
 /// Without the declaration nothing proves `data`'s samples non-negative, so
-/// the merged panes' relative bound does not carry through `avg`: P5-m1 is
-/// rejected, and with no raw samples no plan is valid.
+/// the merged panes' relative bound does not carry through `avg`: no
+/// merged-pane DDSketch candidate is accepted, and with no raw samples no
+/// plan is valid. The joint search discards the sketch candidates before
+/// composition (they have no bound to meet the target), so its error lists
+/// only what reached Stage 3: the exact plan, which needs raw samples. The
+/// exhaustive search keeps every candidate and shows each merged-pane
+/// DDSketch candidate rejected for missing the target with no relative
+/// bound.
 #[tokio::test]
 async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
-    assert!(error.contains("P5-m1"), "{error}");
+    assert!(error.contains("no valid candidate"), "{error}");
+    assert!(
+        error.contains(r#"id: "P1", cause: RawDataNotRetained"#),
+        "{error}"
+    );
+
+    // The exhaustive search keeps every candidate in Stage 3, so its report
+    // shows why the merged-pane DDSketch candidates fail: their output has
+    // no relative bound, which misses the 5% target.
+    let workload = p99_avg_workload(false);
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let roots = asap_frontend_promql::lower_promql_query_workload(&workload).expect("lowers");
+    let run = asap_plan_selection::run_stage1_to_stage3_with(
+        roots.into_iter().enumerate().collect(),
+        &workload.query_workload.entries().collect::<Vec<_>>(),
+        workload.data_workload.as_ref().unwrap(),
+        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
+    )
+    .expect("Stage 1 accepts the workload");
+    // A candidate merges DDSketch panes when it keeps a DDSketch pane chain
+    // (its panes are merged at query time).
+    let merges_ddsketch_panes = |root: &QueryRoot| {
+        let QueryRoot::Operator(root) = root else {
+            return false;
+        };
+        OperatorNode::reachable(root).iter().any(|node| {
+            matches!(
+                node.asap(),
+                Some(ASAPOp::PaneChain {
+                    family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
+                    ..
+                }) if *kind.algorithm() == asap_types::ir::schema::SketchAlgorithm::DDSketch
+            )
+        })
+    };
+    let merged_pane_ids: BTreeSet<&str> = run
+        .stage2_physical_asap_optimization
+        .iter()
+        .filter(|candidate| candidate.roots.iter().any(merges_ddsketch_panes))
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    assert!(
+        !merged_pane_ids.is_empty(),
+        "a merged-pane DDSketch candidate"
+    );
+    let Err(asap_plan_selection::SelectionError::NoValidCandidate(rejections)) =
+        run.stage3_plan_selection
+    else {
+        panic!("no valid candidate");
+    };
+    for id in merged_pane_ids {
+        let rejection = rejections
+            .iter()
+            .find(|rejection| rejection.id == id)
+            .unwrap_or_else(|| panic!("{id} rejected: {rejections:?}"));
+        assert_eq!(
+            rejection.cause,
+            asap_plan_selection::RejectionCause::AccuracyTargetMissed,
+            "{rejection:?}"
+        );
+        assert!(
+            rejection.reason.contains("Relative bound None"),
+            "{rejection:?}"
+        );
+    }
 }
 
 /// `avg by (g) (quantile_over_time(0.99, x[100s]))` every 10 s at rank
