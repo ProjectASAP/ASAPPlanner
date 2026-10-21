@@ -28,6 +28,10 @@ One legal Post-ASAP alternative for answering an intent. Planner preserves alter
 
 Maintained state, exact or approximate, that can answer some query intent more efficiently than raw data. A sketch is one kind of approximate summary.
 
+## Physical plan
+
+A concrete execution and deployment choice: runtime topology of data lifecycle stages, placement of computation, transmission, storage. Physical plans are owned by downstream systems.
+
 ## Raw data sample
 
 One timestamped value of a time series as it arrives, such as one Prometheus Remote Write sample. Raw data samples are the rows a time-series scan reads. Code names them `RawDataSample` / `raw_data_sample`, e.g. `RawDataSample`, `RawDataSampleWindow`, `WeightDomain::RawDataSamplesOfMetric`, `raw_data_samples_of_metric`.
