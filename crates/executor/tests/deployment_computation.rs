@@ -322,6 +322,105 @@ fn exact_count_finalizes_to_declared_float_value() {
     );
 }
 
+/// Prometheus's `quantile` test series (`promql/promqltest/testdata/aggregators.test`
+/// in Prometheus v0.314.0), one job per `test` label and one instance per
+/// `point`, all sampled at 50 s.
+const QUANTILE_SAMPLES: &[Sample] = &[
+    ("data", "two", "a", 50_000, 0.),
+    ("data", "two", "b", 50_000, 1.),
+    ("data", "three", "a", 50_000, 0.),
+    ("data", "three", "b", 50_000, 1.),
+    ("data", "three", "c", 50_000, 2.),
+    ("data", "uneven", "a", 50_000, 0.),
+    ("data", "uneven", "b", 50_000, 1.),
+    ("data", "uneven", "c", 50_000, 4.),
+    ("data", "nan", "a", 50_000, 0.),
+    ("data", "nan", "b", 50_000, 1.),
+    ("data", "nan", "c", 50_000, f64::NAN),
+];
+
+/// Asserts `(job, value)` rows equal `expected`, NaN equal to NaN and finite
+/// values to within 1e-12 (Prometheus's own tests compare approximately too).
+fn assert_rows(actual: &BTreeMap<String, f64>, expected: &[(&str, f64)], query: &str) {
+    let mut jobs: Vec<&str> = expected.iter().map(|(job, _)| *job).collect();
+    jobs.sort();
+    assert_eq!(actual.keys().collect::<Vec<_>>(), jobs, "{query}");
+    for (job, want) in expected {
+        let got = actual[*job];
+        let same = if want.is_finite() {
+            (got - want).abs() <= 1e-12 * want.abs().max(1.)
+        } else {
+            got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan())
+        };
+        assert!(same, "{query}: {job} = {got}, want {want}");
+    }
+}
+
+// An exact instant `quantile by (G)` compiles to the grouped aggregate and
+// returns Prometheus's values: linear interpolation between closest ranks,
+// a NaN sample ordered first (so a rank between NaN and 0 is NaN), and ±Inf
+// for φ outside [0, 1]. The 0.8 and 0.2 rows are Prometheus's own expected
+// values for `quantile without(point)` over the same series.
+#[test]
+fn exact_grouped_quantile_matches_prometheus() {
+    let (inf, nan) = (f64::INFINITY, f64::NAN);
+    for (query, expected) in [
+        (
+            "quantile by (job) (0.8, data)",
+            vec![("two", 0.8), ("three", 1.6), ("uneven", 2.8), ("nan", 0.6)],
+        ),
+        (
+            "quantile by (job) (0.2, data)",
+            vec![("two", 0.2), ("three", 0.4), ("uneven", 0.4), ("nan", nan)],
+        ),
+        (
+            "quantile by (job) (0, data)",
+            vec![("two", 0.), ("three", 0.), ("uneven", 0.), ("nan", nan)],
+        ),
+        (
+            "quantile by (job) (1, data)",
+            vec![("two", 1.), ("three", 2.), ("uneven", 4.), ("nan", 1.)],
+        ),
+        (
+            "quantile by (job) (-0.5, data)",
+            vec![
+                ("two", -inf),
+                ("three", -inf),
+                ("uneven", -inf),
+                ("nan", -inf),
+            ],
+        ),
+        (
+            "quantile by (job) (1.5, data)",
+            vec![("two", inf), ("three", inf), ("uneven", inf), ("nan", inf)],
+        ),
+        // One group over every series: sorted [NaN, 0, 0, 0, 0, 1, 1, 1, 1, 2, 4],
+        // rank 0.5 * 10 = 5 → 1.
+        ("quantile(0.5, data)", vec![("", 1.)]),
+    ] {
+        let rows = run(&exact_dag(query), QUANTILE_SAMPLES, 60_000).unwrap();
+        assert_rows(&rows, &expected, query);
+    }
+}
+
+// With no input series the result is an empty vector, grouped or not, as in
+// Prometheus; a group of one series returns that series' value for any φ in
+// [0, 1].
+#[test]
+fn exact_grouped_quantile_of_no_series_is_empty() {
+    for query in ["quantile by (job) (0.5, data)", "quantile(0.5, data)"] {
+        let rows = run(&exact_dag(query), &[], 60_000).unwrap();
+        assert!(rows.is_empty(), "{query}: {rows:?}");
+    }
+    let one: &[Sample] = &[("data", "solo", "a", 50_000, 3.)];
+    let query = "quantile by (job) (0.9, data)";
+    assert_rows(
+        &run(&exact_dag(query), one, 60_000).unwrap(),
+        &[("solo", 3.)],
+        query,
+    );
+}
+
 /// `dag` with its Binary operator replaced by `kind`.
 fn with_kind(
     mut dag: PhysicalASAPDAG,

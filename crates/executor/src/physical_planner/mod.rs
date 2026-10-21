@@ -970,6 +970,18 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                             AggIntent::Avg { col } => Reduction::Avg(column(*col)?),
                             AggIntent::Min { col } => Reduction::Min(column(*col)?),
                             AggIntent::Max { col } => Reduction::Max(column(*col)?),
+                            // PromQL `quantile by (G) (φ, v)` exactly: the
+                            // group's values, interpolated as Prometheus does.
+                            // SQL percentiles order NaN and NULL differently,
+                            // so a relation's quantile has no exact kernel.
+                            AggIntent::Quantile { col, q, .. }
+                                if input.has_promql_series_identity() =>
+                            {
+                                Reduction::Quantile {
+                                    column: column(*col)?,
+                                    q: *q,
+                                }
+                            }
                             _ => {
                                 return Err(invalid(
                                     "aggregate intent has no native implementation",
