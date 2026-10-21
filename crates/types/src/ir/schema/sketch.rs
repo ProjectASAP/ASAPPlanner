@@ -4,6 +4,13 @@ use crate::ir::scalar::ColumnRef;
 
 // ── Exact accumulators ──────────────────────────────────────────────────────
 
+/// Bytes the executor holds per group for an exact accumulator of any
+/// [`ExactKind`]: one element of its column of fixed-size states (the
+/// executor's `ScalarState`, whose largest variant, a counter's, is 48
+/// bytes). Plan selection prices exact state with it; an executor test
+/// asserts it equals that state's size.
+pub const EXACT_ACCUMULATOR_STATE_BYTES: u64 = 56;
+
 /// An exact, mergeable accumulator family — zero approximation error. The
 /// partial state built for one of these *is* the answer; no
 /// `SummaryEstimate` evaluation is needed to get a value out of it.

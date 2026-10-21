@@ -999,12 +999,12 @@ fn logical_candidate_labels_are_distinct() {
 }
 
 /// `--workload` plans a `PlanningWorkload` JSON file. A dashboard panel
-/// (`max_over_time(m[5m])` every minute over 1M series) answered as the
-/// last hour at 1-minute steps (`range_evaluation`) is priced as 61
-/// evaluations per request: the kept panes (`P2-m2`, 70.51 cost/s) beat
-/// rebuilding the window at every step (`P1`, 127.08), and the document
-/// reports their retention, 1 h + 5 min. The workload section shows the
-/// range. An invalid range is refused.
+/// (`max_over_time(m[5m])` every minute over 1M series sampled every
+/// 1.5 s) answered as the last hour at 1-minute steps
+/// (`range_evaluation`) is priced as 61 evaluations per request: the kept
+/// panes (`P2-m2`, 458.23 cost/s) beat rebuilding the window at every step
+/// (`P1`, 1,261.68), and the document reports their retention, 1 h + 5 min.
+/// The workload section shows the range. An invalid range is refused.
 #[test]
 fn workload_file_with_a_range_evaluation_is_planned() {
     let workload = serde_json::json!({
@@ -1020,8 +1020,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             }],
         },
         "data_workload": {
-            "arrival": {"ingesting": {"rows_per_second": 66666.67}},
-            "sources": {"m": {"series_count": 1000000, "sample_interval": 15000}},
+            "arrival": {"ingesting": {"rows_per_second": 666666.67}},
+            "sources": {"m": {"series_count": 1000000, "sample_interval": 1500}},
         },
     });
     let path = std::env::temp_dir().join(format!(
@@ -1043,8 +1043,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     let selection = &document["stage3_plan_selection"];
     assert_eq!(selection["selected"], "P2-m2");
     let cost = |id: &str| selection["costs"][id]["cost_per_second"].as_f64().unwrap();
-    assert!((cost("P2-m2") - 70.5133).abs() < 1e-3, "{}", cost("P2-m2"));
-    assert!((cost("P1") - 127.0833).abs() < 1e-3, "{}", cost("P1"));
+    assert!((cost("P2-m2") - 458.2333).abs() < 1e-3, "{}", cost("P2-m2"));
+    assert!((cost("P1") - 1261.6833).abs() < 1e-3, "{}", cost("P1"));
     assert_eq!(
         selection["pane_retention_ms"],
         serde_json::json!({"1": 3_900_000})

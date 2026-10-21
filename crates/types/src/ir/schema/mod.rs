@@ -28,6 +28,7 @@ pub use sketch::{
     HydraKind, HydraParams, NonNegativeWeightProof, SamplingKind, SamplingParams, SketchAlgorithm,
     SketchCategory, SketchKind, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
     SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
+    EXACT_ACCUMULATOR_STATE_BYTES,
 };
 
 use serde::{Deserialize, Serialize};
