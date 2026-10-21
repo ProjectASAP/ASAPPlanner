@@ -1,8 +1,8 @@
 //! Numeric regression fixtures: actual PromQL lowering plus numeric update/evaluation checks.
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
 use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::logical_candidates;
-use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::ColumnRef;
@@ -67,7 +67,7 @@ fn count_up_counts_targets_even_when_values_repeat_or_change_sign() {
             3.
         );
     }
-    post_asap_dag(&node);
+    physical_asap_dag(&node);
 }
 
 /// Ten samples give count ten, whereas sum retains the signed sample values.
@@ -85,7 +85,7 @@ fn window_counts_and_sums_distinguish_one_zero_three_and_negative_values() {
             let got: f64 = (0..10).map(|_| contribution(family, update, value)).sum();
             assert_eq!(got, if is_count { 10. } else { value * 10. });
         }
-        post_asap_dag(&node);
+        physical_asap_dag(&node);
     }
 }
 
@@ -101,7 +101,7 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
         let (family, _, _) = aggregate(&node);
         assert!(matches!(family, FieldDataType::ExactAggregate(k, _) if *k == kind));
         assert!(node.guarantee.as_ref().unwrap().is_exact());
-        post_asap_dag(&node);
+        physical_asap_dag(&node);
     }
 }
 
@@ -124,7 +124,7 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         "direct quantile ratio should remain an available candidate"
     );
     assert!(node.guarantee.is_none());
-    post_asap_dag(&node);
+    physical_asap_dag(&node);
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.
     // The sketch reads its minimum and maximum exactly, so the interpolated
@@ -181,7 +181,7 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
                 })
             })
             .unwrap_or_else(|| panic!("outer sketch candidate must survive: {query}"));
-        post_asap_dag(&node);
+        physical_asap_dag(&node);
     }
 }
 
@@ -273,7 +273,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             };
             assert_eq!(got, if is_count { 10. } else { 10. * value });
         }
-        post_asap_dag(node);
+        physical_asap_dag(node);
     }
 }
 

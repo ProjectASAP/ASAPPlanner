@@ -70,7 +70,9 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
 /// at query time) and export the physical DAG — export needs every node
 /// timed first.
 #[allow(dead_code)]
-pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::physical_export::PhysicalASAPDAG {
+pub fn physical_asap_dag(
+    root: &Rc<OperatorNode>,
+) -> asap_types::ir::physical_export::PhysicalASAPDAG {
     use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
     let timed = apply_materialization_timings(
         root,

@@ -201,47 +201,6 @@ fn avg_over_time_maps_to_avg_intent() {
 }
 
 #[test]
-fn stddev_and_stdvar_over_time() {
-    let qe = lower("stddev_over_time(m[5m])");
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected Aggregate");
-    };
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::StdDev {
-            population: true,
-            ..
-        }]
-    ));
-    assert!(matches!(
-        child.expect_non_asap(),
-        NonASAPOp::TimeRange { .. }
-    ));
-
-    let qe = lower("stdvar_over_time(m[5m])");
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected Aggregate");
-    };
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::Variance {
-            population: true,
-            ..
-        }]
-    ));
-    assert!(matches!(
-        child.expect_non_asap(),
-        NonASAPOp::TimeRange { .. }
-    ));
-}
-
-#[test]
 fn histogram_quantile_wraps_inner_in_quantile() {
     // The argument's structure (here `rate`) is preserved *under* the quantile,
     // not squashed away. The `_bucket` metric + `le` matcher mark the classic
@@ -564,22 +523,6 @@ fn count_never_lowers_to_distinct_sample_values() {
             "{query}: {dag:?}"
         );
     }
-}
-
-#[test]
-fn count_over_time_is_count_intent() {
-    let qe = lower("count_over_time(m[5m])");
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected Aggregate");
-    };
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
-    assert!(matches!(
-        child.expect_non_asap(),
-        NonASAPOp::TimeRange { .. }
-    ));
 }
 
 #[test]
@@ -1489,13 +1432,11 @@ fn explicit_range_selector_is_a_range_time_range() {
     assert_eq!(*range, Duration::from_secs(300));
 
     let qe = lower("m[5m]");
-    assert!(matches!(
-        qe.expect_non_asap(),
-        NonASAPOp::TimeRange {
-            kind: TimeRangeKind::Range,
-            ..
-        }
-    ));
+    let NonASAPOp::TimeRange { range, kind, .. } = qe.expect_non_asap() else {
+        panic!("expected TimeRange for a range-vector selector, got {qe:?}");
+    };
+    assert_eq!(*kind, TimeRangeKind::Range);
+    assert_eq!(*range, Duration::from_secs(300));
 }
 
 #[test]

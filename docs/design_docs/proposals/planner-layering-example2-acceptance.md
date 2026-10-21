@@ -68,7 +68,7 @@ workload itself.
 | Once recognized, the SQL workload has the stand-in's Pass 1 options | `stage1_logical_asap_optimization_sql_has_the_standin_options` | passes |
 | Each statistic has an exact and a UnivMon option | `stage1_logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic` | passes |
 | Q1 has a specialized distinct-count summary (HLL or KMV) | `stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary` | passes |
-| Q2 and Q3 have a specialized entropy and norm summary | `stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries` | ignored: no PR yet |
+| Q2 and Q3 have a specialized entropy and norm summary | `stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries` | ignored: needs Pass 1 specialized entropy and L2 summary families (#444) |
 | Every combination of the queries' own options is kept, with no shared summary | `stage1_logical_asap_optimization_keeps_every_independent_combination` | passes |
 | A candidate has one UnivMon build read by all three queries, feeding a distinct-count, an entropy and an L2 estimate | `stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three` | passes |
 | For each pair, a candidate shares one UnivMon between the two while the third takes each of its own options | `stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons` | passes |
@@ -98,11 +98,11 @@ evaluation.
 | The selected plan is the cheapest valid one | `stage3_plan_selection_selects_cheapest_valid` | passes |
 | Each node of a valid candidate is charged once per consuming query while `NotMaterialized`, once when materialized | `stage3_plan_selection_charges_each_node_per_consuming_query` | passes |
 | No candidate builds a Theta sketch | `stage3_plan_selection_has_no_theta_candidate` | passes |
-| A UnivMon estimate has a guarantee, so it is judged against its target instead of rejected for having none | `stage3_plan_selection_judges_univmon_with_an_accuracy_model` | ignored: needs a UnivMon entropy accuracy model; L2 and the distinct count have one |
+| A UnivMon estimate has a guarantee, so it is judged against its target instead of rejected for having none | `stage3_plan_selection_judges_univmon_with_an_accuracy_model` | ignored: needs a UnivMon entropy accuracy model (#788); L2 and the distinct count have one |
 | Given a distinct bound for the source, classic HLL's failure probability is bound and Q1's HLL is accepted; a larger bound enlarges its precision, also in a tumbling-pane chain | `stage3_plan_selection_accepts_hll_given_a_distinct_bound`, `…_enlarges_hll_for_a_larger_distinct_bound`, `…_enlarges_tumbling_pane_hll` | passes |
 | KMV certifies Q1 for any failure probability, without a distinct bound | `stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound` | passes |
 | UnivMon's distinct count is certified given a distinct bound its layers cover; its L2 is certified from layer 0 alone, also through SQL Q3's exact population count and `CASE` | `stage3_plan_selection_accepts_univmon_distinct_given_a_distinct_bound`, `…_rejects_univmon_distinct_past_its_layers`, `…_accepts_univmon_l2` | passes |
-| One materialized UnivMon for all three costs no more than three separate UnivMons | `stage3_plan_selection_shared_univmon_costs_no_more_than_three` | ignored: needs a UnivMon entropy accuracy model and keeping the shared UnivMon materialized |
+| One materialized UnivMon for all three costs no more than three separate UnivMons | `stage3_plan_selection_shared_univmon_costs_no_more_than_three` | ignored: needs a UnivMon entropy accuracy model (#788) |
 | Selection direction: the selected plan has at most one UnivMon, because one shared UnivMon dominates several over the same input | `stage3_plan_selection_selected_plan_has_at_most_one_univmon` | passes |
 | The selected KMV plan's Q1 runs in the executor | `stage3_plan_selection_selected_kmv_plan_executes_end_to_end` | passes |
 

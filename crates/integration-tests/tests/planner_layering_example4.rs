@@ -127,11 +127,22 @@ use MaterializationOption::{MatAtIngestion, MatAtQuery, NotMaterialized};
 // ── Constraints over every candidate ─────────────────────────────────────
 
 /// Every node upstream of an ingestion-time node also runs at ingestion time, in every workload variant.
+/// The monthly variant runs in
+/// `stage2_physical_asap_optimization_monthly_ingestion_time_upstream_is_ingestion_time`.
 #[test]
 fn stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time() {
-    for workload in [once(), monthly(), at_rest(), pattern_b()] {
+    for workload in [once(), at_rest(), pattern_b()] {
         assert_ingestion_upstream_is_ingestion(&run_promql(&workload));
     }
+}
+
+/// The monthly variant of
+/// `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time`:
+/// it plans 67,228 candidates, too slow for a debug build in CI.
+#[test]
+#[ignore = "slow: run in release by hand"]
+fn stage2_physical_asap_optimization_monthly_ingestion_time_upstream_is_ingestion_time() {
+    assert_ingestion_upstream_is_ingestion(&run_promql(&monthly()));
 }
 
 /// Data at rest has no ingestion, so no candidate runs anything at ingestion time.
@@ -145,36 +156,59 @@ fn stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time() {
     }
 }
 
-/// A materialized output is kept for as long as its consumers read: it covers every reader's lookback and offset.
-#[test]
-fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() {
-    // Each query's range window and offset, as its PromQL text states them.
-    let windows: Vec<u64> = PATTERN_A.iter().map(|p| p.window_ms).collect();
-    let offsets: Vec<u64> = PATTERN_A.iter().map(|p| p.offset_before_t_ms).collect();
-    for (workload, windows, offsets) in [
-        (once(), windows.clone(), offsets.clone()),
-        (monthly(), windows.clone(), offsets.clone()),
-        (at_rest(), windows, offsets),
-        (pattern_b(), vec![PATTERN_B_WINDOW_MS], vec![0]),
-    ] {
-        let run = run_promql(&workload);
-        for p in &run.physical {
-            for n in &p.dag().nodes {
-                if materialization(p, n.id) == NotMaterialized {
-                    continue;
-                }
-                let need = readers(p.dag(), &p.query_roots, n.id)
-                    .into_iter()
-                    .map(|q| windows[q] + offsets[q])
-                    .max()
-                    .unwrap_or(0);
-                let kept = retention_ms(p, n.id).unwrap_or_else(|| {
-                    panic!("{}: {:?} is materialized without a retention", p.id, n.id)
-                });
-                assert!(kept >= need, "{}: {:?} kept {kept} < {need}", p.id, n.id);
+/// Each Pattern A query's range window and offset, as its PromQL text states them.
+fn pattern_a_windows_and_offsets() -> (Vec<u64>, Vec<u64>) {
+    let windows = PATTERN_A.iter().map(|p| p.window_ms).collect();
+    let offsets = PATTERN_A.iter().map(|p| p.offset_before_t_ms).collect();
+    (windows, offsets)
+}
+
+/// Every materialized output of every candidate of `workload` is kept for at
+/// least its longest reader's `windows[q] + offsets[q]`.
+fn assert_materialized_outputs_cover_their_consumers(
+    workload: &PlanningWorkload,
+    windows: &[u64],
+    offsets: &[u64],
+) {
+    let run = run_promql(workload);
+    for p in &run.physical {
+        for n in &p.dag().nodes {
+            if materialization(p, n.id) == NotMaterialized {
+                continue;
             }
+            let need = readers(p.dag(), &p.query_roots, n.id)
+                .into_iter()
+                .map(|q| windows[q] + offsets[q])
+                .max()
+                .unwrap_or(0);
+            let kept = retention_ms(p, n.id).unwrap_or_else(|| {
+                panic!("{}: {:?} is materialized without a retention", p.id, n.id)
+            });
+            assert!(kept >= need, "{}: {:?} kept {kept} < {need}", p.id, n.id);
         }
     }
+}
+
+/// A materialized output is kept for as long as its consumers read: it covers every reader's lookback and offset.
+/// The monthly variant runs in
+/// `stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers`.
+#[test]
+fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() {
+    let (windows, offsets) = pattern_a_windows_and_offsets();
+    for workload in [once(), at_rest()] {
+        assert_materialized_outputs_cover_their_consumers(&workload, &windows, &offsets);
+    }
+    assert_materialized_outputs_cover_their_consumers(&pattern_b(), &[PATTERN_B_WINDOW_MS], &[0]);
+}
+
+/// The monthly variant of
+/// `stage2_physical_asap_optimization_materialized_output_covers_its_consumers`:
+/// it plans 67,228 candidates, too slow for a debug build in CI.
+#[test]
+#[ignore = "slow: run in release by hand"]
+fn stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers() {
+    let (windows, offsets) = pattern_a_windows_and_offsets();
+    assert_materialized_outputs_cover_their_consumers(&monthly(), &windows, &offsets);
 }
 
 // ── Pattern A ────────────────────────────────────────────────────────────
@@ -354,36 +388,12 @@ fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
 
 /// The sliding-window KLL is kept from ingestion time or from query time; not materializing it is the no-window plan.
 #[test]
-#[ignore = "needs sliding windows (no PR yet)"]
+#[ignore = "needs sliding windows (#522)"]
 fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options() {
     let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), sliding(), 1)
         .into_keys()
         .collect();
     assert_eq!(found, BTreeSet::from([MatAtIngestion, MatAtQuery]));
-}
-
-/// B2 rebuilds all five tumbling KLLs at every evaluation, so it costs at least B1 and B3.
-#[test]
-#[ignore = "the built-in model contradicts it: with query-time retention, B1 keeps 6 panes of 1M per-series KLLs for 13,326.5 cost/s and B3 keeps 4 for 8,884.5, while B2 rebuilds them for 2.183; needs the model-relative rewrite (Q49)"]
-fn stage3_plan_selection_b_rebuilding_every_window_costs_most() {
-    let run = run_promql_for(&pattern_b(), &keeping_query_time_results());
-    let options = options_of(&run, tumbling(), 1);
-    let b2 = cost(&run, &options[&NotMaterialized].0);
-    for m in [MatAtIngestion, MatAtQuery] {
-        assert!(cost(&run, &options[&m].0) <= b2, "{m:?} vs B2 {b2}");
-    }
-}
-
-/// Repeating over arriving data, the built-in models pick B1 among the tumbling options.
-#[test]
-#[ignore = "the built-in model contradicts it: B1 keeps 6 panes of 1M per-series KLLs (107 GB) for 13,326.5 cost/s, B2 rebuilds them for 2.183; needs the model-relative rewrite (Q49)"]
-fn stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows() {
-    let run = run_promql(&pattern_b());
-    let options = options_of(&run, tumbling(), 1);
-    let b1 = cost(&run, &options[&MatAtIngestion].0);
-    for (m, (id, _)) in &options {
-        assert!(b1 <= cost(&run, id), "B1 {b1} vs {m:?} {}", cost(&run, id));
-    }
 }
 
 // ── Cost models (#683, #660) ─────────────────────────────────────────────

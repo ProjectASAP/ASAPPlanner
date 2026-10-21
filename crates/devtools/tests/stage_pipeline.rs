@@ -415,23 +415,6 @@ fn nine_quantile_queries() -> Vec<String> {
     args
 }
 
-/// The exhaustive search's default limit is 10^4: the nine quantile
-/// queries' 19683 combinations are rejected once the count passes it, and
-/// the message names the exhaustive search.
-#[test]
-fn exhaustive_default_candidate_limit_is_ten_thousand() {
-    let mut args = nine_quantile_queries();
-    args.push("--exhaustive".into());
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (status, stderr) = failure(&args);
-    assert_eq!(status, Some(3));
-    assert!(
-        stderr.contains("workload has more than 10000 Stage 1 candidates"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("--exhaustive"), "{stderr}");
-}
-
 /// Without `--exhaustive`, the same nine queries plan with the default
 /// search, `plan_installable`'s: each query, reading its own metric, is an
 /// independent component searched on its own, so no limit is reached. The

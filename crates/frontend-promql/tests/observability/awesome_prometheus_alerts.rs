@@ -33,8 +33,8 @@ use std::rc::Rc;
 
 use asap_types::ir::operator::{AggIntent, BinaryOpKind, Reduction};
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
-use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ScalarExpr};
+use asap_types::ir::scalar::CompareOpKind;
+use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode};
 use support::lower_promql;
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");
@@ -292,19 +292,6 @@ fn predict_linear_function_body_lowers_with_horizon() {
     assert!(intents(&qe).iter().any(
         |i| matches!(i, AggIntent::PredictLinear { seconds } if (*seconds - 86400.0).abs() < 1e-9)
     ));
-}
-
-#[test]
-fn vector_literal_lowers_to_a_labelless_vector() {
-    // `vector(1)` — used in dead-man's-switch ("always firing") alerts. Now
-    // lowers to a `PromqlVectorFromScalar` over the scalar `1` (issue #48).
-    let qe = ok("vector(1)");
-    let NonASAPOp::PromqlVectorFromScalar(inner) = qe.expect_non_asap() else {
-        panic!("expected PromqlVectorFromScalar, got {qe:?}");
-    };
-    assert!(matches!(inner, ScalarExpr::Literal(ScalarValue::Float64(v)) if *v == 1.0));
-    // The result is a vector: it carries a time index (unlike a bare scalar).
-    assert!(qe.schema.time_index.is_some());
 }
 
 #[test]

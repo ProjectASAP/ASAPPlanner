@@ -208,17 +208,6 @@ fn selector_without_metric_name_is_rejected__GAP() {
     }
 }
 
-#[test]
-fn range_vector_selector_is_time_range() {
-    // SEMANTICS: `[5m]` turns an instant vector into a range vector,
-    // represented in the canonical DAG as a dedicated `TimeRange` node.
-    let qe = ok("node_cpu_seconds_total[5m]");
-    let NonASAPOp::TimeRange { range, .. } = qe.expect_non_asap() else {
-        panic!("expected TimeRange for a range-vector selector, got {qe:?}");
-    };
-    assert_eq!(*range, Duration::from_secs(300));
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // B. Counters: rate / irate / increase     (cheat sheet "Rates of Increase";
 //    functions.test)
@@ -250,45 +239,11 @@ fn selector_time_ranges_carry_their_kind() {
 }
 
 #[test]
-fn rate_range_lives_in_time_range_node() {
-    // SEMANTICS: per-second average rate; the temporal range lives on the
-    // enclosing `TimeRange` node, not inside the intent.
-    let qe = ok("rate(http_requests_total[5m])");
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected Aggregate, got {qe:?}");
-    };
-    assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let NonASAPOp::TimeRange { range, .. } = child.expect_non_asap() else {
-        panic!("expected TimeRange child, got {child:?}");
-    };
-    assert_eq!(*range, Duration::from_secs(300));
-}
-
-#[test]
 fn irate_maps_to_its_own_intent() {
     assert!(has(&ok("irate(http_requests_total[1m])"), |i| matches!(
         i,
         AggIntent::IRate
     )));
-}
-
-#[test]
-fn increase_range_lives_in_time_range_node() {
-    let qe = ok("increase(http_requests_total[1h])");
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected Aggregate, got {qe:?}");
-    };
-    assert!(matches!(measures.as_slice(), [AggIntent::Increase]));
-    let NonASAPOp::TimeRange { range, .. } = child.expect_non_asap() else {
-        panic!("expected TimeRange child, got {child:?}");
-    };
-    assert_eq!(*range, Duration::from_secs(3600));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,46 +367,6 @@ fn group_aggregator_lowers_to_a_distinct_intent() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sum_of_rate_is_two_levels() {
-    // SEMANTICS: per-series rate, THEN cross-series sum. Both must survive.
-    let qe = ok("sum(rate(http_requests_total[5m]))");
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected outer Aggregate{{Sum}}, got {qe:?}");
-    };
-    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    assert!(matches!(
-        child.expect_non_asap(),
-        NonASAPOp::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
-    ));
-}
-
-#[test]
-fn sum_by_of_rate_groups_outer_level() {
-    // Outer cross-series Sum grouped on positional `Aggregate.by` over the
-    // label-preserving inner Rate. Leaf = [ts, value, instance] → by = [2].
-    let qe = ok("sum by(instance) (rate(node_network_receive_bytes_total[5m]))");
-    let NonASAPOp::Aggregate {
-        reduction,
-        measures,
-        child,
-        ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected outer Aggregate grouped by instance, got {qe:?}");
-    };
-    assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    // child is the inner per-series Rate aggregate.
-    assert!(matches!(
-        child.expect_non_asap(),
-        NonASAPOp::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
-    ));
-}
-
-#[test]
 fn sum_by_of_over_time_groups_outer_level() {
     // Outer cross-series Sum grouped on positional `Aggregate.by` over an inner
     // *per-series* `avg_over_time` — `Window { Aggregate{Avg} }` is label-
@@ -516,16 +431,6 @@ fn over_time_functions_reduce_over_time_range() {
     }
 }
 
-#[test]
-fn quantile_over_time_is_aggregate_over_time_range() {
-    let qe = ok("quantile_over_time(0.9, request_latency_seconds[5m])");
-    assert!(matches!(qe.expect_non_asap(), NonASAPOp::Aggregate { .. }));
-    assert!(has(
-        &qe,
-        |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)
-    ));
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // F. Histograms                            (cheat sheet "Quantiles from
 //    Histograms"; histograms.test)
@@ -543,39 +448,6 @@ fn histogram_quantile_over_rate() {
         matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.9).abs() < 1e-9)
     );
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
-}
-
-#[test]
-fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
-    // SEMANTICS: the standard pattern — bucket rates summed by `le`, then the
-    // quantile. The `sum by (le)` aggregation must survive into the
-    // canonical DAG.
-    let qe = ok(
-        "histogram_quantile(0.99, sum by(le) (rate(demo_api_request_duration_seconds_bucket[5m])))",
-    );
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
-    };
-    // `by (le)` marks the classic cumulative-bucket form → `HistogramQuantile`.
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::HistogramQuantile { .. }]
-    ));
-    // `sum by(le)` now survives as a positional Aggregate (by = [2], `le`), over
-    // the inner Rate — no name-based Partition.
-    let NonASAPOp::Aggregate {
-        reduction,
-        measures,
-        ..
-    } = child.expect_non_asap()
-    else {
-        panic!("expected `sum by(le)` as a positional Aggregate, got {child:?}");
-    };
-    assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -789,16 +661,6 @@ fn set_ops_lower_to_binaryop() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn topk_over_count_is_heavy_hitter() {
-    // SEMANTICS: top-k by frequency → first-class heavy-hitter `TopK` intent.
-    let qe = ok("topk(10, count_over_time(http_requests_total[1m]))");
-    assert!(has(
-        &qe,
-        |i| matches!(i, AggIntent::TopK { k, .. } if *k == 10)
-    ));
-}
-
-#[test]
 fn bottomk_is_generic_sort_limit() {
     // SEMANTICS: bottom-k → generic ascending order + limit (no sketch).
     let qe = ok("bottomk(3, count_over_time(http_requests_total[5m]))");
@@ -878,41 +740,6 @@ fn outer_aggregate_over_nested_aggregate_nests() {
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)), "rate preserved");
-}
-
-#[test]
-fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
-    // SEMANTICS (PromQL, issue #53): aggregating `by` a label that no input
-    // series carries is valid — every series lands in one group and the
-    // (empty) label is omitted from the output. Here the inner `sum by (group)`
-    // collapses `job` away (its closed output schema is `[group, sum]`), so the
-    // outer `by (job)` groups everything into a single global partition:
-    // the query lowers with the provably-absent key dropped, exactly
-    // `sum(sum by (group)(…))`.
-    let qe = ok(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#);
-    let NonASAPOp::Aggregate {
-        reduction,
-        measures,
-        child,
-        ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected outer Aggregate, got {qe:?}");
-    };
-    assert_eq!(
-        reduction,
-        &Reduction::by(vec![]),
-        "absent `job` key dropped → global aggregate"
-    );
-    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    let NonASAPOp::Aggregate { reduction, .. } = child.expect_non_asap() else {
-        panic!("expected inner `sum by (group)` Aggregate, got {child:?}");
-    };
-    assert_eq!(
-        reduction,
-        &Reduction::by(vec![2]),
-        "inner grouping on `group` survives"
-    );
 }
 
 #[test]

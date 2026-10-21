@@ -9,8 +9,10 @@
 use std::rc::Rc;
 
 use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::physical_export::{
+    at_ingestion, at_ingestion_physical_asap_dag, physical_asap_dag,
+};
 use asap_integration_tests::planning::logical_candidates;
-use asap_integration_tests::post_asap::{at_ingestion, at_ingestion_post_asap_dag, post_asap_dag};
 use asap_logical_asap_optimization::accuracy::OperandDomain;
 use asap_physical_asap_optimization::PhysicalCandidate;
 use asap_plan_selection::AccuracyEvidenceProvider;
@@ -647,7 +649,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
         .iter()
         .any(|field| matches!(field.dtype, FieldDataType::Plain(DataType::Float64))));
     // Explicit boundary is a valid post-ASAP DAG.
-    post_asap_dag(&plan);
+    physical_asap_dag(&plan);
 }
 
 #[test]
@@ -660,7 +662,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
     let expected = ExecutionTiming::QueryTime;
     let input = lower_promql(query, AccuracyTarget::max_error(0.05)).unwrap();
     let plan = realize(&input, AccuracyTarget::max_error(0.05));
-    let dag = at_ingestion_post_asap_dag(&plan);
+    let dag = at_ingestion_physical_asap_dag(&plan);
     let node = dag
         .nodes
         .iter()
@@ -861,7 +863,7 @@ fn without_aggregation_candidates_export_valid_dags() {
             let candidates = logical_candidates(root, accuracy.clone());
             assert!(!candidates.is_empty(), "{query}");
             for node in &candidates {
-                post_asap_dag(node);
+                physical_asap_dag(node);
             }
         }
     }

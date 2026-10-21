@@ -10,42 +10,69 @@ mod support;
 use asap_types::ir::properties::AccuracyTarget;
 use support::{logical_plan, lower_promql};
 
-const CORPORA: &[(&str, &str)] = &[
+/// Today's coverage of one corpus, as a ratchet: a change that plans fewer
+/// queries with an ASAP operator, or fails to plan more of them, fails the
+/// test. Raise `min_asap_candidates` (or lower `max_planning_errors`) when
+/// coverage improves.
+struct CoverageRatchet {
+    /// Queries whose logical plan binds an ASAP operator below the root.
+    min_asap_candidates: usize,
+    /// Lowered queries whose logical planning returns an error.
+    max_planning_errors: usize,
+}
+
+const fn ratchet(min_asap_candidates: usize, max_planning_errors: usize) -> CoverageRatchet {
+    CoverageRatchet {
+        min_asap_candidates,
+        max_planning_errors,
+    }
+}
+
+const CORPORA: &[(&str, &str, CoverageRatchet)] = &[
     (
         "CMU query logs",
         include_str!("data/metrics_observability/cmu_chad_logs.txt"),
+        ratchet(162, 0),
     ),
     (
         "CMU dashboards",
         include_str!("data/metrics_observability/cmu_chad_dashboards.txt"),
+        ratchet(174, 0),
     ),
     (
         "CMU rules",
         include_str!("data/metrics_observability/cmu_chad_rules.txt"),
+        ratchet(202, 0),
     ),
     (
         "Claude query logs",
         include_str!("data/metrics_observability/from_claude_logs.txt"),
+        ratchet(71, 0),
     ),
     (
         "Grafana dashboards",
         include_str!("data/metrics_observability/grafana_dashboards.txt"),
+        ratchet(164, 0),
     ),
     (
         "Kubernetes mixin dashboards",
         include_str!("data/metrics_observability/kubernetes_mixin_dashboards.txt"),
+        ratchet(147, 0),
     ),
     (
         "Kubernetes mixin alerts",
         include_str!("data/metrics_observability/kubernetes_mixin_alerts.txt"),
+        ratchet(27, 2),
     ),
     (
         "Kubernetes mixin rules",
         include_str!("data/metrics_observability/kubernetes_mixin_rules.txt"),
+        ratchet(66, 0),
     ),
     (
         "Promset",
         include_str!("data/metrics_observability/promset.txt"),
+        ratchet(1505, 4),
     ),
 ];
 
@@ -57,8 +84,8 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
 }
 
 #[test]
-fn benchmark_corpora_are_total_and_report_coverage() {
-    for (name, corpus) in CORPORA {
+fn benchmark_corpora_are_total_and_keep_their_coverage() {
+    for (name, corpus, ratchet) in CORPORA {
         let mut total = 0;
         let mut lowered = 0;
         let mut parse_failures = 0;
@@ -103,6 +130,16 @@ fn benchmark_corpora_are_total_and_report_coverage() {
         // counted above so extraction drift is visible, but are not expected
         // to parse as PromQL.
         assert_eq!(total, lowered + rejected + parse_failures);
+        assert!(
+            post_asap_candidates >= ratchet.min_asap_candidates,
+            "{name}: {post_asap_candidates} queries bind an ASAP operator, fewer than {}",
+            ratchet.min_asap_candidates
+        );
+        assert!(
+            post_asap_errors <= ratchet.max_planning_errors,
+            "{name}: {post_asap_errors} queries fail logical planning, more than {}",
+            ratchet.max_planning_errors
+        );
     }
 }
 

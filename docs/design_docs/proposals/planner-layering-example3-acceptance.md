@@ -71,10 +71,10 @@ Shared data workload, except Pattern A's `arrival` is `Mixed`.
 |---|---|---|
 | The query lowers to scan → range 5m → quantile, no summary | `stage0_query_language_frontends_b_lowers_to_one_range_quantile` | passes |
 | Exact and KLL options | `stage1_logical_asap_optimization_b_pass1_offers_exact_and_kll` | passes |
-| Each summary option appears with no window, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows | `stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option` | ignored: sliding, no PR yet |
+| Each summary option appears with no window, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows | `stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option` | ignored: sliding (#522) |
 | Each summary option appears with no window and as 1-min tumbling panes, 5 merged before the estimate | `stage1_logical_asap_optimization_b_window_composition_adds_tumbling_per_mergeable_option` | passes |
 | Window parameters are legal: L divides W; s divides L and the evaluation interval; a tumbling length divides W and the interval | `stage1_logical_asap_optimization_b_window_parameters_are_legal` | passes |
-| Sliding with L = W has no merge; tumbling merges before the estimate | `stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it` | ignored: sliding, no PR yet |
+| Sliding with L = W has no merge; tumbling merges before the estimate | `stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it` | ignored: sliding (#522) |
 | A window form that merges uses a mergeable summary (KLL, DDSketch), in both patterns | `stage1_logical_asap_optimization_window_merges_use_mergeable_summaries` | passes |
 | One selected, cheapest valid, each node charged once per consuming query | `stage3_plan_selection_b_selects_cheapest_valid` | passes |
 | Panes rebuilt at query time cost the whole build plus the merge; whole-window KLL is selected | `stage3_plan_selection_b_panes_rebuilt_at_query_time_add_the_merge` | passes |

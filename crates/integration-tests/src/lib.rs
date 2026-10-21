@@ -94,8 +94,8 @@ pub mod fixtures {
     }
 }
 
-/// Timing and export helpers for post-ASAP plans.
-pub mod post_asap {
+/// Timing and physical ASAP DAG export helpers for planned candidates.
+pub mod physical_export {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
     use asap_types::ir::{
         apply_materialization_timings, MaterializationAssignment, OperatorNode, TimingMemo,
@@ -128,14 +128,14 @@ pub mod post_asap {
     }
 
     /// Time `root` (default assignment), then export the physical DAG.
-    pub fn post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        compile_physical_asap_dag(&timed(root)).expect("post-ASAP DAG export failed")
+    pub fn physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
+        compile_physical_asap_dag(&timed(root)).expect("physical ASAP DAG export failed")
     }
 
     /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows
     /// it, then export the physical DAG.
-    pub fn at_ingestion_post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        compile_physical_asap_dag(&at_ingestion(root)).expect("post-ASAP DAG export failed")
+    pub fn at_ingestion_physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
+        compile_physical_asap_dag(&at_ingestion(root)).expect("physical ASAP DAG export failed")
     }
 }
 
