@@ -503,6 +503,7 @@ fn a_known_bound_that_misses_is_not_discarded_before_composition() {
         Stage1ToStage3Search {
             keep_every_candidate: true,
             exhaustive: false,
+            memo_groups: false,
         },
     )
     .unwrap();
@@ -1156,4 +1157,184 @@ fn queries_over_other_windows_or_with_a_latency_bound_are_in_no_class() {
     );
     let search = &run.stage3_plan_selection.as_ref().unwrap().search;
     assert!(search.interchangeable_queries.is_empty());
+}
+
+/// The memo-group search (not the default yet) on seeded random workloads
+/// over one or two gauges, with raw data kept or not, under cost model 1:
+/// it selects a plan of the exhaustive search's price, or both find none.
+#[test]
+fn memo_group_search_selects_the_exhaustive_price() {
+    let mut searched = 0;
+    let mut mismatches = Vec::new();
+    for seed in 1..=60u64 {
+        let gauges: &[&str] = match seed % 3 {
+            0 => &["m", "n"],
+            _ => &["m"],
+        };
+        let workload = random_workload_over(seed, gauges);
+        let roots = lower_promql_roots(&workload).unwrap();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                roots.iter().cloned().enumerate().collect(),
+            )
+            .unwrap();
+        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
+            continue;
+        }
+        searched += 1;
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap();
+        let deployment = match seed % 2 {
+            0 => no_raw_data(),
+            _ => asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        };
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
+        let exhaustive = run_stage1_to_stage3_with(
+            indexed(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search::exhaustive(),
+        )
+        .unwrap();
+        let memo = run_stage1_to_stage3_with(
+            indexed(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search {
+                memo_groups: true,
+                ..Stage1ToStage3Search::default()
+            },
+        )
+        .unwrap();
+        let price = |run: &Stage1ToStage3Run<usize>| {
+            run.stage3_plan_selection
+                .as_ref()
+                .ok()
+                .map(|s| s.costs[&s.selected].cost_per_second.unwrap())
+        };
+        let (all, found) = (price(&exhaustive), price(&memo));
+        let same = match (all, found) {
+            (Some(a), Some(f)) => (a - f).abs() <= 1e-9 * a.abs(),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            mismatches.push(format!(
+                "seed {seed}: exhaustive {all:?}, memo {found:?}: {:?}",
+                workload
+                    .query_workload
+                    .repeating_queries
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e.query.0.clone())
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(
+        searched >= 20,
+        "only {searched} workloads were small enough"
+    );
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// The memo-group search selects a plan of the exhaustive search's price
+/// on `workload`, with raw data kept and without (or both find none).
+fn assert_memo_selects_the_exhaustive_price(label: &str, workload: &PlanningWorkload) {
+    let roots = lower_promql_roots(workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    for deployment in [
+        asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        no_raw_data(),
+    ] {
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        let run = |search| {
+            run_stage1_to_stage3_with(
+                roots.iter().cloned().enumerate().collect(),
+                &entries,
+                &data,
+                models,
+                search,
+            )
+            .unwrap()
+        };
+        let price = |run: &Stage1ToStage3Run<usize>| {
+            run.stage3_plan_selection
+                .as_ref()
+                .ok()
+                .map(|s| s.costs[&s.selected].cost_per_second.unwrap())
+        };
+        let exhaustive = price(&run(Stage1ToStage3Search::exhaustive()));
+        let memo = price(&run(Stage1ToStage3Search {
+            memo_groups: true,
+            ..Stage1ToStage3Search::default()
+        }));
+        match (exhaustive, memo) {
+            (Some(a), Some(f)) => assert!(
+                (a - f).abs() <= 1e-9 * a.abs(),
+                "{label}: exhaustive {a}, memo {f}"
+            ),
+            (a, f) => assert_eq!(a.is_some(), f.is_some(), "{label}: {a:?} vs {f:?}"),
+        }
+    }
+}
+
+/// A query's top-k over a sum, beside a query of that sum alone: the top-k's
+/// fused heap absorbs the sum, which is the other query's root, so the memo
+/// keeps the sum its own group for the second query. The memo-group search
+/// selects a plan of the exhaustive search's price, with raw data kept and
+/// without.
+#[test]
+fn a_fused_top_k_beside_its_inner_sum_selects_the_exhaustive_price() {
+    let workload = workload_of(
+        &[
+            ("topk(5, sum by (job) (sum_over_time(m[5m])))", 60_000),
+            ("sum by (job) (sum_over_time(m[5m]))", 60_000),
+        ],
+        AccuracyTarget::max_error(0.01),
+    );
+    assert_memo_selects_the_exhaustive_price("top-k beside its sum", &workload);
+}
+
+/// A per-series quantile over `data[1m]` beside `quantile by (host, job)`
+/// and `quantile by (job)` of `data` (and, in the whole workload, a 5-minute
+/// quantile), every 10 s over 10,000 series: the exhaustive plan rolls the
+/// `by (job)` quantile up from the `by (host, job)` KLL build, which the
+/// memo lists too.
+#[test]
+fn a_sketch_rollup_beside_other_quantiles_selects_the_exhaustive_price() {
+    let workload = |queries: &[&str]| -> PlanningWorkload {
+        let entries: Vec<serde_json::Value> = queries
+            .iter()
+            .map(|q| {
+                serde_json::json!({
+                    "query": q,
+                    "demand": {"fixed_interval": 10000},
+                    "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
+                    "predictability": {"predictable": {"known_at": null}}
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": entries},
+            "data_workload": {
+                "arrival": {"ingesting": {"rows_per_second": 666.67}},
+                "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}}
+            }
+        }))
+        .unwrap()
+    };
+    let (q1, q2, q3, q4) = (
+        "quantile_over_time(0.5, data[1m])",
+        "quantile_over_time(0.9, data[5m])",
+        "quantile by (host, job) (0.5, data)",
+        "quantile by (job) (0.5, data)",
+    );
+    assert_memo_selects_the_exhaustive_price("Q1, Q3, Q4", &workload(&[q1, q3, q4]));
+    assert_memo_selects_the_exhaustive_price("Q2, Q3, Q4", &workload(&[q2, q3, q4]));
 }

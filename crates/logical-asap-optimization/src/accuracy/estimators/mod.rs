@@ -235,7 +235,7 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
 /// shrinks, so each reader's `k` or heap is first resized to the shared
 /// (smallest) failure probability at no larger error ([`kll::shared_k`],
 /// [`univmon::shared_heap`]), and the shared build meets every reader.
-pub(crate) fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
+pub fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
     use SketchParams as P;
     let (first, rest) = params.split_first()?;
     let shared = rest.iter().try_fold((*first).clone(), |a, b| {

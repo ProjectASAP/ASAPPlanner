@@ -1705,3 +1705,54 @@ fn scans_projecting_different_labels_are_shared() {
         "{rolled_up} vs {without_rollup}"
     );
 }
+
+/// The memo search's document names its selected plan's logical candidate
+/// under the id its physical candidates read (`from_logical`), as the
+/// viewer's validator requires: the brute force numbers its logical plans,
+/// so the selected one need not be the first.
+#[test]
+fn the_memo_search_document_names_the_selected_logical_candidate() {
+    let document = document_of(&[
+        "--promql",
+        "quantile_over_time(0.5, data[5m])",
+        "--promql",
+        "quantile_over_time(0.9, data[5m])",
+        "--sample-interval-ms",
+        "15000",
+        "--search",
+        "memo-brute-force",
+    ]);
+    assert_eq!(document["search"], "memo-brute-force");
+    let logical: HashSet<&str> = document["stage1_logical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert!(!physical.is_empty());
+    for candidate in physical {
+        let from = candidate["from_logical"].as_str().unwrap();
+        assert!(logical.contains(from), "{from} is not in {logical:?}");
+    }
+    let selected = document["stage3_plan_selection"]["selected"]
+        .as_str()
+        .unwrap();
+    assert!(physical.iter().any(|c| c["id"] == selected));
+}
+
+/// `--exhaustive` and `--search memo-brute-force` are two searches.
+#[test]
+fn exhaustive_and_the_memo_search_are_not_both_given() {
+    let (status, stderr) = failure(&[
+        "--promql",
+        "sum(m)",
+        "--exhaustive",
+        "--search",
+        "memo-brute-force",
+    ]);
+    assert_eq!(status, Some(2));
+    assert!(stderr.contains("give one"), "{stderr}");
+}

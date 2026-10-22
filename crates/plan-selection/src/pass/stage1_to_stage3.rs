@@ -159,6 +159,12 @@ pub struct Stage1ToStage3Search {
     /// own candidates first: the exhaustive search the pruned one is tested
     /// against; default `false`.
     pub exhaustive: bool,
+    /// Search the memo over logical sub-expressions (planner-layering
+    /// design, "The stages over a memo of sub-expressions") instead of
+    /// whole-workload candidates;
+    /// ignored with `exhaustive`. Default `false` until it selects the
+    /// exhaustive search's price on every equivalence test.
+    pub memo_groups: bool,
 }
 
 impl Stage1ToStage3Search {
@@ -168,6 +174,7 @@ impl Stage1ToStage3Search {
         Self {
             keep_every_candidate: true,
             exhaustive: true,
+            memo_groups: false,
         }
     }
 }
@@ -228,6 +235,41 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
+    if search.memo_groups && !search.exhaustive {
+        let pruned = per_computation
+            .clone()
+            .without_unsupported_summaries(models.deployment_capabilities);
+        let combinations = pruned.combinations();
+        let found = super::subexpr::search::brute_force(&pruned, entries, data, models);
+        let (selection, selected, logical) = match found {
+            Ok((selection, selected, logical)) => (Ok(selection), Some(selected), Some(logical)),
+            Err(error) => (Err(error), None, None),
+        };
+        let from_logical = selected.as_ref().map(|s| s.from_logical.clone());
+        let selected_logical = logical
+            .as_ref()
+            .and_then(|roots| selected_logical(roots, entries, data));
+        return Stage1ToStage3Run {
+            stage1_pass1_per_computation: pruned,
+            combinations,
+            stage1_logical_asap_optimization: Vec::new(),
+            stage2_physical_asap_optimization: Vec::new(),
+            stage2_pruned: Vec::new(),
+            stage3_plan_selection: selection,
+            stage3_selected: selected,
+            stage3_selected_logical: selected_logical,
+            // The selected plan's logical candidate, under the id its
+            // physical candidates name (`from_logical`).
+            stage1_selected: logical
+                .zip(from_logical)
+                .map(|(roots, id)| LogicalCandidate {
+                    id,
+                    choice: Vec::new(),
+                    roots: Ok(roots),
+                    pass2: None,
+                }),
+        };
+    }
     let components = super::components::sharing_components(&per_computation, entries, &models);
     let searched_as_one = match super::components::searched_as_one(&components, &models, search) {
         Some(reason) => reason,

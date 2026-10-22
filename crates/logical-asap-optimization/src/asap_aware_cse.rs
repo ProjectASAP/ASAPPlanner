@@ -1704,6 +1704,140 @@ fn in_panes(
     recompose_guarantees(&out)
 }
 
+/// `roots` with the `SummaryMerge` `merge` (over one [`ASAPOp::PaneChain`]
+/// of `roots`) reading the newest panes of another chain over the same
+/// input: `pane_count` panes of `pane_width_ms` of family `family` (a size
+/// that serves every reader of the chain). The merge reads the newest
+/// panes covering its own window (its newest panes, or its whole chain),
+/// which `pane_width_ms` divides and the new chain covers; every guarantee
+/// is composed again.
+pub fn with_pane_chain(
+    roots: &[QueryRoot],
+    merge: &Rc<OperatorNode>,
+    family: FieldDataType,
+    pane_width_ms: u64,
+    pane_count: u32,
+) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+    let Some(ASAPOp::SummaryMerge {
+        children,
+        newest_panes: own_newest,
+        ..
+    }) = merge.asap()
+    else {
+        unreachable!("a merge over a pane chain");
+    };
+    let own = &children[0];
+    let Some(ASAPOp::PaneChain {
+        child,
+        input,
+        reduction,
+        grouping,
+        filter,
+        pane_width_ms: own_width,
+        pane_count: own_count,
+        ..
+    }) = own.asap()
+    else {
+        unreachable!("a merge over a pane chain");
+    };
+    // The merge's window: its newest panes, or the whole chain.
+    let window_ms = own_width * u64::from(own_newest.unwrap_or(*own_count));
+    let newest =
+        u32::try_from(window_ms / pane_width_ms).expect("a reader's window is at most the chain's");
+    let mut chain = OperatorNode::new(Operator::ASAP(ASAPOp::PaneChain {
+        child: Rc::clone(child),
+        family,
+        input: input.clone(),
+        reduction: reduction.clone(),
+        grouping: grouping.clone(),
+        filter: filter.clone(),
+        pane_width_ms,
+        pane_count,
+    }))?;
+    for (field, kept) in chain.schema.fields.iter_mut().zip(&own.schema.fields) {
+        field.name = kept.name.clone();
+        field.table = kept.table.clone();
+    }
+    let read = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![Rc::new(chain)],
+        newest_panes: (newest < pane_count).then_some(newest),
+        group_by: None,
+    }))?;
+    let replaced = HashMap::from([(Rc::as_ptr(merge), Rc::new(read))]);
+    let mut rebuilt = HashMap::new();
+    let mut out = Vec::new();
+    for root in roots {
+        out.push(match root {
+            QueryRoot::Operator(node) => {
+                QueryRoot::Operator(rebuild(node, &replaced, &mut rebuilt)?)
+            }
+            QueryRoot::Scalar(expr) => {
+                let mut nodes = HashMap::new();
+                for node in expr.operator_refs() {
+                    nodes.insert(Rc::as_ptr(node), rebuild(node, &replaced, &mut rebuilt)?);
+                }
+                QueryRoot::Scalar(
+                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
+                )
+            }
+        });
+    }
+    recompose_guarantees(&out)
+}
+
+/// `roots` with the summary build `build` (a `SummaryAgg` of `roots`)
+/// built at family `family` instead (the same algorithm at another size),
+/// its output names kept; every guarantee is composed again.
+pub fn with_resized_build(
+    roots: &[QueryRoot],
+    build: &Rc<OperatorNode>,
+    family: FieldDataType,
+) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+    let Some(ASAPOp::SummaryAgg {
+        child,
+        input,
+        reduction,
+        grouping,
+        filter,
+        ..
+    }) = build.asap()
+    else {
+        unreachable!("a summary build");
+    };
+    let mut resized = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: Rc::clone(child),
+        family,
+        input: input.clone(),
+        reduction: reduction.clone(),
+        grouping: grouping.clone(),
+        filter: filter.clone(),
+    }))?;
+    for (field, kept) in resized.schema.fields.iter_mut().zip(&build.schema.fields) {
+        field.name = kept.name.clone();
+        field.table = kept.table.clone();
+    }
+    let replaced = HashMap::from([(Rc::as_ptr(build), Rc::new(resized))]);
+    let mut rebuilt = HashMap::new();
+    let mut out = Vec::new();
+    for root in roots {
+        out.push(match root {
+            QueryRoot::Operator(node) => {
+                QueryRoot::Operator(rebuild(node, &replaced, &mut rebuilt)?)
+            }
+            QueryRoot::Scalar(expr) => {
+                let mut nodes = HashMap::new();
+                for node in expr.operator_refs() {
+                    nodes.insert(Rc::as_ptr(node), rebuild(node, &replaced, &mut rebuilt)?);
+                }
+                QueryRoot::Scalar(
+                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
+                )
+            }
+        });
+    }
+    recompose_guarantees(&out)
+}
+
 /// The [`ASAPOp::PaneChain`] of `candidate`'s panes, with the build's
 /// output names.
 fn pane_chain(candidate: &PaneCandidate) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
