@@ -369,6 +369,55 @@ The result is the plan the exhaustive search would select. It is checked by `joi
 6. **Combine** the clusters' frontiers; peaks and capacity limits (cost models 2 and 3) are checked when frontiers combine. Latency and repeat-interval checks are checked when a reader attaches to a shared group, at that group's threshold.
 7. **Build late.** Compose the selected plan once, run Stage 3's checks and the executor's compile check on it, and report it.
 
+### The search: threshold enumeration, branch and bound, dynamic programming
+
+Steps 4 and 5 combine three techniques. One example runs through all three: three quantile queries over one metric that may share one DDSketch build, `Qa` with relative error 0.01, `Qb` with 0.02 and `Qc` with 0.05.
+
+**Threshold enumeration: which readers join a shared node, and how large it is.** Choosing which readers join is a subset choice: 2³ = 8 subsets here, 2ⁿ for n readers. The shared node's size depends only on its strictest member, and a reader no stricter than that size can join without enlarging it (it only adds its own read). So the search enumerates the size, as a threshold set by one reader's requirement, instead of the subset:
+
+| Threshold (sized for) | Readers that may join | Readers that cannot |
+| --- | --- | --- |
+| 0.01 (`Qa`) | `Qa`, `Qb`, `Qc` | none |
+| 0.02 (`Qb`) | `Qb`, `Qc` | `Qa` builds its own |
+| 0.05 (`Qc`) | `Qc` | `Qa`, `Qb` build their own |
+| no shared node | none | all build their own |
+
+Given a threshold, each reader that may join decides on its own, by comparing its read of the shared node with its cheapest own implementation. That is n + 1 thresholds with n independent decisions each, instead of 2ⁿ subsets. A size with several parameters (a KLL's `k` and failure probability) takes each reader's requirement vector as a candidate threshold and drops dominated ones. The other coupling sites follow the same pattern:
+- a pane chain enumerates its grid (the gcd closure of its readers' widths) and its longest window;
+- a source's raw retention enumerates the horizon;
+- a metric's scan enumerates its label set.
+
+**Branch and bound: which combinations of coupling choices to try.** A cluster usually has several coupling sites, so their thresholds still multiply. The search assigns one site at a time, in a search tree, and prunes:
+1. **Branch**: pick the next coupling site and try each of its thresholds.
+2. **Bound**: for a partial assignment, compute a lower bound on any completion. Assigned sites are priced exactly. Every unassigned site is priced once, at its least demanding reader's size. Every group is priced at its cheapest frontier candidate given the sites so far. Sharing only removes repeated charges, so no completion is cheaper than this bound.
+3. **Prune**: when the bound exceeds the best complete assignment found so far (the incumbent), skip the whole subtree.
+
+For example, if an incumbent costs 0.50 per second and a branch fixes the source's raw horizon at 24 hours, whose disk charge alone is 0.60 per second, none of that branch's completions can win, so none of them is expanded. Only provably worse branches are pruned, so the result stays exact.
+
+**Dynamic programming: everything else, once per group.** With the coupling choices fixed, the remaining groups no longer affect each other's cost. Each group's frontier is computed bottom-up from its children's, once, and cached:
+
+```text
+G2 = TimeRange(5m)               coupling choice fixed: built once per evaluation
+G6 = sum_over_time over G2       exact accumulator only: c6
+G8 = sum by (job) over G6        min(exact over G6: c6 + x,  rollup of G7: c7 + y)
+G9 = topk(5) over G8             min(exact top-k: best(G8) + z,  fused heap over G2: w)
+```
+
+A parent reads its children's best values; it never multiplies their alternatives with its own. This is where the memo's speed comes from: work proportional to the number of groups and their implementations, not to the product of every query's choices.
+
+**How the three fit together:**
+
+```text
+for each sharing cluster:
+  branch and bound over the cluster's coupling sites
+    each site's candidate values come from threshold enumeration (n + 1, not 2^n)
+      each complete assignment: dynamic programming over the remaining groups (cached)
+  keep the cheapest assignment (the incumbent)
+compose the clusters' selections into one plan; check and compile it once
+```
+
+None of the three discards a plan that could be optimal, so the selection equals the exhaustive search's. `joint_search_equivalence` checks this on workloads small enough for `--exhaustive`.
+
 ### Coupled charges
 
 - **Raw data on disk**: a per-source coupling site whose size is the longest horizon among the readers that scan raw data, enumerated as a threshold (step 4).
