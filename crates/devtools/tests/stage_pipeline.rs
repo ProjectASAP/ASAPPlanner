@@ -1756,3 +1756,96 @@ fn exhaustive_and_the_memo_search_are_not_both_given() {
     assert_eq!(status, Some(2));
     assert!(stderr.contains("give one"), "{stderr}");
 }
+
+/// Each shown candidate's `per_node` entries carry the node's operator,
+/// timing and predicted CPU, as `plan_installable`'s predicted usage names
+/// them, and the candidate's `cpu_core_seconds_per_second` is their sum:
+/// enough to compare a plan's predicted CPU with a runtime's measurement
+/// without `plan_installable`. Report-only: prices are unchanged.
+#[test]
+fn per_node_costs_show_operator_timing_and_predicted_cpu() {
+    let document = generate(&[]);
+    let costs = document["stage3_plan_selection"]["costs"]
+        .as_object()
+        .unwrap();
+    assert!(!costs.is_empty());
+    let mut timings = HashSet::new();
+    for (id, cost) in costs {
+        let per_node = cost["per_node"].as_object().unwrap();
+        let mut sum = 0.0;
+        for node in per_node.values() {
+            assert!(node["operator"].is_string(), "{id}: {node}");
+            timings.insert(node["timing"].as_str().unwrap().to_owned());
+            let cpu = node["cpu_core_seconds_per_second"].as_f64().unwrap();
+            assert!(cpu >= 0.0, "{id}: {node}");
+            sum += cpu;
+        }
+        let total = cost["cpu_core_seconds_per_second"].as_f64().unwrap();
+        assert!(total > 0.0, "{id}");
+        assert!(
+            (total - sum).abs() <= 1e-9 * total,
+            "{id}: {total} vs {sum}"
+        );
+    }
+    assert!(
+        timings.is_subset(&HashSet::from([
+            "ingestion_time".to_owned(),
+            "query_time".to_owned()
+        ])),
+        "{timings:?}"
+    );
+}
+
+/// `rate`, `increase` and `irate` over a source the workload declares a
+/// gauge still plan, with a warning under `stage3_plan_selection.warnings`
+/// (which the viewer shows) naming the query, the function and the metric.
+/// A counter gets none.
+#[test]
+fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
+    let workload = |metric_type: &str| {
+        serde_json::json!({
+            "query_workload": {
+                "language": "promql",
+                "query_batch": null,
+                "repeating_queries": [
+                    {
+                        "query": "sum by (job) (rate(m[5m]))",
+                        "demand": {"fixed_interval": 60000},
+                        "requirements": {},
+                        "predictability": {"predictable": {"known_at": null}},
+                    },
+                    {
+                        "query": "max_over_time(m[5m])",
+                        "demand": {"fixed_interval": 60000},
+                        "requirements": {},
+                        "predictability": {"predictable": {"known_at": null}},
+                    },
+                ],
+            },
+            "data_workload": {
+                "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+                "sources": {"m": {"series_count": 1000, "metric_type": metric_type,
+                                  "sample_interval": 15000}},
+            },
+        })
+    };
+    let path = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_gauge_rate_workload.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, workload("gauge").to_string()).unwrap();
+    let gauge = document_of(&["--workload", path.to_str().unwrap()]);
+    std::fs::write(&path, workload("counter").to_string()).unwrap();
+    let counter = document_of(&["--workload", path.to_str().unwrap()]);
+    std::fs::remove_file(path).unwrap();
+    assert!(gauge["stage3_plan_selection"]["selected"].is_string());
+    assert_eq!(
+        gauge["stage3_plan_selection"]["warnings"],
+        serde_json::json!([
+            "q1: rate over m, which the data workload declares a gauge: rate assumes a \
+             counter (a drop is a reset); planned as written"
+        ])
+    );
+    assert!(counter["stage3_plan_selection"]["selected"].is_string());
+    assert!(counter["stage3_plan_selection"].get("warnings").is_none());
+}

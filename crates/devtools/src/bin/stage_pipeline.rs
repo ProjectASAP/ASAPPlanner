@@ -101,9 +101,16 @@
 //     pane chain the selected plan keeps beyond one evaluation (by node id)
 //     to how far back from the newest evaluation the runtime must keep its
 //     panes: the window plus the longest range-evaluation span reading it.
-//     `warnings` are one-line warnings about the selected plan: its peak
-//     memory when over 10^12 bytes and the cost model declares no memory
-//     capacity (`large_peak_memory_warning`); absent when there are none.
+//     `warnings` are one-line warnings about the workload and the selected
+//     plan: a PromQL query applying `rate`, `increase` or `irate` to a
+//     metric the data workload declares a gauge, prefixed with its id (the
+//     query still plans; `counter_function_over_gauge_warnings`), and the
+//     plan's peak memory when over 10^12 bytes and the cost model declares
+//     no memory capacity (`large_peak_memory_warning`); absent when there
+//     are none. Each node's `per_node` entry also has its `operator`,
+//     `timing` and predicted CPU (`cpu_core_seconds_per_second`), and each
+//     shown candidate's `cpu_core_seconds_per_second` is their sum: report
+//     only, as `plan_installable`'s predicted usage names them.
 // `workload.data_workload` is the `DataWorkload` the run planned with, as
 // declared (`--workload`, `--example`) or built from `--sample-interval-ms`
 // (`--promql`); each query also carries its `recurrence` and
@@ -212,7 +219,7 @@ use asap_devtools::planning_stages::{
     PlanningStagesError, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
-use asap_frontend_promql::promql_metric_names;
+use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
 use asap_logical_asap_optimization::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates, PruneReason,
 };
@@ -673,18 +680,19 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     };
     // A selected plan's very large peak memory, when the deployment
     // declares no memory capacity to check it against.
-    let warnings: Vec<String> = result
-        .as_ref()
-        .ok()
-        .and_then(|run| run.stage3_plan_selection.as_ref().ok())
-        .and_then(|selection| {
-            large_peak_memory_warning(
-                selection.costs[&selection.selected].usage.peak_memory_bytes,
-                &plan_selection.cost_model,
-            )
-        })
-        .into_iter()
-        .collect();
+    let mut warnings = counter_function_over_gauge_warnings_of(&described, &data)?;
+    warnings.extend(
+        result
+            .as_ref()
+            .ok()
+            .and_then(|run| run.stage3_plan_selection.as_ref().ok())
+            .and_then(|selection| {
+                large_peak_memory_warning(
+                    selection.costs[&selection.selected].usage.peak_memory_bytes,
+                    &plan_selection.cost_model,
+                )
+            }),
+    );
     let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
     if !warnings.is_empty() {
         document["stage3_plan_selection"]["warnings"] = json!(warnings);
@@ -706,6 +714,27 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         serde_json::to_value(&deployment_capabilities).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}").into())
+}
+
+/// One warning per PromQL query of `described` (the document's queries)
+/// that applies `rate`, `increase` or `irate` to a metric `data` declares a
+/// gauge, prefixed with the query's id; the query still plans.
+fn counter_function_over_gauge_warnings_of(
+    described: &[Value],
+    data: &DataWorkload,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    for query in described.iter().filter(|q| q["language"] == "promql") {
+        let (id, text) = (&query["id"], query["text"].as_str().unwrap_or_default());
+        let id = id.as_str().unwrap_or_default();
+        warnings.extend(
+            counter_function_over_gauge_warnings(text, data)
+                .map_err(|e| format!("{id}: {e}"))?
+                .into_iter()
+                .map(|warning| format!("{id}: {warning}")),
+        );
+    }
+    Ok(warnings)
 }
 
 /// A workload's queries as the document describes them, the frontends'
@@ -1012,6 +1041,9 @@ fn plan_selection_json(
                     (
                         node.to_string(),
                         json!({
+                            "operator": c.operator,
+                            "timing": c.timing,
+                            "cpu_core_seconds_per_second": c.cpu_core_seconds_per_second,
                             "cost_per_second": c.cost_per_second,
                             "multiplier": c.multiplier,
                             "detail": c.detail,
@@ -1024,6 +1056,13 @@ fn plan_selection_json(
                 id.clone(),
                 json!({
                     "cost_per_second": cost.cost_per_second,
+                    // Report-only: the nodes' predicted CPU, summed as
+                    // `plan_installable`'s predicted usage sums it.
+                    "cpu_core_seconds_per_second": cost
+                        .per_node
+                        .values()
+                        .map(|node| node.cpu_core_seconds_per_second)
+                        .sum::<f64>(),
                     "cost_unit": cost.cost_unit,
                     "source": cost.source,
                     "usage": usage_json(&cost.usage),
