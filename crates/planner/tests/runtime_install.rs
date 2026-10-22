@@ -727,6 +727,123 @@ async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
     }
 }
 
+/// A query whose window equals its interval, with no declared phase: one
+/// tumbling window per evaluation, maintained at ingestion time, answers
+/// every evaluation without raw data. `quantile_over_time(0.99, m[5m])`
+/// every 5 minutes at rank error 0.01 (a KLL per series) had no plan.
+#[tokio::test]
+async fn a_window_equal_to_its_interval_is_kept_at_ingestion_time() {
+    assert_answers_as_reference_without_raw_data(
+        "quantile_over_time(0.99, m[5m])",
+        r#"{"fixed_interval": 300000}"#,
+        RANK_ERROR_1_PERCENT,
+        &[0, 300_000, 600_000],
+    )
+    .await;
+    assert_answers_as_reference_without_raw_data(
+        "sum by (job) (sum_over_time(m[20s]))",
+        r#"{"fixed_interval": 20000}"#,
+        "{}",
+        &[0, 20_000, 40_000, 60_000],
+    )
+    .await;
+}
+
+/// The same 20 s window every 20 s at phase 5 s: a 20 s window on the
+/// epoch grid would end 5 s before every evaluation, so the plan must not
+/// read one; it still answers every evaluation as the reference.
+#[tokio::test]
+async fn a_window_equal_to_its_interval_at_an_offset_phase_answers_as_reference() {
+    assert_answers_as_reference_without_raw_data(
+        "sum by (job) (sum_over_time(m[20s]))",
+        r#"{"fixed_interval_at": {"interval": 20000, "evaluation_phase": 5000}}"#,
+        "{}",
+        &[5_000, 25_000, 45_000, 65_000],
+    )
+    .await;
+}
+
+/// Rank error 0.01 with failure probability 0.01, as `requirements`.
+const RANK_ERROR_1_PERCENT: &str = r#"{"accuracy": {"accuracy_metric": "rank", "max_error": 0.01,
+    "failure_probability": 0.01, "accuracy_scope": "whole_result"}}"#;
+
+/// Plans `query` with `demand` and `requirements` over 6 ingesting series of `m` sampled every
+/// second, for a deployment that keeps no raw data, and runs it at
+/// `EVALUATION_MS` plus each of `evaluation_offsets_ms` on a runtime that
+/// builds each ingestion state once, on the epoch grid of its width. The
+/// plan keeps state at ingestion time and reads no raw data at query time;
+/// every answer equals the query-time reference.
+async fn assert_answers_as_reference_without_raw_data(
+    query: &str,
+    demand: &str,
+    requirements: &str,
+    evaluation_offsets_ms: &[i64],
+) {
+    let workload: PlanningWorkload = serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [
+              {{"query": {query:?}, "demand": {demand}, "requirements": {requirements},
+                "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 6.0}}}},
+              "sources": {{"m": {{"series_count": 6, "sample_interval": 1000}}}}}}}}"#
+    ))
+    .unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan_json = plan_json_for(workload, &capabilities).await;
+    let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    assert!(
+        plan.stored_outputs
+            .iter()
+            .any(|output| output.built_at == StoredOutputBuild::IngestionRun),
+        "{:#?}",
+        plan.stored_outputs
+    );
+    assert!(
+        plan.query_time_raw_windows.is_empty(),
+        "no raw data at query time"
+    );
+    // Samples of `m`, `job` a (instances 1-3) and b (4-6), every second
+    // from 6 minutes before `EVALUATION_MS` to past the last evaluation;
+    // each value distinct, so a window off by a second answers differently.
+    let last_ms = EVALUATION_MS + evaluation_offsets_ms.iter().max().unwrap();
+    let steps = (last_ms - EVALUATION_MS + 360_000) / 1_000 + 10;
+    let samples: Vec<RawDataSample> = (1..=6i64)
+        .flat_map(|instance| {
+            (0..steps).map(move |step| RawDataSample {
+                labels: BTreeMap::from([
+                    ("__name__".to_string(), "m".to_string()),
+                    (
+                        "job".to_string(),
+                        if instance <= 3 { "a" } else { "b" }.to_string(),
+                    ),
+                    ("instance".to_string(), instance.to_string()),
+                ]),
+                timestamp_ms: EVALUATION_MS - 360_000 + step * 1_000,
+                value: (instance * 1000 + step * step % 997) as f64,
+            })
+        })
+        .collect();
+    // The states stored across every evaluation.
+    let mut store = SummaryStore::new();
+    for offset_ms in evaluation_offsets_ms {
+        let evaluation_ms = EVALUATION_MS + offset_ms;
+        let run = run_data_plane_on(
+            &plan_json,
+            &samples,
+            evaluation_ms,
+            &mut store,
+            IngestionBuilds::Tumbling,
+        );
+        assert!(!run.answers_per_query[0].is_empty());
+        assert_eq!(
+            run.answers_per_query, run.reference_answers_per_query,
+            "{query} at {evaluation_ms}"
+        );
+    }
+}
+
 /// A plan file of another DAG wire version is refused, and so is the
 /// reference of a tampered plan file, with an error rather than a panic.
 #[tokio::test]

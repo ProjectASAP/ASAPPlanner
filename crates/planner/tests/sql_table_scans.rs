@@ -45,15 +45,15 @@ fn http_schema() -> Schema {
     )
 }
 
-/// Repeating SQL `queries`, each every minute with `accuracy`, over `http`
-/// ingesting 100 rows per second, whose 3 services and 100,000 rows held
-/// are declared.
-fn workload(queries: &[&str], accuracy: &str) -> PlanningWorkload {
+/// Repeating SQL `queries`, each every `interval_ms` with `accuracy`, over
+/// `http` ingesting 100 rows per second, whose 3 services and 100,000 rows
+/// held are declared.
+fn workload(queries: &[&str], accuracy: &str, interval_ms: u64) -> PlanningWorkload {
     let entries: Vec<String> = queries
         .iter()
         .map(|query| {
             format!(
-                r#"{{"query": {query:?}, "demand": {{"fixed_interval": 60000}},
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval": {interval_ms}}},
                 "requirements": {{"accuracy": {accuracy}}},
                 "predictability": {{"predictable": {{"known_at": null}}}}}}"#
             )
@@ -83,26 +83,42 @@ async fn plan(query: &str, accuracy: &str) -> InstallablePlan {
 }
 
 async fn plan_all(queries: &[&str], accuracy: &str) -> InstallablePlan {
-    plan_for(queries, accuracy, &DeploymentCapabilities::default()).await
+    plan_for(
+        queries,
+        accuracy,
+        MINUTE_MS as u64,
+        &DeploymentCapabilities::default(),
+    )
+    .await
 }
 
 /// [`plan_all`] for a deployment that keeps no raw data: every window is
 /// read by state maintained at ingestion time.
 async fn plan_without_raw_data(queries: &[&str], accuracy: &str) -> InstallablePlan {
+    plan_without_raw_data_every(queries, accuracy, MINUTE_MS as u64).await
+}
+
+/// [`plan_without_raw_data`] with each query every `interval_ms`.
+async fn plan_without_raw_data_every(
+    queries: &[&str],
+    accuracy: &str,
+    interval_ms: u64,
+) -> InstallablePlan {
     let deployment = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    plan_for(queries, accuracy, &deployment).await
+    plan_for(queries, accuracy, interval_ms, &deployment).await
 }
 
 async fn plan_for(
     queries: &[&str],
     accuracy: &str,
+    interval_ms: u64,
     deployment: &DeploymentCapabilities,
 ) -> InstallablePlan {
     let catalog = SqlCatalog::new().with_table("http", http_schema());
-    let workload = workload(queries, accuracy);
+    let workload = workload(queries, accuracy, interval_ms);
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Sql { catalog: &catalog },
@@ -588,4 +604,48 @@ async fn ingestion_time_row_counts_read_each_table_row_once() {
             .collect();
         assert_eq!(by_key(answers[query].clone()), expected, "query {query}");
     }
+}
+
+/// A 5-minute distinct count every 5 minutes (window equal to interval,
+/// the W-RollupHeavy query that had no plan) and an exact 5-minute row
+/// count every 5 minutes, for a deployment that keeps no raw data: each is
+/// one tumbling window built at ingestion time from the table rows, read
+/// no raw data at query time, and answers exactly.
+#[tokio::test]
+async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_rows() {
+    let five_minutes_ms = 5 * MINUTE_MS as u64;
+    let plan = plan_without_raw_data_every(
+        &[DISTINCT_USERS_LAST_5_MINUTES],
+        APPROXIMATE,
+        five_minutes_ms,
+    )
+    .await;
+    assert!(
+        plan.stored_outputs
+            .iter()
+            .any(|o| o.built_at == StoredOutputBuild::IngestionRun
+                && !o.inputs.raw_data_sample_windows.is_empty()),
+        "built at ingestion time from table rows: {:?}",
+        plan.stored_outputs
+    );
+    assert!(
+        plan.query_time_raw_windows.is_empty(),
+        "no raw data at query time"
+    );
+    assert_eq!(
+        by_key(run_data_plane(&plan).remove(0)),
+        expected_distinct_users()
+    );
+
+    let row_count = "SELECT service, COUNT(*) AS value FROM http \
+                     WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
+    let plan = plan_without_raw_data_every(&[row_count], EXACT, five_minutes_ms).await;
+    assert!(
+        plan.query_time_raw_windows.is_empty(),
+        "no raw data at query time"
+    );
+    let expected: BTreeMap<String, String> = (0..3)
+        .map(|s| (format!("s{s}"), shown(&Value::Int64(100))))
+        .collect();
+    assert_eq!(by_key(run_data_plane(&plan).remove(0)), expected);
 }
