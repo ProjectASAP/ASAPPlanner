@@ -315,6 +315,7 @@ fn memo_run<Id: Clone + std::fmt::Debug>(
     let selected_logical = logical
         .as_ref()
         .and_then(|roots| selected_logical(roots, entries, data));
+    let from_logical = selected.as_ref().map(|s| s.from_logical.clone());
     Stage1ToStage3Run {
         stage1_pass1_per_computation: per_computation,
         combinations,
@@ -324,12 +325,16 @@ fn memo_run<Id: Clone + std::fmt::Debug>(
         stage3_plan_selection: selection,
         stage3_selected: selected,
         stage3_selected_logical: selected_logical,
-        stage1_selected: logical.map(|roots| LogicalCandidate {
-            id: "L1".to_string(),
-            choice: Vec::new(),
-            roots: Ok(roots),
-            pass2: None,
-        }),
+        // The selected plan's logical candidate, under the id its physical
+        // candidates name (`from_logical`).
+        stage1_selected: logical
+            .zip(from_logical)
+            .map(|(roots, id)| LogicalCandidate {
+                id,
+                choice: Vec::new(),
+                roots: Ok(roots),
+                pass2: None,
+            }),
     }
 }
 
