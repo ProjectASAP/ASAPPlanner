@@ -1917,14 +1917,15 @@ fn values_per_result(
 
 /// An upper bound on the groups `node` returns, from the distinct values
 /// the sources it reads declare for its group keys
-/// (`SourceFacts::distinct_values_per_label`): the product over the keys of
-/// each key's declared count ([`declared_distinct_values`]). The grouping is
+/// (`SourceFacts::distinct_values_per_label` and
+/// `distinct_values_per_label_set`): the smallest product of declared counts
+/// covering the keys ([`declared_distinct_combinations`]). The grouping is
 /// found below operators that only keep, drop or reorder rows, and through
 /// a summary's estimate (not a top-k, which returns several rows per
 /// group), merge and finalization. `None` when no such grouping is found,
 /// it is a `without (...)`, or a key is not a source column passed through
-/// unchanged with a declared count: the declared counts are upper bounds,
-/// never defaults.
+/// unchanged covered by declared counts: the declared counts are upper
+/// bounds, never defaults.
 fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64> {
     let grouped = |reduction: &Reduction, input: &OperatorNode| -> Option<u64> {
         let Reduction::Reduce(keys) = reduction else {
@@ -1933,9 +1934,7 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
         if keys.is_without() {
             return None;
         }
-        keys.keys().iter().try_fold(1u64, |product, &key| {
-            Some(product.saturating_mul(declared_distinct_values(input, key, data)?))
-        })
+        declared_distinct_combinations(input, keys.keys(), data)
     };
     match &node.operator {
         Operator::NonASAP(NonASAPOp::Aggregate {
@@ -1988,34 +1987,41 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
     }
 }
 
-/// The distinct values column `column` of `node` takes at most, when it is
-/// a source column passed through unchanged: traced down through
-/// operators that keep their input's columns (filter, sort, limit, time
-/// range and shift), a projection that selects it, a grouped aggregate's
-/// key, a per-series reduction's other columns, and each branch of a
-/// union, to the scans, and summed over them from the label (or column)
-/// counts their sources declare. `None` when it is computed or relabeled
-/// on the way (its values are no longer the source's), or a source does
-/// not declare it.
-fn declared_distinct_values(
+/// The distinct combinations of values columns `columns` of `node` take
+/// together at most, when each is a source column passed through
+/// unchanged: traced down through operators that keep their input's
+/// columns (filter, sort, limit, time range and shift), a projection that
+/// selects them, a grouped aggregate's keys, a per-series reduction's other
+/// columns, and each branch of a union (whose combinations add), to the
+/// scans, where the source's declared label and label-set counts bound them
+/// ([`SourceFacts::declared_distinct_combinations`]). A join is not traced:
+/// it can pair values of different rows. `None` when a column is computed
+/// or relabeled on the way (its values are no longer the source's), or a
+/// source's declared counts do not cover the columns.
+///
+/// [`SourceFacts::declared_distinct_combinations`]: asap_types::workload::SourceFacts::declared_distinct_combinations
+fn declared_distinct_combinations(
     node: &OperatorNode,
-    column: usize,
+    columns: &[usize],
     data: &DataWorkload,
 ) -> Option<u64> {
     match node.non_asap()? {
         NonASAPOp::Scan { source, .. } => {
-            let label = &node.schema.fields.get(column)?.name;
+            let labels = columns
+                .iter()
+                .map(|&column| Some(node.schema.fields.get(column)?.name.as_str()))
+                .collect::<Option<Vec<_>>>()?;
             data.sources
                 .get(source_name(source))?
-                .distinct_values_per_label
-                .get(label)
-                .copied()
+                .declared_distinct_combinations(&labels)
         }
         NonASAPOp::Filter { child, .. }
         | NonASAPOp::Sort { child, .. }
         | NonASAPOp::Limit { child, .. }
         | NonASAPOp::TimeRange { child, .. }
-        | NonASAPOp::TimeShift { child, .. } => declared_distinct_values(child, column, data),
+        | NonASAPOp::TimeShift { child, .. } => {
+            declared_distinct_combinations(child, columns, data)
+        }
         // A grouped aggregate returns its keys first, unchanged; but a
         // `count_values` label named like a key takes that key's place
         // with the stringified sample values.
@@ -2029,7 +2035,11 @@ fn declared_distinct_values(
                 .iter()
                 .any(|m| matches!(m, AggIntent::CountValues { .. })) =>
         {
-            declared_distinct_values(child, *keys.keys().get(column)?, data)
+            let inputs = columns
+                .iter()
+                .map(|&column| keys.keys().get(column).copied())
+                .collect::<Option<Vec<_>>>()?;
+            declared_distinct_combinations(child, &inputs, data)
         }
         // A per-series reduction keeps every column but the one it reduces.
         NonASAPOp::Aggregate {
@@ -2046,25 +2056,31 @@ fn declared_distinct_values(
                 )
                 .ok()?,
             };
-            (column != reduced)
-                .then(|| declared_distinct_values(child, column, data))
+            (!columns.contains(&reduced))
+                .then(|| declared_distinct_combinations(child, columns, data))
                 .flatten()
         }
-        NonASAPOp::Project { cols, child, .. } => match cols.get(column)?.expr {
-            ScalarExpr::Column(input) => declared_distinct_values(child, input, data),
-            _ => None,
-        },
+        NonASAPOp::Project { cols, child, .. } => {
+            let inputs = columns
+                .iter()
+                .map(|&column| match cols.get(column)?.expr {
+                    ScalarExpr::Column(input) => Some(input),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            declared_distinct_combinations(child, &inputs, data)
+        }
         NonASAPOp::SetOp {
             kind: RelationalSetOpKind::Union,
             left,
             right,
             ..
         } => Some(
-            declared_distinct_values(left, column, data)?
-                .saturating_add(declared_distinct_values(right, column, data)?),
+            declared_distinct_combinations(left, columns, data)?
+                .saturating_add(declared_distinct_combinations(right, columns, data)?),
         ),
         NonASAPOp::Concat { children, .. } => children.iter().try_fold(0u64, |total, child| {
-            Some(total.saturating_add(declared_distinct_values(child, column, data)?))
+            Some(total.saturating_add(declared_distinct_combinations(child, columns, data)?))
         }),
         _ => None,
     }
@@ -2893,10 +2909,16 @@ fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<f
 /// The groups (or partitions) a `by (keys)` over rows of schema `input`
 /// from `sources` is priced at, from declared or derivable facts only: the
 /// smallest of
-/// - the product of each key's distinct-value count, which each source
-///   read declares in `distinct_values_per_label` (summed over the
-///   sources: a union holds at most the sum, while a join matching on the
-///   key is over-counted), when every key has one;
+/// - over one source with no join or binary operator below
+///   (`joined_below` false), the smallest product of the counts it declares
+///   in `distinct_values_per_label` and `distinct_values_per_label_set`
+///   that covers the keys
+///   ([`SourceFacts::declared_distinct_combinations`](asap_types::workload::SourceFacts::declared_distinct_combinations));
+///   over several sources, or rows a join pairs (whose key values can come
+///   from different rows), the product of each key's
+///   `distinct_values_per_label` count summed over the sources (a union
+///   holds at most the sum, while a join matching on the key is
+///   over-counted), when every key has one;
 /// - the series (PromQL) or groups of rows (SQL) the sources declare in
 ///   `series_count`, when they all do (their product over several
 ///   sources): each is in one group;
@@ -2906,14 +2928,17 @@ fn group_count_bound(
     keys: &GroupKeys,
     input: Option<&Schema>,
     sources: &BTreeSet<&str>,
+    joined_below: bool,
     data: &DataWorkload,
     rows_read: u64,
 ) -> u64 {
-    let distinct_values = |key: &usize| -> Option<u64> {
-        let label = &input?.fields.get(*key)?.name;
-        if sources.is_empty() {
-            return None;
-        }
+    let labels = || -> Option<Vec<&str>> {
+        keys.keys()
+            .iter()
+            .map(|key| Some(input?.fields.get(*key)?.name.as_str()))
+            .collect()
+    };
+    let label_count = |label: &str| -> Option<u64> {
         sources.iter().try_fold(0u64, |total, source| {
             let count = data
                 .sources
@@ -2923,12 +2948,20 @@ fn group_count_bound(
             Some(total.saturating_add(*count))
         })
     };
-    let declared = if keys.is_without() {
-        None
-    } else {
-        keys.keys().iter().try_fold(1u64, |product, key| {
-            Some(product.saturating_mul(distinct_values(key)?))
-        })
+    let declared = || -> Option<u64> {
+        match sources.iter().collect::<Vec<_>>().as_slice() {
+            _ if keys.is_without() => None,
+            [] => None,
+            // Rows of one source, no join below: each group's key values
+            // are one row's, which the source's declared label sets bound.
+            [source] if !joined_below => data
+                .sources
+                .get(**source)?
+                .declared_distinct_combinations(&labels()?),
+            _ => labels()?.into_iter().try_fold(1u64, |product, label| {
+                Some(product.saturating_mul(label_count(label)?))
+            }),
+        }
     };
     // Over several sources a group combines one series (or group of rows)
     // of each at most, as a join does; a union's groups are fewer.
@@ -2939,7 +2972,7 @@ fn group_count_bound(
             Some(product.saturating_mul(data.sources.get(*source)?.series_count?))
         })
     };
-    [declared, declared_series, Some(rows_read)]
+    [declared(), declared_series, Some(rows_read)]
         .into_iter()
         .flatten()
         .min()
@@ -3238,6 +3271,9 @@ fn price_at_scale(
     };
     // The sources each node reads, filled children first.
     let mut sources_read_by: HashMap<PhysicalASAPNodeId, BTreeSet<&str>> = HashMap::new();
+    // Whether a join or a binary operator over two inputs lies at or below
+    // each node: its rows can pair values of different input rows.
+    let mut joined_below: HashMap<PhysicalASAPNodeId, bool> = HashMap::new();
     let multipliers = computations(
         dag,
         recurrence,
@@ -3307,6 +3343,11 @@ fn price_at_scale(
             )
         };
         sources_read_by.insert(node.id, sources);
+        let joined = matches!(
+            node.payload,
+            Payload::NonASAP(NonASAPOp::Join { .. } | NonASAPOp::BinaryOp { .. })
+        ) || producers.iter().any(|producer| joined_below[producer]);
+        joined_below.insert(node.id, joined);
         let family = match &node.payload {
             Payload::ASAP(
                 ASAPOp::SummaryAgg {
@@ -3410,6 +3451,7 @@ fn price_at_scale(
                 keys,
                 input_schema,
                 &sources_read_by[&node.id],
+                joined_below[&node.id],
                 data,
                 rows_read,
             ))
@@ -4846,7 +4888,7 @@ mod tests {
     use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
     use asap_types::ir::schema::{GroupingStrategy, SketchKind};
     use asap_types::ir::{ExprSemantics, ScalarExpr};
-    use asap_types::workload::{DataArrival, MetricType, SourceFacts};
+    use asap_types::workload::{DataArrival, LabelSetDistinctValues, MetricType, SourceFacts};
 
     /// The AWS Fargate preset holds the page's prices converted as its doc
     /// says at the given speed: per vCPU-second × seconds per operation or
@@ -6415,6 +6457,98 @@ mod tests {
             few.iter().any(|d| d.contains(" in 50 partitions;")),
             "{few:?}"
         );
+    }
+
+    /// `x` holding 10,000 series over 4 regions, 25 services and 625
+    /// endpoints, each endpoint in one service (the eval's RollupHeavy
+    /// `http`), with `(service, endpoint)`'s 625 combinations declared when
+    /// `declared_set`.
+    fn hierarchical_labels(declared_set: bool) -> DataWorkload {
+        let mut data = with_series(Some(10_000));
+        let facts = data.sources.get_mut("x").unwrap();
+        facts.distinct_values_per_label = [
+            ("region".to_string(), 4),
+            ("service".to_string(), 25),
+            ("endpoint".to_string(), 625),
+        ]
+        .into();
+        if declared_set {
+            facts.distinct_values_per_label_set = vec![LabelSetDistinctValues {
+                labels: vec!["service".to_string(), "endpoint".to_string()],
+                distinct_values: 625,
+            }];
+        }
+        data
+    }
+
+    /// A grouping is priced at the smallest bound the declared facts give:
+    /// the declared `(service, endpoint)` set's 625 combinations, not
+    /// 25 x 625 capped at the 10,000 series; a superset grouping at the set
+    /// times `region`'s 4; without the set, at the per-label product capped
+    /// at the series. A partitioned top-k takes the same count.
+    #[test]
+    fn a_grouping_is_priced_at_its_declared_label_set_count() {
+        let details = |query: &str, declared_set: bool| {
+            let data = hierarchical_labels(declared_set);
+            let cost = price(
+                &exact_dag(&[query], &data),
+                &recurrences(1),
+                &data,
+                &PlanSelectionSettings::default(),
+            )
+            .unwrap();
+            node_prices(&cost)
+                .into_iter()
+                .map(|(_, _, detail, _)| detail)
+                .collect::<Vec<_>>()
+        };
+        let sum = |keys: &str| format!("sum by ({keys}) (sum_over_time(x[15m]))");
+        for (query, declared_set, expected) in [
+            (sum("service, endpoint"), true, "into 625 states"),
+            (sum("region, service, endpoint"), true, "into 2500 states"),
+            (
+                sum("service, endpoint"),
+                false,
+                "Sum accumulator into 10000 states",
+            ),
+            (sum("region, service"), true, "into 100 states"),
+            (
+                "topk by (service, endpoint) (3, sum_over_time(x[15m]))".to_string(),
+                true,
+                " in 625 partitions;",
+            ),
+        ] {
+            let details = details(&query, declared_set);
+            assert!(
+                details.iter().any(|d| d.contains(expected)),
+                "{query} (set declared: {declared_set}): {details:#?}"
+            );
+        }
+    }
+
+    /// A grouped root's `G` takes the declared label set's count too: the
+    /// set's 625 for `(service, endpoint)`, times `region`'s 4 for a
+    /// superset; without the set, the per-label product capped at the
+    /// series.
+    #[test]
+    fn values_per_result_is_bound_by_a_declared_label_set() {
+        let root =
+            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::max_error(0.01)));
+        for (query, declared_set, values) in [
+            ("sum by (service, endpoint) (rate(x[5m]))", true, 625),
+            (
+                "sum by (region, service, endpoint) (rate(x[5m]))",
+                true,
+                2_500,
+            ),
+            ("sum by (service, endpoint) (rate(x[5m]))", false, 10_000),
+        ] {
+            assert_eq!(
+                values_of(&root(query), &hierarchical_labels(declared_set)),
+                Some(values),
+                "{query} (set declared: {declared_set})"
+            );
+        }
     }
 
     /// A grouped root's `G` is also bound by its keys' declared distinct
