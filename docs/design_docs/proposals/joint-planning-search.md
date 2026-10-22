@@ -16,6 +16,7 @@ ASAPPlanner searches per-query alternatives, sharing choices, and materializatio
 - [Interfaces](#interfaces)
 - [Worked example](#worked-example)
 - [Search and validation](#search-and-validation)
+- [Memo-group search](#memo-group-search)
 - [Future work](#future-work)
 
 ## Problem
@@ -196,6 +197,112 @@ Generate candidates lazily and stream completed plans through the existing valid
 Exact search finishes when every remaining branch has been explored or certified unable to improve the result. A budget stop reports the best feasible plan found, unresolved work, and whether optimality is certified. No incumbent means “no feasible plan found,” not “infeasible.” Report a scalar gap only with a bound covering all unresolved branches; report Pareto-front completeness separately.
 
 Validate each rule against exhaustive enumeration on small workloads, alone and in combination. Include donor-dependent sharing, global memory/core limits, overlapping reuse, per-source retention, repairable accuracy failures, and near ties. Verify bounds against the best exhaustive completion of each tested partial state. Measure planning time and peak memory on Examples 1–4, the mixed workloads, and Kubernetes recording rules without claiming a universal scaling guarantee.
+
+## Memo-group search
+
+The rules above prune a search that still builds and prices whole-workload candidates, one at a time, at about a millisecond each. RangeHeavy's 24-hour quantiles component checks 153,086 of them in 92 s even with interchangeable queries collapsed, and whole workloads link most queries over one source into one component (shared scans, SQL windows as time ranges, sketch rollup). The memo-group search replaces whole-candidate enumeration: each group of queries enumerates and prices its own alternatives once, keeps the cheapest per sharing signature, and only groups that can share a node make a joint choice.
+
+### Components
+
+| Component | What it is |
+| --- | --- |
+| Memo group | The queries planned together as one unit: one query, every query of a class of interchangeable queries, or queries that read a common Pass 1 target. Identical queries are one group. |
+| Group candidate | One alternative of one group, planned alone: a choice of a Pass 1 candidate for each of its targets, the Pass 2 rewrites that touch only its own nodes (panes, sharing inside the group), and one Stage 2 materialization of each build only it can read. |
+| Sharing site | A node another group could also read: a summary build (whole, or a pane chain with its width), a shared scan or time range, a rollup source, a top-k ranking. Keyed so that two groups' sites meet exactly when a Pass 2 rule could make them one node. |
+| Sharing signature | The sites a group candidate exposes, each with what decides the shared node's cost: family, size parameters, pane grid and materialization. |
+| Local usage | A group candidate's usage priced by Stage 3's per-node pricing with the group alone: CPU operations, scanned bytes, memory byte-seconds, peak memory, disk, each query's latency. Priced once per candidate and cached. |
+| Sharing cluster | The groups whose signatures can meet, directly or through other groups. Clusters are searched separately (method 5). |
+| Cluster selection | One kept candidate per group of a cluster, with the sites they make one node. |
+
+### Algorithm
+
+1. **Groups.** Split the workload into memo groups (hash-consing identical queries; classes of interchangeable queries; queries sharing a Pass 1 target).
+2. **Enumerate and price each group alone.** For each group, enumerate its candidates and price each with Stage 3 as a workload of that group alone. A candidate that fails a check that sharing cannot repair is dropped (method 2).
+3. **Keep the cheapest per signature.** Within a group, among candidates with the same sharing signature, drop a candidate whose local usage is no smaller on every component and larger on one (method 4, local dominance). Ties are kept. A candidate whose sites can meet no other group's has an empty signature, so it competes with every such candidate of the group: the group's overall cheapest.
+4. **Clusters.** Link two groups when one kept site of each can meet. Each connected cluster is searched on its own.
+5. **Joint choice in a cluster.** Branch and bound over the groups of a cluster, one kept candidate each. A complete assignment is priced exactly: its groups' roots are composed, the meeting sites are made one node by the Pass 2 rule that applies (identical expression, summary capability sized for the strictest reader, shared pane chain), and Stage 2 and Stage 3 price the cluster. The lower bound of a partial assignment is the sum, over its groups, of local usage minus the cost of its sites, plus each distinct site's cost once, sized for its least demanding reader: sharing can only remove repeated site charges.
+6. **Whole plan once.** The cluster selections are composed into one plan, checked by Stage 3 (including the executor's compile check) and returned. Runner-ups are built only when the report asks for them.
+
+The search is exact when every interaction between two groups goes through a sharing site (step 4), and when sharing changes nothing outside the sites it merges. Charges that couple everything (raw data on disk, cost models 2 and 3, a measured cost table) keep the current search.
+
+### Interfaces
+
+The memo-group search lives in `crates/plan-selection/src/pass/memo/`, behind the current search until it matches it on every equivalence test.
+
+```rust
+/// One memo group: queries planned together as one unit.
+pub(crate) struct MemoGroup {
+    /// Its queries, by index in the workload, in workload order.
+    pub queries: Vec<usize>,
+    /// The Pass 1 targets its queries read (digits of a whole-workload choice).
+    pub targets: Vec<usize>,
+}
+
+/// One candidate of a memo group, planned alone.
+pub(crate) struct GroupCandidate {
+    /// Its group, by index.
+    pub group: usize,
+    /// The group's Pass 1 choice: one candidate per target, over the group's targets.
+    pub choice: Vec<usize>,
+    /// The group's roots, in its queries' order, with Pass 2 rewrites inside the group.
+    pub roots: Vec<QueryRoot>,
+    /// One materialization per build only this group reads, in discovery order.
+    pub materialization: Vec<Materialization>,
+    /// The sites another group could share.
+    pub signature: SharingSignature,
+    /// The group's usage planned alone, priced by Stage 3.
+    pub usage: LocalUsage,
+}
+
+/// The sites a group candidate exposes, sorted; equal signatures compete.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct SharingSignature(pub Vec<SharingSite>);
+
+/// A node another group could read once it is shared.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct SharingSite {
+    /// Equal keys meet: the shared node's input and computation, sizes and ranks masked.
+    pub meeting_key: u64,
+    /// What decides the shared node's cost: family and size, pane grid, materialization.
+    pub cost_key: u64,
+}
+
+/// One group candidate's usage priced alone.
+pub(crate) struct LocalUsage {
+    pub cpu_ops_per_second: f64,
+    pub scanned_bytes_per_second: f64,
+    pub average_memory_bytes: f64,
+    pub peak_memory_bytes: u64,
+    pub disk_bytes: u64,
+    /// Each of the group's queries' latency per evaluation, in ms.
+    pub latency_ms: Vec<f64>,
+    /// The price under the deployment's cost model, when it has one.
+    pub cost_per_second: Option<f64>,
+}
+
+/// Step 1: the memo groups of a workload.
+pub(crate) fn memo_groups<Id: Clone>(per_computation: &PerComputationCandidates<Id>, entries: &[QueryWorkloadEntry], models: &PlanningModels<'_>) -> Vec<MemoGroup>;
+
+/// Steps 2 and 3: a group's candidates, priced alone, the dominated ones per signature dropped.
+pub(crate) fn group_candidates<Id: Clone>(per_computation: &PerComputationCandidates<Id>, group: &MemoGroup, entries: &[QueryWorkloadEntry], data: &DataWorkload, models: PlanningModels<'_>) -> Vec<GroupCandidate>;
+
+/// Step 3 alone: `candidates` with every one another of the same signature dominates dropped.
+pub(crate) fn keep_undominated(candidates: Vec<GroupCandidate>) -> Vec<GroupCandidate>;
+
+/// Steps 4 and 5: the clusters of groups whose kept sites can meet, each selected exactly.
+pub(crate) fn select_clusters(groups: &[MemoGroup], candidates: &[Vec<GroupCandidate>], entries: &[QueryWorkloadEntry], data: &DataWorkload, models: PlanningModels<'_>) -> Result<Vec<ClusterSelection>, SelectionError>;
+
+/// One cluster's selection: a kept candidate per group, and the plan they compose.
+pub(crate) struct ClusterSelection {
+    pub groups: Vec<usize>,
+    /// Per group, the index of its selected candidate.
+    pub selected: Vec<usize>,
+    /// The cluster's physical candidate, as Stage 2 built it, priced by Stage 3.
+    pub physical: PhysicalCandidate,
+}
+```
+
+Step 6 composes the cluster selections the way independent components are combined today, and the facade (`run_stage1_to_stage3_from_pass1`) switches to the memo-group search when its preconditions hold.
 
 ## Future work
 
