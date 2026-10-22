@@ -7,8 +7,13 @@
 //! `ε_i = 1 − (1 + ε)^{−1/n}` for a relative one, and `δ_i = δ / n` (the
 //! union bound). Relative errors compose through products and quotients:
 //! each input contributes a factor of at most `1 + ε_i` as a factor and
-//! `1/(1 − ε_i)` as a divisor, so `(1 − ε_i)^{−n} − 1 = ε` bounds any mix
-//! (e.g. a ratio's `(a + b)/(1 − b)`). Only equal splits are made.
+//! `1/(1 − ε_i)` as a divisor, so the true error of any mix stays within
+//! `(1 − ε_i)^{−n} − 1 = ε`. The composed bound Stage 3 checks meets it for
+//! one product or quotient of two inputs (a ratio's `(a + b)/(1 − b)`), not
+//! for a nested quotient such as `x / (y / z)`, whose bound composes each
+//! step's slack. A lone approximate denominator over an exact numerator is
+//! sized for the whole target, so its quotient's bound `ε/(1 − ε)` misses
+//! it. Only equal splits are made.
 use super::*;
 
 /// The target of one of `approximate_inputs` approximate inputs that

@@ -237,8 +237,11 @@ Every proposed composition is checked again using the actual guarantees.
 
 The default equal-split allocator divides an additive error budget across the
 approximate layers. For relative error, it uses local error
-`1 - (1 + epsilon)^(-1/n)` for `n` layers, which meets the target for any mix
-of products and quotients (each layer contributes at most `1/(1 - e)`). When the target includes delta, it
+`1 - (1 + epsilon)^(-1/n)` for `n` layers. The true error of any mix of
+products and quotients stays within the target (each layer contributes at most
+`1/(1 - e)`); the composed bound meets it for one product or quotient of two
+layers, not for a nested quotient or an exact numerator over a lone
+approximate denominator. When the target includes delta, it
 splits that budget across the layers for union-bound composition. An exact
 target does not receive an approximate allocation.
 

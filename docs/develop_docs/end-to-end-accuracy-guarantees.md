@@ -74,9 +74,11 @@ trait AccuracyModel {
 
 `accuracy::budget::per_input_target` splits a target equally among the
 approximate inputs of one composition (ε / n for an additive metric,
-1 − (1 + ε)^(−1/n) for a relative one, δ / n). The relative share holds for any
-mix of products and quotients of the inputs: a ratio of two relative errors `a`
-and `b` is within `(a + b) / (1 − b)`, so ε = 0.05 gives each side 0.0241. Every candidate must then be resized, propagated, and
+1 − (1 + ε)^(−1/n) for a relative one, δ / n). The relative share meets the
+composed bound of one product or quotient of two inputs: a ratio of two
+relative errors `a` and `b` is within `(a + b) / (1 − b)`, so ε = 0.05 gives
+each side 0.0241. A nested quotient (`x / (y / z)`) or an exact numerator over a
+lone approximate denominator composes a bound above ε and is rejected. Every candidate must then be resized, propagated, and
 checked before being treated as satisfying the target. This is distinct from
 candidate visibility: a Stage 1 candidate whose output has no guarantee is
 still enumerated and appears in the stage document, but Stage 3 rejects it
