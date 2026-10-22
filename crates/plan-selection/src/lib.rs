@@ -1185,52 +1185,510 @@ pub struct PlanSelector<'a> {
     runner_up: Option<f64>,
 }
 
-/// Stage 3's per-node pricing of `candidate`, a part of a workload whose
-/// roots are read by the queries of `entries` (one entry per root), sized
-/// for their failure probabilities when that resizes, with the formulas'
-/// CPU time scaled by `formula_scale`: its cost and calibration fit.
-/// `None` when it fails a check no summary size repairs: a per-series
-/// aggregate the executor cannot run, or raw data the deployment does not
-/// keep. The memo over sub-expressions prices each group's sub-DAG this
-/// way; accuracy and latency are checked on the whole plan.
-pub(crate) fn price_part(
-    candidate: &PhysicalCandidate,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-    formula_scale: f64,
-) -> Result<Option<(CandidateCost, CalibrationFit)>, SelectionError> {
-    let targets = accuracy_targets(entries);
-    let sized = sized_for_failure_probability(candidate, &targets, data)
-        .unwrap_or_else(|_| candidate.clone());
-    if per_entity_aggregate_violation(&sized.dag).is_some() {
+/// Evaluations per second of a node computed once for the queries of
+/// `entries` together, as a node they share at query time is
+/// ([`computations`]).
+pub(crate) fn shared_evaluation_rate(
+    entries: &[&QueryWorkloadEntry],
+    settings: &PlanSelectionSettings,
+) -> Result<f64, AnalyticalCostError> {
+    evaluation_rate(
+        entries.iter().map(|e| (&e.recurrence, e.range_evaluation)),
+        settings.non_repeating_query_horizon_seconds,
+    )
+}
+
+/// Memory a query-time node holds while an evaluation runs, charged once
+/// its readers' latencies are known (Stage 3's "held" memory):
+/// `byte_seconds_per_ms` times the readers' rate-weighted mean latency in
+/// ms (`weighted`), or their longest latency (otherwise), is the byte-seconds
+/// per second it adds to the average memory.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HeldMemory {
+    pub(crate) byte_seconds_per_ms: f64,
+    /// The queries reading it, each with its evaluations per second, by
+    /// position among the part's roots (or, once mapped, in the workload).
+    pub(crate) readers: Vec<(usize, f64)>,
+    /// Whether each reader computes its own copy (rate-weighted mean
+    /// latency) rather than one copy held until the longest finishes.
+    pub(crate) weighted: bool,
+}
+
+impl HeldMemory {
+    /// Its byte-seconds per second given each reader's latency in ms.
+    pub(crate) fn byte_seconds(&self, latency_ms: impl Fn(usize) -> f64) -> f64 {
+        let longest = || {
+            self.readers
+                .iter()
+                .map(|&(q, _)| latency_ms(q))
+                .fold(0.0, f64::max)
+        };
+        let rate: f64 = self.readers.iter().map(|&(_, r)| r).sum();
+        let evaluation_ms = match self.weighted && rate > 0.0 {
+            true => {
+                self.readers
+                    .iter()
+                    .map(|&(q, r)| r * latency_ms(q))
+                    .sum::<f64>()
+                    / rate
+            }
+            false => longest(),
+        };
+        self.byte_seconds_per_ms * evaluation_ms
+    }
+}
+
+/// Who computes a set of nodes: a reader at `rate_per_second`
+/// computations per second, through which the `queries` (positions among
+/// [`PrivatePricing::queries`]) reach them at query time; at ingestion time
+/// (`at_ingestion`, a build above them materialized at ingestion) no query
+/// reaches them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NodeConsumer {
+    pub(crate) rate_per_second: f64,
+    pub(crate) queries: Vec<usize>,
+    pub(crate) at_ingestion: bool,
+}
+
+/// Stage 3's pricing of some nodes of a physical DAG on their own
+/// ([`price_private_nodes`]): a candidate's private nodes, the others being
+/// its children's, whose outputs are given.
+pub(crate) struct PrivatePricing<'a> {
+    /// The DAG (Stage 2's, the candidate over its children), its first
+    /// root the candidate's node.
+    pub(crate) dag: &'a PhysicalASAPDAG,
+    /// Which nodes are priced, by position in `dag.nodes`.
+    pub(crate) private: &'a [bool],
+    /// The output of each other node a private node reads (a child's root).
+    pub(crate) child_outputs: &'a HashMap<PhysicalASAPNodeId, EdgeStatistics>,
+    /// Who computes the candidate's node; all at ingestion time or all not.
+    pub(crate) consumers: &'a [NodeConsumer],
+    /// The queries the consumers name.
+    pub(crate) queries: &'a [QueryWorkloadEntry],
+    /// Per query, whether the candidate's node is its root (its request
+    /// overhead is charged here).
+    pub(crate) root_of: &'a [bool],
+    /// The look-back of a query-time scan no window among the private
+    /// nodes bounds ([`DEFAULT_LOOKBACK_MS`] when `None`).
+    pub(crate) scan_lookback_ms: Option<u64>,
+    pub(crate) data: &'a DataWorkload,
+    pub(crate) settings: &'a PlanSelectionSettings,
+    pub(crate) formula_scale: f64,
+}
+
+/// The usage of a candidate's private nodes ([`price_private_nodes`]).
+/// Charges that need the whole plan are kept apart: memory held for an
+/// evaluation ([`HeldMemory`]) and each query-time raw scan (Stage 3 keeps
+/// each source's longest on disk). Per query (position): the query-time
+/// work it reaches among the private nodes, in ms, and the longest
+/// compaction among the ingestion-time ones it reads first.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PrivateNodesUsage {
+    /// Under cost model 1, the nodes' prices without held memory and raw
+    /// data; `None` otherwise.
+    pub(crate) cost_per_second: Option<f64>,
+    pub(crate) cpu_ops_per_second: f64,
+    pub(crate) scanned_bytes_per_second: f64,
+    pub(crate) average_memory_bytes: f64,
+    pub(crate) peak_memory_bytes: u64,
+    pub(crate) disk_bytes: u64,
+    pub(crate) query_ms: Vec<f64>,
+    pub(crate) compaction_ms: Vec<f64>,
+    pub(crate) held: Vec<HeldMemory>,
+    pub(crate) raw_scans: Vec<(String, u64)>,
+    /// The candidate's node's output per computation.
+    pub(crate) output: EdgeStatistics,
+    pub(crate) fit: CalibrationFit,
+}
+
+/// Each node of `dag` below and including `id`: the sources it reads,
+/// without pricing (for a child's root, whose output is given).
+fn sources_below<'a>(
+    dag: &'a PhysicalASAPDAG,
+    nodes: &NodeMap<'a>,
+    id: PhysicalASAPNodeId,
+) -> BTreeSet<&'a str> {
+    let mut sources = BTreeSet::new();
+    let mut stack = vec![id];
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &nodes[&id].payload {
+            sources.insert(source_name(source));
+        }
+        stack.extend(
+            dag.edges
+                .iter()
+                .filter(|e| e.consumer == id)
+                .map(|e| e.producer),
+        );
+    }
+    sources
+}
+
+/// The state family of node `id` of `dag`, without pricing.
+fn family_below<'a>(
+    dag: &'a PhysicalASAPDAG,
+    nodes: &NodeMap<'a>,
+    id: PhysicalASAPNodeId,
+) -> StateFamily<'a> {
+    let first = dag
+        .edges
+        .iter()
+        .find(|e| e.consumer == id)
+        .map(|e| e.producer);
+    let producer_family = match &nodes[&id].payload {
+        Payload::ASAP(
+            ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. },
+        ) => first.map(|p| family_below(dag, nodes, p)),
+        _ => None,
+    };
+    state_family(&nodes[&id].payload, producer_family)
+}
+
+/// Price `input`'s private nodes as Stage 3 prices them in the whole plan
+/// ([`price_node`]): each computed for its consumers as [`computations`]
+/// counts them (a materialized private node once, at its own rate:
+/// 1 at ingestion time, the queries reaching it together at query time,
+/// once per request when kept across evaluations), reading its children's
+/// given outputs. With consumers at ingestion time every private node runs
+/// at ingestion time. `None` when a private node fails a check no summary
+/// size repairs: a per-series aggregate the executor cannot run, or a
+/// query-time scan of raw data the deployment does not keep; also when a
+/// node materialized at query time runs under an ingestion-time consumer.
+pub(crate) fn price_private_nodes(
+    input: &PrivatePricing<'_>,
+    raw_data_retained: bool,
+) -> Result<Option<PrivateNodesUsage>, (PhysicalASAPNodeId, AnalyticalCostError)> {
+    let at_ingestion = input.consumers.iter().any(|c| c.at_ingestion);
+    // The DAG with the private nodes placed for the consumers.
+    let mut placed = input.dag.clone();
+    if at_ingestion {
+        for (node, private) in placed.nodes.iter_mut().zip(input.private) {
+            if !*private {
+                continue;
+            }
+            if node.materialization.timing() == ExecutionTiming::QueryTime
+                && node.materialization != Materialization::NotMaterialized
+            {
+                return Ok(None);
+            }
+            node.output_state.timing = ExecutionTiming::IngestionTime;
+        }
+    }
+    let dag = &placed;
+    let private_ids: HashSet<PhysicalASAPNodeId> = dag
+        .nodes
+        .iter()
+        .zip(input.private)
+        .filter(|(_, p)| **p)
+        .map(|(n, _)| n.id)
+        .collect();
+    let private_dag = PhysicalASAPDAG {
+        nodes: dag
+            .nodes
+            .iter()
+            .filter(|n| private_ids.contains(&n.id))
+            .cloned()
+            .collect(),
+        edges: Vec::new(),
+        roots: Vec::new(),
+        scalar_roots: Vec::new(),
+    };
+    if per_entity_aggregate_violation(&private_dag).is_some() {
         return Ok(None);
     }
-    let nodes = node_map(&sized.dag);
-    let kept_chains = kept_pane_chains(&sized.dag);
-    if !models.deployment_capabilities.raw_data_retained
-        && raw_data_violation(&sized.dag, &nodes, &kept_chains).is_some()
+    let nodes = node_map(dag);
+    let kept_chains = kept_pane_chains(dag);
+    let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
+    let Some(&root) = dag.roots.first() else {
+        return Ok(None);
+    };
+    let settings = input.settings;
+    let horizon = settings.non_repeating_query_horizon_seconds;
+    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    for e in &dag.edges {
+        producers_of.entry(e.consumer).or_default().push(e.producer);
+    }
+    let private_inputs = |id: PhysicalASAPNodeId| {
+        producers_of
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|p| private_ids.contains(p))
+            .collect::<Vec<_>>()
+    };
+    // Each query's reach among the private nodes at query time, stopping
+    // at (and including) ingestion-time nodes, as Stage 3's.
+    let query_count = input.queries.len();
+    let mut reach: Vec<HashSet<PhysicalASAPNodeId>> = vec![HashSet::new(); query_count];
+    if private_ids.contains(&root) {
+        for consumer in input.consumers.iter().filter(|c| !c.at_ingestion) {
+            for &query in &consumer.queries {
+                let mut stack = vec![root];
+                while let Some(id) = stack.pop() {
+                    if reach[query].insert(id)
+                        && nodes[&id].output_state.timing != ExecutionTiming::IngestionTime
+                    {
+                        stack.extend(private_inputs(id));
+                    }
+                }
+            }
+        }
+    }
+    let rate_of = |queries: &mut dyn Iterator<Item = usize>, per_request: bool| {
+        evaluation_rate(
+            queries.filter_map(|q| {
+                input.queries.get(q).map(|e| {
+                    let range = if per_request {
+                        None
+                    } else {
+                        e.range_evaluation
+                    };
+                    (&e.recurrence, range)
+                })
+            }),
+            horizon,
+        )
+    };
+    // How often each private node is computed ([`computations`]).
+    let mut rate_of_materialized: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
+    for node in dag.nodes.iter().filter(|n| private_ids.contains(&n.id)) {
+        let rate = match node.materialization {
+            Materialization::NotMaterialized => continue,
+            Materialization::MatAtIngestion(_) => 1.0,
+            m => {
+                let per_request = matches!(m, Materialization::MatAtQueryKeptAcrossEvaluations(_));
+                let reaching: Vec<usize> = (0..query_count)
+                    .filter(|&q| reach[q].contains(&node.id))
+                    .collect();
+                rate_of(&mut reaching.into_iter(), per_request).map_err(|error| (node.id, error))?
+            }
+        };
+        rate_of_materialized.insert(node.id, rate);
+    }
+    let mut walks: Vec<(Vec<PhysicalASAPNodeId>, f64)> = input
+        .consumers
+        .iter()
+        .map(|c| (vec![root], c.rate_per_second))
+        .collect();
+    for (&id, &rate) in &rate_of_materialized {
+        walks.push((private_inputs(id), rate));
+    }
+    let mut multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)> = HashMap::new();
+    for (start, rate) in walks {
+        let mut seen = HashSet::new();
+        let mut stack = start;
+        while let Some(id) = stack.pop() {
+            if !private_ids.contains(&id)
+                || rate_of_materialized.contains_key(&id)
+                || !seen.insert(id)
+            {
+                continue;
+            }
+            let entry = multipliers.entry(id).or_default();
+            entry.0 += 1;
+            entry.1 += rate;
+            stack.extend(private_inputs(id));
+        }
+    }
+    for (&id, &rate) in &rate_of_materialized {
+        multipliers.insert(id, (1, rate));
+    }
+    let retention_ms = pane_retention_ms(
+        dag,
+        &reach,
+        &input
+            .queries
+            .iter()
+            .map(|e| e.range_evaluation)
+            .collect::<Vec<_>>(),
+    );
+    // Price each private node, children first.
+    let mut priced: HashMap<PhysicalASAPNodeId, PricedNode<'_>> = HashMap::new();
+    for node in dag.nodes.iter().filter(|n| private_ids.contains(&n.id)) {
+        let views: Vec<ProducerOutput<'_>> = producers_of
+            .get(&node.id)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .map(|p| match priced.get(p) {
+                Some(produced) => ProducerOutput {
+                    payload: &nodes[p].payload,
+                    output_schema: &nodes[p].output_schema,
+                    output: produced.output,
+                    sources: produced.sources.clone(),
+                    family: produced.family,
+                },
+                None => ProducerOutput {
+                    payload: &nodes[p].payload,
+                    output_schema: &nodes[p].output_schema,
+                    output: input
+                        .child_outputs
+                        .get(p)
+                        .copied()
+                        .unwrap_or(EdgeStatistics { rows: 1, bytes: 1 }),
+                    sources: sources_below(dag, &nodes, *p),
+                    family: family_below(dag, &nodes, *p),
+                },
+            })
+            .collect();
+        let lookback_ms = match (&node.payload, node.output_state.timing) {
+            (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
+                windows_read(dag, &nodes, node.id, &kept_chains)
+                    .into_iter()
+                    .max()
+                    .or(input.scan_lookback_ms)
+                    .unwrap_or(DEFAULT_LOOKBACK_MS)
+            }
+            _ => 0,
+        };
+        let node_priced = price_node(
+            node,
+            &views,
+            multipliers.get(&node.id).copied().unwrap_or((0, 0.0)),
+            lookback_ms,
+            retained_panes(node, &retention_ms),
+            (node.output_state.timing == ExecutionTiming::IngestionTime)
+                .then(|| maintained_window_ms(node.id, &nodes, &producers_of))
+                .flatten(),
+            input.data,
+            settings,
+            input.formula_scale,
+        )
+        .map_err(|error| (node.id, error))?;
+        priced.insert(node.id, node_priced);
+    }
+    if !raw_data_retained
+        && priced.values().any(|p| p.raw_scan.is_some())
+        && raw_data_violation(dag, &nodes, &kept_chains).is_some()
     {
         return Ok(None);
     }
-    let recurrence: Vec<QueryRecurrence> = entries.iter().map(|e| e.recurrence.clone()).collect();
-    let range_evaluations: Vec<_> = entries.iter().map(|e| e.range_evaluation).collect();
-    price_at_scale(
-        &sized.dag,
-        &nodes,
-        &kept_chains,
-        &recurrence,
-        &range_evaluations,
-        data,
-        models.plan_selection,
-        formula_scale,
-    )
-    .map(Some)
-    .map_err(|(node, error)| SelectionError::Cost {
-        candidate: candidate.id.clone(),
-        node,
-        error,
-    })
+    let work_ms: HashMap<PhysicalASAPNodeId, f64> = dag
+        .nodes
+        .iter()
+        .map(|n| (n.id, priced.get(&n.id).map_or(0.0, |p| p.work_ms)))
+        .collect();
+    let mut usage = PrivateNodesUsage {
+        cost_per_second: match settings.cost_model {
+            CostModel::UsageOverTime(_) => Some(0.0),
+            _ => None,
+        },
+        cpu_ops_per_second: 0.0,
+        scanned_bytes_per_second: 0.0,
+        average_memory_bytes: 0.0,
+        peak_memory_bytes: 0,
+        disk_bytes: 0,
+        query_ms: vec![0.0; query_count],
+        compaction_ms: vec![0.0; query_count],
+        held: Vec::new(),
+        raw_scans: Vec::new(),
+        output: priced
+            .get(&root)
+            .map_or(EdgeStatistics { rows: 0, bytes: 0 }, |p| p.output),
+        fit: CalibrationFit::default(),
+    };
+    let table = &settings.measured_operation_costs;
+    let sketch_size =
+        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
+    let formula_merge_ms = settings.resource_speed.ms_per_cpu_op * input.formula_scale;
+    for node in dag.nodes.iter().filter(|n| private_ids.contains(&n.id)) {
+        let node_priced = &priced[&node.id];
+        if let (Some(total), Some(cost)) =
+            (&mut usage.cost_per_second, node_priced.cost.cost_per_second)
+        {
+            *total += cost;
+        }
+        usage.cpu_ops_per_second += node_priced.cpu_ops_per_second;
+        usage.scanned_bytes_per_second += node_priced.scanned_bytes_per_second;
+        usage.average_memory_bytes += node_priced.average_memory_bytes;
+        usage.peak_memory_bytes = usage
+            .peak_memory_bytes
+            .saturating_add(node_priced.peak_memory_bytes);
+        usage.disk_bytes = usage.disk_bytes.saturating_add(node_priced.disk_bytes);
+        usage.fit.add(node_priced.fit);
+        // Partial copies: the workers this state's ingestion work below it
+        // takes, counting the private nodes only.
+        if let Some(window) = node_priced.maintained {
+            let copies = ingest_workers(dag, &work_ms, node.id) - 1;
+            usage.peak_memory_bytes = usage
+                .peak_memory_bytes
+                .saturating_add(copies.saturating_mul(window));
+        }
+        if let Some((source, bytes)) = node_priced.raw_scan {
+            usage
+                .raw_scans
+                .push((source_name(source).to_string(), bytes));
+        }
+        if let Some((state, per_second, weighted)) = node_priced.held {
+            let mut readers = Vec::new();
+            for (query, reached) in reach.iter().enumerate() {
+                if reached.contains(&node.id) {
+                    let rate = match weighted {
+                        true => rate_of(&mut std::iter::once(query), false)
+                            .map_err(|error| (node.id, error))?,
+                        false => 0.0,
+                    };
+                    readers.push((query, rate));
+                }
+            }
+            usage.held.push(HeldMemory {
+                byte_seconds_per_ms: state as f64 / 1_000.0 * per_second,
+                readers,
+                weighted,
+            });
+        }
+        for (query, reached) in reach.iter().enumerate() {
+            if !reached.contains(&node.id) {
+                continue;
+            }
+            if node.output_state.timing == ExecutionTiming::IngestionTime {
+                let workers = ingest_workers(dag, &work_ms, node.id) as f64;
+                let states = (node_priced.output.rows / panes_of(node)) as f64;
+                let per_merge_ms = lookup(
+                    table,
+                    OperatorKind::SummaryMerge,
+                    ExecutionTiming::QueryTime,
+                    node_priced.family,
+                    sketch_size,
+                )
+                .map_or(formula_merge_ms, |unit| {
+                    (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6
+                });
+                let compaction = (workers - 1.0) * states * per_merge_ms;
+                usage.compaction_ms[query] = usage.compaction_ms[query].max(compaction);
+            } else {
+                usage.query_ms[query] += node_priced.work_ms;
+            }
+        }
+    }
+    // A query's fixed request cost, where the candidate is its root.
+    let evaluation_ms = table.ns_per_evaluation * 1e-6;
+    for query in 0..query_count {
+        if evaluation_ms <= 0.0 || !input.root_of.get(query).copied().unwrap_or(false) {
+            continue;
+        }
+        let requests_per_second = evaluation_rate(
+            input.queries.get(query).map(|e| (&e.recurrence, None)),
+            horizon,
+        )
+        .map_err(|error| (first, error))?;
+        let ops_per_second =
+            evaluation_ms / settings.resource_speed.ms_per_cpu_op * requests_per_second;
+        usage.cpu_ops_per_second += ops_per_second;
+        usage.query_ms[query] += evaluation_ms;
+        if let (Some(cost), CostModel::UsageOverTime(prices)) =
+            (&mut usage.cost_per_second, &settings.cost_model)
+        {
+            *cost += prices.cost_per_cpu_op * ops_per_second;
+        }
+    }
+    Ok(Some(usage))
 }
 
 /// Prices within this fraction of each other are the same sum of charges
@@ -2206,7 +2664,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
 /// stays unmet. Stage 1 sizes for ε and reads no data workload; only this
 /// stage binds `G`. `Err` is the reason the candidate is rejected when its
 /// resized summaries do not rebuild into a plan.
-fn sized_for_failure_probability(
+pub(crate) fn sized_for_failure_probability(
     candidate: &PhysicalCandidate,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
@@ -3173,6 +3631,7 @@ fn computations(
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],
     non_repeating_query_horizon_seconds: f64,
+    root_rates: Option<&[f64]>,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
     let range_of = |query: usize| range_evaluations.get(query).copied().flatten();
     let materialized: HashMap<_, _> = dag
@@ -3223,10 +3682,13 @@ fn computations(
     // Each consumer's starting nodes and its rate.
     let mut consumers = Vec::new();
     for (query, start) in starts.into_iter().enumerate() {
-        let rate = evaluation_rate(
-            recurrence.get(query).map(|r| (r, range_of(query))),
-            non_repeating_query_horizon_seconds,
-        )?;
+        let rate = match root_rates.and_then(|rates| rates.get(query)) {
+            Some(&rate) => rate,
+            None => evaluation_rate(
+                recurrence.get(query).map(|r| (r, range_of(query))),
+                non_repeating_query_horizon_seconds,
+            )?,
+        };
         consumers.push((start, rate));
     }
     for (&id, &rate) in &rate_of_materialized {
@@ -3291,17 +3753,22 @@ fn price_at_scale(
         CostModel::UsageOverTime(prices) => Some(prices),
         _ => None,
     };
-    // Each node priced, filled children first.
-    let mut priced: HashMap<PhysicalASAPNodeId, PricedNode<'_>> = HashMap::new();
-    let multipliers = computations(
+    let EachNodePriced {
+        priced,
+        multipliers,
+        reach,
+    } = price_each_node(
         dag,
+        nodes,
+        kept_chains,
         recurrence,
         range_evaluations,
-        settings.non_repeating_query_horizon_seconds,
-    )
-    .map_err(|error| (first, error))?;
-    let reach = query_reach(dag, nodes);
-    let retention_ms = pane_retention_ms(dag, &reach, range_evaluations);
+        data,
+        settings,
+        formula_scale,
+        None,
+        None,
+    )?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
     // The candidate's usage, accumulated node by node; peak cores and
@@ -3322,11 +3789,6 @@ fn price_at_scale(
     // Each in-memory ingestion-time state's bytes per window (what it keeps
     // for one window, its output or an exact aggregate's values).
     let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
-    // Each node's producers, in edge order.
-    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-    for e in &dag.edges {
-        producers_of.entry(e.consumer).or_default().push(e.producer);
-    }
     // Each summary node's state family, to look up in the measured table:
     // a build's own (one sketch instance per group; a shared Hydra
     // structure is not that sketch), inherited by the merges, estimates and
@@ -3335,41 +3797,7 @@ fn price_at_scale(
     let sketch_size =
         |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
     for node in &dag.nodes {
-        let views: Vec<ProducerOutput<'_>> = producers_of
-            .get(&node.id)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|p| {
-                let produced: &PricedNode<'_> = &priced[p];
-                ProducerOutput {
-                    payload: &nodes[p].payload,
-                    output_schema: &nodes[p].output_schema,
-                    output: produced.output,
-                    sources: produced.sources.clone(),
-                    family: produced.family,
-                }
-            })
-            .collect();
-        let lookback_ms = match (&node.payload, node.output_state.timing) {
-            (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
-                query_time_lookback_ms(dag, nodes, node.id, kept_chains)
-            }
-            _ => 0,
-        };
-        let node_priced = price_node(
-            node,
-            &views,
-            multipliers[&node.id],
-            lookback_ms,
-            retained_panes(node, &retention_ms),
-            (node.output_state.timing == ExecutionTiming::IngestionTime)
-                .then(|| maintained_window_ms(node.id, nodes, &producers_of))
-                .flatten(),
-            data,
-            settings,
-            formula_scale,
-        )
-        .map_err(|error| (node.id, error))?;
+        let node_priced = &priced[&node.id];
         usage.cpu_ops_per_second += node_priced.cpu_ops_per_second;
         usage.scanned_bytes_per_second += node_priced.scanned_bytes_per_second;
         usage.average_memory_bytes += node_priced.average_memory_bytes;
@@ -3396,7 +3824,6 @@ fn price_at_scale(
             }
         }
         per_node.insert(node.id, node_priced.cost.clone());
-        priced.insert(node.id, node_priced);
     }
     // The runtime's fixed cost per query request, charged to the node the
     // query reads first and added to its latency below.
@@ -3548,6 +3975,135 @@ fn price_at_scale(
     ))
 }
 
+/// Every node of a physical DAG priced ([`price_each_node`]), with each
+/// node's `(multiplier, per_second)` ([`computations`]) and the nodes each
+/// query reaches at query time ([`query_reach`]).
+pub(crate) struct EachNodePriced<'a> {
+    pub(crate) priced: HashMap<PhysicalASAPNodeId, PricedNode<'a>>,
+    pub(crate) multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)>,
+    pub(crate) reach: Vec<HashSet<PhysicalASAPNodeId>>,
+}
+
+/// [`price_node`] over every node of `dag`, children first, with the
+/// arguments of [`price_at_scale`]. `root_scan_lookback_ms` is the
+/// look-back of a query-time scan no window above it in `dag` bounds (a
+/// scan priced without its consumers); `None` reads
+/// [`DEFAULT_LOOKBACK_MS`] as Stage 3 does. `root_rates`, when given, are
+/// the computations per second of each root's consumer in place of its
+/// query's own rate ([`computations`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn price_each_node<'a>(
+    dag: &'a PhysicalASAPDAG,
+    nodes: &NodeMap<'a>,
+    kept_chains: &HashSet<PhysicalASAPNodeId>,
+    recurrence: &[QueryRecurrence],
+    range_evaluations: &[Option<RangeEvaluation>],
+    data: &DataWorkload,
+    settings: &'a PlanSelectionSettings,
+    formula_scale: f64,
+    root_scan_lookback_ms: Option<u64>,
+    root_rates: Option<&[f64]>,
+) -> Result<EachNodePriced<'a>, (PhysicalASAPNodeId, AnalyticalCostError)> {
+    let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
+    let multipliers = computations(
+        dag,
+        recurrence,
+        range_evaluations,
+        settings.non_repeating_query_horizon_seconds,
+        root_rates,
+    )
+    .map_err(|error| (first, error))?;
+    let reach = query_reach(dag, nodes);
+    let retention_ms = pane_retention_ms(dag, &reach, range_evaluations);
+    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    for e in &dag.edges {
+        producers_of.entry(e.consumer).or_default().push(e.producer);
+    }
+    let mut priced: HashMap<PhysicalASAPNodeId, PricedNode<'a>> = HashMap::new();
+    for node in &dag.nodes {
+        let views: Vec<ProducerOutput<'a>> = producers_of
+            .get(&node.id)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .map(|p| {
+                let produced: &PricedNode<'a> = &priced[p];
+                ProducerOutput {
+                    payload: &nodes[p].payload,
+                    output_schema: &nodes[p].output_schema,
+                    output: produced.output,
+                    sources: produced.sources.clone(),
+                    family: produced.family,
+                }
+            })
+            .collect();
+        let lookback_ms = match (&node.payload, node.output_state.timing) {
+            (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
+                let windows = windows_read(dag, nodes, node.id, kept_chains);
+                match (windows.into_iter().max(), root_scan_lookback_ms) {
+                    (Some(window), _) => window,
+                    (None, Some(lookback)) => lookback,
+                    (None, None) => DEFAULT_LOOKBACK_MS,
+                }
+            }
+            _ => 0,
+        };
+        let node_priced = price_node(
+            node,
+            &views,
+            multipliers[&node.id],
+            lookback_ms,
+            retained_panes(node, &retention_ms),
+            (node.output_state.timing == ExecutionTiming::IngestionTime)
+                .then(|| maintained_window_ms(node.id, nodes, &producers_of))
+                .flatten(),
+            data,
+            settings,
+            formula_scale,
+        )
+        .map_err(|error| (node.id, error))?;
+        priced.insert(node.id, node_priced);
+    }
+    Ok(EachNodePriced {
+        priced,
+        multipliers,
+        reach,
+    })
+}
+
+/// The state family of a node with `payload` whose first producer has
+/// `producer_family`: a build's own (one sketch instance per group; a
+/// shared Hydra structure is not that sketch), inherited by the merges,
+/// estimates and finalizations over it, none otherwise.
+fn state_family<'a>(
+    payload: &'a Payload,
+    producer_family: Option<StateFamily<'a>>,
+) -> StateFamily<'a> {
+    match payload {
+        Payload::ASAP(
+            ASAPOp::SummaryAgg {
+                family, grouping, ..
+            }
+            | ASAPOp::PaneChain {
+                family, grouping, ..
+            },
+        ) => match family {
+            FieldDataType::Sketch(kind, _)
+                if *grouping == GroupingStrategy::PerSubpopulationInstance =>
+            {
+                StateFamily::Sketch(kind.params())
+            }
+            FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
+            _ => StateFamily::None,
+        },
+        Payload::ASAP(
+            ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. },
+        ) => producer_family.unwrap_or(StateFamily::None),
+        _ => StateFamily::None,
+    }
+}
+
 /// One producer of a node being priced ([`price_node`]): its payload and
 /// schema, its output statistics, the sources it reads and its state
 /// family.
@@ -3632,32 +4188,7 @@ pub(crate) fn price_node<'a>(
     // The rows per ms its sources receive, which its scans and time
     // ranges read.
     let rows_per_ms = source_rows_per_ms(&sources, data);
-    let family = match &node.payload {
-        Payload::ASAP(
-            ASAPOp::SummaryAgg {
-                family, grouping, ..
-            }
-            | ASAPOp::PaneChain {
-                family, grouping, ..
-            },
-        ) => match family {
-            FieldDataType::Sketch(kind, _)
-                if *grouping == GroupingStrategy::PerSubpopulationInstance =>
-            {
-                StateFamily::Sketch(kind.params())
-            }
-            FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
-            _ => StateFamily::None,
-        },
-        Payload::ASAP(
-            ASAPOp::SummaryMerge { .. }
-            | ASAPOp::SummaryEstimate { .. }
-            | ASAPOp::FinalizeExactAccumulator { .. },
-        ) => producers
-            .first()
-            .map_or(StateFamily::None, |p| p.family),
-        _ => StateFamily::None,
-    };
+    let family = state_family(&node.payload, producers.first().map(|p| p.family));
     let operator = OperatorKind::of(&node.payload);
     let unit_price = match &node.payload {
         Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => {
@@ -3710,14 +4241,14 @@ pub(crate) fn price_node<'a>(
     // maintains (one second of them does not bound its groups).
     let rows_read = match ingestion {
         false => Some(input.rows.max(1)),
-        true => ingestion_window_ms.map(|window_ms| ((rows_per_ms * window_ms as f64).round() as u64).max(1)),
+        true => ingestion_window_ms
+            .map(|window_ms| ((rows_per_ms * window_ms as f64).round() as u64).max(1)),
     };
     // Query time always has its input rows; an ingestion-time grouping
     // with no window below it is an error (Stage 2 builds none).
 
     let estimated_groups = |keys: &GroupKeys| {
-        let rows_read =
-            rows_read.ok_or(AnalyticalCostError::IngestionGroupingWithoutWindow)?;
+        let rows_read = rows_read.ok_or(AnalyticalCostError::IngestionGroupingWithoutWindow)?;
         Ok(group_count_bound(
             keys,
             input_schema,
@@ -3853,9 +4384,7 @@ pub(crate) fn price_node<'a>(
                 // A range keeps its window's samples; an instant
                 // selector the latest sample of each series.
                 let kept = match kind {
-                    TimeRangeKind::Range => {
-                        (rows_per_ms * range.as_millis() as f64).round() as u64
-                    }
+                    TimeRangeKind::Range => (rows_per_ms * range.as_millis() as f64).round() as u64,
                     TimeRangeKind::Instant => series,
                 };
                 let out = edge(input.rows.min(kept.max(1)));
@@ -3981,9 +4510,7 @@ pub(crate) fn price_node<'a>(
             let mut group_count = 0;
             for producer in producers {
                 let panes = match producer.payload {
-                    Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => {
-                        u64::from(*pane_count)
-                    }
+                    Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count),
                     _ => 1,
                 };
                 group_count = group_count.max(producer.output.rows / panes.max(1));
@@ -4134,10 +4661,7 @@ pub(crate) fn price_node<'a>(
         // The retained panes and the one being built.
         (Materialization::MatAtIngestion(medium), Payload::ASAP(ASAPOp::PaneChain { .. })) => {
             let panes = panes_of(node);
-            (
-                state / panes * (retained_pane_count + 1),
-                medium,
-            )
+            (state / panes * (retained_pane_count + 1), medium)
         }
         (Materialization::MatAtIngestion(medium), _) => (2 * state, medium),
     };

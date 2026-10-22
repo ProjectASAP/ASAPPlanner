@@ -159,16 +159,32 @@ pub(crate) struct Context {
     pub materialization: Vec<(GroupId, Materialization)>,
 }
 
-/// One candidate's usage priced in a context (Stage 3's per-node pricing).
+/// One candidate's usage priced in a context: Stage 3's per-node pricing of
+/// its private nodes ([`pricing::local_price`]). The charges Stage 3 makes
+/// only once the whole plan is known are kept apart and added by
+/// [`pricing::plan_cost`]: memory held for an evaluation (which needs the
+/// readers' whole latency) and the raw data query-time scans keep on disk
+/// (each source's longest scan, once).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LocalUsage {
+    /// Under cost model 1, its private nodes' price per second, without
+    /// held memory and raw data: a lower bound of what it adds.
     pub cost_per_second: Option<f64>,
     pub cpu_ops_per_second: f64,
     pub scanned_bytes_per_second: f64,
     pub average_memory_bytes: f64,
     pub peak_memory_bytes: u64,
-    pub peak_cpu_cores: u32,
     pub disk_bytes: u64,
-    /// Each query's latency the candidate adds per evaluation, in ms.
+    /// Per reading query, the query-time work in ms its private nodes add
+    /// to the query's latency per evaluation (a query's latency is the sum
+    /// over its groups plus its longest compaction).
     pub latency_ms: Vec<(usize, f64)>,
+    /// Per reading query, the longest compaction in ms of an
+    /// ingestion-time state among its private nodes that the query reads.
+    pub compaction_ms: Vec<(usize, f64)>,
+    /// Memory its private nodes hold while an evaluation runs, readers by
+    /// query index in the workload.
+    pub held_memory: Vec<crate::HeldMemory>,
+    /// Each query-time raw scan among its private nodes: source and bytes.
+    pub raw_scans: Vec<(String, u64)>,
 }
