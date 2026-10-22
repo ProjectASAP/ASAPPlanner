@@ -84,6 +84,17 @@ pub fn execute_raw_rows(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
     rows: Vec<Vec<asap_executor::values::Value>>,
 ) -> Vec<Vec<asap_executor::values::Value>> {
+    execute_raw_rows_at(root, rows, 0)
+}
+
+/// [`execute_raw_rows`] evaluated at `evaluation_time_ms` (`now()`, and the
+/// end of every trailing window).
+#[allow(dead_code)]
+pub fn execute_raw_rows_at(
+    root: &std::rc::Rc<asap_types::ir::OperatorNode>,
+    rows: Vec<Vec<asap_executor::values::Value>>,
+    evaluation_time_ms: i64,
+) -> Vec<Vec<asap_executor::values::Value>> {
     use asap_executor::{
         physical_planner::bind_with_data_sources,
         sources::{DataSources, MemorySource},
@@ -115,7 +126,7 @@ pub fn execute_raw_rows(
     let plan = bind_with_data_sources(&wire, BTreeMap::new(), &[root_id], &sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
-            evaluation_time_ms: 0,
+            evaluation_time_ms,
             revision: 1,
         },
         Limits::default(),
