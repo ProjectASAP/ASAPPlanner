@@ -214,6 +214,80 @@ The rules above prune a search that still builds and prices whole-workload candi
 | Local price | One implementation candidate's usage, priced by Stage 3's per-node pricing given its context (its readers' requirements, its coupling sites' thresholds): CPU operations, scanned bytes, memory byte-seconds, peak memory, disk, each reader's latency. Cached per (group, candidate, context). |
 | Frontier | Per group and subproblem, the candidates no other dominates in usage: the cheapest under cost model 1, a Pareto front over (cost, peak memory, peak cores, disk, worst latency) under cost models 2 and 3. |
 
+### How the stages and the memo work together
+
+Today the stages run one after another over the whole workload, and each hands the next every whole-workload candidate; the candidate count is the product of every query's choices:
+
+```text
+Stage 0  frontend            -> pre-ASAP logical DAG
+Stage 1  Pass 1              -> per target, whole sub-DAG candidates           (no cost)
+         Pass 2              -> one whole-workload candidate per sharing subset (no cost)
+Stage 2  materialization     -> every candidate x every materialization
+Stage 3  selection           -> every physical candidate built, checked, priced (~1 ms each)
+Stage 4  executor
+```
+
+The memo keeps each stage's semantics and code, and changes what they exchange: groups and implementation candidates instead of whole plans. Each stage runs per group, and only the choices that couple groups are made jointly:
+
+```text
+                 group A                 group B                 group C (shares nothing)
+Stage 1 Pass 1   A's implementations     B's implementations     C's implementations
+Stage 1 Pass 2   transformations add implementations that read another group (capability, panes, rollup, top-k)
+Stage 2          materialization per implementation, once per group however many parents read it
+Stage 3          local price per (group, implementation, context), cached; frontier per group
+------------------------- coupling sites of the cluster {A, B} -------------------------
+                 thresholds enumerated with bounds: a shared group's size (strictest reader),
+                 a pane chain's grid and longest window, a metric's scan labels, a source's raw horizon;
+                 dynamic programming below them; C is solved on its own
+-------------------------------------------------------------------------------------------
+Selected plan    composed once, then Stage 3's checks and the executor's compile check
+```
+
+Example: two queries over one metric.
+
+```promql
+Q1: quantile_over_time(0.9, data[5m])
+Q2: topk(5, sum by (job) (sum_over_time(data[5m])))
+```
+
+Hash-consing their logical DAGs gives six groups; `G2` is one group read by both queries:
+
+```text
+G1 = Scan(data)
+G2 = TimeRange(5m) over G1          <- read by Q1 and Q2
+G3 = quantile_over_time(0.9) over G2    (Q1's root)
+G4 = sum_over_time over G2
+G5 = sum by (job) over G4
+G6 = topk(5) over G5                    (Q2's root)
+```
+
+Pass 1 and the Pass 2 transformations give each group the implementations of that node alone, referencing child groups:
+
+```text
+G3: exact quantile (reads G2) | KLL(k) (reads G2) | DDSketch(alpha) (reads G2)
+    | newest-n panes of a shared chain (reads another group's pane chain)
+G4: exact sum accumulator (reads G2)
+G5: exact group-by sum (reads G4)
+G6: exact top-k (reads G5)
+    | Count-Min heap (reads G2)     <- fused: one implementation of G4, G5 and G6
+G1, G2: each reader computes its own (NotMaterialized) | built once per evaluation (MatAtQuery)
+```
+
+Before, the same `Scan -> TimeRange(5m)` was repeated inside every per-target candidate, and Pass 2 had to discover it again; candidates multiplied across targets. In the memo, `G2` appears once, `G3` has a handful of implementations, and the search is bottom-up: `G2`'s choice is a coupling choice of the cluster `{Q1, Q2}`, and every other group keeps its frontier given it.
+
+Where each part of the stage design lives in the memo:
+
+| Stage design | In the memo |
+| --- | --- |
+| Pass 1 computation candidates | implementation candidates per group, referencing child groups |
+| Identical-expression rule | group identity (hash-consing) |
+| Summary-capability rule | an implementation serving several reader groups; its size is a coupling site (strictest reader) |
+| Window-composition rule | pane implementations in a group; a shared chain's grid and longest window are a coupling site; a reader reads its newest panes |
+| Rollup and exact top-k reuse | an implementation of a coarse group (or a top-k) that reads a finer group (or a ranking) |
+| Stage 2 materialization | chosen per implementation, once per group |
+| Stage 3 pricing and checks | local price per (group, implementation, context), cached; the full plan is checked once |
+| Raw retention, cost models 2 and 3, measured table | a per-source horizon site; frontiers; a calibration factor fitted once and frozen |
+
 ### Stage interfaces
 
 - **Pass 1** emits, per group, its implementation candidates (exact, exact accumulators, each summary family and size, pane variants), each referencing child groups. It no longer emits a whole sub-DAG per target.
