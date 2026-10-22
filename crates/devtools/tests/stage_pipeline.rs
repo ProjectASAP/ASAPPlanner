@@ -1790,3 +1790,32 @@ fn search_flag_is_checked() {
     assert_eq!(status, Some(2));
     assert!(stderr.contains("drop it with --exhaustive"), "{stderr}");
 }
+
+/// The MILP search stopped by its time limit before any valid plan says
+/// so (never a plan called optimal), and the limit needs the MILP search.
+#[test]
+fn milp_time_limit_is_reported_and_needs_the_milp_search() {
+    let document = document_of(&[
+        "--example",
+        "planner-layering-3b",
+        "--search",
+        "memo-milp",
+        "--milp-time-limit-s",
+        "0",
+    ]);
+    let selection = &document["stage3_plan_selection"];
+    assert!(selection["selected"].is_null(), "{selection}");
+    assert!(
+        selection["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("reached its time limit")),
+        "{selection}"
+    );
+    let (_, stderr) = failure(&[
+        "--example",
+        "planner-layering-3b",
+        "--milp-time-limit-s",
+        "1",
+    ]);
+    assert!(stderr.contains("needs --search memo-milp"), "{stderr}");
+}
