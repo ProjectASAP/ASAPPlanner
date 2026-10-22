@@ -50,11 +50,31 @@ Write the pull-request description top-down:
      Use real syntax and numbers, and check them by compiling and running the
      example (a test, an example binary or a devtool run) at the linked commit.
    See [references/key-code-interfaces-example.md](references/key-code-interfaces-example.md).
-5. **Before this PR**: the previous end-to-end behavior, limitation, failure
+5. **Major algorithm changes**: for each algorithm the PR adds, replaces, or
+   changes in a way that alters its results or cost (search, selection, pruning,
+   sizing, accuracy composition, cost model, scheduling, execution kernels),
+   write a short subsection:
+   - **Problem**: what the old algorithm got wrong or could not do, with one
+     concrete input and its observed outcome.
+   - **Before / after**: the old and new algorithm as numbered steps or short
+     pseudocode, naming the functions that implement them.
+   - **Correctness**: the invariant, guarantee, or proof sketch that the new
+     algorithm keeps (for example, exactness against exhaustive search, an error
+     bound, or a cost that never exceeds the old one), and the tests that check
+     it.
+   - **Complexity**: time and memory before and after, in terms of the inputs
+     that drive them, plus a measured number on a real workload when there is
+     one.
+   - **Assumptions and limits**: when the algorithm does not apply or falls back,
+     and what it deliberately leaves out.
+   Write "None" when the PR changes no algorithm (for example, a rename,
+   documentation, tests, or plumbing only). Keep **How** as the overview and put
+   the algorithmic detail here.
+6. **Before this PR**: the previous end-to-end behavior, limitation, failure
    mode, architecture, or workflow.
-6. **After this PR**: the new end-to-end behavior and what users, developers, or
+7. **After this PR**: the new end-to-end behavior and what users, developers, or
    operators can do differently.
-7. **Verification**: focused tests and applicable end-to-end evidence.
+8. **Verification**: focused tests and applicable end-to-end evidence.
 
 Include a compact before/after example, screenshot, or diagram when it provides
 real evidence or makes behavior easier to understand. For significant design

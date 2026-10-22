@@ -23,6 +23,16 @@ writes (query, requirements, data facts, or CLI call), through where this PR's
 interfaces are called, to what the user gets back, with every variable commented
 and the numbers checked by running it. Write "None" if no interface changes.
 
+## Major algorithm changes
+
+For each algorithm this PR adds, replaces, or changes (search, selection,
+pruning, sizing, accuracy composition, cost model, scheduling, execution
+kernels): the problem with a concrete input; the old and new algorithm as
+numbered steps or pseudocode naming their functions; the correctness invariant
+or guarantee and the tests that check it; time and memory complexity before and
+after, with a measured number when available; and assumptions, limits, and
+fallbacks. Write "None" if no algorithm changes.
+
 ## Before this PR
 
 Describe the previous end-to-end behavior, limitation, failure mode,

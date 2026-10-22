@@ -23,7 +23,8 @@
   original behavior, then confirm it passes after the fix.
 - Commit at incremental logical boundaries when commits are requested.
 - Keep pull-request descriptions top-down and concise. Explain why, what, and
-  how, and list the **Key code interfaces added / modified** (or "None").
+  how, and list the **Key code interfaces added / modified** (or "None") and the
+  **Major algorithm changes** (or "None").
   Explicitly describe **Before this PR** and **After this PR**, using an
   end-to-end example, screenshot, measurement, or diagram appropriate to the
   change.
