@@ -3165,3 +3165,125 @@ async fn a_cast_to_varchar_lowers_to_utf8() {
         FieldDataType::Plain(DataType::Utf8)
     );
 }
+
+/// The trailing window `TimeRange(w)` over the table `Scan` a query reads, or
+/// `None` when the query's leaf is not one.
+fn trailing_window(node: &OperatorNode) -> Option<(std::time::Duration, &OperatorNode)> {
+    if let NonASAPOp::TimeRange { range, kind, child } = op(node) {
+        assert_eq!(*kind, asap_types::ir::TimeRangeKind::Range);
+        return Some((*range, child));
+    }
+    node.children().into_iter().find_map(|c| trailing_window(c))
+}
+
+// A trailing window on the table's time column is the query's lookback, the
+// same `TimeRange` a PromQL range selector lowers to, so Pass 2 can build it
+// in panes and Stage 2 at ingestion time. Other conjuncts stay on the `Scan`.
+#[tokio::test]
+async fn trailing_window_on_the_time_column_lowers_to_a_time_range() {
+    for (sql, window_ms) in [
+        (
+            "SELECT service, COUNT(DISTINCT bytes) FROM metrics \
+             WHERE ts >= now() - INTERVAL '5 minutes' AND service = 'api' GROUP BY service",
+            300_000,
+        ),
+        (
+            "SELECT COUNT(*) FROM metrics WHERE ts > now() - INTERVAL '15 minutes'",
+            900_000,
+        ),
+        (
+            "SELECT COUNT(*) FROM metrics WHERE now() - INTERVAL '1 hour' <= ts",
+            3_600_000,
+        ),
+        (
+            "SELECT COUNT(*) FROM metrics \
+             WHERE ts BETWEEN now() - INTERVAL '90 seconds' AND now()",
+            90_000,
+        ),
+    ] {
+        let qe = lower(sql).await;
+        let (range, child) =
+            trailing_window(&qe).unwrap_or_else(|| panic!("no TimeRange for {sql}: {qe:#?}"));
+        assert_eq!(range.as_millis(), window_ms, "{sql}");
+        let NonASAPOp::Scan { predicates, .. } = op(child) else {
+            panic!("TimeRange must sit on the Scan for {sql}: {child:#?}");
+        };
+        let rest = usize::from(sql.contains("service = 'api'"));
+        assert_eq!(
+            predicates.len(),
+            rest,
+            "only the window leaves the Scan: {sql}"
+        );
+    }
+}
+
+// Conditions that are not a trailing window on the time column stay `Scan`
+// predicates: an upper bound alone, a month-long (variable) interval, a
+// window under `OR`, a window on another column, two windows, and a window on
+// a table without a time index. A window next to another condition on
+// `now()` stays one too: that condition would read other rows in a pane or
+// at ingestion time.
+#[tokio::test]
+async fn other_time_conditions_stay_scan_predicates() {
+    let catalog = catalog().with_table(
+        "events",
+        Schema::new(vec![
+            col("ts", DataType::Timestamp),
+            col("service", DataType::Utf8),
+        ]),
+    );
+    for sql in [
+        "SELECT COUNT(*) FROM metrics WHERE ts < now() - INTERVAL '5 minutes'",
+        "SELECT COUNT(*) FROM metrics WHERE ts >= now() - INTERVAL '1 month'",
+        "SELECT COUNT(*) FROM metrics WHERE ts >= now() - INTERVAL '5 minutes' OR service = 'a'",
+        "SELECT COUNT(*) FROM metrics WHERE CAST(bytes AS TIMESTAMP) >= now() - INTERVAL '5 minutes'",
+        "SELECT COUNT(*) FROM metrics \
+             WHERE ts >= now() - INTERVAL '5 minutes' AND ts > now() - INTERVAL '15 minutes'",
+        "SELECT COUNT(*) FROM metrics \
+             WHERE ts >= now() - INTERVAL '5 minutes' AND ts < now() - INTERVAL '1 minute'",
+        "SELECT COUNT(*) FROM events WHERE ts >= now() - INTERVAL '5 minutes'",
+    ] {
+        let qe = lower_sql(sql, &catalog, AccuracyTarget::exact())
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert!(trailing_window(&qe).is_none(), "{sql}: {qe:#?}");
+        let scan = scan_of(&qe);
+        let NonASAPOp::Scan { predicates: kept, .. } = op(scan) else {
+            unreachable!()
+        };
+        // The conditions stay together as one predicate on the `Scan`.
+        assert_eq!(kept.len(), 1, "{sql}: {scan:#?}");
+    }
+}
+
+/// The table `Scan` a query reads.
+fn scan_of(node: &OperatorNode) -> &OperatorNode {
+    if matches!(op(node), NonASAPOp::Scan { .. }) {
+        return node;
+    }
+    node.children()
+        .into_iter()
+        .map(|c| scan_of(c))
+        .next()
+        .expect("a Scan below")
+}
+
+// An aliased table's window lowers too, and `asap_rate` over a windowed
+// table reads its own range over the window's rows.
+#[tokio::test]
+async fn trailing_window_on_an_aliased_table_and_under_asap_rate() {
+    let qe =
+        lower("SELECT COUNT(*) FROM metrics m WHERE m.ts >= now() - INTERVAL '5 minutes'").await;
+    let (range, _) = trailing_window(&qe).expect("a TimeRange");
+    assert_eq!(range.as_millis(), 300_000);
+
+    let qe = lower(
+        "SELECT service, asap_rate(latency, ts, 60000) AS v FROM metrics \
+         WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service",
+    )
+    .await;
+    let (rate_range, below) = trailing_window(&qe).expect("the rate's range");
+    assert_eq!(rate_range.as_millis(), 60_000);
+    let (window, _) = trailing_window(below).expect("the WHERE window below it");
+    assert_eq!(window.as_millis(), 300_000);
+}

@@ -23,6 +23,23 @@ fn generate(extra: &[&str]) -> Value {
     generate_example("planner-layering-1", extra)
 }
 
+/// `example`'s document from the default search (no `--exhaustive`).
+fn generate_default_search(example: &str) -> Value {
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_default_{example}.json",
+        std::process::id(),
+    ));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(["--example", example, "--out"])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    document
+}
+
 fn generate_example(example: &str, extra: &[&str]) -> Value {
     // Tests run as threads of one process, so the name needs a per-call counter.
     static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -224,39 +241,19 @@ fn example3a_selects_the_cheapest_of_all_candidates() {
     assert!(physical.iter().any(|p| p["id"] == expected.as_str()));
 }
 
-/// Example 2 plans its three SQL queries: Stage 1 lists a candidate in
-/// which one UnivMon build serves all three, and plan selection selects a
-/// plan.
+/// Example 2 plans its three SQL queries with the default search and
+/// selects a plan.
 #[test]
-fn example2_plans_the_sql_workload_with_one_univmon_for_all_three() {
-    let document = generate_example("planner-layering-2", &["--max-displayed", "100000"]);
+fn example2_plans_the_sql_workload() {
+    // The default search: its SQL windows get tumbling panes, so an
+    // exhaustive run has over 10^4 Stage 2 candidates. The integration test
+    // `stage1_logical_asap_optimization_sql_adds_one_univmon_for_all_three`
+    // checks the shared UnivMon candidate.
+    let document = generate_default_search("planner-layering-2");
     let queries = document["workload"]["queries"].as_array().unwrap();
     assert_eq!(queries.len(), 3);
     assert!(queries.iter().all(|q| q["language"] == "sql"));
     validated_dag(&document["stage0_query_language_frontends"]["dag"], 3);
-    let univmon_builds = |candidate: &Value| {
-        candidate["dag"]["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|n| {
-                n["operator"]["ASAP"]["SummaryAgg"]["family"]["Sketch"][0]["algorithm"] == "UnivMon"
-            })
-            .count()
-    };
-    let candidates = document["stage1_logical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
-    assert!(
-        candidates.iter().any(|c| {
-            c["display_name"]
-                .as_str()
-                .unwrap()
-                .starts_with("Q1 UnivMon · Q2 UnivMon (Count acc) · Q3 UnivMon (Count acc)")
-                && univmon_builds(c) == 1
-        }),
-        "no candidate reads one UnivMon for all three"
-    );
     assert!(document["stage3_plan_selection"]["selected"].is_string());
 }
 

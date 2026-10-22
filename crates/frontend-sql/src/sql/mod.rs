@@ -423,8 +423,10 @@ impl<'a> SqlLowerer<'a> {
     /// `WHERE` — a conjunction of ordinary predicates plus, possibly, subquery
     /// predicates (issue #111).
     ///
-    /// The ordinary conjuncts stay one predicate, folded onto a bare `Scan`
-    /// (`filter_or_fold`). A subquery conjunct — `c IN (SELECT …)`, `EXISTS
+    /// A trailing window on a bare table `Scan`'s time index
+    /// ([`trailing_window_of_scan`]) becomes a range `TimeRange` over that
+    /// `Scan`. The other ordinary conjuncts stay one predicate, folded onto a
+    /// bare `Scan` (`filter_or_fold`). A subquery conjunct — `c IN (SELECT …)`, `EXISTS
     /// (…)`, `x > (SELECT …)` — is a row filter whose predicate reads another
     /// operator (`UnresolvedScalar::InSubquery` / `Exists` /
     /// `ScalarSubquery`); each one becomes its own `Filter` **above** the
@@ -440,14 +442,39 @@ impl<'a> SqlLowerer<'a> {
     fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<Unresolved, LoweringError> {
         let mut conjuncts = Vec::new();
         split_conjunction(&filter.predicate, &mut conjuncts);
-        let (subqueries, residual): (Vec<_>, Vec<_>) =
+        let (subqueries, mut residual): (Vec<_>, Vec<_>) =
             conjuncts.into_iter().partition(|e| reads_subquery(e));
 
         let input = self.lower_plan(&filter.input)?;
+        // A trailing window on the table's time column is the query's
+        // lookback: a range `TimeRange` over the `Scan`, as PromQL's `m[w]`.
+        // Only when no other conjunct reads `now()`: such a condition would
+        // be evaluated per pane and at ingestion time once the window is a
+        // `TimeRange`, and would select other rows there.
+        let other_reads_now = |window: usize| {
+            residual
+                .iter()
+                .enumerate()
+                .any(|(i, e)| i != window && reads_now(e))
+                || subqueries.iter().any(|e| reads_now(e))
+        };
+        let window = trailing_window_of_scan(&input, &residual)
+            .filter(|(index, _)| !other_reads_now(*index))
+            .map(|(index, width_ms)| {
+                residual.remove(index);
+                Duration::from_millis(width_ms)
+            });
         let mut node = match rebuild_conjunction(&residual) {
             Some(pred) => filter_or_fold(self.lower_expr(&pred)?, input),
             None => input,
         };
+        if let Some(range) = window {
+            node = Unresolved::TimeRange {
+                range,
+                kind: TimeRangeKind::Range,
+                child: Rc::new(node),
+            };
+        }
         for sq in subqueries {
             node = match sq {
                 Expr::Exists(ex) if !ex.subquery.outer_ref_columns.is_empty() => {
@@ -1964,6 +1991,103 @@ fn filter_or_fold(pred: Scalar, child: Unresolved) -> Unresolved {
             pred: Predicate(pred),
             child: Rc::new(other),
         },
+    }
+}
+
+/// The one conjunct of `conjuncts` that is a trailing window on the time
+/// column of `input`, a bare table `Scan` with a time index, as `(its
+/// position, the window width in ms)`. The caller also requires that no
+/// other conjunct reads `now()`. `None` when `input` is not such a
+/// `Scan`, or when no conjunct or more than one is a trailing window.
+///
+/// A trailing window is `time >= now() - INTERVAL 'w'` (or `>`, or the
+/// mirrored `now() - INTERVAL 'w' <= time`), or `time BETWEEN now() -
+/// INTERVAL 'w' AND now()`. It reads the rows of the last `w` before the
+/// evaluation time, with PromQL's range-selector timing `(T - w, T]`: the
+/// window's start is exclusive, so `>=` and `>` lower alike, and rows later
+/// than `T` have not arrived when the query is evaluated.
+fn trailing_window_of_scan(input: &Unresolved, conjuncts: &[&Expr]) -> Option<(usize, u64)> {
+    let Unresolved::Scan { schema, .. } = input else {
+        return None;
+    };
+    let schema = schema.as_ref()?;
+    let time_column = &schema.fields.get(schema.time_index?)?.name;
+    let mut windows = conjuncts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| Some((i, trailing_window_ms(e, time_column)?)));
+    let window = windows.next()?;
+    windows.next().is_none().then_some(window)
+}
+
+/// The width in ms of the trailing window `conjunct` states on
+/// `time_column` (see [`trailing_window_of_scan`]), or `None`.
+fn trailing_window_ms(conjunct: &Expr, time_column: &str) -> Option<u64> {
+    use logical_expr::Operator as Op;
+    let is_time = |e: &Expr| matches!(without_casts(e), Expr::Column(c) if c.name == time_column);
+    match conjunct {
+        Expr::BinaryExpr(b) => match b.op {
+            Op::GtEq | Op::Gt if is_time(&b.left) => now_minus_interval_ms(&b.right),
+            Op::LtEq | Op::Lt if is_time(&b.right) => now_minus_interval_ms(&b.left),
+            _ => None,
+        },
+        Expr::Between(b) if !b.negated && is_time(&b.expr) && is_now(&b.high) => {
+            now_minus_interval_ms(&b.low)
+        }
+        _ => None,
+    }
+}
+
+/// `w` in ms for `now() - INTERVAL 'w'` with a fixed-length `w > 0`. A
+/// month or year has no fixed length, so it is `None`.
+fn now_minus_interval_ms(expr: &Expr) -> Option<u64> {
+    let Expr::BinaryExpr(b) = without_casts(expr) else {
+        return None;
+    };
+    if b.op != logical_expr::Operator::Minus || !is_now(&b.left) {
+        return None;
+    }
+    let Expr::Literal(interval, _) = without_casts(&b.right) else {
+        return None;
+    };
+    const DAY_MS: i64 = 86_400_000;
+    let ms = match interval {
+        DfScalarValue::IntervalMonthDayNano(Some(v))
+            if v.months == 0 && v.nanoseconds % 1_000_000 == 0 =>
+        {
+            i64::from(v.days)
+                .checked_mul(DAY_MS)?
+                .checked_add(v.nanoseconds / 1_000_000)?
+        }
+        DfScalarValue::IntervalDayTime(Some(v)) => i64::from(v.days)
+            .checked_mul(DAY_MS)?
+            .checked_add(i64::from(v.milliseconds))?,
+        _ => return None,
+    };
+    u64::try_from(ms).ok().filter(|&ms| ms > 0)
+}
+
+/// Whether `now()` / `CURRENT_TIMESTAMP` appears anywhere in `expr`.
+fn reads_now(expr: &Expr) -> bool {
+    expr.exists(|e| Ok(is_now(e)))
+        .expect("the predicate never fails")
+}
+
+/// Whether `expr` is `now()` / `CURRENT_TIMESTAMP`, under any casts.
+fn is_now(expr: &Expr) -> bool {
+    matches!(without_casts(expr), Expr::ScalarFunction(sf)
+        if sf.args.is_empty()
+            && matches!(sf.func.name().to_ascii_lowercase().as_str(), "now" | "current_timestamp"))
+}
+
+/// `expr` without the casts type coercion wraps it in.
+fn without_casts(mut expr: &Expr) -> &Expr {
+    loop {
+        expr = match expr {
+            Expr::Cast(c) => &c.expr,
+            Expr::TryCast(c) => &c.expr,
+            other => return other,
+        };
     }
 }
 

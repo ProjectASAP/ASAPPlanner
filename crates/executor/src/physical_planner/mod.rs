@@ -24,7 +24,9 @@ use planner_types::ir::schema::{
 // `promql_rows` reads `LogicalOperator` and `OperatorNode` through `super::*`
 // only in its test-support helpers.
 #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_imports))]
-use planner_types::ir::{ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr};
+use planner_types::ir::{
+    ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr, TimeRangeKind,
+};
 mod logical;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -624,6 +626,15 @@ fn compile_internal(
                     continue;
                 }
             }
+            // A SQL table's trailing window (and a tumbling pane's shift
+            // under it) runs as a filter on the table's time column against
+            // the evaluation time.
+            if let Some(operator) = table_time_operator(id, &nodes, &dependencies, &schemas)
+                .map_err(|error| invalid(format!("node {id}: {error}")))?
+            {
+                physical_dag.add(id, inputs, operator.with_output_schema(output)?)?;
+                continue;
+            }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_evaluation() {
@@ -641,6 +652,112 @@ fn compile_internal(
     }
     physical_dag.validate()?;
     Ok(physical_dag)
+}
+
+/// The native operator of `id` when it is a range `TimeRange` or a
+/// `TimeShift` over a SQL table's rows (a table `Scan` below any stacked
+/// `TimeShift`s), `None` for any other node.
+///
+/// A `TimeRange(w)` over shifts summing to `s` keeps the rows whose time
+/// column lies in `(T - s - w, T - s]` at evaluation time `T`, the window a
+/// PromQL range selector reads: a filter on the time column against `now()`.
+/// A `TimeShift` only moves the window its `TimeRange` reads (the range
+/// above applies its offset), so it passes the rows through; a shift is
+/// meaningful only under a range, the shape Pass 2's tumbling panes build.
+/// An `@` anchor has no table lowering, so a shift with one gets `None`
+/// and the node fails compilation.
+fn table_time_operator(
+    id: NodeId,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+    input_schemas: &[SchemaRef],
+) -> Result<Option<Operator>, Error> {
+    let child = |id: NodeId| dependencies.get(&id).and_then(|d| d.first()).copied();
+    // The shifts' total offset below `id` (`id` included), and whether the
+    // first node below them is a table `Scan`.
+    let mut offset_ms = 0i64;
+    let mut below = match &nodes[&id].payload {
+        Payload::NonASAP(NonASAPOp::TimeRange {
+            kind: TimeRangeKind::Range,
+            ..
+        }) => child(id),
+        Payload::NonASAP(NonASAPOp::TimeShift { .. }) => Some(id),
+        _ => return Ok(None),
+    };
+    while let Some(node) = below {
+        match &nodes[&node].payload {
+            Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                if shift.at.is_some() {
+                    return Ok(None);
+                }
+                offset_ms = offset_ms
+                    .checked_add(shift.offset_ms)
+                    .ok_or_else(|| invalid("window offset overflows Int64"))?;
+                below = child(node);
+            }
+            Payload::NonASAP(NonASAPOp::Scan {
+                source: planner_types::ir::operator::Source::Table { .. },
+                ..
+            }) => break,
+            _ => return Ok(None),
+        }
+    }
+    if below.is_none() {
+        return Ok(None);
+    }
+    let [input] = input_schemas else {
+        return Err(invalid("a table time range or shift reads one input"));
+    };
+    let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[&id].payload else {
+        // A shift passes its rows through.
+        let columns = input
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
+            .collect();
+        return Operator::project(input.clone(), columns).map(Some);
+    };
+    let time = input
+        .time_index
+        .ok_or_else(|| invalid("a table time range needs the table's time column"))?;
+    let width_ms =
+        i64::try_from(range.as_millis()).map_err(|_| invalid("window width overflows Int64"))?;
+    let start_back_ms = offset_ms
+        .checked_add(width_ms)
+        .ok_or_else(|| invalid("window overflows Int64"))?;
+    // `now() - back`, as SQL timestamp arithmetic.
+    let now_minus = |back_ms: i64| -> Result<ScalarExpr, Error> {
+        let nanos = back_ms
+            .checked_mul(1_000_000)
+            .ok_or_else(|| invalid("window overflows Int64 nanoseconds"))?;
+        Ok(ScalarExpr::Arithmetic {
+            op: planner_types::ir::scalar::ArithmeticOpKind::Sub,
+            left: Box::new(ScalarExpr::CurrentTimestamp),
+            right: Box::new(ScalarExpr::Literal(
+                planner_types::ir::scalar::ScalarValue::Interval {
+                    months: 0,
+                    days: 0,
+                    nanos,
+                },
+            )),
+            semantics: planner_types::ir::scalar::ExprSemantics::Sql,
+        })
+    };
+    let compare = |op, back_ms| -> Result<ScalarExpr, Error> {
+        Ok(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(time)),
+            op,
+            right: Box::new(now_minus(back_ms)?),
+            semantics: planner_types::ir::scalar::ExprSemantics::Sql,
+        })
+    };
+    let window = ScalarExpr::BoolAnd(vec![
+        compare(CompareOpKind::Gt, start_back_ms)?,
+        compare(CompareOpKind::Le, offset_ms)?,
+    ]);
+    let predicate = crate::expressions::CompiledExpression::compile(&window, input)?;
+    Operator::filter(input.clone(), Expression::planner(predicate)).map(Some)
 }
 
 /// The first node at or below `node` that is not a `TimeShift`, following

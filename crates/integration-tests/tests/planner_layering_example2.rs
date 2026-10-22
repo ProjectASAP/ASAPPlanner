@@ -8,8 +8,8 @@
 //!
 //! The doc's workload is SQL; the SQL frontend lowers Q1 to a distinct
 //! count and recognizes Q2 and Q3 as `Entropy` and `L2` (Q3 with a Float64
-//! product). Its time filter stays a scan predicate, so the planning
-//! stages also run on a PromQL stand-in with the same structure: three
+//! product), and its time filter to the same 1-min `TimeRange` as PromQL's
+//! `[1m]`. Most planning tests predate that and run on a PromQL stand-in with the same structure: three
 //! statistics of one input over the same 1-min window, through the
 //! frontend's `distinct_over_time`, `entropy_over_time` and `l2_over_time`.
 
@@ -302,6 +302,21 @@ async fn stage1_logical_asap_optimization_sql_has_the_standin_options() {
     for q in 0..3 {
         assert_eq!(options(&sql, q), options(&standin, q), "Q{}", q + 1);
     }
+}
+
+/// The doc's SQL workload itself gets the summary-capability rule's shared
+/// candidate: one UnivMon read by Q1, Q2 and Q3.
+#[tokio::test]
+async fn stage1_logical_asap_optimization_sql_adds_one_univmon_for_all_three() {
+    let workload = sql_workload();
+    let run = run_stages(&workload, lower_sql(&workload).await);
+    assert!(
+        run.logical.iter().any(|c| {
+            let ums = univmons(c);
+            ums.len() == 1 && ums[0].0 == BTreeSet::from([0, 1, 2])
+        }),
+        "no SQL candidate reads one UnivMon for Q1, Q2 and Q3"
+    );
 }
 
 /// The stand-in lowers to the three statistics, each over a 1-min range of one input.

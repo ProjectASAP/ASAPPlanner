@@ -1184,8 +1184,8 @@ pub fn pane_candidates(
 }
 
 /// The window `W` of a build the rule can split: a `SummaryAgg` whose
-/// family merges, over a range `TimeRange(W)` over an instant vector read
-/// at the query's time or a fixed offset from it: no `@` anchor on any of
+/// family merges, over a range `TimeRange(W)` over an instant vector or a
+/// SQL table's rows, read at the query's time or a fixed offset from it: no `@` anchor on any of
 /// the time shifts stacked below the range.
 fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
     let Some(ASAPOp::SummaryAgg { child, family, .. }) = build.asap() else {
@@ -1200,7 +1200,12 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
     else {
         return None;
     };
-    if input.result_kind != OperatorResultKind::InstantVector {
+    // An instant vector (PromQL `m[w]`) or a SQL table's rows (a trailing
+    // window); not a range vector, whose rows are already windows.
+    if !matches!(
+        input.result_kind,
+        OperatorResultKind::InstantVector | OperatorResultKind::Relation
+    ) {
         return None;
     }
     // Refuse an `@` anchor on any of the shifts stacked below the range.

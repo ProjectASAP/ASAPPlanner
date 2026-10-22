@@ -1069,11 +1069,15 @@ impl NonASAPOp {
                 }
             }
             TimeShift { child, .. } => {
+                // A relation is a SQL table's rows, shifted under a trailing
+                // window's tumbling pane.
                 if !matches!(
                     child.result_kind,
-                    OperatorResultKind::InstantVector | OperatorResultKind::RangeVector
+                    OperatorResultKind::InstantVector
+                        | OperatorResultKind::RangeVector
+                        | OperatorResultKind::Relation
                 ) {
-                    return Err(invalid("time shift requires a vector"));
+                    return Err(invalid("time shift requires a vector or a relation"));
                 }
             }
         }

@@ -380,10 +380,10 @@ Any other shape stays in `definition`:
 
 | Kind | Comes from | Example |
 |---|---|---|
-| **Relative** to the evaluation time | a range `TimeRange(w)` over a `TimeShift(s)` → `(−(s+w), −s]` | `TimeRange(1m)` alone → `(−1m, 0]`; over `TimeShift(1m)` → `(−2m, −1m]` |
+| **Relative** to the evaluation time | a range `TimeRange(w)` over a `TimeShift(s)` → `(−(s+w), −s]`; a SQL trailing window `ts >= now() - INTERVAL 'w'` lowers to `TimeRange(w)` | `TimeRange(1m)` alone → `(−1m, 0]`; over `TimeShift(1m)` → `(−2m, −1m]` |
 | **Absolute** (later) | an interval on the timestamp column | `ts >= t0 AND ts < t1` → `ts ∈ [t0, t1)` |
 
-- PromQL windows exclude their start, so relative windows are open on the left.
+- PromQL windows exclude their start, so relative windows are open on the left. A SQL trailing window takes the same timing, `>=` included.
 - Window composition ([Pass 2](planner-layering.md#pass-2-asap-aware-common-subexpression-elimination) of logical optimization) builds its tumbling panes this way: a 3-minute window as panes `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so pane times are derived, not declared (#601).
 - An instant `TimeRange` (latest sample per series) does not pick rows by time, so it stays in `definition`. The walk also stops there, so for now the label matchers of an instant selector stay in `definition` too; lifting them is planned together with `rate` (Rule 1).
 - The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.

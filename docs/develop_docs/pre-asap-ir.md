@@ -171,7 +171,7 @@ to one source language.
 - [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via a reduction and aggregate intents.
 
 **[Time-related nodes](#time-related-nodes)**
-- [`TimeRange`](#timerange) — temporal selection over a time-series input (PromQL instant lookback or `[5m]` range selector).
+- [`TimeRange`](#timerange) — temporal selection over a time-series input (PromQL instant lookback or `[5m]` range selector) or a SQL table (a trailing `WHERE ts >= now() - INTERVAL '5 minutes'`).
 - [`TimeShift`](#timeshift) — shifts *when* a selector is evaluated (PromQL `offset`/`@`).
 - [`PromqlSubquery`](#promqlsubquery) — re-evaluates an instant-vector expression over a range at a given step.
 
@@ -434,6 +434,23 @@ explicit concern. `kind` records which samples a PromQL selector reads:
 rate(http_requests_total[5m])
 ```
 
+A SQL trailing window on the scanned table's time index lowers to the same `Range` node
+over the `Scan`, so its summaries get the same tumbling panes and ingestion-time builds:
+
+```sql
+SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '5 minutes'
+-- TimeRange(range = 5m, kind = Range, child = Scan("flows"))
+```
+
+The SQL front end recognizes one conjunct `ts >= now() - INTERVAL 'w'` (also `>`, the
+mirrored `now() - INTERVAL 'w' <= ts`, and `ts BETWEEN now() - INTERVAL 'w' AND now()`)
+on the table's `time_index`, with a fixed-length `w` (days and smaller; a month has no fixed
+length). It reads the window with PromQL's range timing, `(T - w, T]` at evaluation time
+`T`: the start is exclusive for `>=` too, so a row stamped exactly `T - w` is not read, and rows
+later than `T` have not arrived yet. Any other time condition stays a `Scan` predicate, and so
+does the window itself when another conjunct also reads `now()` (in a pane or at ingestion time
+that conjunct would read other rows).
+
 **Fields:**
 - `range` — how far back to look (the PromQL `[5m]` duration, or the instant lookback).
 - `kind` — `Instant` or `Range`.
@@ -442,7 +459,8 @@ rate(http_requests_total[5m])
 ### TimeShift
 
 PromQL `offset` / `@` time shift on a selector — a pass-through wrapper that moves *when*
-the child is evaluated but leaves its schema unchanged.
+the child is evaluated but leaves its schema unchanged. Pass 2 also shifts a SQL table's
+`Scan` this way for each tumbling pane of a trailing window.
 
 ```promql
 up offset 5m

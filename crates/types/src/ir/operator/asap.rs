@@ -705,10 +705,13 @@ impl ASAPOp {
                     ));
                 }
                 // The chain is the range selector: it reads the series the
-                // selector would.
-                if child.result_kind != OperatorResultKind::InstantVector {
+                // selector would, or a SQL table's rows for a trailing window.
+                if !matches!(
+                    child.result_kind,
+                    OperatorResultKind::InstantVector | OperatorResultKind::Relation
+                ) {
                     return Err(SchemaDerivationError::InvalidScalarSignature(format!(
-                        "a pane chain reads an instant vector, got {:?}",
+                        "a pane chain reads an instant vector or a relation, got {:?}",
                         child.result_kind
                     )));
                 }
