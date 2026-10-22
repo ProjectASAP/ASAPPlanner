@@ -95,6 +95,15 @@
   });
   $('plannerAdd').addEventListener('click', () => addPlannerRow({ text: '' }));
   $('schemaAdd').addEventListener('click', () => addSchemaRow());
+  // The source facts the editor declares: each non-empty number field.
+  function declaredFacts() {
+    const facts = {};
+    for (const [key, id] of [['series_count', 'plannerSeriesCount'], ['rows_per_second', 'plannerRowsPerSecond'], ['rows_held', 'plannerRowsHeld']]) {
+      const raw = $(id).value.trim();
+      if (raw !== '') facts[key] = Number(raw);
+    }
+    return facts;
+  }
   $('plannerRun').addEventListener('click', async () => {
     const rows = Array.from(plannerRows.querySelectorAll('.plannerRow')).filter((row) => row.querySelector('.plannerInclude').checked);
     const queries = rows.map((row) => ({
@@ -117,6 +126,9 @@
             .map(parseSchemaRow),
           max_error: Number($('plannerMaxError').value),
           accuracy_metric: $('plannerAccuracyMetric').value,
+          // Declared source facts; an empty field declares nothing, and a
+          // plan that needs it fails, naming the source and the fact.
+          ...declaredFacts(),
         }),
       });
       const result = await response.json();

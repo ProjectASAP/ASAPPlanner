@@ -27,7 +27,6 @@ use asap_types::ir::schema::{
     SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
-use asap_types::workload::DataWorkload;
 
 /// The first logical candidate (Stage 1, in enumeration order) of `root` as
 /// a query at `accuracy` that uses an ASAP operator, or the plain exact one
@@ -690,6 +689,7 @@ fn ddsketch_ratio_selection(
     accuracy: AccuracyTarget,
 ) -> (Vec<PhysicalCandidate>, Selection) {
     let root = lower_promql(query, planned).unwrap();
+    let data = asap_integration_tests::planning::declared_data(&root);
     let run = asap_plan_selection::run_stage1_to_stage3_with(
         vec![(0, QueryRoot::Operator(root))],
         &[asap_types::workload::QueryWorkloadEntry {
@@ -702,7 +702,7 @@ fn ddsketch_ratio_selection(
             recurrence: Default::default(),
             range_evaluation: None,
         }],
-        &DataWorkload::default(),
+        &data,
         PlanningModels::builtin(),
         asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )

@@ -46,7 +46,9 @@ fn entry(accuracy: &AccuracyTarget, interval_ms: u32) -> QueryWorkloadEntry {
 }
 
 /// `http` arrives at 2e6 rows/s (W-RollupHeavy's table), 10,000 series,
-/// a million distinct users at most per evaluation.
+/// a million distinct users at most per evaluation, and holds a minute of
+/// rows (the catalog has no time index, so a query's time predicate is a
+/// filter over every row held).
 fn data() -> DataWorkload {
     serde_json::from_value(serde_json::json!({
         "arrival": {"ingesting": {"rows_per_second": 2_000_000.0}},
@@ -55,6 +57,7 @@ fn data() -> DataWorkload {
             "sample_interval": 5,
             "values_non_negative": true,
             "max_distinct_per_evaluation": 1_000_000,
+            "rows_held": 120_000_000,
         }},
     }))
     .unwrap()

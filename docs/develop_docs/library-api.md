@@ -298,8 +298,13 @@ plan selection prices a `by (...)` grouping's groups at: the product of its
 keys' counts, at most the declared `series_count` (series or groups of
 rows) and the rows it reads; with a key undeclared, no count is assumed and
 the grouping is priced at the smaller of those two; over several sources a
-key's counts add). Every fact is declared: the planner has no
-clock, so a caller drops facts that no longer hold before planning. Plan
+key's counts add), and `rows_held` (the rows the source holds at rest,
+which bound a scan with no window and data at rest). Every fact is declared: the planner has no
+clock, so a caller drops facts that no longer hold before planning, and
+pricing assumes no default: a scan whose source declares no arrival rate
+(`rows_per_second`, or `series_count` with `sample_interval`) and no
+`rows_held` fails with `AnalyticalCostError::MissingSourceFact`, naming the
+source and the missing fact. Plan
 selection bounds a query's number of values `G`, and its input row count,
 by the `series_count` of the sources it reads, counting each branch of an
 `or` or union, and a grouped result's `G` (PromQL or SQL) also by the

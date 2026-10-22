@@ -48,10 +48,13 @@ def seed862() -> dict:
 
 
 def stage_pipeline(*args: str) -> dict:
-    """A document written on demand by the built stage_pipeline."""
+    """A document written on demand by the built stage_pipeline; queries
+    given on the command line read sources declared to hold 1,000 series
+    each (pricing uses only declared facts)."""
+    facts = ["--series-count", "1000"] if "--promql" in args or "--sql" in args else []
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "doc.json"
-        subprocess.run([str(server.BINARY), *args, "--out", str(out)], check=True, capture_output=True)
+        subprocess.run([str(server.BINARY), *args, *facts, "--out", str(out)], check=True, capture_output=True)
         return json.loads(out.read_text())
 
 

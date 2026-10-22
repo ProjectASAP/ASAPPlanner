@@ -296,9 +296,17 @@ async fn batch_planning_replaces_summary_operators() {
             ),
             repeating_queries: None,
         },
+        // `requests` at rest, holding a million rows.
         data_workload: Some(DataWorkload {
             arrival: DataArrival::AtRest,
-            ..Default::default()
+            sources: [(
+                "requests".to_string(),
+                asap_types::workload::SourceFacts {
+                    rows_held: Some(1_000_000),
+                    ..Default::default()
+                },
+            )]
+            .into(),
         }),
     };
     let catalog = SqlCatalog::new().with_table(

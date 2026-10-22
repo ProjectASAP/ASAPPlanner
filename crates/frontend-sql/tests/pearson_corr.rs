@@ -149,6 +149,11 @@ async fn corr_filter_is_a_measure_filter() {
 #[tokio::test]
 async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
+    // `a` holds 60,000 rows: the query scans all of them.
+    let data: asap_types::workload::DataWorkload = serde_json::from_value(
+        serde_json::json!({"arrival": "at_rest", "sources": {"a": {"rows_held": 60000}}}),
+    )
+    .unwrap();
     let run = asap_plan_selection::run_stage1_to_stage3_with(
         vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
         &[asap_types::workload::QueryWorkloadEntry {
@@ -161,7 +166,7 @@ async fn corr_survives_exact_plan_compilation() {
             recurrence: Default::default(),
             range_evaluation: None,
         }],
-        &Default::default(),
+        &data,
         asap_plan_selection::PlanningModels::builtin(),
         asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )

@@ -129,8 +129,13 @@ accuracy guarantees enforced.
 With the local server running, **Query editor** plans SQL and PromQL
 queries with one ε for every query. SQL queries read the tables declared in
 the editor (one column per line, `name TYPE [NOT NULL]`, and an optional
-time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
-`--name` and `--table` and the page shows the result. Accuracy guarantees
+time column). The editor also declares the source facts plan
+selection prices from (series, rows/s and rows held for every source; an
+empty field declares nothing). The server runs `stage_pipeline` with
+`--sql`, `--promql`, `--name`, `--table`, `--series-count`,
+`--rows-per-second` and `--rows-held`, and the page shows the result, or
+the error naming the source and the fact a plan needed but nobody
+declared. Accuracy guarantees
 are ignored, `stage_pipeline`'s default.
 
 ## Document format

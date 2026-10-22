@@ -272,6 +272,10 @@ fn sql_queries_over_declared_tables_are_planned() {
             "SELECT service, COUNT(*) FROM metrics GROUP BY service",
             "--sql",
             "SELECT service, AVG(latency) FROM metrics GROUP BY service",
+            "--series-count",
+            "1000",
+            "--rows-held",
+            "60000",
             "--out",
         ])
         .arg(&out)
@@ -306,6 +310,10 @@ fn mixed_sql_and_promql_queries_are_planned_with_their_names() {
             "topk(5, rate(http_requests_total[5m]))",
             "--max-error",
             "0.01",
+            "--series-count",
+            "1000",
+            "--rows-held",
+            "60000",
             "--out",
         ])
         .arg(&out)
@@ -578,7 +586,9 @@ fn duplicate_default_name_says_it_is_the_default() {
     assert!(stderr.contains("duplicate query name q1\n"), "{stderr}");
 }
 
-/// Runs `stage_pipeline` with `args`, expecting a document.
+/// Runs `stage_pipeline` with `args`, expecting a document; queries given
+/// on the command line read sources declared to hold 1,000 series each,
+/// and a SQL table 60,000 rows (pricing uses only declared facts).
 fn document_of(args: &[&str]) -> Value {
     static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -586,8 +596,14 @@ fn document_of(args: &[&str]) -> Value {
         "stage_pipeline_{}_{call}_document.json",
         std::process::id()
     ));
+    let facts: &[&str] = if args.iter().any(|a| *a == "--promql" || *a == "--sql") {
+        &["--series-count", "1000", "--rows-held", "60000"]
+    } else {
+        &[]
+    };
     let output = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
         .args(args)
+        .args(facts)
         .arg("--out")
         .arg(&out)
         .output()
@@ -1352,6 +1368,7 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
 /// the queries read, sampled every `--sample-interval-ms`.
 #[test]
 fn promql_queries_carry_their_sampled_data_workload() {
+    // `document_of` declares 1,000 series and 60,000 rows held per source.
     let document = document_of(&[
         "--promql",
         "sum(rate(a[1m])) / sum(b)",
@@ -1361,8 +1378,8 @@ fn promql_queries_carry_their_sampled_data_workload() {
     assert_eq!(
         document["workload"]["data_workload"]["sources"],
         serde_json::json!({
-            "a": {"series_count": null, "metric_type": null, "sample_interval": 30000, "stream_norms": null, "max_distinct_per_evaluation": null},
-            "b": {"series_count": null, "metric_type": null, "sample_interval": 30000, "stream_norms": null, "max_distinct_per_evaluation": null},
+            "a": {"series_count": 1000, "metric_type": null, "sample_interval": 30000, "stream_norms": null, "max_distinct_per_evaluation": null, "rows_held": 60000},
+            "b": {"series_count": 1000, "metric_type": null, "sample_interval": 30000, "stream_norms": null, "max_distinct_per_evaluation": null, "rows_held": 60000},
         })
     );
     // Nothing is stored: every query computes at query time.
