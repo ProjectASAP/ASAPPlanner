@@ -3078,14 +3078,14 @@ fn group_count_bound(
         let labels = labels()?;
         // Keys that are one source row's unchanged labels: the source's
         // declared label sets bound their combinations.
-        if let [source] = sources.iter().collect::<Vec<_>>().as_slice() {
+        if let (1, Some(source)) = (sources.len(), sources.first()) {
             if labels
                 .iter()
                 .all(|label| unchanged_input_columns.contains(label))
             {
                 return data
                     .sources
-                    .get(**source)?
+                    .get(*source)?
                     .declared_distinct_combinations(&labels);
             }
         }
