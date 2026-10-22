@@ -84,8 +84,12 @@ strictest: every group (`G`, when `G` is above 100), then a 1% share (100),
 then a 5% share (20), then a single value (1). A whole-result target with an unbound `G`
 enlarges nothing and stays unmet. A grouped result's `G` is bound by the
 distinct values its sources declare for its group keys
-(`SourceFacts.distinct_values_per_label`): the product over the keys, at most
-the series read. A key counts only when it is a source column passed through
+(`SourceFacts.distinct_values_per_label`, and
+`distinct_values_per_label_set` for labels that depend on each other): the
+smallest product of declared label and label-set counts covering the keys, at
+most the series read. With each of 625 endpoints in one of 25 services and
+`(service, endpoint)` declared at 625, `by (service, endpoint)` returns at
+most 625 values, not 25 x 625. A key counts only when it is a source column passed through
 unchanged; a relabeled or computed key leaves `G` unbound. So a sketch meets a whole-result target over SQL groups when
 every grouping column's distinct values are declared, and over 25 services
 and 25 endpoints sizes each group's sketch for `δ / 625`. Nothing declared

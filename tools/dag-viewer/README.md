@@ -40,7 +40,7 @@ To run it, see [RUNNING.md](RUNNING.md).
 - **Data workload** beside it: the arrival and one row per declared source
   with exactly the facts `SourceFacts` has (series count, metric type,
   non-negative values, sample interval, stream norms, distinct bound,
-  distinct values per label) and
+  distinct values per label, distinct values per label set) and
   the queries whose text names it, plus the deployment capabilities the
   run planned with.
 - **Stage 3 · plans by cost**: every candidate the document shows. First the

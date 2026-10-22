@@ -201,7 +201,12 @@ struct SourceFacts {
     stream_norms: Option<StreamNorms>,
     max_distinct_per_evaluation: Option<u64>,
     distinct_values_per_label: BTreeMap<String, u64>,
+    distinct_values_per_label_set: Vec<LabelSetDistinctValues>,
     rows_held: Option<u64>,
+}
+struct LabelSetDistinctValues {
+    labels: Vec<String>,
+    distinct_values: u64,
 }
 ```
 
@@ -215,6 +220,7 @@ struct SourceFacts {
 | `sample_interval` | PromQL and MetricsQL; nonzero | How often each series of the metric is sampled. Bare instant selectors over it use it as their selection horizon; without it, such a query fails to lower. |
 | `stream_norms`, `max_distinct_per_evaluation` | Optional | Bounds that Count-Min/Count Sketch and HLL/UnivMon guarantees are bound with. |
 | `distinct_values_per_label` | Optional; default empty; each count nonzero | Distinct values each label (PromQL) or column (SQL) takes, e.g. `{"host": 1000, "job": 10}`. Plan selection prices a `by (k1, k2, ...)` aggregate or summary, and a partitioned sort or limit, at the product of its keys' counts, at most the `series_count` (series, or groups of rows) of the sources it reads and the rows it reads per evaluation. Over several sources a key's counts add. No count is assumed for a key some source read does not declare: the grouping is priced at the smaller of that `series_count` and those rows. Each count must be an upper bound, counting a missing label (or a NULL) as one more value: when every key of a grouped result declares one, their product (at most the series read) also bounds `G`, which sizes per-group sketches for a whole-result target; otherwise `G` keeps its series bound, or none for SQL. |
+| `distinct_values_per_label_set` | Optional; default empty; each set two or more distinct labels, its count nonzero and at most the product of its labels' declared counts | Distinct combinations a set of labels (or columns) takes together, for labels that depend on each other, e.g. `[{"labels": ["service", "endpoint"], "distinct_values": 625}]` when each of 625 endpoints is in one of 25 services. For a grouping over one source whose keys are one row's unchanged labels, the per-label product above becomes the smallest product of declared set and label counts whose labels cover the keys: `by (service, endpoint)` is 625 groups, not 25 x 625, and `by (region, service, endpoint)` at most 4 x 625. A set covering more labels than the keys also bounds them. Nothing is inferred from the per-label counts (no functional dependency is assumed). Over several sources, or for keys a join or binary operator pairs from different rows, only the per-label counts apply; a key a relabeling rewrites is not bounded by any declared set. The same bound gives `G` for a whole-result target. A count above its labels' product is an input error naming the source. |
 | `rows_held` | Optional; nonzero | Rows the source holds at rest. A query-time scan reads at most these; a scan with no window above it (a SQL query without a time predicate) reads all of them. |
 
 Every fact is declared: the planner has no clock, so a caller drops facts

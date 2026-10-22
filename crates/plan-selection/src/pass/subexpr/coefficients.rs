@@ -554,6 +554,7 @@ fn per_computation<'a>(
                     output: produced.output,
                     sources: produced.sources.clone(),
                     family: produced.family,
+                    unchanged_columns: produced.unchanged_columns.clone(),
                 }
             })
             .collect();

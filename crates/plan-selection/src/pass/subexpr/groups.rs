@@ -284,6 +284,7 @@ fn target_candidates<Id: Clone>(
                 }
             }
         }
+        private_absorbed(groups, &mut implements);
         for budget_share in 1..=max_budget_share {
             let Ok(composed) =
                 compose_alone(per_computation, &aggregate, targets, &choice, budget_share)
@@ -358,6 +359,30 @@ fn target_candidates<Id: Clone>(
         }
     }
     (!candidates.is_empty()).then_some(candidates)
+}
+
+/// Keeps in `implements` (the group, then the groups its fused computation
+/// absorbs) only the absorbed groups no other reader needs: no query's root,
+/// and every parent in `implements`. Pass 1 fuses an aggregate only into its
+/// single consumer within one query; the memo merges equal nodes across
+/// queries, so an absorbed group may also be another query's root or
+/// another group's child. Such a group (and, in turn, what only it reads)
+/// is computed privately inside the fused candidate and stays its own group
+/// for its other readers, so e.g. `topk(5, sum by (job) (…))` by a heap
+/// never answers a second query's `sum by (job) (…)`.
+fn private_absorbed(groups: &[MemoGroup], implements: &mut Vec<GroupId>) {
+    loop {
+        let shared = implements[1..].iter().position(|a| {
+            let group = &groups[a.0 as usize];
+            !group.roots_of.is_empty() || group.parents.iter().any(|p| !implements.contains(p))
+        });
+        match shared {
+            Some(i) => {
+                implements.remove(i + 1);
+            }
+            None => break,
+        }
+    }
 }
 
 /// `aggregate` composed alone with `choice[t]` for each of its measures'

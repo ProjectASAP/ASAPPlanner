@@ -194,3 +194,30 @@ fn an_undeclared_sql_grouping_is_priced_at_the_groups_of_rows_or_the_rows_read()
         priced_groups_and_scan_rows(workload(DISTINCT_USERS, "relative", every_column()));
     assert_eq!(groups, std::collections::BTreeSet::from([625]));
 }
+
+/// Each endpoint is in one service: declaring `(service, endpoint)`'s 625
+/// combinations prices `GROUP BY service, endpoint` at 625 groups, where
+/// the per-column product (25 x 625) is capped only by the 10,000 groups of
+/// rows.
+#[test]
+fn a_declared_column_set_prices_a_sql_grouping_at_its_combinations() {
+    let hierarchical =
+        serde_json::json!({"region": 4, "service": 25, "endpoint": 625, "status": 4});
+    let (groups, _) =
+        priced_groups_and_scan_rows(workload(DISTINCT_USERS, "relative", hierarchical.clone()));
+    assert_eq!(groups, std::collections::BTreeSet::from([10_000]));
+    let mut declared = workload(DISTINCT_USERS, "relative", hierarchical);
+    declared
+        .data_workload
+        .as_mut()
+        .unwrap()
+        .sources
+        .get_mut("http")
+        .unwrap()
+        .distinct_values_per_label_set = vec![asap_types::workload::LabelSetDistinctValues {
+        labels: vec!["service".to_string(), "endpoint".to_string()],
+        distinct_values: 625,
+    }];
+    let (groups, _) = priced_groups_and_scan_rows(declared);
+    assert_eq!(groups, std::collections::BTreeSet::from([625]));
+}
