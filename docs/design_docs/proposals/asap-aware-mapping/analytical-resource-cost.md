@@ -785,8 +785,11 @@ from logical group count alone.
 
 Summary merge, subtract, delete, and readout are separate physical operators.
 Their CPU and memory use the concrete summary state size and number of input
-states. A plan using one of these operations is unavailable until the
-corresponding formula and required evidence are present.
+states. A merge costs one operation per input state, and outputs one state per
+group: the input's groups, or for a rollup (`group_by`) the groups of its
+keys, estimated like any `by (keys)` and at most the input's groups. A plan
+using one of these operations is unavailable until the corresponding formula
+and required evidence are present.
 
 Summary construction uses physical-input realization rules before it emits a
 `SummaryAgg`. The default rule consumes the logical aggregate's immediate

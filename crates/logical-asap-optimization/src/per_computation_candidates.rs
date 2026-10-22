@@ -1546,6 +1546,9 @@ fn with_guarantees(
 ///
 /// [`AccuracyScope::PerValue`]: asap_types::ir::properties::AccuracyScope::PerValue
 fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+    if let Some(guarantee) = rolled_up_guarantee(node) {
+        return guarantee;
+    }
     if let Some(guarantee) = merged_panes_guarantee(node) {
         return guarantee;
     }
@@ -1689,6 +1692,61 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
         ),
         Operator::NonASAP(_) => None,
     }
+}
+
+/// The guarantee of an estimate or finalized value read from a rollup (a
+/// regrouping `SummaryMerge` of one input): the same read of the input
+/// states, when the family's merged error for that read is exact or the
+/// same as one build's over the union (the family-capability table). The
+/// groups of one build partition its rows, so a rolled-up state is a merge
+/// of disjoint parts, and a family whose bound holds for one build over
+/// the union keeps it: KMV, HLL and DDSketch merge into the state a direct
+/// coarse build would have, KLL into a state with the same rank bound, and
+/// linear sketches into the direct build's counters, whose error is
+/// relative to the coarse group's total. Each guarantee holds per output
+/// point, so the number of groups does not change it. None when the merged
+/// readout is approximate (heap top-k, entropy) or the family has no merge.
+/// `None` for any node that does not read a rollup.
+fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>> {
+    let state = match node.asap()? {
+        ASAPOp::SummaryEstimate { summary_input, .. } => summary_input,
+        ASAPOp::FinalizeExactAccumulator { child } => child,
+        _ => return None,
+    };
+    let Some(ASAPOp::SummaryMerge {
+        children,
+        group_by: Some(_),
+        ..
+    }) = state.asap()
+    else {
+        return None;
+    };
+    let [input] = children.as_slice() else {
+        return Some(None);
+    };
+    let family = state.asap()?.produced_state()?;
+    let merged = match node.asap()? {
+        ASAPOp::SummaryEstimate { query, .. } => FamilyCapability::of(family).merged_error(query),
+        // An exact accumulator merged across groups is exact.
+        _ => FamilyCapability::merges_groups(family).then_some(MergedError::Exact),
+    };
+    if !matches!(
+        merged,
+        Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
+    ) {
+        return Some(None);
+    }
+    let reader = OperatorNode::with_schema(
+        node.operator.map_children(|child| {
+            if Rc::ptr_eq(child, state) {
+                Rc::clone(input)
+            } else {
+                Rc::clone(child)
+            }
+        }),
+        node.schema.clone(),
+    );
+    Some(composed_guarantee(&reader))
 }
 
 /// The guarantee of an estimate or finalized value read from merged
