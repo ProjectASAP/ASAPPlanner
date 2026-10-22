@@ -1189,6 +1189,17 @@ pub struct PlanSelector<'a> {
     runner_up: Option<f64>,
 }
 
+/// One candidate checked and priced on its own ([`PlanSelector::price_alone`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PricedAlone {
+    /// It passes every check and costs this.
+    Priced(CandidateCost),
+    /// The first check it fails. A raw-data, latency or repeat-interval
+    /// failure is marked `size_independent`: a larger summary does not
+    /// repair it.
+    Failed(CheckFailure),
+}
+
 /// Prices within this fraction of each other are the same sum of charges
 /// rounded differently (Stage 3's tie tolerance is 1e-9).
 const ROUNDING: f64 = 1e-12;
@@ -1420,6 +1431,61 @@ impl<'a> PlanSelector<'a> {
             sized,
         });
         Ok(())
+    }
+
+    /// `candidate` checked and priced as [`Self::offer`] checks and prices
+    /// it, without ranking, keeping or the executor's compile check: the
+    /// memo-group search prices one group's candidate this way, the group's
+    /// queries being this selector's workload.
+    pub(crate) fn price_alone(
+        &self,
+        candidate: &PhysicalCandidate,
+    ) -> Result<PricedAlone, SelectionError> {
+        if candidate.roots.len() != self.entries.len() {
+            return Err(SelectionError::EntryCount {
+                candidate: candidate.id.clone(),
+                roots: candidate.roots.len(),
+                entries: self.entries.len(),
+            });
+        }
+        let sized = match checked_candidate(candidate, &self.targets, self.data, &self.models) {
+            Ok((sized, _)) => sized,
+            Err(failed) => return Ok(PricedAlone::Failed(failed)),
+        };
+        let nodes = node_map(&sized.dag);
+        let kept_chains = kept_pane_chains(&sized.dag);
+        if !self.models.deployment_capabilities.raw_data_retained {
+            if let Some(reason) = raw_data_violation(&sized.dag, &nodes, &kept_chains) {
+                return Ok(PricedAlone::Failed(CheckFailure {
+                    cause: RejectionCause::RawDataNotRetained,
+                    reason,
+                    size_independent: true,
+                }));
+            }
+        }
+        let (cost, _) = price_at_scale(
+            &sized.dag,
+            &nodes,
+            &kept_chains,
+            &self.recurrence,
+            &self.range_evaluations,
+            self.data,
+            self.models.plan_selection,
+            self.formula_scale,
+        )
+        .map_err(|(node, error)| SelectionError::Cost {
+            candidate: candidate.id.clone(),
+            node,
+            error,
+        })?;
+        if let Some((cause, reason)) = latency_violation(&cost, self.entries) {
+            return Ok(PricedAlone::Failed(CheckFailure {
+                cause,
+                reason,
+                size_independent: true,
+            }));
+        }
+        Ok(PricedAlone::Priced(cost))
     }
 
     /// Whether a candidate Stage 1 candidate `from_logical` implements is
