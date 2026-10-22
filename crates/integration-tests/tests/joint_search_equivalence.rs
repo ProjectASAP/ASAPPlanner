@@ -1241,3 +1241,117 @@ fn memo_group_search_selects_the_exhaustive_price() {
     );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
+
+/// Debugging aid: the memo's and the exhaustive search's selected roots on
+/// one seed.
+#[test]
+#[ignore = "debugging aid"]
+fn debug_memo_seed() {
+    use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
+    fn show(node: &std::rc::Rc<OperatorNode>, depth: usize, out: &mut String) {
+        let detail = match (node.asap(), node.non_asap()) {
+            (
+                Some(ASAPOp::SummaryAgg {
+                    family, reduction, ..
+                }),
+                _,
+            ) => {
+                format!("{family:?} {reduction:?}")
+            }
+            (
+                Some(ASAPOp::SummaryMerge {
+                    newest_panes,
+                    group_by,
+                    ..
+                }),
+                _,
+            ) => {
+                format!("newest {newest_panes:?} group_by {group_by:?}")
+            }
+            (
+                Some(ASAPOp::PaneChain {
+                    family,
+                    reduction,
+                    pane_width_ms,
+                    pane_count,
+                    ..
+                }),
+                _,
+            ) => {
+                format!("{family:?} {reduction:?} {pane_width_ms}x{pane_count}")
+            }
+            (_, Some(NonASAPOp::TimeRange { range, .. })) => format!("{range:?}"),
+            (
+                _,
+                Some(NonASAPOp::Aggregate {
+                    reduction,
+                    measures,
+                    ..
+                }),
+            ) => {
+                format!("{reduction:?} {measures:?}")
+            }
+            _ => String::new(),
+        };
+        let detail: String = detail.chars().take(160).collect();
+        out.push_str(&format!(
+            "{}{} {:p} {detail}\n",
+            "  ".repeat(depth),
+            node.operator.kind_name(),
+            std::rc::Rc::as_ptr(node)
+        ));
+        for child in node.children() {
+            show(child, depth + 1, out);
+        }
+    }
+    let seed: u64 = std::env::var("SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(59);
+    let gauges: &[&str] = match seed % 3 {
+        0 => &["m", "n"],
+        _ => &["m"],
+    };
+    let workload = random_workload_over(seed, gauges);
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    for e in &entries {
+        eprintln!("{} {:?}", e.query.0, e.recurrence);
+    }
+    let data = workload.data_workload.clone().unwrap();
+    let deployment = match seed % 2 {
+        0 => no_raw_data(),
+        _ => asap_logical_asap_optimization::DeploymentCapabilities::default(),
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+    let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
+    for (name, search) in [
+        ("exhaustive", Stage1ToStage3Search::exhaustive()),
+        (
+            "memo",
+            Stage1ToStage3Search {
+                memo_groups: true,
+                ..Stage1ToStage3Search::default()
+            },
+        ),
+    ] {
+        let run = run_stage1_to_stage3_with(indexed(), &entries, &data, models, search).unwrap();
+        let s = run.stage3_plan_selection.as_ref().unwrap();
+        eprintln!("== {name}: {:?}", s.costs[&s.selected].cost_per_second);
+        let mut out = String::new();
+        for root in run
+            .stage1_selected
+            .as_ref()
+            .unwrap()
+            .roots
+            .as_ref()
+            .unwrap()
+        {
+            if let QueryRoot::Operator(node) = root {
+                show(node, 0, &mut out);
+            }
+            out.push_str("--\n");
+        }
+        eprintln!("{out}");
+    }
+}
