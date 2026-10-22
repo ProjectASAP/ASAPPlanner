@@ -200,109 +200,70 @@ Validate each rule against exhaustive enumeration on small workloads, alone and 
 
 ## Memo-group search
 
-The rules above prune a search that still builds and prices whole-workload candidates, one at a time, at about a millisecond each. RangeHeavy's 24-hour quantiles component checks 153,086 of them in 92 s even with interchangeable queries collapsed, and whole workloads link most queries over one source into one component (shared scans, SQL windows as time ranges, sketch rollup). The memo-group search replaces whole-candidate enumeration: each group of queries enumerates and prices its own alternatives once, keeps the cheapest per sharing signature, and only groups that can share a node make a joint choice.
+The rules above prune a search that still builds and prices whole-workload candidates, one at a time, at about a millisecond each: RangeHeavy's 24-hour quantiles component checks 153,086 of them in 92 s, and whole workloads link most queries over one source into one component (shared scans, SQL windows as time ranges, sketch rollup). The memo-group search replaces whole-candidate enumeration with a Cascades-style memo over the workload's logical sub-expressions. The stages keep their semantics and code boundaries; what changes is the unit they exchange.
 
 ### Components
 
 | Component | What it is |
 | --- | --- |
-| Memo group | The queries planned together as one unit: one query, every query of a class of interchangeable queries, or queries that read a common Pass 1 target. Identical queries are one group. |
-| Group candidate | One alternative of one group, planned alone: a choice of a Pass 1 candidate for each of its targets, the Pass 2 rewrites that touch only its own nodes (panes, sharing inside the group), and one Stage 2 materialization of each build only it can read. |
-| Sharing site | A node another group could also read: a summary build (whole, or a pane chain with its width), a shared scan or time range, a rollup source, a top-k ranking. Keyed so that two groups' sites meet exactly when a Pass 2 rule could make them one node. |
-| Sharing signature | The sites a group candidate exposes, each with what decides the shared node's cost: family, size parameters, pane grid and materialization. |
-| Local usage | A group candidate's usage priced by Stage 3's per-node pricing with the group alone: CPU operations, scanned bytes, memory byte-seconds, peak memory, disk, each query's latency. Priced once per candidate and cached. |
-| Sharing cluster | The groups whose signatures can meet, directly or through other groups. Clusters are searched separately (method 5). |
-| Cluster selection | One kept candidate per group of a cluster, with the sites they make one node. |
+| Memo group | One distinct logical sub-expression of the workload: the logical DAG hash-consed, so identical expressions of several queries are one group. Identical-expression sharing is group identity. |
+| Implementation candidate | One way to implement one group: exact, exact accumulator, a summary family with its size parameters, tumbling panes, or a read of another group (newest panes of a shared chain, a rollup regrouping, a top-k ranking). It references child groups, not child nodes. A fused computation (e.g. a heap that absorbs a sum and a top-k) is one candidate that implements several groups; it records which. |
+| Materialization | `NotMaterialized`, `MatAtQuery`, at ingestion, or kept across evaluations: chosen once per implementation candidate of a group, however many parents read it. |
+| Shared group | A group read by two or more parents. Its choice (implementation, size, materialization, pane grid) couples its parents. |
+| Coupling site | A choice several groups' costs depend on: a shared group's size (sized for its strictest reader), a shared pane chain's grid, longest window and size, a metric's scan label set, a source's raw-data horizon. |
+| Local price | One implementation candidate's usage, priced by Stage 3's per-node pricing given its context (its readers' requirements, its coupling sites' thresholds): CPU operations, scanned bytes, memory byte-seconds, peak memory, disk, each reader's latency. Cached per (group, candidate, context). |
+| Frontier | Per group and subproblem, the candidates no other dominates in usage: the cheapest under cost model 1, a Pareto front over (cost, peak memory, peak cores, disk, worst latency) under cost models 2 and 3. |
+
+### Stage interfaces
+
+- **Pass 1** emits, per group, its implementation candidates (exact, exact accumulators, each summary family and size, pane variants), each referencing child groups. It no longer emits a whole sub-DAG per target.
+- **Pass 2 rules** add implementation candidates to groups:
+  - summary capability: one build serving several reader groups, sized for the strictest reader;
+  - window composition: pane implementations, a newest-n read of another group's chain, and the gcd grid;
+  - rollup: a coarse group implemented by regrouping a finer group;
+  - exact top-k reuse: a top-k implemented from another group's ranking.
+- **Stage 2** chooses each candidate's materialization; a group with several parents chooses once.
+- **Stage 3** prices per group with the cache. The executor's compile check and the full physical DAG are built only for the selection and the runner-ups a report asks for.
 
 ### Algorithm
 
-1. **Groups.** Split the workload into memo groups (hash-consing identical queries; classes of interchangeable queries; queries sharing a Pass 1 target).
-2. **Enumerate and price each group alone.** For each group, enumerate its candidates and price each with Stage 3 as a workload of that group alone. A candidate that fails a check that sharing cannot repair is dropped (method 2).
-3. **Keep the cheapest per signature.** Within a group, among candidates with the same sharing signature, drop a candidate whose local usage is no smaller on every component and larger on one (method 4, local dominance). Ties are kept. A candidate whose sites can meet no other group's has an empty signature, so it competes with every such candidate of the group: the group's overall cheapest.
-4. **Clusters.** Link two groups when one kept site of each can meet. Each connected cluster is searched on its own.
-5. **Joint choice in a cluster.** Branch and bound over the groups of a cluster, one kept candidate each. A complete assignment is priced exactly: its groups' roots are composed, the meeting sites are made one node by the Pass 2 rule that applies (identical expression, summary capability sized for the strictest reader, shared pane chain), and Stage 2 and Stage 3 price the cluster. The lower bound of a partial assignment is the sum, over its groups, of local usage minus the cost of its sites, plus each distinct site's cost once, sized for its least demanding reader: sharing can only remove repeated site charges.
-6. **Whole plan once.** The cluster selections are composed into one plan, checked by Stage 3 (including the executor's compile check) and returned. Runner-ups are built only when the report asks for them.
+1. **Hash-cons** the workload's logical DAG into groups.
+2. **Generate** each group's implementation candidates (Pass 1, then the Pass 2 transformations), each with its child groups and its coupling sites.
+3. **Clusters.** Groups linked by a shared group or a coupling site form a cluster; clusters are solved separately.
+4. **Enumerate the coupling choices of a cluster, with bounds.** A shared group's size depends only on its strictest reader, so instead of reader subsets the search enumerates the strictness threshold (one value per distinct reader requirement, the per-parameter maximum when a size has several parameters); a reader no stricter than the threshold may read it, and does iff that is cheapest for it. Pane chains add the grid (the closure of the readers' widths under gcd) and the longest window. A metric's scans enumerate the label sets of their readers. A source's raw retention enumerates the horizon threshold among its raw-reading readers. Branch and bound prunes threshold combinations whose lower bound exceeds the incumbent.
+5. **Dynamic programming** over the rest of the group DAG, given the coupling choices: each group keeps its frontier of candidates (cheapest, or Pareto under cost models 2 and 3), computed bottom-up from its children's frontiers with the cached local prices.
+6. **Combine** the clusters' frontiers; peaks and capacity limits (cost models 2 and 3) are checked when frontiers combine. Latency and repeat-interval checks are checked when a reader attaches to a shared group, at that group's threshold.
+7. **Build late.** Compose the selected plan once, run Stage 3's checks and the executor's compile check on it, and report it.
 
-The search is exact when every interaction between two groups goes through a sharing site (step 4), and when sharing changes nothing outside the sites it merges. Charges that couple everything (raw data on disk, cost models 2 and 3, a measured cost table) keep the current search.
+### Coupled charges
 
-### Interfaces
+- **Raw data on disk**: a per-source coupling site whose size is the longest horizon among the readers that scan raw data, enumerated as a threshold (step 4).
+- **Cost models 2 and 3**: frontiers instead of minima (step 5), peaks and limits at combination (step 6).
+- **A measured cost table**: the calibration factor is fitted once, before the search, over every candidate node the generation produced (before pruning), and frozen; every group is priced with it.
 
-The memo-group search lives in `crates/plan-selection/src/pass/memo/`, behind the current search until it matches it on every equivalence test.
+### Exactness
+
+The search is exact when every interaction between groups is a shared group or a coupling site, and each coupling site's cost depends only on its threshold. When a cluster has a construct no threshold captures, that cluster is searched exhaustively over its frontiers and the report names it; no cap is applied. Each rule is checked against exhaustive enumeration on small workloads (`joint_search_equivalence`), including raw-retention coupling, a cost model 2 peak, a cost model 3 capacity limit and a partial measured table.
+
+### Code layout
+
+`crates/plan-selection/src/pass/memo/`, behind `Stage1ToStage3Search::memo_groups` until it matches the current search on every equivalence test:
 
 ```rust
-/// One memo group: queries planned together as one unit.
-pub(crate) struct MemoGroup {
-    /// Its queries, by index in the workload, in workload order.
-    pub queries: Vec<usize>,
-    /// The Pass 1 targets its queries read (digits of a whole-workload choice).
-    pub targets: Vec<usize>,
-}
-
-/// One candidate of a memo group, planned alone.
-pub(crate) struct GroupCandidate {
-    /// Its group, by index.
-    pub group: usize,
-    /// The group's Pass 1 choice: one candidate per target, over the group's targets.
-    pub choice: Vec<usize>,
-    /// The group's roots, in its queries' order, with Pass 2 rewrites inside the group.
-    pub roots: Vec<QueryRoot>,
-    /// One materialization per build only this group reads, in discovery order.
-    pub materialization: Vec<Materialization>,
-    /// The sites another group could share.
-    pub signature: SharingSignature,
-    /// The group's usage planned alone, priced by Stage 3.
-    pub usage: LocalUsage,
-}
-
-/// The sites a group candidate exposes, sorted; equal signatures compete.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct SharingSignature(pub Vec<SharingSite>);
-
-/// A node another group could read once it is shared.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct SharingSite {
-    /// Equal keys meet: the shared node's input and computation, sizes and ranks masked.
-    pub meeting_key: u64,
-    /// What decides the shared node's cost: family and size, pane grid, materialization.
-    pub cost_key: u64,
-}
-
-/// One group candidate's usage priced alone.
-pub(crate) struct LocalUsage {
-    pub cpu_ops_per_second: f64,
-    pub scanned_bytes_per_second: f64,
-    pub average_memory_bytes: f64,
-    pub peak_memory_bytes: u64,
-    pub disk_bytes: u64,
-    /// Each of the group's queries' latency per evaluation, in ms.
-    pub latency_ms: Vec<f64>,
-    /// The price under the deployment's cost model, when it has one.
-    pub cost_per_second: Option<f64>,
-}
-
-/// Step 1: the memo groups of a workload.
-pub(crate) fn memo_groups<Id: Clone>(per_computation: &PerComputationCandidates<Id>, entries: &[QueryWorkloadEntry], models: &PlanningModels<'_>) -> Vec<MemoGroup>;
-
-/// Steps 2 and 3: a group's candidates, priced alone, the dominated ones per signature dropped.
-pub(crate) fn group_candidates<Id: Clone>(per_computation: &PerComputationCandidates<Id>, group: &MemoGroup, entries: &[QueryWorkloadEntry], data: &DataWorkload, models: PlanningModels<'_>) -> Vec<GroupCandidate>;
-
-/// Step 3 alone: `candidates` with every one another of the same signature dominates dropped.
-pub(crate) fn keep_undominated(candidates: Vec<GroupCandidate>) -> Vec<GroupCandidate>;
-
-/// Steps 4 and 5: the clusters of groups whose kept sites can meet, each selected exactly.
-pub(crate) fn select_clusters(groups: &[MemoGroup], candidates: &[Vec<GroupCandidate>], entries: &[QueryWorkloadEntry], data: &DataWorkload, models: PlanningModels<'_>) -> Result<Vec<ClusterSelection>, SelectionError>;
-
-/// One cluster's selection: a kept candidate per group, and the plan they compose.
-pub(crate) struct ClusterSelection {
-    pub groups: Vec<usize>,
-    /// Per group, the index of its selected candidate.
-    pub selected: Vec<usize>,
-    /// The cluster's physical candidate, as Stage 2 built it, priced by Stage 3.
-    pub physical: PhysicalCandidate,
-}
+/// One hash-consed logical sub-expression.
+pub(crate) struct MemoGroup { pub node: Rc<OperatorNode>, pub parents: Vec<GroupId>, pub queries: Vec<usize> }
+/// One implementation of one group (or of several, for a fused computation).
+pub(crate) struct ImplementationCandidate { pub implements: Vec<GroupId>, pub node: Rc<OperatorNode>, pub children: Vec<GroupId>, pub coupling_sites: Vec<CouplingSite> }
+/// A choice several groups' costs depend on, keyed so that equal keys are one site.
+pub(crate) struct CouplingSite { pub key: u64, pub kind: CouplingKind }
+pub(crate) enum CouplingKind { SharedGroupSize, PaneChain, ScanLabels, RawHorizon }
+/// The cached local price of a candidate in a context (thresholds of its sites).
+pub(crate) fn local_price(group: GroupId, candidate: &ImplementationCandidate, context: &Context, cache: &mut PriceCache) -> Result<LocalUsage, SelectionError>;
+/// The frontier of a group given its children's frontiers and a context.
+pub(crate) fn frontier(group: GroupId, context: &Context, memo: &Memo, cache: &mut PriceCache) -> Frontier;
+/// The cluster's selection: thresholds enumerated with bounds, the DP below them.
+pub(crate) fn solve_cluster(cluster: &Cluster, memo: &Memo, cache: &mut PriceCache) -> Result<ClusterSelection, SelectionError>;
 ```
-
-Step 6 composes the cluster selections the way independent components are combined today, and the facade (`run_stage1_to_stage3_from_pass1`) switches to the memo-group search when its preconditions hold.
 
 ## Future work
 
