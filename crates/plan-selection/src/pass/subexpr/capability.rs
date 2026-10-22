@@ -22,14 +22,17 @@
 //! iff [`may_read`].
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::accuracy::estimators::size_for_all_readers;
+use asap_logical_asap_optimization::asap_aware_cse::with_resized_build;
+use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::operator::Reduction;
-use asap_types::ir::schema::sketch::{GroupingStrategy, SketchParams};
+use asap_types::ir::schema::sketch::{GroupingStrategy, SketchKind, SketchParams};
 use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::QueryRoot;
 use asap_types::ir::{ASAPOp, OperatorNode};
 
 use super::groups::NodeKeys;
@@ -145,6 +148,214 @@ pub(crate) fn may_read(threshold: &SizeThreshold, reader: &ImplementationCandida
         (Some(threshold), Some((_, Some(params)))) => admits(threshold, &params),
         (Some(_), Some((_, None))) => false,
     }
+}
+
+/// `candidate`'s node with its shared build (of `site`) built at
+/// `threshold`, every guarantee composed again: the node itself when the
+/// build already has that size (or is an exact accumulator, which has
+/// none); `None` when `candidate` does not read `site` or may not read the
+/// threshold ([`may_read`]).
+pub(crate) fn resized_at_threshold(
+    memo: &Memo,
+    candidate: &ImplementationCandidate,
+    site: &CouplingSite,
+    threshold: &SizeThreshold,
+) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+    if !candidate.coupling_sites.contains(site)
+        || site_key(memo, candidate) != Some(site.key)
+        || !may_read(threshold, candidate)
+    {
+        return Ok(None);
+    }
+    let (Some((build, Some(own))), Some(size)) = (reader_build(candidate), &threshold.params)
+    else {
+        return Ok(Some(Rc::clone(&candidate.node)));
+    };
+    if same_size(&own, size) {
+        return Ok(Some(Rc::clone(&candidate.node)));
+    }
+    let Some(ASAPOp::SummaryAgg {
+        family: FieldDataType::Sketch(kind, strategy),
+        ..
+    }) = build.asap()
+    else {
+        unreachable!("a reader's build is a sketch when it has a size");
+    };
+    let family = FieldDataType::Sketch(
+        SketchKind::new(kind.algorithm().clone(), size.clone()),
+        strategy.clone(),
+    );
+    let roots = with_resized_build(
+        &[QueryRoot::Operator(Rc::clone(&candidate.node))],
+        &build,
+        family,
+    )?;
+    let [QueryRoot::Operator(node)] = &roots[..] else {
+        unreachable!("an operator root");
+    };
+    // Composing the guarantees again rebuilds the child groups' nodes too;
+    // the candidate reads them as the groups' own nodes.
+    let child_nodes: HashSet<*const OperatorNode> = candidate
+        .children
+        .iter()
+        .map(|c| Rc::as_ptr(&memo.groups[c.0 as usize].node))
+        .collect();
+    Ok(Some(with_child_nodes(
+        &candidate.node,
+        node,
+        &child_nodes,
+        &mut HashMap::new(),
+    )))
+}
+
+/// `resized` (a rewrite of `original` with the same shape) with each node
+/// that is a child group's node in `original` put back, and the nodes above
+/// rebuilt over them, keeping their own schema and guarantee.
+fn with_child_nodes(
+    original: &Rc<OperatorNode>,
+    resized: &Rc<OperatorNode>,
+    child_nodes: &HashSet<*const OperatorNode>,
+    done: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+) -> Rc<OperatorNode> {
+    if child_nodes.contains(&Rc::as_ptr(original)) {
+        return Rc::clone(original);
+    }
+    if let Some(found) = done.get(&Rc::as_ptr(resized)) {
+        return Rc::clone(found);
+    }
+    let pairs: HashMap<*const OperatorNode, Rc<OperatorNode>> = original
+        .children()
+        .into_iter()
+        .zip(resized.children())
+        .map(|(o, r)| (Rc::as_ptr(r), with_child_nodes(o, r, child_nodes, done)))
+        .collect();
+    let mut changed = false;
+    let operator = resized.operator.map_children(|child| {
+        let new = Rc::clone(&pairs[&Rc::as_ptr(child)]);
+        changed |= !Rc::ptr_eq(&new, child);
+        new
+    });
+    let out = match changed {
+        false => Rc::clone(resized),
+        true => Rc::new(
+            OperatorNode::with_schema(operator, resized.schema.clone())
+                .with_guarantee(resized.guarantee.clone())
+                .with_timing(resized.timing)
+                .with_materialization(resized.materialization),
+        ),
+    };
+    done.insert(Rc::as_ptr(resized), Rc::clone(&out));
+    out
+}
+
+/// The shared build `candidate` reads, if any ([`add_shared_builds`]).
+pub(crate) fn shared_build_of(candidate: &ImplementationCandidate) -> Option<Rc<OperatorNode>> {
+    reader_build(candidate).map(|(build, _)| build)
+}
+
+/// `roots` with each set of equal summary builds that one of `resized`
+/// equals made one build: the summary-capability rule's builds resized to
+/// one size, over equal inputs (two queries' equal windows are two groups,
+/// since a window has no unique key, so identical-expression sharing
+/// leaves their builds apart). As the rule shares only builds whose sizes
+/// are not all equal, equal builds none of which was resized stay apart.
+/// Each build is replaced by the first equal one a children-first walk
+/// meets, and the nodes above rebuilt.
+pub(crate) fn share_equal_builds(
+    roots: &[QueryRoot],
+    resized: &[Rc<OperatorNode>],
+) -> Vec<QueryRoot> {
+    let mut kept: Vec<Rc<OperatorNode>> = Vec::new();
+    let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    let mut seen = HashSet::new();
+    for node in roots.iter().flat_map(root_nodes) {
+        if !seen.insert(Rc::as_ptr(&node))
+            || !matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
+            || !resized.iter().any(|r| **r == *node)
+        {
+            continue;
+        }
+        match kept.iter().find(|k| ***k == *node) {
+            Some(first) => {
+                replaced.insert(Rc::as_ptr(&node), Rc::clone(first));
+            }
+            None => kept.push(node),
+        }
+    }
+    if replaced.is_empty() {
+        return roots.to_vec();
+    }
+    let mut done = HashMap::new();
+    roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => {
+                QueryRoot::Operator(replaced_in(node, &replaced, &mut done))
+            }
+            QueryRoot::Scalar(expr) => QueryRoot::Scalar(
+                expr.map_operator_refs(&mut |node| replaced_in(node, &replaced, &mut done)),
+            ),
+        })
+        .collect()
+}
+
+/// Every node of `root`'s operators, each once, children first.
+fn root_nodes(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
+    let starts: Vec<Rc<OperatorNode>> = match root {
+        QueryRoot::Operator(node) => vec![Rc::clone(node)],
+        QueryRoot::Scalar(expr) => expr.operator_refs().into_iter().cloned().collect(),
+    };
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    fn walk(
+        node: &Rc<OperatorNode>,
+        seen: &mut HashSet<*const OperatorNode>,
+        out: &mut Vec<Rc<OperatorNode>>,
+    ) {
+        if !seen.insert(Rc::as_ptr(node)) {
+            return;
+        }
+        for child in node.children() {
+            walk(child, seen, out);
+        }
+        out.push(Rc::clone(node));
+    }
+    for start in &starts {
+        walk(start, &mut seen, &mut out);
+    }
+    out
+}
+
+/// `node` with each node of `replaced` (by address) swapped, the nodes
+/// above rebuilt over the swapped ones.
+fn replaced_in(
+    node: &Rc<OperatorNode>,
+    replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    done: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+) -> Rc<OperatorNode> {
+    if let Some(found) = replaced.get(&Rc::as_ptr(node)) {
+        return Rc::clone(found);
+    }
+    if let Some(found) = done.get(&Rc::as_ptr(node)) {
+        return Rc::clone(found);
+    }
+    let mut changed = false;
+    let operator = node.operator.map_children(|child| {
+        let new = replaced_in(child, replaced, done);
+        changed |= !Rc::ptr_eq(&new, child);
+        new
+    });
+    let out = match changed {
+        false => Rc::clone(node),
+        true => Rc::new(
+            OperatorNode::with_schema(operator, node.schema.clone())
+                .with_guarantee(node.guarantee.clone())
+                .with_timing(node.timing)
+                .with_materialization(node.materialization),
+        ),
+    };
+    done.insert(Rc::as_ptr(node), Rc::clone(&out));
+    out
 }
 
 /// Whether a build at `threshold` serves a reader that requires `required`.
