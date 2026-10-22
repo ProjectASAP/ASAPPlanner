@@ -9668,6 +9668,51 @@ mod tests {
         assert!(merges[1].1.starts_with("0.0167/s"), "{merges:?}");
     }
 
+    /// A 1-hour quantile every minute (60 × 1-min panes) and every 45 s
+    /// (80 × 45-s panes) can share only a chain at their gcd, 240 × 15-s
+    /// panes. Maintained at ingestion time it keeps more states than both
+    /// per-query chains together, so it is priced higher than the
+    /// per-query chains maintained at ingestion time.
+    #[test]
+    fn a_shared_chain_at_a_fine_gcd_is_offered_but_costs_more() {
+        let rows_per_s = 10_000.0;
+        let queries = [
+            ("quantile_over_time(0.5, m[1h])", MINUTE),
+            ("quantile_over_time(0.99, m[1h])", 45_000),
+        ];
+        let shared = shared_windows_at_ingestion(queries, true, rows_per_s);
+        let chain = node_of(&shared.dag, is_chain);
+        let chain = shared.dag.nodes.iter().find(|n| n.id == chain).unwrap();
+        assert!(matches!(
+            chain.payload,
+            Payload::ASAP(ASAPOp::PaneChain {
+                pane_width_ms: 15_000,
+                pane_count: 240,
+                ..
+            })
+        ));
+        let separate = shared_windows_at_ingestion(queries, false, rows_per_s);
+        let recurrence = [repeating(MINUTE), repeating(45_000)];
+        let settings = PlanSelectionSettings::default();
+        let price_of = |candidate: &PhysicalCandidate| {
+            price(
+                &candidate.dag,
+                &recurrence,
+                &arriving(rows_per_s),
+                &settings,
+            )
+            .unwrap()
+            .cost_per_second
+            .unwrap()
+        };
+        assert!(
+            price_of(&shared) > price_of(&separate),
+            "{} vs {}",
+            price_of(&shared),
+            price_of(&separate)
+        );
+    }
+
     /// With more than one ingest worker, each worker beyond the first holds
     /// its own partial copy of a maintained state's newest window: B1's
     /// peak memory grows by (k − 1) panes of states, its average memory

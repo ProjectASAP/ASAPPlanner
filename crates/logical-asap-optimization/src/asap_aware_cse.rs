@@ -79,20 +79,22 @@
 //!
 //! Nested windows share one chain: when a subset holds builds of one family
 //! (at any size) over the same input below their ranges, read the same way,
-//! with the same output column names, whose panes differ in width or count
-//! ([`nested_window_groups`]), the subset also comes as a Pass 2 candidate
-//! in which each such group reads one chain ([`SharedPaneChain`]) over the
-//! longest window, in the finest member's panes when that width divides
-//! every member's (the gcd of their widths, so queries repeating at
-//! different intervals read the same panes, each at its own cadence),
-//! sized for every member ([`size_for_all_readers`]). Every window ends at
-//! the evaluation time, so each shorter one is the chain's newest panes:
-//! its `SummaryMerge` merges only those (`newest_panes`), and has the
-//! guarantee of one build over its own window. Stage 2 never keeps a chain
-//! read at different intervals across evaluations from query time (each
-//! reader would need one new pane per evaluation). A grid finer than every
-//! member's own panes, long-window segments, sliding windows and
-//! Exponential Histograms are not implemented.
+//! with the same output column names, whose panes differ in width or count,
+//! the subset also comes as a Pass 2 candidate in which each such group
+//! reads one chain ([`SharedPaneChain`]) over the longest window, sized for
+//! every member ([`size_for_all_readers`]). Two grids are offered: the
+//! finest member's own panes, for the members whose widths it divides
+//! ([`nested_window_groups`]), and, when that differs, the gcd of all the
+//! members' widths, even finer than every member's own panes
+//! ([`gcd_window_groups`]); Stage 3's pricing weighs the extra states and
+//! merges of finer panes. Queries repeating at different intervals read the
+//! same panes, each at its own cadence. Every window ends at the evaluation
+//! time, so each shorter one is the chain's newest panes: its
+//! `SummaryMerge` merges only those (`newest_panes`), and has the guarantee
+//! of one build over its own window. Stage 2 never keeps a chain read at
+//! different intervals across evaluations from query time (each reader
+//! would need one new pane per evaluation). Long-window segments, sliding
+//! windows and Exponential Histograms are not implemented.
 //!
 //! # Rollup rule
 //!
@@ -1090,7 +1092,8 @@ pub struct WindowCompositionPass2Candidate {
     /// The builds built as tumbling panes, in [`pane_candidates`] order.
     pub pane_candidates: Vec<PaneCandidate>,
     /// The chains each shared by several of `pane_candidates`
-    /// ([`nested_window_groups`]); empty when each build has its own chain.
+    /// ([`nested_window_groups`] or [`gcd_window_groups`]); empty when each
+    /// build has its own chain.
     pub shared_chains: Vec<SharedPaneChain>,
     /// The candidate's roots with those builds in panes.
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
@@ -1111,7 +1114,8 @@ pub struct SharedPaneChain {
 }
 
 /// The most pane candidates one candidate may have: every non-empty subset
-/// is a Pass 2 candidate, about a million at 20.
+/// is a Pass 2 candidate, and with shared grids up to three, about three
+/// million at 20.
 pub const MAX_PANE_CANDIDATES: usize = 20;
 
 /// The pane candidates of the candidate with query roots `roots`, children
@@ -1201,10 +1205,15 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
 /// ([`pane_candidates`]): one per non-empty subset of them, in
 /// binary-counter order (the first candidate the lowest bit). Each build in
 /// the subset becomes a `SummaryMerge` over one [`ASAPOp::PaneChain`] of
-/// its panes; every other build is untouched. A subset with groups of
-/// nested windows ([`nested_window_groups`]) is followed by a second Pass 2
-/// candidate in which each group reads one shared chain, each member
-/// merging its newest panes. An error only for more than
+/// its panes; every other build is untouched. A subset whose builds can
+/// share chains is followed by one Pass 2 candidate per shared grid, in
+/// which each group reads one shared chain, each member merging its newest
+/// panes: the finest member's panes ([`nested_window_groups`]), then the
+/// gcd of the members' widths when that groups them differently
+/// ([`gcd_window_groups`]); and by one error candidate per group whose
+/// sizing fails. Each grid groups every build of a subset at once: a
+/// shared gcd grid over only some of the builds that could share it is not
+/// listed. An error only for more than
 /// [`MAX_PANE_CANDIDATES`] pane candidates; a Pass 2 candidate whose
 /// composition fails carries its own error.
 pub fn window_composition_pass2_candidates(
@@ -1229,30 +1238,87 @@ pub fn window_composition_pass2_candidates(
             pane_candidates: chosen.clone(),
             shared_chains: Vec::new(),
         });
-        // Each group with a size that serves every member, and that build.
-        let mut shared = Vec::new();
-        for group in nested_window_groups(&chosen) {
-            match shared_chain_build(&chosen, &group.members) {
-                Ok(Some(build)) => shared.push((group, build)),
-                Ok(None) => {}
-                Err(error) => {
-                    pass2_candidates.push(WindowCompositionPass2Candidate {
-                        roots: Err(error),
-                        pane_candidates: chosen.clone(),
-                        shared_chains: vec![group],
-                    });
-                }
-            }
-        }
-        if !shared.is_empty() {
-            pass2_candidates.push(WindowCompositionPass2Candidate {
-                roots: in_panes(roots, &chosen, &shared),
-                pane_candidates: chosen,
-                shared_chains: shared.into_iter().map(|(group, _)| group).collect(),
-            });
+        // Shared chains on the members' own finest panes, then, when it
+        // groups them differently, on the gcd of their widths.
+        let on_member_panes = nested_window_groups(&chosen);
+        let on_gcd_panes = gcd_window_groups(&chosen);
+        push_shared_chains(roots, &chosen, &on_member_panes, &mut pass2_candidates);
+        if on_gcd_panes != on_member_panes {
+            push_shared_chains(roots, &chosen, &on_gcd_panes, &mut pass2_candidates);
         }
     }
     Ok(pass2_candidates)
+}
+
+/// Push the Pass 2 candidate in which each of `groups` reads its one shared
+/// chain: the groups whose members have a shared size, and the error of
+/// each group whose sizing fails. Nothing when no group has a shared size.
+fn push_shared_chains(
+    roots: &[QueryRoot],
+    chosen: &[PaneCandidate],
+    groups: &[SharedPaneChain],
+    pass2_candidates: &mut Vec<WindowCompositionPass2Candidate>,
+) {
+    // Each group with a size that serves every member, and that build.
+    let mut shared = Vec::new();
+    for group in groups {
+        match shared_chain_build(chosen, &group.members) {
+            Ok(Some(build)) => shared.push((group.clone(), build)),
+            Ok(None) => {}
+            Err(error) => pass2_candidates.push(WindowCompositionPass2Candidate {
+                roots: Err(error),
+                pane_candidates: chosen.to_vec(),
+                shared_chains: vec![group.clone()],
+            }),
+        }
+    }
+    if !shared.is_empty() {
+        pass2_candidates.push(WindowCompositionPass2Candidate {
+            roots: in_panes(roots, chosen, &shared),
+            pane_candidates: chosen.to_vec(),
+            shared_chains: shared.into_iter().map(|(group, _)| group).collect(),
+        });
+    }
+}
+
+/// The pane candidates (positions in `candidates`) that can read one
+/// shared chain at the gcd of their pane widths, each group with its
+/// chain: every build over one input ([`same_build_over_one_input`]) in one
+/// group, whatever its pane width, on panes of the gcd of the members'
+/// widths over the longest window. Finer panes than any member builds mean
+/// more states and more merges; Stage 3's pricing decides whether sharing
+/// pays. Groups of members with the same panes and window are left to the
+/// other rules.
+fn gcd_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, candidate) in candidates.iter().enumerate() {
+        match groups
+            .iter_mut()
+            .find(|group| same_build_over_one_input(&candidates[group[0]], candidate))
+        {
+            Some(group) => group.push(i),
+            None => groups.push(vec![i]),
+        }
+    }
+    groups
+        .into_iter()
+        .filter_map(|members| {
+            let panes = |i: usize| (candidates[i].pane_width_ms, candidates[i].pane_count);
+            if members.iter().all(|&i| panes(i) == panes(members[0])) {
+                return None;
+            }
+            let pane_width_ms = members.iter().fold(0, |width, &i| {
+                asap_types::workload::greatest_common_divisor(width, candidates[i].pane_width_ms)
+            });
+            let longest = longest(candidates, &members);
+            let pane_count = u32::try_from(candidates[longest].window_ms() / pane_width_ms).ok()?;
+            Some(SharedPaneChain {
+                members,
+                pane_width_ms,
+                pane_count,
+            })
+        })
+        .collect()
 }
 
 /// The pane candidates (positions in `candidates`) that can read one
@@ -1287,7 +1353,7 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
             None => groups.push(vec![i]),
         }
     }
-    groups
+    let mut shared = groups
         .into_iter()
         .filter_map(|mut members| {
             let panes = |i: usize| (candidates[i].pane_width_ms, candidates[i].pane_count);
@@ -1304,7 +1370,11 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
                 pane_count,
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // In the order of their first members, as [`gcd_window_groups`] lists
+    // its groups, so equal groupings compare equal.
+    shared.sort_by_key(|group| group.members[0]);
+    shared
 }
 
 /// Whether two pane candidates build one family (at any size) over the
@@ -3135,11 +3205,30 @@ mod tests {
         assert_eq!(chains(shared.roots.as_ref().unwrap()).len(), 2);
     }
 
-    /// A shared grid finer than every member's own panes is not offered: a
-    /// 15-min quantile every 3 min (3-min panes) and one every 5 min
-    /// (5-min panes) would need 1-min panes, finer than either.
+    /// The shared chains (width, count) of every Pass 2 candidate that
+    /// paned all of `rule_candidates`.
+    fn shared_grids(
+        roots: &[QueryRoot],
+        rule_candidates: &[PaneCandidate],
+    ) -> Vec<Vec<(u64, u32)>> {
+        window_composition_pass2_candidates(roots, rule_candidates)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.pane_candidates.len() == rule_candidates.len())
+            .map(|c| {
+                c.shared_chains
+                    .iter()
+                    .map(|shared| (shared.pane_width_ms, shared.pane_count))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Panes neither member's divide (3-min and 5-min panes of a 15-min
+    /// window) are shared at their gcd, 1 min, as one more candidate beside
+    /// the per-query chains; no member's own width serves both.
     #[test]
-    fn a_shared_grid_finer_than_every_member_is_not_offered() {
+    fn a_shared_grid_at_the_gcd_of_the_members_widths_is_offered() {
         let roots = chose(
             &[
                 ("quantile_over_time(0.5, m[15m])", 0.01),
@@ -3150,11 +3239,65 @@ mod tests {
         let grids = [Some(180_000), Some(300_000)];
         assert_eq!(panes(&roots, &grids), [(180_000, 5), (300_000, 3)]);
         let rule_candidates = pane_candidates(&roots, &grids);
-        assert!(
-            window_composition_pass2_candidates(&roots, &rule_candidates)
-                .unwrap()
-                .iter()
-                .all(|c| c.shared_chains.is_empty())
+        assert_eq!(
+            shared_grids(&roots, &rule_candidates),
+            [vec![], vec![(60_000, 15)]]
+        );
+    }
+
+    /// A 15-min quantile every minute (15 × 1-min panes) and a 6-min one
+    /// every 90 s (4 × 90-s panes): one chain of 30-s panes over 15 min
+    /// serves both, the 6-min query merging the newest 12. It comes beside
+    /// the per-query chains, and Stage 3 prices which is cheaper.
+    #[test]
+    fn queries_at_60_and_90_seconds_share_one_chain_of_30_second_panes() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.5, m[15m])", 0.01),
+                ("quantile_over_time(0.9, m[6m])", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let grids = [Some(60_000), Some(90_000)];
+        assert_eq!(panes(&roots, &grids), [(60_000, 15), (90_000, 4)]);
+        let rule_candidates = pane_candidates(&roots, &grids);
+        assert_eq!(
+            shared_grids(&roots, &rule_candidates),
+            [vec![], vec![(30_000, 30)]]
+        );
+        let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
+            .unwrap()
+            .into_iter()
+            .find(|c| !c.shared_chains.is_empty())
+            .unwrap();
+        let shared_roots = shared.roots.unwrap();
+        assert_eq!(newest_panes(&shared_roots[0]), None);
+        assert_eq!(newest_panes(&shared_roots[1]), Some(12));
+        for (root, whole) in shared_roots.iter().zip(&roots) {
+            operator(root).validate_structure().unwrap();
+            assert_eq!(operator(root).guarantee, operator(whole).guarantee);
+        }
+    }
+
+    /// When the members' finest width divides the others, the gcd is that
+    /// width: one shared candidate, not two equal ones. With 1-min, 2-min
+    /// and 3-min panes, the divisible group (1 and 2 min, the 3-min build
+    /// joining at 1 min too) is already the gcd grid.
+    #[test]
+    fn the_gcd_grid_is_not_listed_twice_when_a_member_width_is_the_gcd() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.5, m[12m])", 0.01),
+                ("quantile_over_time(0.9, m[12m])", 0.01),
+                ("quantile_over_time(0.99, m[12m])", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let grids = [Some(60_000), Some(120_000), Some(180_000)];
+        let rule_candidates = pane_candidates(&roots, &grids);
+        assert_eq!(
+            shared_grids(&roots, &rule_candidates),
+            [vec![], vec![(60_000, 12)]]
         );
     }
 

@@ -886,3 +886,63 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
         );
     }
 }
+
+/// A 5-min quantile every minute (5 × 1-min panes) and a 3-min one every
+/// 90 s (2 × 90-s panes): neither width divides the other, so the rule
+/// offers one chain at their gcd, 10 × 30-s panes, the 3-min query merging
+/// the newest 6. Expanded, each query's answer from the shared chain equals
+/// one build over its window, at times on each query's own grid.
+#[test]
+fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_panes() {
+    let accuracy = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
+    let singles = [
+        single_build("quantile_over_time(0.5, m[5m])", accuracy.clone()),
+        single_build("quantile_over_time(0.99, m[3m])", accuracy),
+    ];
+    let roots: Vec<QueryRoot> = singles
+        .iter()
+        .map(|root| QueryRoot::Operator(Rc::clone(root)))
+        .collect();
+    let rule_candidates = pane_candidates(&roots, &[Some(PANE_MS as u64), Some(90_000)]);
+    let widths: Vec<(u64, u32)> = rule_candidates
+        .iter()
+        .map(|c| (c.pane_width_ms, c.pane_count))
+        .collect();
+    assert_eq!(widths, [(PANE_MS as u64, 5), (90_000, 2)]);
+    let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.pane_candidates.len() == 2 && !c.shared_chains.is_empty())
+        .expect("one shared chain at the gcd");
+    assert_eq!(
+        (
+            shared.shared_chains[0].pane_width_ms,
+            shared.shared_chains[0].pane_count
+        ),
+        (30_000, 10)
+    );
+    let data = samples(0);
+    let shared_roots: Vec<Rc<OperatorNode>> = shared
+        .roots
+        .unwrap()
+        .into_iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => expand_pane_chains(&node).unwrap(),
+            QueryRoot::Scalar(_) => panic!("an operator root"),
+        })
+        .collect();
+    for (query, evaluation_ms) in [(0, EVALUATION_MS), (1, 270_000), (1, 180_000)] {
+        let expected = execute_ranges_at_their_windows(&singles[query], &data, evaluation_ms);
+        assert_eq!(expected.len(), 2, "{expected:?}");
+        assert_eq!(
+            render(&execute_ranges_at_their_windows(
+                &shared_roots[query],
+                &data,
+                evaluation_ms
+            )),
+            render(&expected),
+            "Q{} at {evaluation_ms} ms",
+            query + 1
+        );
+    }
+}
