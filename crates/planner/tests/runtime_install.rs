@@ -913,6 +913,150 @@ async fn an_exact_per_series_quantile_runs_from_raw_data_samples() {
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
 }
 
+// ── A ratio of two relative-error quantiles (issue #852) ────────────────────
+
+/// Repeating `queries`, each every 10 minutes at error 0.05 in each
+/// summary's own metric (W-RangeHeavy leaves the metric unset) and δ 0.01,
+/// over 1,000 ingesting non-negative `latency_ms` gauges sampled
+/// every second.
+fn relative_workload(queries: &[&str]) -> PlanningWorkload {
+    let entries: Vec<String> = queries
+        .iter()
+        .map(|query| {
+            format!(
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval": 600000}},
+                  "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.01,
+                      "accuracy_scope": "whole_result"}}}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
+    serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0}}}},
+              "sources": {{"latency_ms": {{"series_count": 1000, "sample_interval": 1000,
+                "metric_type": "gauge", "values_non_negative": true}}}}}}}}"#,
+        entries.join(",")
+    ))
+    .unwrap()
+}
+
+/// The DDSketch α of every sketch `plan` builds; panics on any other sketch.
+fn ddsketch_alphas(plan: &InstallablePlan) -> Vec<f64> {
+    plan.dag
+        .dag
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }
+                | ASAPOp::PaneChain {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                },
+            ) => match kind.params() {
+                SketchParams::DDSketch { alpha } => Some(*alpha),
+                other => panic!("not a DDSketch: {other:?}"),
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// PromQL `quantile_over_time(q, …)` of `values`: linear interpolation
+/// between the sorted values at rank `q·(n − 1)`.
+fn promql_quantile(q: f64, values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let rank = q * (values.len() - 1) as f64;
+    let (low, high) = (rank.floor() as usize, rank.ceil() as usize);
+    values[low] + (values[high] - values[low]) * (rank - low as f64)
+}
+
+/// The p90/p50 ratio of an hour (W-RangeHeavy template 8) on a deployment
+/// that keeps no raw data samples: both quantiles come from DDSketches
+/// sized for a share of the target (α = 1 − 1.05^{−1/2} ≈ 0.0241, so
+/// `(a + b)/(1 − b) ≤ 0.05`), maintained in panes; nothing is read from
+/// raw data at query time. Run on data, each series' ratio is within 0.05
+/// of the exact ratio of its hour's samples.
+#[tokio::test]
+async fn a_ratio_of_two_quantiles_runs_from_ddsketches_within_its_relative_target() {
+    let query =
+        "quantile_over_time(0.9, latency_ms[60m]) / quantile_over_time(0.5, latency_ms[60m])";
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan_json = plan_json_for(relative_workload(&[query]), &capabilities).await;
+    let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    assert!(installed.query_time_raw_windows.is_empty(), "no raw scan");
+    let alphas = ddsketch_alphas(&installed);
+    assert!(!alphas.is_empty(), "DDSketch states");
+    let share = 1.0 - 1.05f64.powf(-0.5);
+    for alpha in &alphas {
+        assert!(*alpha <= share + 1e-12, "α {alpha} > {share}");
+    }
+    let samples = remote_write_samples();
+    let run = run_data_plane(
+        &plan_json,
+        &samples,
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    let answered = &run.answers_per_query[0];
+    assert_eq!(answered.len(), 2, "{answered:?}");
+    for (labels, value) in answered {
+        let mut hour: Vec<f64> = samples
+            .iter()
+            .filter(|s| {
+                s.labels["__name__"] == "latency_ms"
+                    && s.labels["instance"] == labels["instance"]
+                    && s.timestamp_ms > EVALUATION_MS - 3_600_000
+                    && s.timestamp_ms <= EVALUATION_MS
+            })
+            .map(|s| s.value)
+            .collect();
+        let exact = promql_quantile(0.9, &mut hour) / promql_quantile(0.5, &mut hour);
+        let error = (value - exact).abs() / exact;
+        assert!(error <= 0.05, "{labels:?}: {value} vs {exact} ({error})");
+    }
+}
+
+/// The ratio's numerator is also asked for on its own (W-RangeHeavy
+/// templates 5 and 8): the p90 estimate is shared, so its state is sized
+/// for its strictest reader, the ratio's share; the plan still reads no raw
+/// data samples.
+#[tokio::test]
+async fn a_quantile_shared_with_a_ratio_is_sized_for_the_ratio() {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan_json = plan_json_for(
+        relative_workload(&[
+            "quantile_over_time(0.9, latency_ms[60m])",
+            "quantile_over_time(0.9, latency_ms[60m]) / quantile_over_time(0.5, latency_ms[60m])",
+        ]),
+        &capabilities,
+    )
+    .await;
+    let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    assert!(installed.query_time_raw_windows.is_empty(), "no raw scan");
+    let share = 1.0 - 1.05f64.powf(-0.5);
+    for alpha in ddsketch_alphas(&installed) {
+        assert!(alpha <= share + 1e-12, "α {alpha} > {share}");
+    }
+    let run = run_data_plane(
+        &plan_json,
+        &remote_write_samples(),
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
 // ── Stored outputs built from stored outputs (issue #781) ──────────────────
 
 /// Stage 1 to Stage 3, then every node `store` names stored as it says,

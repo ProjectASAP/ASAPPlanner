@@ -4,19 +4,13 @@ use super::*;
 /// An enforced domain for the true values of one operand of an exact
 /// arithmetic operation, in every evaluation: they are finite and lie in
 /// `[lower, upper]`. Plan selection uses it to bound a product or quotient
-/// of estimates; for a quantile operand of a ratio (one use) it also
-/// promises a nonempty sample population in this interval, which the
-/// DDSketch ratio rule needs. Sampled min/max statistics are not a proof:
-/// the contract must be enforced by the source or execution layer.
+/// of estimates whose errors are not both relative. Sampled min/max
+/// statistics are not a proof: the source or execution layer must enforce
+/// it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperandDomain {
     pub lower: f64,
     pub upper: f64,
-    /// Upper bound on samples per evaluation, matching the pinned evaluation's
-    /// exact Float64 rank limit; the population must also be nonempty. Only
-    /// the quantile ratio rule reads it.
-    pub max_samples: u64,
-    pub contract: String,
 }
 
 /// Statistics a propagation rule may consult. Every field is optional and
@@ -24,9 +18,6 @@ pub struct OperandDomain {
 /// [`BoundExpr::Unknown`] leaf (or rejects) rather than guessing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PropagationStats {
-    /// Certified finite ranges for the true numerator and denominator values.
-    /// Quantile ratios obtain these from their enforced input domains.
-    pub division_operand_domains: Option<[OperandDomain; 2]>,
     /// Provenance for supplied evidence (source, observation identity, etc.).
     pub evidence_provenance: Vec<GuaranteeSource>,
     /// Whether every input value is known to be non-negative — required by

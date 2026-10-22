@@ -204,7 +204,7 @@ The principal composition rules are:
 | Registered Lipschitz transform | Scale the input bound by the registered constant and include local error |
 | Exact sum over approximate values | Convert compatible errors to absolute units and account for input multiplicity; missing scale/count evidence remains unknown |
 | Exact average or extremum over approximate values | Use the registered absolute-error bound and account for failures across the input population |
-| Division | Require the appropriate value-error rule and denominator/domain conditions; arbitrary rank-error division is unsupported |
+| Division | Two relative errors (or an exact numerator over a relative error) compose in closed form, `(a + b)/(1 − b)` for `b < 1`, with no domain evidence; any other approximate denominator needs enforced operand domains bounded away from zero; rank-error division is unsupported |
 | Counter rate/increase over approximate samples | No general distribution-free rule for reset detection and extrapolation; exact inputs remain a distinct supported case |
 | Candidate-based TopK | Require membership/completeness evidence; frequency accuracy and exact reranking alone are insufficient |
 
@@ -216,7 +216,16 @@ justify reducing the failure budget. Per-result guarantees also do not imply
 a simultaneous guarantee across every query or evaluation time in a dashboard.
 
 For relative errors, two eligible layers with errors `e1` and `e2` compose as
-`(1 + e1)(1 + e2) - 1`, not simply `e1 + e2`. Likewise, an exact sum above
+`(1 + e1)(1 + e2) - 1`, not simply `e1 + e2`. A ratio of relative errors `a`
+over `b` is within `max((1 + a)/(1 − b) − 1, 1 − (1 − a)/(1 + b)) = (a + b)/(1 − b)`.
+A relative bound below 1 keeps zero at zero and keeps the sign, so a zero
+denominator gives the same non-finite answer exactly and approximately. The
+rule relies on each operand's own relative guarantee (for DDSketch, its
+estimator contract: one-signed values within the mapping's range). A ratio
+of operands whose relative bound is still symbolic in Stage 1 (e.g. a sum of
+quantiles gated on the values' sign) gets no guarantee. A sum or difference of relative
+errors has no relative bound (cancellation), and a rank error (KLL) has no
+value bound, so neither composes through division. Likewise, an exact sum above
 approximate values retains their uncertainty: exact arithmetic does not
 recover information lost below it.
 
@@ -228,19 +237,23 @@ Every proposed composition is checked again using the actual guarantees.
 
 The default equal-split allocator divides an additive error budget across the
 approximate layers. For relative error, it uses local error
-`(1 + epsilon)^(1/n) - 1` for `n` layers. When the target includes delta, it
+`1 - (1 + epsilon)^(-1/n)` for `n` layers. The true error of any mix of
+products and quotients stays within the target (each layer contributes at most
+`1/(1 - e)`); the composed bound meets it for one product or quotient of two
+layers, not for a nested quotient or an exact numerator over a lone
+approximate denominator. When the target includes delta, it
 splits that budget across the layers for union-bound composition. An exact
 target does not receive an approximate allocation.
 
 For example, under a supported two-layer relative-error composition, a 10%
-end-to-end budget gives each layer approximately 4.88%, not 5%. If the failure
+end-to-end budget gives each layer approximately 4.65%, not 5%. If the failure
 budget is 1%, each layer receives 0.5%. A model with only a fixed 1% failure
 contract cannot automatically satisfy that allocation; another supported
 configuration or candidate is needed.
 
 ## Evidence and trust boundaries
 
-`AccuracyEvidenceProvider` supplies estimator contracts, quantile input domains
+`AccuracyEvidenceProvider` supplies estimator contracts, operand domains
 and propagation evidence. The evidence must cover the population to which the
 claimed guarantee applies: sources, filters, grouping, evaluation windows and
 all merged panes. Evidence for a narrower population cannot silently certify

@@ -218,9 +218,7 @@ use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_id
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::ir::properties::{
-    AccuracyGuarantee, AccuracyMetric, CompositionOperator, ExecutionTiming,
-};
+use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, ExecutionTiming};
 use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::schema::sketch::KLL_MAX_K;
@@ -246,12 +244,12 @@ use crate::cost::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use asap_logical_asap_optimization::accuracy::composition::{
-    parse_raw_data_samples_sign_statistic, parse_source_norm_statistic, DIVISION_OPERAND_DOMAINS,
-    INPUT_ROW_COUNT, PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
+    parse_raw_data_samples_sign_statistic, parse_source_norm_statistic, INPUT_ROW_COUNT,
+    PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
 };
 use asap_logical_asap_optimization::accuracy::estimators::with_failure_probability;
 use asap_logical_asap_optimization::accuracy::estimators::{hll, univmon};
-use asap_logical_asap_optimization::accuracy::{OperandDomain, PropagationStats};
+use asap_logical_asap_optimization::accuracy::OperandDomain;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilitiesError;
 use asap_logical_asap_optimization::per_computation_candidates::{
     approximate_inputs, distinct_bound_source, operand_domain_statistic, operand_guarantee,
@@ -2426,8 +2424,6 @@ impl<'a> DomainOperand<'a> {
             Self::Literal(value) => Some(OperandDomain {
                 lower: *value,
                 upper: *value,
-                max_samples: 1,
-                contract: "literal".into(),
             }),
             Self::Other => None,
         }
@@ -2530,7 +2526,6 @@ fn scalar_domain_operations<'a>(
 }
 
 /// The bound of one product or quotient from its operands' domains:
-/// - a ratio of relative errors: the accuracy model's division rule;
 /// - a product: `|x|·e_y + |y|·e_x + e_x·e_y`;
 /// - a quotient: `(|x|·e_y + |y|·e_x) / (m·(m − e_y))` with `m` the least
 ///   `|y|`, which must exceed `e_y` (the denominator's domain is bounded
@@ -2552,22 +2547,6 @@ fn domain_bound(
     let bind =
         |g: &AccuracyGuarantee| g.bind(&|statistic| workload_statistic(statistic, series, data));
     let (gx, gy) = (bind(gx), bind(gy));
-    if operation.statistic == DIVISION_OPERAND_DOMAINS {
-        let stats = PropagationStats {
-            division_operand_domains: Some([dx, dy]),
-            ..PropagationStats::default()
-        };
-        return asap_logical_asap_optimization::accuracy::composition::propagate(
-            &CompositionOperator::ExactDivision,
-            &[gx, gy],
-            None,
-            &stats,
-        )
-        .ok()?
-        .spec
-        .error
-        .evaluate();
-    }
     let valid =
         |d: &OperandDomain| d.lower.is_finite() && d.upper.is_finite() && d.lower <= d.upper;
     if !(valid(&dx) && valid(&dy)) {
@@ -7251,10 +7230,10 @@ mod tests {
         assert!(ids.iter().all(|id| !without.costs.contains_key(id)));
     }
 
-    /// Deployment contract: every quantile operand lies in `[1, 1000]`.
-    struct BoundedQuantiles;
+    /// Deployment contract: every operand lies in `[1, 1000]`.
+    struct BoundedOperands;
 
-    impl AccuracyEvidenceProvider for BoundedQuantiles {
+    impl AccuracyEvidenceProvider for BoundedOperands {
         fn operand_domain(
             &self,
             _operand: &OperatorNode,
@@ -7262,25 +7241,20 @@ mod tests {
             Some(asap_logical_asap_optimization::accuracy::OperandDomain {
                 lower: 1.0,
                 upper: 1_000.0,
-                max_samples: 1_000_000,
-                contract: "test source enforces [1, 1000]".into(),
             })
         }
     }
 
-    /// A ratio of two DDSketch quantiles has a relative bound only with an
-    /// enforced operand domain: Stage 3 binds it from the deployment's
-    /// `OperandDomain` contract; without one the target is unmet. (A
-    /// DDSketch quantile over an exact one keeps its relative bound.) Each
-    /// operand is sized for the entry's target, so the ratio's bound, about
-    /// twice that, is checked against a looser one.
+    /// A ratio of two DDSketch quantiles has a closed-form relative bound,
+    /// `(a + b)/(1 − b)`, with no operand domain: each operand sized for
+    /// 0.01 gives about 0.0202, which meets a 0.05 target.
     #[test]
-    fn ddsketch_ratio_meets_its_target_only_with_operand_domains() {
+    fn ddsketch_ratio_meets_its_target_without_operand_domains() {
         let planned = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
         let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
-        let run = |models| run_selecting(query, &planned, &target, &data(), models);
-        let (candidates, without) = run(PlanningModels::builtin());
+        let (candidates, selection) =
+            run_selecting(query, &planned, &target, &data(), PlanningModels::builtin());
         let ids: Vec<_> = candidates
             .iter()
             .filter(|c| sketches(c) == [SketchAlgorithm::DDSketch, SketchAlgorithm::DDSketch])
@@ -7288,9 +7262,10 @@ mod tests {
             .collect();
         // The Pass 1 candidate and its Pass 2 candidates sharing the input.
         assert!(!ids.is_empty());
-        assert!(ids.iter().all(|id| !without.costs.contains_key(id)));
-        let (_, with) = run(PlanningModels::builtin().with_evidence(&BoundedQuantiles));
-        assert!(ids.iter().all(|id| with.costs.contains_key(id)), "{with:?}");
+        assert!(
+            ids.iter().all(|id| selection.costs.contains_key(id)),
+            "{selection:?}"
+        );
     }
 
     /// `query` carrying `guarantee`, as a `scalar(…)` operand.
@@ -7426,7 +7401,7 @@ mod tests {
     /// deployment's operand domains (`[1, 1000]`):
     /// `|x|·e_y + |y|·e_x + e_x·e_y` and `(|x|·e_y + |y|·e_x) / (|y|·(|y| − e_y))`
     /// at the domain's extremes; without domains they stay unmet. A ratio of
-    /// relative errors with no division operator to bind stays unmet too.
+    /// relative errors needs no domain: `(a + b)/(1 − b)`.
     #[test]
     fn stage3_binds_products_and_quotients_from_operand_domains() {
         let (x, y) = (
@@ -7435,7 +7410,7 @@ mod tests {
         );
         let product = scalar_root(ArithmeticOpKind::Mul, x.clone(), y.clone());
         let quotient = scalar_root(ArithmeticOpKind::Div, x, y);
-        let bounded = PlanningModels::builtin().with_evidence(&BoundedQuantiles);
+        let bounded = PlanningModels::builtin().with_evidence(&BoundedOperands);
         for (root, expected) in [
             (&product, 1_000.0 * 0.02 + 1_000.0 * 0.01 + 0.01 * 0.02),
             (&quotient, (1_000.0 * 0.02 + 1_000.0 * 0.01) / (1.0 - 0.02)),
@@ -7455,26 +7430,23 @@ mod tests {
             scalar_of("sum(b)", guarantee(AccuracyMetric::Relative, 0.01, 0.0)),
         );
         let g = bound_of(&ratio, &data(), &PlanningModels::builtin()).unwrap();
-        assert!(g.spec.error.has_unknown(), "{g:?}");
+        assert!(
+            (g.spec.error.evaluate().unwrap() - 0.02 / 0.99).abs() < 1e-12,
+            "{g:?}"
+        );
     }
 
     /// A ratio divided by an exact vector, `(q99 / q50) / max_over_time(m)`,
-    /// keeps the inner ratio's symbolic relative bound; Stage 3 binds it at
-    /// the division of the two estimates, not at the outer division that
-    /// inherited it, so the candidate is selectable.
+    /// keeps the inner ratio's relative bound, so the candidate is
+    /// selectable with no operand domain.
     #[test]
-    fn a_scaled_ratio_binds_at_its_division() {
+    fn a_scaled_ratio_keeps_its_relative_bound() {
         let planned = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
         let query = "(quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])) \
                      / max_over_time(m[1m])";
-        let (candidates, selection) = run_selecting(
-            query,
-            &planned,
-            &target,
-            &data(),
-            PlanningModels::builtin().with_evidence(&BoundedQuantiles),
-        );
+        let (candidates, selection) =
+            run_selecting(query, &planned, &target, &data(), PlanningModels::builtin());
         let ids: Vec<_> = candidates
             .iter()
             .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))

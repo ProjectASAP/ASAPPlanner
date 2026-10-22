@@ -11,8 +11,7 @@ workflow.
 ## How one candidate moves through the implementation
 
 The implementation follows one candidate from a query requirement to either a
-proven Post-ASAP node or a structured rejection. The direct DDSketch ratio
-exception described below also permits an unproven candidate for backend inspection:
+proven Post-ASAP node or a structured rejection:
 
 ```text
 aggregate intent and AccuracyTarget
@@ -75,7 +74,11 @@ trait AccuracyModel {
 
 `accuracy::budget::per_input_target` splits a target equally among the
 approximate inputs of one composition (ε / n for an additive metric,
-(1 + ε)^(1/n) − 1 for a relative one, δ / n). Every candidate must then be resized, propagated, and
+1 − (1 + ε)^(−1/n) for a relative one, δ / n). The relative share meets the
+composed bound of one product or quotient of two inputs: a ratio of two
+relative errors `a` and `b` is within `(a + b) / (1 − b)`, so ε = 0.05 gives
+each side 0.0241. A nested quotient (`x / (y / z)`) or an exact numerator over a
+lone approximate denominator composes a bound above ε and is rejected. Every candidate must then be resized, propagated, and
 checked before being treated as satisfying the target. This is distinct from
 candidate visibility: a Stage 1 candidate whose output has no guarantee is
 still enumerated and appears in the stage document, but Stage 3 rejects it
@@ -255,14 +258,10 @@ with probability at most `1/3`. Zero or even depth has no modeled guarantee.
 ## Runtime or statistics evidence
 
 ASAPPlanner contains the guarantee algebra and parameter-derived contracts.
-It imports `asap_sketchlib` DDSketch mapping bounds for ratio certification;
-see [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md). This dependency
-does not make Planner a query executor. Data- or runtime-dependent evidence enters
+Planner is not a query executor. Data- or runtime-dependent evidence enters
 through an `AccuracyEvidenceProvider`, is exposed to propagation as typed
 `PropagationStats`, and is recorded in provenance. `NoAccuracyEvidence` is the
-default: it supplies no missing facts. Guarantee derivation remains conservative;
-the direct DDSketch ratio exception above retains a candidate without claiming
-its accuracy is proven.
+default: it supplies no missing facts. Guarantee derivation remains conservative.
 
 ### TopK membership
 

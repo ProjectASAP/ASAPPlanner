@@ -4,7 +4,10 @@
 > search (strategies, `CandidateLogicalASAPDAGs` as a Rust type, cost-model
 > ranking and `global_selection`), which has been removed. The planner now
 > plans through the stages of the [planning stages design](../proposals/planner-layering.md). The
-> document is kept as a record of the design.
+> document is kept as a record of the design. A ratio of two DDSketch
+> quantiles no longer depends on domain evidence: Stage 1 composes its
+> relative bound in closed form (see
+> [accuracy models](../concepts/accuracy-models.md)).
 
 Audience: ASAPPlanner library integrators, especially ASAPQuery-backend.
 

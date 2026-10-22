@@ -126,9 +126,8 @@ impl AccuracyModel for IgnoreAccuracyGuarantees {
 pub trait AccuracyEvidenceProvider {
     /// Enforced domain of `operand`'s true values ([`OperandDomain`]), scoped
     /// to this complete expression, including its source, filters, grouping
-    /// and window: a quantile ratio's operands, or the operands of a
-    /// product or quotient of estimates. `None` means unknown, including
-    /// emptiness.
+    /// and window: the operands of a product or quotient of estimates whose
+    /// errors are not both relative. `None` means unknown.
     fn operand_domain(&self, _operand: &OperatorNode) -> Option<OperandDomain> {
         None
     }

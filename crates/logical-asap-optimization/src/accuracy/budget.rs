@@ -3,10 +3,17 @@
 //!
 //! When `n` approximate values compose into one output, each is sized for an
 //! equal share of the output's target, so the composed bound meets the
-//! target with no slack: `ε_i = ε / n` for an additively composed metric,
-//! `ε_i = (1 + ε)^{1/n} − 1` for a relative one (relative errors compose as
-//! `Π(1 + ε_i) − 1`), and `δ_i = δ / n` (the union bound). Only equal
-//! splits are made.
+//! target: `ε_i = ε / n` for an additively composed metric (no slack),
+//! `ε_i = 1 − (1 + ε)^{−1/n}` for a relative one, and `δ_i = δ / n` (the
+//! union bound). Relative errors compose through products and quotients:
+//! each input contributes a factor of at most `1 + ε_i` as a factor and
+//! `1/(1 − ε_i)` as a divisor, so the true error of any mix stays within
+//! `(1 − ε_i)^{−n} − 1 = ε`. The composed bound Stage 3 checks meets it for
+//! one product or quotient of two inputs (a ratio's `(a + b)/(1 − b)`), not
+//! for a nested quotient such as `x / (y / z)`, whose bound composes each
+//! step's slack. A lone approximate denominator over an exact numerator is
+//! sized for the whole target, so its quotient's bound `ε/(1 − ε)` misses
+//! it. Only equal splits are made.
 use super::*;
 
 /// The target of one of `approximate_inputs` approximate inputs that
@@ -22,9 +29,12 @@ pub fn per_input_target(
     if target.is_exact() || !(target.max_error.is_finite() && target.max_error > 0.0) {
         return None;
     }
+    if approximate_inputs <= 1 {
+        return Some(target.clone());
+    }
     let fraction = 1.0 / approximate_inputs.max(1) as f64;
     let max_error = match metric {
-        AccuracyMetric::Relative => (1.0 + target.max_error).powf(fraction) - 1.0,
+        AccuracyMetric::Relative => 1.0 - (1.0 + target.max_error).powf(-fraction),
         _ => target.max_error * fraction,
     };
     Some(AccuracyTarget {
@@ -60,17 +70,25 @@ mod tests {
         );
     }
 
-    /// A relative target splits multiplicatively: `(1 + ε_i)^n = 1 + ε`,
-    /// not `n ε_i = ε`.
+    /// A relative target splits so that a quotient meets it too:
+    /// `(1 − ε_i)^{−n} = 1 + ε`. For ε = 0.05 over two inputs each gets
+    /// 0.0241, and both a ratio `(a + b)/(1 − b)` and a product
+    /// `(1 + a)(1 + b) − 1` of them stay within 0.05; the product-only split
+    /// `(1 + ε)^{1/2} − 1 = 0.0247` would give the ratio 0.0507.
     #[test]
-    fn a_relative_target_splits_multiplicatively() {
-        let share = per_input_target(
-            &AccuracyTarget::max_error(0.21),
-            AccuracyMetric::Relative,
-            2,
-        )
-        .unwrap();
-        assert!((share.max_error - 0.1).abs() < 1e-12);
+    fn a_relative_target_splits_so_a_quotient_meets_it() {
+        let target = AccuracyTarget::max_error(0.05);
+        let share = per_input_target(&target, AccuracyMetric::Relative, 2)
+            .unwrap()
+            .max_error;
+        assert!((share - (1.0 - 1.05f64.powf(-0.5))).abs() < 1e-12);
+        let ratio = (share + share) / (1.0 - share);
+        let product = (1.0 + share) * (1.0 + share) - 1.0;
+        assert!(ratio <= 0.05 && product <= 0.05, "{ratio} {product}");
+        assert_eq!(
+            per_input_target(&target, AccuracyMetric::Relative, 1),
+            Some(target)
+        );
     }
 
     /// No approximate input meets an exact target.
