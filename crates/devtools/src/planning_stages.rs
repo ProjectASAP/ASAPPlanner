@@ -220,9 +220,24 @@ pub fn run_planning_stages_over(
 /// fails), and Stage 3 records the first rejection of each cause and the
 /// search's report (`Selection::search`). `models` should be the ones
 /// `plan_installable` plans with (the executor's summary families and
-/// compile check) to see what it selects. `search` picks the algorithm
-/// ([`asap_plan_selection::SearchAlgorithm::Legacy`] is the default search) and the MILP
-/// search's time limit; nothing else is limited.
+/// compile check) to see what it selects. No limit applies.
+pub fn run_default_search_over(
+    roots: Vec<QueryRoot>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<PlanningStagesRun, PlanningStagesError> {
+    run_search_over(
+        roots,
+        entries,
+        data,
+        models,
+        Stage1ToStage3Search::default(),
+    )
+}
+
+/// [`run_default_search_over`] with the search `search` (e.g. the
+/// reference search over the memo, `memo_groups`).
 pub fn run_search_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],

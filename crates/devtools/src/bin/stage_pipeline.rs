@@ -39,7 +39,9 @@
 // force (the reference), or solved as a MILP; `search` names it, and the
 // search report says which ran (`algorithm`, omitted for legacy) and,
 // when the legacy search ran instead, why (`routed_to_legacy`). Not with
-// `--exhaustive`.
+// `--exhaustive`. `--milp-time-limit-s <f64>` limits the MILP search: at
+// the limit it selects its best plan so far and reports
+// `solver_time_limit_reached` with the gap to its bound.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.
@@ -195,7 +197,13 @@
 // `PlanSelectionSettings`. The document's top-level `accuracy_guarantees` is
 // `"ignored"` or `"enforced"`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
-// PromQL queries read (default 15000); the data declares no other facts.
+// PromQL queries read (default 15000). `--series-count <n>`,
+// `--rows-per-second <f64>` (the data then ingests at that rate) and
+// `--rows-held <n>` declare those facts for every source the queries read
+// (metric or `--table`); nothing else is declared. Plan selection prices
+// only from declared facts: a scan whose source has no arrival rate
+// (`--rows-per-second`, or `--series-count` with the sample interval) and
+// no `--rows-held` fails, naming the source and the missing fact.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
 // int64|bigint", "nullable": true}], "time_index": 0}` (`nullable` defaults
@@ -237,7 +245,7 @@ use serde_json::{json, Value};
 
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
-[--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
+[--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp [--milp-time-limit-s <f64>]] [--max-displayed <n>] --out <file>\n\
@@ -330,6 +338,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
     let (mut max_error, mut failure_probability, mut sample_interval_ms) = (None, None, 15_000u64);
+    // Facts declared for every source the --promql/--sql queries read.
+    let (mut series_count, mut rows_per_second, mut rows_held) =
+        (None::<u64>, None::<f64>, None::<u64>);
     let mut accuracy_metric: Option<AccuracyMetric> = None;
     let mut max_displayed = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
@@ -342,6 +353,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_selection_settings_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
+    // `--search`: the default search's algorithm, legacy unless given;
+    // `--milp-time-limit-s` limits the MILP search.
     let mut search_algorithm: Option<SearchAlgorithm> = None;
     let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
@@ -378,6 +391,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--sample-interval-ms" => {
                 sample_interval_ms = value()?.parse().map_err(|e| format!("{e}"))?
             }
+            "--series-count" => series_count = Some(value()?.parse().map_err(|e| format!("{e}"))?),
+            "--rows-per-second" => rows_per_second = Some(number(value()?)?),
+            "--rows-held" => rows_held = Some(value()?.parse().map_err(|e| format!("{e}"))?),
             "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
             "--max-combinations" => {
                 max_combinations = value()?.parse().map_err(|e| format!("{e}"))?;
@@ -403,12 +419,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
-            "--milp-time-limit-s" => {
-                let seconds: f64 = value()?
-                    .parse()
-                    .map_err(|e| format!("--milp-time-limit-s: {e}"))?;
-                milp_time_limit_ms = Some((seconds * 1e3) as u64);
-            }
             "--search" => {
                 search_algorithm = Some(match value()?.as_str() {
                     "legacy" => SearchAlgorithm::Legacy,
@@ -422,6 +432,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     }
                 })
             }
+            "--milp-time-limit-s" => {
+                let seconds: f64 = value()?
+                    .parse()
+                    .map_err(|e| format!("--milp-time-limit-s: {e}"))?;
+                milp_time_limit_ms = Some((seconds * 1e3) as u64);
+            }
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -432,6 +448,18 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
+    if (series_count.is_some() || rows_per_second.is_some() || rows_held.is_some())
+        && (workload_path.is_some() || example.is_some())
+    {
+        return Err(
+            "--series-count, --rows-per-second and --rows-held declare facts for --promql/--sql \
+             queries; a --workload or --example declares its own"
+                .into(),
+        );
+    }
+    if max_combinations_given && !exhaustive {
+        return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
+    }
     if exhaustive && search_algorithm.is_some() {
         return Err(
             "--search picks the default search's algorithm: drop it with --exhaustive".into(),
@@ -442,9 +470,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         return Err(
             "--milp-time-limit-s limits the MILP search: it needs --search memo-milp".into(),
         );
-    }
-    if max_combinations_given && !exhaustive {
-        return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
     }
     if plan_selection_settings_path.is_some()
         && (cost_model.is_some()
@@ -626,7 +651,18 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 query["id"] = json!(name);
                 described.push(query);
             }
-            let data = DataWorkload::sampled_every(metrics, DurationMs(sample_interval_ms));
+            let mut data = DataWorkload::sampled_every(metrics, DurationMs(sample_interval_ms));
+            for table in catalog_table_names(&tables)? {
+                data.sources.entry(table).or_default();
+            }
+            for facts in data.sources.values_mut() {
+                facts.series_count = series_count;
+                facts.rows_held = rows_held;
+            }
+            if let Some(rows_per_second) = rows_per_second {
+                data.arrival = DataArrival::Ingesting { rows_per_second };
+            }
+            data.validate().map_err(|e| e.to_string())?;
             (described, roots, entries, data)
         }
         _ => {
@@ -1164,6 +1200,20 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
     queries
 }
 
+/// The names of the tables `--table` declares.
+fn catalog_table_names(tables: &[String]) -> Result<Vec<String>, String> {
+    tables
+        .iter()
+        .map(|raw| {
+            let table: Value = serde_json::from_str(raw).map_err(|e| format!("--table: {e}"))?;
+            table["name"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "--table: name must be a string".to_string())
+        })
+        .collect()
+}
+
 /// The tables `--table` declares.
 fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
     let mut catalog = SqlCatalog::new();
@@ -1306,12 +1356,16 @@ mod tests {
     /// candidate and its cost, chosen among all candidates.
     #[test]
     fn display_cap_keeps_the_selected_candidate() {
-        let workload = query_batch(
+        let mut workload = query_batch(
             QueryLanguage::PromQL,
             &["sum(m)".into()],
             AccuracyTarget::exact(),
             15_000,
         );
+        // `m` holds 1,000 series: pricing uses only declared facts.
+        workload.data_workload = workload
+            .data_workload
+            .map(|data| data.with_series_count(1_000));
         let run =
             run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
         let entries: Vec<_> = workload.query_workload.entries().collect();
