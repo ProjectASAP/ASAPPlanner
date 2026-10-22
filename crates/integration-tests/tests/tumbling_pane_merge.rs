@@ -776,12 +776,13 @@ fn newest_panes_of_a_shared_chain_match_a_separate_chain() {
     }
 }
 
-/// Runs `root` at query time at `EVALUATION_MS`, each raw `TimeRange` fed
+/// Runs `root` at query time at `evaluation_ms`, each raw `TimeRange` fed
 /// the samples of its own window: `[T - s - w, T - s)` for a range of
 /// width `w` over a shift of `s` (none for an unshifted range).
 fn execute_ranges_at_their_windows(
     root: &Rc<OperatorNode>,
     samples: &[RawDataSample],
+    evaluation_ms: i64,
 ) -> Vec<Vec<Value>> {
     let timed = apply_materialization_timings(
         root,
@@ -800,7 +801,7 @@ fn execute_ranges_at_their_windows(
             Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms,
             _ => 0,
         };
-        let end = EVALUATION_MS - back;
+        let end = evaluation_ms - back;
         let start = end - range.as_millis() as i64;
         let schema = schema_of(&compiled.dag, node.id as u64);
         let rows = samples
@@ -822,13 +823,18 @@ fn execute_ranges_at_their_windows(
         &[compiled.dag.roots[0] as u64],
     )
     .unwrap();
-    run(&plan, inputs, query_scope())
+    let scope = Scope::Query {
+        evaluation_time_ms: evaluation_ms,
+        revision: 1,
+    };
+    run(&plan, inputs, scope)
 }
 
 /// A 5-min quantile every 30 s (10 × 30-s panes) and a 5-min quantile
 /// every minute (5 × 1-min panes): the rule offers one chain of 30-s
 /// panes both read in full, each at its own interval. Expanded, each
-/// query's answer from the shared chain equals one build over its window.
+/// query's answer from the shared chain equals one build over its window,
+/// at 5 min, and for the 30-s query also at 4.5 min, off the 1-min grid.
 #[test]
 fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
     let accuracy = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
@@ -856,19 +862,26 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
         (30_000, 10)
     );
     let data = samples(0);
-    for (query, (root, single)) in shared.roots.unwrap().iter().zip(&singles).enumerate() {
-        let QueryRoot::Operator(root) = root else {
-            panic!("an operator root")
-        };
-        let expected = execute_ranges_at_their_windows(single, &data);
+    let shared_roots: Vec<Rc<OperatorNode>> = shared
+        .roots
+        .unwrap()
+        .into_iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => expand_pane_chains(&node).unwrap(),
+            QueryRoot::Scalar(_) => panic!("an operator root"),
+        })
+        .collect();
+    for (query, evaluation_ms) in [(0, EVALUATION_MS), (1, EVALUATION_MS), (0, 270_000)] {
+        let expected = execute_ranges_at_their_windows(&singles[query], &data, evaluation_ms);
         assert_eq!(expected.len(), 2, "{expected:?}");
         assert_eq!(
             render(&execute_ranges_at_their_windows(
-                &expand_pane_chains(root).unwrap(),
-                &data
+                &shared_roots[query],
+                &data,
+                evaluation_ms
             )),
             render(&expected),
-            "Q{}",
+            "Q{} at {evaluation_ms} ms",
             query + 1
         );
     }

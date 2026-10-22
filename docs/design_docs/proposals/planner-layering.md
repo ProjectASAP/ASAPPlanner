@@ -752,7 +752,9 @@ panes. A family that merges exactly keeps each query's guarantee, since a
 merge of fewer panes is one build over the shorter window, and each query
 fails with at most the shared state's failure probability. Stage 3 prices
 each merge by the panes it reads, at its query's rate. The per-query chains
-stay candidates too. A grid finer than every query's own panes, long-window
+stay candidates too. A chain read at different intervals is not kept across
+evaluations from query time: that option needs every reader to build one
+new pane per evaluation. A grid finer than every query's own panes, long-window
 segments, sliding windows and Exponential Histograms are not implemented
 yet.
 

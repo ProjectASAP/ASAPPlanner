@@ -198,7 +198,8 @@ pub fn pass2_label(
                 is_pane_chain_of(
                     node,
                     &candidate.build,
-                    (candidate.pane_width_ms, candidate.pane_count),
+                    candidate.pane_width_ms,
+                    candidate.pane_count,
                     false,
                 )
             };
@@ -216,7 +217,7 @@ pub fn pass2_label(
     let shared = pass2.shared_pane_chains.iter().map(|shared| {
         let build = &candidates[shared.members[0]].build;
         let chain = |node: &OperatorNode| {
-            is_pane_chain_of(node, build, (shared.pane_width_ms, shared.pane_count), true)
+            is_pane_chain_of(node, build, shared.pane_width_ms, shared.pane_count, true)
         };
         let mut text = format!(
             "one {} in {} × {} panes",
@@ -228,8 +229,7 @@ pub fn pass2_label(
             .members
             .iter()
             .map(|&m| {
-                let window_ms = candidates[m].pane_width_ms * u64::from(candidates[m].pane_count);
-                u32::try_from(window_ms / shared.pane_width_ms).unwrap_or(u32::MAX)
+                u32::try_from(candidates[m].window_ms() / shared.pane_width_ms).unwrap_or(u32::MAX)
             })
             .filter(|&n| n < shared.pane_count)
             .collect();
@@ -375,13 +375,14 @@ fn same_computation(a: &OperatorNode, b: &OperatorNode) -> bool {
 }
 
 /// Whether `node` is a pane chain `build` became: the same family, update,
-/// grouping and filter, over the build's window input, in `panes` (width,
-/// count). With `any_size`, the family at any size: a shared chain is
-/// sized for all its readers.
+/// grouping and filter, over the build's window input, in `chain_pane_count`
+/// panes of `chain_pane_width_ms`. With `any_size`, the family at any size:
+/// a shared chain is sized for all its readers.
 fn is_pane_chain_of(
     node: &OperatorNode,
     build: &OperatorNode,
-    panes: (u64, u32),
+    chain_pane_width_ms: u64,
+    chain_pane_count: u32,
     any_size: bool,
 ) -> bool {
     let (
@@ -407,7 +408,7 @@ fn is_pane_chain_of(
     else {
         return false;
     };
-    (*pane_width_ms, *pane_count) == panes
+    (*pane_width_ms, *pane_count) == (chain_pane_width_ms, chain_pane_count)
         && (family == build_family
             || any_size
                 && match (family, build_family) {
@@ -623,6 +624,54 @@ mod tests {
         );
         let distinct: std::collections::BTreeSet<&String> = logical.iter().copied().collect();
         assert_eq!(distinct.len(), logical.len(), "{logical:#?}");
+    }
+
+    /// A 1-min sum every 10 s (6 × 10-s panes) and a 2-min sum every 20 s
+    /// (6 × 20-s panes) read one chain of 10-s panes: the label lists it
+    /// once with both readers and the newest panes the 1-min sum merges.
+    #[test]
+    fn a_chain_shared_across_intervals_is_listed_once_with_its_newest_readers() {
+        use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
+        use asap_types::ir::properties::AccuracyTarget;
+        use asap_types::workload::{
+            DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
+            QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+        };
+        let panel = |query: &str, interval_ms: u32| RepeatingEntry {
+            query: Query(query.into()),
+            demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval_ms)),
+            requirements: QueryRequirements {
+                accuracy: AccuracyTarget::exact(),
+                max_latency_ms: None,
+            },
+            predictability: Predictability::Predictable { known_at: None },
+            range_evaluation: None,
+        };
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: None,
+                repeating_queries: Some(vec![
+                    panel("sum_over_time(a[1m])", 10_000),
+                    panel("sum_over_time(a[2m])", 20_000),
+                ]),
+            },
+            data_workload: Some(shared_data_workload(
+                DataArrival::Ingesting {
+                    rows_per_second: SHARED_ROWS_PER_SECOND,
+                },
+                "a",
+            )),
+        };
+        let run =
+            run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
+        let labels = candidate_labels(&run);
+        assert!(
+            labels
+                .values()
+                .any(|l| l.contains("one Sum acc for Q1, Q2 in 12 × 10s panes (Q1 newest 6)")),
+            "{labels:#?}"
+        );
     }
 
     /// A fused computation's candidate is labeled apart from the unfused pair's:

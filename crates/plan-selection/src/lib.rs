@@ -9356,6 +9356,29 @@ mod tests {
             separate_cost.cost_per_second
         );
         assert!(cost.usage.average_memory_bytes < separate_cost.usage.average_memory_bytes);
+        // Each query merges all 10 panes per series at its own rate: once
+        // a minute and once per 5 min.
+        let mut merges: Vec<(u64, String)> = shared
+            .dag
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })))
+            .map(|n| {
+                let detail = &cost.per_node[&n.id].detail;
+                let states = detail
+                    .strip_prefix("merge ")
+                    .and_then(|rest| rest.split(' ').next())
+                    .and_then(|states| states.parse().ok())
+                    .unwrap_or_else(|| panic!("not a merge: {detail}"));
+                let rate = detail.split("; x ").nth(1).unwrap_or_default().to_string();
+                (states, rate)
+            })
+            .collect();
+        merges.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(merges.len(), 2);
+        assert_eq!(merges[0].0, merges[1].0);
+        assert!(merges[0].1.starts_with("0.0033/s"), "{merges:?}");
+        assert!(merges[1].1.starts_with("0.0167/s"), "{merges:?}");
     }
 
     /// With more than one ingest worker, each worker beyond the first holds
