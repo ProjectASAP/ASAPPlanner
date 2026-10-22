@@ -17,6 +17,7 @@
 pub(crate) mod clusters;
 pub(crate) mod groups;
 pub(crate) mod pricing;
+pub(crate) mod sharing;
 
 use asap_physical_asap_optimization::PhysicalCandidate;
 use asap_types::ir::QueryRoot;

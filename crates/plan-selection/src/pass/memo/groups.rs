@@ -190,6 +190,26 @@ pub(crate) fn group_candidates<Id: Clone>(
     candidates
 }
 
+impl MemoGroups {
+    /// The sharing sites among `nodes` (nodes of composed group
+    /// candidates): each node whose masked hash met another group's node,
+    /// with its meeting key and a hash of the node as built. The node's
+    /// materialization is left out: Stage 2 chooses it for a shared node.
+    pub(super) fn sites_of_nodes(&self, nodes: &[Rc<OperatorNode>]) -> Vec<SharingSite> {
+        let mut keys = NodeKeys::default();
+        nodes
+            .iter()
+            .filter_map(|node| {
+                let meeting_key = *self.sites.meeting_key.get(&keys.meeting(node))?;
+                Some(SharingSite {
+                    meeting_key,
+                    cost_key: hash_of(&(keys.exact(node), Vec::<String>::new())),
+                })
+            })
+            .collect()
+    }
+}
+
 /// Where the workload's groups can meet: per group, the masked hashes of
 /// its nodes a Pass 2 rule could make one node with a node of another
 /// group's candidate, and each such hash's meeting key.
