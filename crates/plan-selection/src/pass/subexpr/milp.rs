@@ -168,6 +168,21 @@ pub(crate) struct ModelInput {
     /// Whether the deployment keeps raw data: without it, no part with a
     /// raw scan may run at query time.
     pub raw_data_retained: bool,
+    /// Per choice, the memory its parts hold while a query's evaluation
+    /// runs ([`HeldAtQueryTime`]).
+    pub held: Vec<HeldAtQueryTime>,
+}
+
+/// The memory a choice's parts hold while an evaluation runs, priced per
+/// ms of latency: Stage 3 charges `bytes · rate · E / 1000` at the memory
+/// price, `E` the latency of the queries reaching the part.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct HeldAtQueryTime {
+    /// Per unit of a reading query's rate: each reader holds its own copy
+    /// over its own latency.
+    pub per_reader_per_ms: f64,
+    /// Per unit of rate: one copy held over the longest reader's latency.
+    pub longest_per_ms: f64,
 }
 
 /// A raw scan of one part of a choice, when that part runs at query time.
@@ -181,33 +196,36 @@ pub(crate) struct RawScan {
     pub via: Via,
 }
 
-/// Adds to `choice`'s coefficients a lower bound on the memory its parts
-/// hold while an evaluation runs ([`LazyTerms::held`]): Stage 3 charges
-/// `bytes · rate · E / 1000` at the memory price, `E` the latency of the
-/// queries reaching the part, at least the part's own work. The group's
-/// own node's working memory is left out (replaced when it is built
-/// once).
-fn add_lazy_lower_bounds(choice: &mut Choice, lazy: &LazyTerms, prices: &ResourceUnitCost) {
-    let coefficients = &mut choice.coefficients;
+/// The memory `choice`'s parts hold while an evaluation runs
+/// ([`LazyTerms::held`]), but its ingestion-time slots'. Its own node,
+/// when built once, holds the smaller of its working memory and its built
+/// state.
+fn held_at_query_time(
+    choice: &Choice,
+    lazy: &LazyTerms,
+    prices: &ResourceUnitCost,
+) -> HeldAtQueryTime {
+    let mut held = HeldAtQueryTime::default();
     for term in &lazy.held {
-        if term.own_node {
-            continue;
+        if let Via::Slot(i) = term.via {
+            if matches!(
+                choice.coefficients.slots[i].materialization,
+                Materialization::MatAtIngestion(_)
+            ) {
+                continue;
+            }
         }
-        let per_unit_rate = |work_ms: f64| {
-            prices.cost_per_memory_byte_second * term.bytes as f64 * work_ms / 1000.0
+        let bytes = match term.own_node {
+            true => term.bytes.min(lazy.built_once_state_bytes),
+            false => term.bytes,
         };
-        match term.via {
-            Via::Direct => {
-                coefficients.direct.cost_per_unit_rate += per_unit_rate(coefficients.direct.work_ms)
-            }
-            Via::Slot(i) => {
-                let slot = &mut coefficients.slots[i];
-                if !matches!(slot.materialization, Materialization::MatAtIngestion(_)) {
-                    slot.cost_per_unit_rate += per_unit_rate(slot.work_ms);
-                }
-            }
+        let per_ms = prices.cost_per_memory_byte_second * bytes as f64 / 1000.0;
+        match term.per_reader {
+            true => held.per_reader_per_ms += per_ms,
+            false => held.longest_per_ms += per_ms,
         }
     }
+    held
 }
 
 /// The model's optimum.
@@ -482,6 +500,54 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         objective += e;
     }
 
+    // Query-time reach and latency (for held memory and latency bounds):
+    // `at_query_time[q, g]`, query `q` reaches group `g` without passing an
+    // ingestion-time slot; `work_reached[q, c]`, it reaches choice `c` so.
+    let mut at_query_time: HashMap<(usize, usize), Variable> = HashMap::new();
+    for (g, queries) in input.group_queries.iter().enumerate() {
+        for &q in queries {
+            at_query_time.insert((q, g), vars.add(variable().min(0).max(1)));
+        }
+    }
+    let query_time_work = |c: usize| -> f64 {
+        let coefficients = &input.choices[c].coefficients;
+        coefficients.direct.work_ms
+            + coefficients
+                .slots
+                .iter()
+                .filter(|s| !matches!(s.materialization, Materialization::MatAtIngestion(_)))
+                .map(|s| s.work_ms)
+                .sum::<f64>()
+    };
+    let held_of = |c: usize| input.held.get(c).copied().unwrap_or_default();
+    let mut work_reached: HashMap<(usize, usize), Variable> = HashMap::new();
+    for (c, choice) in input.choices.iter().enumerate() {
+        let held = held_of(c);
+        if query_time_work(c) <= 0.0 && held.per_reader_per_ms <= 0.0 && held.longest_per_ms <= 0.0
+        {
+            continue;
+        }
+        for &q in &input.group_queries[choice.group.0 as usize] {
+            work_reached.insert((q, c), vars.add(variable().min(0).max(1)));
+        }
+    }
+    // Held memory per (choice, query) for a reader's own copy, and per
+    // choice for one copy over the longest reader.
+    let mut held_per_reader: HashMap<(usize, usize), Variable> = HashMap::new();
+    let mut held_longest: HashMap<usize, Variable> = HashMap::new();
+    for &(q, c) in work_reached.keys() {
+        let held = held_of(c);
+        if held.per_reader_per_ms > 0.0 {
+            let h = vars.add(variable().min(0));
+            objective += h;
+            held_per_reader.insert((q, c), h);
+        }
+        if held.longest_per_ms > 0.0 && !held_longest.contains_key(&c) {
+            let h = vars.add(variable().min(0));
+            objective += h;
+            held_longest.insert(c, h);
+        }
+    }
     let vars_exclusive = (vars.add(binary()), vars.add(binary()));
     let source_count = input
         .raw_scans
@@ -710,18 +776,103 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             b >= built_once - floor * x[c] - big_m * (1 - u)
         ));
     }
-    // Latency bounds: the work each query reaches at query time.
+    // Query-time reach: a query reaches its roots, and through a chosen
+    // choice its children read directly or by a query-time slot.
     for (q, query) in input.queries.iter().enumerate() {
-        let Some(bound) = query.max_latency_ms else {
-            continue;
-        };
-        let mut latency = Expression::from(0.0);
-        for (&(k, c), &v) in &y {
-            if k == Consumer::Query(q) {
-                latency += input.choices[c].coefficients.direct.work_ms * v;
+        for root in &query.roots {
+            if let Some(&v) = at_query_time.get(&(q, root.0 as usize)) {
+                constraints.push(constraint!(v == 1));
             }
         }
-        constraints.push(constraint!(latency <= bound));
+    }
+    for (g, of_g) in choices_of.iter().enumerate() {
+        let mut children: BTreeSet<usize> = BTreeSet::new();
+        for &c in of_g {
+            children.extend(input.choices[c].children.iter().map(|h| h.0 as usize));
+        }
+        for h in children {
+            let mut with_child = Expression::from(0.0);
+            for &c in of_g {
+                let choice = &input.choices[c];
+                let at_query = choice
+                    .children
+                    .iter()
+                    .zip(&choice.coefficients.child_via)
+                    .any(|(child, via)| {
+                        child.0 as usize == h
+                            && match via {
+                                Via::Direct => true,
+                                Via::Slot(i) => !matches!(
+                                    choice.coefficients.slots[*i].materialization,
+                                    Materialization::MatAtIngestion(_)
+                                ),
+                            }
+                    });
+                if at_query {
+                    with_child += x[c];
+                }
+            }
+            for &q in &input.group_queries[g] {
+                if let (Some(&above), Some(&below)) =
+                    (at_query_time.get(&(q, g)), at_query_time.get(&(q, h)))
+                {
+                    constraints.push(constraint!(below >= above + with_child.clone() - 1));
+                }
+            }
+        }
+    }
+    for (&(q, c), &w) in &work_reached {
+        let g = input.choices[c].group.0 as usize;
+        constraints.push(constraint!(w >= at_query_time[&(q, g)] + x[c] - 1));
+    }
+    // Each query's latency: the query-time work of the choices it reaches
+    // (a lower bound: compaction is left out).
+    let latency_of = |q: usize| {
+        let mut latency = Expression::from(0.0);
+        for (&(r, c), &w) in &work_reached {
+            if r == q {
+                latency += query_time_work(c) * w;
+            }
+        }
+        latency
+    };
+    for (q, query) in input.queries.iter().enumerate() {
+        if let Some(bound) = query.max_latency_ms {
+            constraints.push(constraint!(latency_of(q) <= bound));
+        }
+    }
+    // Held memory, linearized: h ≥ coefficient · (latency − L · (1 − w)),
+    // L the longest the query's latency can be; exact when w is 0 or 1.
+    let longest_latency: Vec<f64> = (0..input.queries.len())
+        .map(|q| {
+            choices_of
+                .iter()
+                .enumerate()
+                .filter(|(g, _)| input.group_queries[*g].contains(&q))
+                .map(|(_, of_g)| of_g.iter().map(|&c| query_time_work(c)).fold(0.0, f64::max))
+                .sum()
+        })
+        .collect();
+    for (&(q, c), &w) in &work_reached {
+        let held = held_of(c);
+        let longest = longest_latency[q];
+        if let Some(&h) = held_per_reader.get(&(q, c)) {
+            let coefficient = held.per_reader_per_ms * input.queries[q].rate;
+            constraints.push(constraint!(
+                h >= coefficient * (latency_of(q) - longest * (1 - w))
+            ));
+        }
+        if let Some(&h) = held_longest.get(&c) {
+            let g = input.choices[c].group.0 as usize;
+            let rate = input.group_queries[g]
+                .iter()
+                .map(|&r| input.queries[r].rate)
+                .fold(f64::INFINITY, f64::min);
+            let coefficient = held.longest_per_ms * rate;
+            constraints.push(constraint!(
+                h >= coefficient * (latency_of(q) - longest * (1 - w))
+            ));
+        }
     }
     // Cuts.
     for (set, outside, bound) in &input.excluded {
@@ -954,6 +1105,7 @@ pub(crate) fn search<Id: Clone>(
     let mut cache = super::pricing::PriceCache::new(scale);
     let mut choices: Vec<Choice> = Vec::new();
     let mut raw_scans: Vec<(usize, String, u64, Via)> = Vec::new();
+    let mut held: Vec<HeldAtQueryTime> = Vec::new();
     let CostModel::UsageOverTime(prices) = &models.plan_selection.cost_model else {
         unreachable!("the caller routes cost models 2 and 3 to the legacy search");
     };
@@ -974,14 +1126,14 @@ pub(crate) fn search<Id: Clone>(
         // pricing of a group choice prices both.
         // Widened scans are reached through the identical-expression
         // variants of the exact pricing, never chosen directly.
-        for (mut choice, lazy) in group_choices.into_iter().zip(lazy) {
+        for (choice, lazy) in group_choices.into_iter().zip(lazy) {
             if choice.copy_of.is_some()
                 || memo.candidates[g][choice.candidate].origin
                     == super::CandidateOrigin::WidenedScans
             {
                 continue;
             }
-            add_lazy_lower_bounds(&mut choice, &lazy, prices);
+            held.push(held_at_query_time(&choice, &lazy, prices));
             raw_scans.extend(
                 lazy.raw_scans
                     .iter()
@@ -1017,6 +1169,7 @@ pub(crate) fn search<Id: Clone>(
         });
     }
     input.raw_data_retained = models.deployment_capabilities.raw_data_retained;
+    input.held = held;
     let mut selector = PlanSelector::new(entries, data, models, false)?;
     let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
     let mut number = 0usize;
@@ -1049,6 +1202,9 @@ pub(crate) fn search<Id: Clone>(
         let mut group_choice: super::search::GroupChoice = vec![None; memo.groups.len()];
         for &c in &solution.chosen {
             group_choice[input.choices[c].group.0 as usize] = Some(input.choices[c].candidate);
+        }
+        if trace {
+            eprintln!("milp: round {iterations} group choice {group_choice:?}");
         }
         let chosen_candidates: Vec<(GroupId, &super::ImplementationCandidate)> = group_choice
             .iter()
@@ -1214,6 +1370,7 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         exclusive: input.exclusive.clone(),
         raw_scans: input.raw_scans.clone(),
         raw_data_retained: input.raw_data_retained,
+        held: input.held.clone(),
         rollup_rules: input.rollup_rules.clone(),
     }
 }
@@ -1384,6 +1541,7 @@ fn model_input(
         rollup_rules,
         raw_scans: Vec::new(),
         raw_data_retained: true,
+        held: Vec::new(),
     })
 }
 
@@ -1452,6 +1610,7 @@ mod tests {
             rollup_rules: Vec::new(),
             raw_scans: Vec::new(),
             raw_data_retained: true,
+            held: Vec::new(),
         };
         let solution = solve(&input).unwrap().unwrap();
         assert_eq!(solution.built_once, [GroupId(0)].into());
