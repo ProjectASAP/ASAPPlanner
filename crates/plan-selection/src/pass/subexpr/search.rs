@@ -368,3 +368,94 @@ pub(crate) fn brute_force<Id: Clone>(
         .expect("the selection's logical roots are kept");
     Ok((selection, selected, roots))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::test_support::lower_promql;
+    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::ir::schema::schema_support::with_promql_series_identity;
+    use asap_types::workload::{
+        DataArrival, DurationMs, MetricType, Predictability, QueryRecurrence, QueryRequirements,
+        RepeatedDemand, RepetitionInterval, SourceFacts,
+    };
+
+    #[test]
+    #[ignore = "debugging aid"]
+    fn debug_topk_memo() {
+        let queries = ["topk by (job) (3, sum_over_time(m[1m]))"];
+        let roots: Vec<(usize, QueryRoot)> = queries
+            .iter()
+            .map(|q| {
+                let root = lower_promql(q, AccuracyTarget::max_error(0.05));
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
+            })
+            .enumerate()
+            .collect();
+        let pc = generate_per_computation_candidates(roots).unwrap();
+        let entries: Vec<QueryWorkloadEntry> = queries
+            .iter()
+            .map(|q| QueryWorkloadEntry {
+                query: asap_types::workload::Query((*q).into()),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyTarget::max_error(0.05),
+                    max_latency_ms: None,
+                },
+                predictability: Predictability::Predictable { known_at: None },
+                recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                    RepetitionInterval(60_000),
+                )),
+                range_evaluation: None,
+            })
+            .collect();
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 2_000.0 / 15.0,
+            },
+            sources: [(
+                "m".to_string(),
+                SourceFacts {
+                    series_count: Some(1_000),
+                    metric_type: Some(MetricType::Gauge),
+                    sample_interval: Some(DurationMs(15_000)),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into(),
+        };
+        let memo = memo(&pc, &entries);
+        eprintln!("{}", stats(&memo));
+        for (g, group) in memo.groups.iter().enumerate() {
+            eprintln!(
+                "G{g} {:?} children {:?} roots_of {:?} candidates {}",
+                group.node.operator.kind_name(),
+                group.children,
+                group.roots_of,
+                memo.candidates[g].len()
+            );
+            for c in &memo.candidates[g] {
+                eprintln!(
+                    "   {:?} implements {:?} children {:?}",
+                    c.origin, c.implements, c.children
+                );
+            }
+        }
+        let choices = group_choices(&memo).unwrap();
+        eprintln!("choices {}", choices.len());
+        for choice in &choices {
+            for plan in at_thresholds(&memo, choice) {
+                let roots = composed_roots(&memo, &pc, &plan);
+                eprintln!("choice {choice:?} composed {}", roots.is_some());
+                if let Some(roots) = roots {
+                    let r =
+                        optimize_physical_asap("L", &roots, &entries, &data, &Default::default());
+                    eprintln!(
+                        "  stage2 {:?}",
+                        r.as_ref().map(|v| v.len()).map_err(|e| e.to_string())
+                    );
+                }
+            }
+        }
+    }
+}
