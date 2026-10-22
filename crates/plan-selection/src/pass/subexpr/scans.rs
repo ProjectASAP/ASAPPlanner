@@ -31,6 +31,7 @@ use asap_logical_asap_optimization::asap_aware_cse::with_union_scan_labels;
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::operator::Source;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
+use asap_types::physical::{Materialization, Medium};
 
 use super::groups::NodeKeys;
 use super::{CandidateOrigin, CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo};
@@ -214,10 +215,54 @@ pub(crate) fn widened_at_threshold(
         children: child_groups(&mut Boundary::of(memo, candidate), node),
         origin: CandidateOrigin::WidenedScans,
         coupling_sites: candidate.coupling_sites.clone(),
+        materializations: candidate.materializations.clone(),
         budget_share: candidate.budget_share,
         requires_exact_children: candidate.requires_exact_children.clone(),
         rollup_of: candidate.rollup_of.clone(),
     }))
+}
+
+/// The materializations of each scan group's candidates (a user
+/// decision): a scan whose readers (its parent groups) all read one window
+/// is built once, `MatAtQuery`, with no per-reader choice; a scan read
+/// through different windows may be built once or read per reader
+/// (`NotMaterialized`). Equal scans are one group (any scan is shareable,
+/// a SQL table's keyless rows included), so this is where a scan read by
+/// several queries is decided.
+pub(crate) fn scan_materializations(memo: &mut Memo) {
+    for (g, group) in memo.groups.iter().enumerate() {
+        if !matches!(group.node.non_asap(), Some(NonASAPOp::Scan { .. })) {
+            continue;
+        }
+        let windows: HashSet<Option<String>> = group
+            .parents
+            .iter()
+            .map(|p| window_of(&memo.groups[p.0 as usize].node))
+            .collect();
+        let allowed = if windows.len() <= 1 {
+            vec![Materialization::MatAtQuery(Medium::Memory)]
+        } else {
+            vec![
+                Materialization::NotMaterialized,
+                Materialization::MatAtQuery(Medium::Memory),
+            ]
+        };
+        for candidate in &mut memo.candidates[g] {
+            candidate.materializations = allowed.clone();
+        }
+    }
+}
+
+/// The window a scan's reader reads: a range, lookback or shift with its
+/// length; `None` for a reader of every row the scan outputs.
+fn window_of(reader: &OperatorNode) -> Option<String> {
+    match reader.non_asap() {
+        Some(NonASAPOp::TimeRange { range, kind, .. }) => Some(format!("{kind:?}/{range:?}")),
+        Some(NonASAPOp::TimeShift { .. }) => {
+            Some(format!("{:?}", reader.operator.map_children(|_| ())))
+        }
+        _ => None,
+    }
 }
 
 /// Raw horizon: for each source whose raw windows candidates of two or
@@ -595,5 +640,76 @@ mod tests {
         let mut memo = memo(&["sum_over_time(m[1m])", "sum_over_time(x[5m])"]);
         add_raw_horizons(&mut memo);
         assert!(sites(&memo, CouplingKind::RawHorizon).is_empty());
+    }
+
+    /// The scan groups of `memo` and their candidates' materializations,
+    /// after [`scan_materializations`].
+    fn scan_options(mut memo: Memo) -> Vec<(Vec<usize>, Vec<Materialization>)> {
+        scan_materializations(&mut memo);
+        memo.groups
+            .iter()
+            .zip(&memo.candidates)
+            .filter(|(g, _)| matches!(g.node.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .map(|(g, c)| (g.queries.clone(), c[0].materializations.clone()))
+            .collect()
+    }
+
+    /// Two queries over one 5-minute window: one scan group read through
+    /// equal windows, built once with no per-reader choice. Windows of 1
+    /// and 5 minutes keep both choices.
+    #[test]
+    fn a_scan_read_through_one_window_is_built_once() {
+        let at_query = Materialization::MatAtQuery(Medium::Memory);
+        assert_eq!(
+            scan_options(memo(&["sum_over_time(m[5m])", "max_over_time(m[5m])"])),
+            vec![(vec![0, 1], vec![at_query])]
+        );
+        assert_eq!(
+            scan_options(memo(&["sum_over_time(m[1m])", "sum_over_time(m[5m])"])),
+            vec![(vec![0, 1], vec![Materialization::NotMaterialized, at_query])]
+        );
+    }
+
+    /// Two SQL sums over one keyless table grouped differently: the equal
+    /// table scans are one group (any scan is shareable), read by both
+    /// aggregates over every row, so it is built once.
+    #[test]
+    fn equal_sql_table_scans_are_one_group_built_once() {
+        use asap_logical_asap_optimization::test_support::{agg, scan_from};
+        use asap_types::ir::operator::AggIntent;
+        use asap_types::ir::schema::{DataType, Field, Schema};
+        let table = || {
+            scan_from(
+                Source::Table {
+                    table_ref: "t".into(),
+                },
+                Schema::with_time_index(
+                    vec![
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("value", DataType::Float64, false),
+                        Field::plain("a", DataType::Utf8, true),
+                        Field::plain("b", DataType::Utf8, true),
+                    ],
+                    0,
+                    vec![],
+                ),
+            )
+        };
+        let sum = || AggIntent::Sum { col: Some(1) };
+        let roots = vec![
+            QueryRoot::Operator(agg(vec![2], sum(), table())),
+            QueryRoot::Operator(agg(vec![3], sum(), table())),
+        ]
+        .into_iter()
+        .enumerate()
+        .collect();
+        let memo = memo_of(&generate_per_computation_candidates(roots).unwrap());
+        assert_eq!(
+            scan_options(memo),
+            vec![(
+                vec![0, 1],
+                vec![Materialization::MatAtQuery(Medium::Memory)]
+            )]
+        );
     }
 }

@@ -559,6 +559,7 @@ mod tests {
                 children,
                 origin: CandidateOrigin::Pass1,
                 coupling_sites: Vec::new(),
+                materializations: Vec::new(),
                 budget_share: 1,
                 requires_exact_children: Vec::new(),
                 rollup_of: None,
