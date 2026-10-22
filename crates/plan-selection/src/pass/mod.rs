@@ -14,6 +14,7 @@
 
 mod components;
 mod interchangeable;
+mod memo;
 mod query_candidates;
 mod stage1_to_stage3;
 
