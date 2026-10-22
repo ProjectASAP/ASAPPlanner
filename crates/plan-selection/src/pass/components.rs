@@ -238,59 +238,109 @@ fn can_share_a_node<Id: Clone>(
 }
 
 /// Whether a Pass 2 rule, on the two-query candidate `roots`, makes both
-/// queries read one node: whole, with the metric's scans widened to one
-/// label set, or in any window-composition candidate (identical pane
-/// chains, or one chain serving nested windows or several intervals).
+/// queries read one node ([`meetings`]).
 fn rules_link_nodes(roots: &[QueryRoot], grids: &[Option<u64>]) -> bool {
+    !meetings(roots, grids, true).is_empty()
+}
+
+/// Nodes of a two-query candidate a Pass 2 rule makes one node, or makes
+/// one query read from the other's: the ones the first query reads and
+/// the ones the second reads (a node both already read is in both).
+pub(super) struct Meeting {
+    pub first: Vec<Rc<OperatorNode>>,
+    pub second: Vec<Rc<OperatorNode>>,
+}
+
+/// The nodes a Pass 2 rule, on the two-query candidate `roots` (with
+/// `grids` its queries' evaluation grids), makes both queries read: whole,
+/// with the metric's scans widened to one label set, or in any
+/// window-composition candidate (identical pane chains, or one chain
+/// serving nested windows or several intervals). Each meeting's nodes are
+/// nodes of `roots`, of its widened roots or of a window-composition
+/// candidate's roots. With `first_only`, at most the first meeting found.
+pub(super) fn meetings(
+    roots: &[QueryRoot],
+    grids: &[Option<u64>],
+    first_only: bool,
+) -> Vec<Meeting> {
     let reach = |root: &QueryRoot| -> std::collections::HashSet<*const OperatorNode> {
         root_nodes(root).iter().map(Rc::as_ptr).collect()
     };
-    let links = |roots: &[QueryRoot]| {
+    let links = |roots: &[QueryRoot], found: &mut Vec<Meeting>| {
         let (first, second) = (reach(&roots[0]), reach(&roots[1]));
-        let spans = |nodes: &mut dyn Iterator<Item = &Rc<OperatorNode>>| {
-            let (mut in_first, mut in_second) = (false, false);
-            for node in nodes {
-                in_first |= first.contains(&Rc::as_ptr(node));
-                in_second |= second.contains(&Rc::as_ptr(node));
+        let mut add = |nodes: Vec<&Rc<OperatorNode>>| {
+            let side = |reached: &std::collections::HashSet<*const OperatorNode>| {
+                nodes
+                    .iter()
+                    .filter(|node| reached.contains(&Rc::as_ptr(node)))
+                    .map(|node| Rc::clone(node))
+                    .collect::<Vec<_>>()
+            };
+            let meeting = Meeting {
+                first: side(&first),
+                second: side(&second),
+            };
+            if !meeting.first.is_empty() && !meeting.second.is_empty() {
+                found.push(meeting);
             }
-            in_first && in_second
+            first_only && !found.is_empty()
         };
         // A rule already made both read one node (a shared pane chain).
-        first.iter().any(|node| second.contains(node))
-            || sharing_candidates(roots)
-                .iter()
-                .any(|c| spans(&mut c.nodes.iter()))
-            || capability_sharing_candidates(roots)
-                .iter()
-                .any(|c| spans(&mut c.members.iter()))
-            || rollup_candidates(roots)
-                .iter()
-                .any(|c| spans(&mut [&c.coarse, &c.finer].into_iter()))
-            || topk_reuse_candidates(roots)
-                .iter()
-                .any(|c| spans(&mut c.members.iter()))
+        for node in root_nodes(&roots[0]) {
+            if second.contains(&Rc::as_ptr(&node)) && add(vec![&node]) {
+                return;
+            }
+        }
+        for c in sharing_candidates(roots) {
+            if add(c.nodes.iter().collect()) {
+                return;
+            }
+        }
+        for c in capability_sharing_candidates(roots) {
+            if add(c.members.iter().collect()) {
+                return;
+            }
+        }
+        for c in rollup_candidates(roots) {
+            if add(vec![&c.coarse, &c.finer]) {
+                return;
+            }
+        }
+        for c in topk_reuse_candidates(roots) {
+            if add(c.members.iter().collect()) {
+                return;
+            }
+        }
     };
-    if links(roots) {
-        return true;
+    let mut found = Vec::new();
+    links(roots, &mut found);
+    if first_only && !found.is_empty() {
+        return found;
     }
     // Scans of one metric that project different labels, widened to one.
     if let Ok(Some(widened)) = with_union_scan_labels(roots) {
-        if links(&widened) {
-            return true;
+        links(&widened, &mut found);
+        if first_only && !found.is_empty() {
+            return found;
         }
     }
     let panes = pane_candidates(roots, grids);
     if panes.is_empty() {
-        return false;
+        return found;
     }
-    window_composition_pass2_candidates(roots, &panes)
-        .unwrap_or_default()
-        .iter()
-        .any(|in_panes| matches!(&in_panes.roots, Ok(in_panes) if links(in_panes)))
+    for in_panes in window_composition_pass2_candidates(roots, &panes).unwrap_or_default() {
+        if let Ok(in_panes) = &in_panes.roots {
+            links(in_panes, &mut found);
+            if first_only && !found.is_empty() {
+                return found;
+            }
+        }
+    }
+    found
 }
 
 /// Every node `root` reaches.
-fn root_nodes(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
+pub(super) fn root_nodes(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
     let starts: Vec<&Rc<OperatorNode>> = match root {
         QueryRoot::Operator(node) => vec![node],
         QueryRoot::Scalar(expr) => expr.operator_refs(),

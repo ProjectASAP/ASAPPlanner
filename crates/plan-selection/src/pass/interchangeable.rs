@@ -278,6 +278,26 @@ impl Classes {
         share_identical_expressions(&roots, &shared)
     }
 
+    /// The classes with every member in `queries`, renumbered to their
+    /// positions in `queries`: the classes of the workload of `queries`
+    /// alone, as the workload's search restricts it (a memo group).
+    pub(crate) fn restricted_to(&self, queries: &[usize]) -> Self {
+        let classes = self
+            .classes
+            .iter()
+            .filter_map(|class| {
+                class
+                    .iter()
+                    .map(|(q, digits)| {
+                        let position = queries.iter().position(|x| x == q)?;
+                        Some((position, digits.clone()))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .collect();
+        Self { classes }
+    }
+
     /// Each class's members, by query index, for the search report.
     pub(crate) fn members(&self) -> Vec<Vec<usize>> {
         self.classes
@@ -288,7 +308,7 @@ impl Classes {
 }
 
 /// Whether `a` and `b` are the same workload entry but for the query text.
-fn same_entry(a: &QueryWorkloadEntry, b: &QueryWorkloadEntry) -> bool {
+pub(super) fn same_entry(a: &QueryWorkloadEntry, b: &QueryWorkloadEntry) -> bool {
     a.requirements == b.requirements
         && a.predictability == b.predictability
         && a.recurrence == b.recurrence
@@ -386,7 +406,7 @@ fn carries_a_rank(node: &OperatorNode) -> bool {
 /// `value`, a serialized plan, with the rank `q` of every quantile (a
 /// quantile measure's or a sketch estimate's, and the estimate a
 /// guarantee's provenance names) masked.
-fn mask_quantile_ranks(value: &mut serde_json::Value) {
+pub(super) fn mask_quantile_ranks(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             // A sketch estimate's `{"Quantile": {"q": ..}}`.
