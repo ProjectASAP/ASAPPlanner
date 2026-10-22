@@ -59,6 +59,68 @@ impl Expression {
     pub fn planner(expression: CompiledExpression) -> Self {
         Self::Planner(Box::new(expression))
     }
+
+    /// This expression with SQL `now()` the evaluation time of `context`'s
+    /// query run: itself when it does not read `now()`, else a copy.
+    pub(crate) fn at_evaluation_time(
+        &self,
+        context: &crate::runtime::RunContext,
+    ) -> std::borrow::Cow<'_, Self> {
+        if !self.reads_current_timestamp() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut bound = self.clone();
+        bound.for_each_compiled(&mut |compiled| *compiled = compiled.at_evaluation_time(context));
+        std::borrow::Cow::Owned(bound)
+    }
+
+    fn reads_current_timestamp(&self) -> bool {
+        use Expression::*;
+        match self {
+            Planner(compiled) => compiled.reads_current_timestamp(),
+            Binary { left, right, .. }
+            | Arithmetic { left, right, .. }
+            | Equal(left, right)
+            | Less(left, right)
+            | And(left, right)
+            | Or(left, right) => left.reads_current_timestamp() || right.reads_current_timestamp(),
+            FiniteFloat64(operand) | Negate(operand) | Not(operand) | IsNull(operand) => {
+                operand.reads_current_timestamp()
+            }
+            Column(_)
+            | ExactFloat64(_)
+            | LabelSet { .. }
+            | Label { .. }
+            | LabelIdentity { .. }
+            | Literal { .. } => false,
+        }
+    }
+
+    /// Calls `f` on every Planner expression in this one.
+    fn for_each_compiled(&mut self, f: &mut impl FnMut(&mut CompiledExpression)) {
+        use Expression::*;
+        match self {
+            Planner(compiled) => f(compiled),
+            Binary { left, right, .. }
+            | Arithmetic { left, right, .. }
+            | Equal(left, right)
+            | Less(left, right)
+            | And(left, right)
+            | Or(left, right) => {
+                left.for_each_compiled(f);
+                right.for_each_compiled(f);
+            }
+            FiniteFloat64(operand) | Negate(operand) | Not(operand) | IsNull(operand) => {
+                operand.for_each_compiled(f)
+            }
+            Column(_)
+            | ExactFloat64(_)
+            | LabelSet { .. }
+            | Label { .. }
+            | LabelIdentity { .. }
+            | Literal { .. } => {}
+        }
+    }
     pub(crate) fn dtype(&self, input: &SchemaRef) -> Result<(DataType, bool), Error> {
         use Expression::*;
         match self {

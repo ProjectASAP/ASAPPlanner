@@ -65,13 +65,7 @@ impl DataSources {
         }
         let predicates = predicates
             .iter()
-            .map(|predicate| {
-                let predicate = CompiledExpression::compile(&predicate.0, &output)?;
-                if predicate.dtype().0 != DataType::Bool {
-                    return Err(Error::Invalid("Scan predicate must be boolean".into()));
-                }
-                Ok(predicate)
-            })
+            .map(|predicate| compile_scan_predicate(&predicate.0, &output))
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(Scan {
             reader,
@@ -79,6 +73,19 @@ impl DataSources {
             predicates,
         })
     }
+}
+
+/// A `Scan` predicate compiled over the scan's rows `output`; bad input when
+/// it is not boolean or the executor cannot evaluate it.
+pub(crate) fn compile_scan_predicate(
+    predicate: &planner_types::ir::ScalarExpr,
+    output: &SchemaRef,
+) -> Result<CompiledExpression, Error> {
+    let predicate = CompiledExpression::compile(predicate, output)?;
+    if predicate.dtype().0 != DataType::Bool {
+        return Err(Error::Invalid("Scan predicate must be boolean".into()));
+    }
+    Ok(predicate)
 }
 
 pub struct Scan {
@@ -117,6 +124,15 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
         if context.is_cancelled() {
             return Err(Error::Cancelled);
         }
+        // `now()` in the predicates is this run's evaluation time.
+        let predicates: Vec<std::borrow::Cow<'_, CompiledExpression>> = self
+            .predicates
+            .iter()
+            .map(|predicate| match predicate.reads_current_timestamp() {
+                true => std::borrow::Cow::Owned(predicate.at_evaluation_time(&context)),
+                false => std::borrow::Cow::Borrowed(predicate),
+            })
+            .collect();
         // Opening is lazy: validation and construction of a run perform no I/O.
         let opening = context.clone();
         let stream = stream::once(async move {
@@ -138,7 +154,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                         "connector returned a different Scan schema".into(),
                     ));
                 }
-                if self.predicates.is_empty() {
+                if predicates.is_empty() {
                     return Ok(batch);
                 }
                 // The filtered copy is at most the batch again; the
@@ -154,7 +170,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 // kept; over dictionary-encoded labels it is evaluated once
                 // per distinct label value, not once per row.
                 let mut batch = batch;
-                for predicate in &self.predicates {
+                for predicate in &predicates {
                     if batch.num_rows() == 0 {
                         break;
                     }

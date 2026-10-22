@@ -504,15 +504,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     };
     // The workload's queries as the document describes them, the
     // frontends' roots, the workload entries and the data workload.
-    // Whether every query is PromQL, which the executor's compile check
-    // applies to (it does not compile SQL table scans).
-    let promql_only = match (&from_file, example.as_deref()) {
-        (Some((workload, _)), _) => workload.query_workload.language == QueryLanguage::PromQL,
-        (None, Some(example)) => example != "planner-layering-2",
-        (None, None) => queries
-            .iter()
-            .all(|(language, _, _)| *language == QueryLanguage::PromQL),
-    };
     let (described, roots, entries, data) = match (example.as_deref(), queries.is_empty()) {
         (None, true) if from_file.is_some() => {
             let (workload, catalog) = from_file.expect("checked");
@@ -606,18 +597,15 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     };
     // Plan with the models `plan_installable` plans with: the executor's
     // summary families when the deployment declares none, and the
-    // executor's compile check for a PromQL workload.
+    // executor's compile check.
     if deployment_capabilities.supported_summaries.is_none() {
         deployment_capabilities.supported_summaries =
             Some(asap_executor::supported_summary_families());
     }
     let models = PlanningModels::builtin()
         .with_plan_selection(&plan_selection)
-        .with_deployment_capabilities(&deployment_capabilities);
-    let models = match promql_only {
-        true => models.with_executor_compile_check(&PlannerExecutorCompileCheck),
-        false => models,
-    };
+        .with_deployment_capabilities(&deployment_capabilities)
+        .with_executor_compile_check(&PlannerExecutorCompileCheck);
     let result = match exhaustive {
         true => run_planning_stages_over(
             roots.clone(),

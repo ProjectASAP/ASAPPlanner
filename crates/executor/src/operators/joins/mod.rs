@@ -108,7 +108,7 @@ pub(super) fn execute<'a>(
             relational_join(
                 operator,
                 kind,
-                predicate,
+                &predicate.at_evaluation_time(&context),
                 &left.batch,
                 &right.batch,
                 &context,

@@ -17,7 +17,7 @@
 //!
 //! Errors are those of row-by-row evaluation: vectorized operations cannot
 //! fail, and the per-input path visits inputs in row order.
-use super::planner::ScalarExpr;
+use super::planner::{LocalTyping, ScalarExpr};
 use super::{arithmetic, Expression};
 use crate::values::arrow_columns::{self, ColumnDepth};
 use crate::values::{Batch, Value};
@@ -166,7 +166,9 @@ fn lower_expression(expression: &Expression, schema: &Schema) -> Option<(VectorE
             let (operand, _) = lower_expression(operand, schema)?;
             (VectorExpr::IsNull(Box::new(operand)), DataType::Bool)
         }
-        E::Planner(compiled) => lower_scalar(compiled.expression(), schema)?,
+        E::Planner(compiled) => {
+            lower_scalar(compiled.expression(), schema, compiled.evaluation_time_ms())?
+        }
         _ => return None,
     })
 }
@@ -194,8 +196,32 @@ fn literal(value: &ScalarValue) -> (Value, DataType) {
 }
 
 /// [`lower_expression`] for a Planner scalar expression.
-fn lower_scalar(expression: &ScalarExpr, schema: &Schema) -> Option<(VectorExpr, DataType)> {
+///
+/// `evaluation_time_ms` is SQL `now()` (none outside a query run): `now()`
+/// lowers to it, and a timestamp shifted by an interval without reading a
+/// column to its one value.
+fn lower_scalar(
+    expression: &ScalarExpr,
+    schema: &Schema,
+    evaluation_time_ms: Option<i64>,
+) -> Option<(VectorExpr, DataType)> {
     Some(match expression {
+        ScalarExpr::CurrentTimestamp => (
+            VectorExpr::Literal(Value::Timestamp(evaluation_time_ms?), DataType::Timestamp),
+            DataType::Timestamp,
+        ),
+        ScalarExpr::Arithmetic { .. }
+            if expression.columns_referenced().is_empty()
+                && matches!(expression.scalar_type(schema), Ok((DataType::Timestamp, _))) =>
+        {
+            // Its row semantics, once; an error stays on the row path.
+            let value =
+                super::planner::evaluate(expression, &[], schema, evaluation_time_ms).ok()?;
+            (
+                VectorExpr::Literal(value, DataType::Timestamp),
+                DataType::Timestamp,
+            )
+        }
         ScalarExpr::Column(column) => (
             VectorExpr::Column(*column),
             plain_type(schema, *column)?.clone(),
@@ -205,7 +231,7 @@ fn lower_scalar(expression: &ScalarExpr, schema: &Schema) -> Option<(VectorExpr,
             (VectorExpr::Literal(value, dtype.clone()), dtype)
         }
         ScalarExpr::Negative { expr, .. } => {
-            let (operand, dtype) = lower_scalar(expr, schema)?;
+            let (operand, dtype) = lower_scalar(expr, schema, evaluation_time_ms)?;
             if dtype != DataType::Float64 {
                 return None;
             }
@@ -214,8 +240,8 @@ fn lower_scalar(expression: &ScalarExpr, schema: &Schema) -> Option<(VectorExpr,
         ScalarExpr::Arithmetic {
             op, left, right, ..
         } => {
-            let (left, a) = lower_scalar(left, schema)?;
-            let (right, b) = lower_scalar(right, schema)?;
+            let (left, a) = lower_scalar(left, schema, evaluation_time_ms)?;
+            let (right, b) = lower_scalar(right, schema, evaluation_time_ms)?;
             if a != DataType::Float64 || b != DataType::Float64 {
                 return None;
             }
@@ -238,8 +264,8 @@ fn lower_scalar(expression: &ScalarExpr, schema: &Schema) -> Option<(VectorExpr,
             ) {
                 return None;
             }
-            let (l, a) = lower_scalar(left, schema)?;
-            let (r, b) = lower_scalar(right, schema)?;
+            let (l, a) = lower_scalar(left, schema, evaluation_time_ms)?;
+            let (r, b) = lower_scalar(right, schema, evaluation_time_ms)?;
             // Dates have no Planner comparison; Int64 against Float64 has
             // its own exact semantics on the row path.
             if a != b || !scalar_comparable(&a) || a == DataType::Date {
@@ -254,7 +280,7 @@ fn lower_scalar(expression: &ScalarExpr, schema: &Schema) -> Option<(VectorExpr,
             let lowered = parts
                 .iter()
                 .map(|part| {
-                    let (part, dtype) = lower_scalar(part, schema)?;
+                    let (part, dtype) = lower_scalar(part, schema, evaluation_time_ms)?;
                     (dtype == DataType::Bool).then_some(part)
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -268,22 +294,22 @@ fn lower_scalar(expression: &ScalarExpr, schema: &Schema) -> Option<(VectorExpr,
             )
         }
         ScalarExpr::Not(operand) => {
-            let (operand, dtype) = lower_scalar(operand, schema)?;
+            let (operand, dtype) = lower_scalar(operand, schema, evaluation_time_ms)?;
             if dtype != DataType::Bool {
                 return None;
             }
             (VectorExpr::Not(Box::new(operand)), DataType::Bool)
         }
         ScalarExpr::IsNull(operand) => {
-            let (operand, _) = lower_scalar(operand, schema)?;
+            let (operand, _) = lower_scalar(operand, schema, evaluation_time_ms)?;
             (VectorExpr::IsNull(Box::new(operand)), DataType::Bool)
         }
         ScalarExpr::IsNotNull(operand) => {
-            let (operand, _) = lower_scalar(operand, schema)?;
+            let (operand, _) = lower_scalar(operand, schema, evaluation_time_ms)?;
             (VectorExpr::IsNotNull(Box::new(operand)), DataType::Bool)
         }
         ScalarExpr::Cast { expr, to, .. } => {
-            let (operand, dtype) = lower_scalar(expr, schema)?;
+            let (operand, dtype) = lower_scalar(expr, schema, evaluation_time_ms)?;
             match (&dtype, to) {
                 (from, to) if from == to => (operand, dtype),
                 (DataType::Int64, DataType::Float64) => {
@@ -733,7 +759,9 @@ impl super::CompiledExpression {
     /// which must be in the schema it was compiled for. The same values and
     /// errors as [`Self::evaluate`] row by row.
     pub(crate) fn evaluate_batch(&self, batch: &Batch) -> Result<ArrayRef, Error> {
-        if let Some((vector, _)) = lower_scalar(self.expression(), batch.schema()) {
+        if let Some((vector, _)) =
+            lower_scalar(self.expression(), batch.schema(), self.evaluation_time_ms())
+        {
             return evaluate_vector(&vector, batch)?.into_array(batch.num_rows());
         }
         let columns = distinct(self.expression().columns_referenced());
@@ -852,6 +880,64 @@ mod tests {
 
     fn col(i: usize) -> Box<Expression> {
         Box::new(Expression::Column(i))
+    }
+
+    // `ts >= now() - INTERVAL` at an evaluation time is vectorized (`now()`
+    // and the shift lower to one timestamp) with the row values.
+    #[test]
+    fn a_now_window_is_vectorized_with_row_values() {
+        use crate::runtime::{Limits, RunContext, Scope};
+        let batch = batch(50);
+        let window = ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(7)),
+            op: CompareOpKind::Ge,
+            right: Box::new(ScalarExpr::Arithmetic {
+                op: ArithmeticOpKind::Sub,
+                left: Box::new(ScalarExpr::CurrentTimestamp),
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Interval {
+                    months: 0,
+                    days: 0,
+                    nanos: 2_000_000,
+                })),
+                semantics: ExprSemantics::Sql,
+            }),
+            semantics: ExprSemantics::Sql,
+        };
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: 4,
+                revision: 1,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let bound = planner(window, &batch);
+        let bound = bound.at_evaluation_time(&context);
+        assert!(lower_expression(&bound, batch.schema()).is_some());
+        check(&bound, &batch);
+    }
+
+    // A column-free numeric subexpression (`g > 1.0 + 2.0`) stays vectorized.
+    #[test]
+    fn a_constant_numeric_subexpression_is_vectorized() {
+        let batch = batch(10);
+        let three = ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Add,
+            left: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(2.0))),
+            semantics: ExprSemantics::Sql,
+        };
+        let greater = planner(
+            ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(1)),
+                op: CompareOpKind::Gt,
+                right: Box::new(three),
+                semantics: ExprSemantics::Sql,
+            },
+            &batch,
+        );
+        assert!(lower_expression(&greater, batch.schema()).is_some());
+        check(&greater, &batch);
     }
 
     // Every evaluation path (vectorized, once per distinct dictionary key,

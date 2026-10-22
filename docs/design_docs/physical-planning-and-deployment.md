@@ -418,6 +418,13 @@ query inputs. Their source, filters, grouping, build window, evaluation time, re
 revision contracts must accompany the selected materialization and be checked during
 deployment binding. Type compatibility alone does not establish reuse legality.
 
+A table `Scan` the query run reads outside a raw-data-sample window (a SQL
+table) is bound at run time to the deployment's data source for that table
+(`bind_with_data_sources`). Without a reader, `scan_contract` gives its input
+contract once its predicates compile, so a compile check (the one
+`plan_installable` runs) cuts the plan there. SQL `now()` is the query's
+evaluation time (`Scope::Query`); it has no value in an ingestion run.
+
 The Planner integration test executes both candidates through the shared runtime
 and reverses the selected frontier with two controlled cost fixtures. It also
 rejects shadowed/duplicate boundaries and incomparable planning horizons. This

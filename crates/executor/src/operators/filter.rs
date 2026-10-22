@@ -21,20 +21,23 @@ pub(super) fn execute<'a>(
         // The predicate is one column per batch; Arrow's filter kernel then
         // copies the kept cells of each plain column. State columns are
         // shared, not copied.
-        Kind::Filter(predicate) => Ok(input
-            .map(move |batch| {
-                if context.is_cancelled() {
-                    return Err(Error::Cancelled);
-                }
-                let batch = batch?;
-                let keep = predicate.evaluate_batch(&batch, &DataType::Bool)?;
-                let keep = keep
-                    .as_any()
-                    .downcast_ref::<arrow::array::BooleanArray>()
-                    .ok_or_else(|| invalid("filter predicate must be boolean"))?;
-                batch.filter(keep)
-            })
-            .boxed_local()),
+        Kind::Filter(predicate) => {
+            let predicate = predicate.at_evaluation_time(&context);
+            Ok(input
+                .map(move |batch| {
+                    if context.is_cancelled() {
+                        return Err(Error::Cancelled);
+                    }
+                    let batch = batch?;
+                    let keep = predicate.evaluate_batch(&batch, &DataType::Bool)?;
+                    let keep = keep
+                        .as_any()
+                        .downcast_ref::<arrow::array::BooleanArray>()
+                        .ok_or_else(|| invalid("filter predicate must be boolean"))?;
+                    batch.filter(keep)
+                })
+                .boxed_local())
+        }
         _ => unreachable!(),
     }
 }

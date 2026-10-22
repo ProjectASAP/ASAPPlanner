@@ -25,8 +25,8 @@ candidates first, searches queries over disjoint sources separately, and keeps
 only the best plan, so it plans workloads with many queries in seconds. It
 also plans with the models `plan_installable` uses: when the deployment
 declares no supported summaries, only the summaries the Planner's executor
-runs are offered, and a PromQL workload's plans must compile with the
-executor (a SQL workload's table scans are not checked). The
+runs are offered, and every plan must compile with the executor (a SQL
+plan's table scans compile as the data sources a runtime binds them to). The
 document then shows the selected plan, the rejections the search recorded and
 what it checked. With `--exhaustive` it instead composes and prices every
 candidate and the document lists them all, for small workloads or to compare;

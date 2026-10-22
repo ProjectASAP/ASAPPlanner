@@ -88,6 +88,15 @@ impl RunContext {
             waiter.wake();
         }
     }
+    /// The query's evaluation time (SQL `now()`); `None` in an ingestion run.
+    pub fn evaluation_time_ms(&self) -> Option<i64> {
+        match self.scope {
+            Scope::Query {
+                evaluation_time_ms, ..
+            } => Some(evaluation_time_ms),
+            Scope::Ingestion { .. } => None,
+        }
+    }
     pub fn is_cancelled(&self) -> bool {
         self.control.cancelled.get()
     }

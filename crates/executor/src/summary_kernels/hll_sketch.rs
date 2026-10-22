@@ -110,6 +110,11 @@ impl HllSketchAccumulator {
         self.inner.update(&DataInput::Bytes(item));
     }
 
+    /// Observe one typed item, hashed as `asap_sketchlib` hashes it.
+    pub fn update_item(&mut self, item: &DataInput) {
+        self.inner.update(item);
+    }
+
     /// One rank per register.
     pub fn registers(&self) -> &[u8] {
         self.inner.registers()
