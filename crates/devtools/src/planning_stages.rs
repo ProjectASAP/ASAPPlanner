@@ -227,17 +227,29 @@ pub fn run_default_search_over(
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
-    validate(&roots)?;
-    let per_computation =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
-            .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
-    let run = run_stage1_to_stage3_from_pass1(
-        per_computation,
+    run_search_over(
+        roots,
         entries,
         data,
         models,
         Stage1ToStage3Search::default(),
-    );
+    )
+}
+
+/// [`run_default_search_over`] with the search `search` (e.g. the
+/// reference search over the memo, `memo_groups`).
+pub fn run_search_over(
+    roots: Vec<QueryRoot>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    search: Stage1ToStage3Search,
+) -> Result<PlanningStagesRun, PlanningStagesError> {
+    validate(&roots)?;
+    let per_computation =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
+            .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
+    let run = run_stage1_to_stage3_from_pass1(per_computation, entries, data, models, search);
     if let Some(Ok(roots)) = run.stage1_selected.as_ref().map(|c| &c.roots) {
         validate(roots)?;
     }

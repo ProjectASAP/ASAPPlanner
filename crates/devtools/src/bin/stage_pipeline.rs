@@ -202,7 +202,7 @@ use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_default_search_over, run_planning_stages_over,
+    lower_promql_roots, lower_sql_roots, run_planning_stages_over, run_search_over,
     PlanningStagesError, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
@@ -214,7 +214,7 @@ use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
     PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection,
-    SelectionError,
+    SelectionError, Stage1ToStage3Search,
 };
 use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -233,7 +233,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--max-displayed <n>] --out <file>";
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) an exhaustive run enumerates.
@@ -334,6 +334,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_selection_settings_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
+    // `--search memo-brute-force`: the reference search over the memo of
+    // sub-expressions instead of the default search.
+    let mut memo_brute_force = false;
     let mut max_combinations_given = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -393,6 +396,13 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
+            "--search" => {
+                memo_brute_force = match value()?.as_str() {
+                    "legacy" => false,
+                    "memo-brute-force" => true,
+                    other => return Err(format!("unknown search {other}").into()),
+                }
+            }
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -614,7 +624,16 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             Some(max_combinations),
             models,
         ),
-        false => run_default_search_over(roots.clone(), &entries, &data, models),
+        false => run_search_over(
+            roots.clone(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search {
+                memo_groups: memo_brute_force,
+                ..Stage1ToStage3Search::default()
+            },
+        ),
     };
     // A selected plan's very large peak memory, when the deployment
     // declares no memory capacity to check it against.
@@ -636,7 +655,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     document["workload"]["data_workload"] =
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
-    document["search"] = json!(if exhaustive { "exhaustive" } else { "default" });
+    document["search"] = json!(match (exhaustive, memo_brute_force) {
+        (true, _) => "exhaustive",
+        (false, true) => "memo-brute-force",
+        (false, false) => "default",
+    });
     document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
         "enforced"
     } else {
