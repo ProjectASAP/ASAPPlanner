@@ -1207,10 +1207,12 @@ fn relative_time(from_ms: i64, to_ms: i64) -> Vec<SelectionBox> {
     }]
 }
 
-/// A fine and a coarse sum (`sum by (job, instance)` and `sum by (job)`),
-/// both built at ingestion from one stored per-series sum: Stage 1 shares
-/// the per-series sums the two queries read (over scans that project other
-/// labels). The per-series sum is listed first, then each group sum, which
+/// A per-group sum and a per-group maximum (`sum by (job, instance)` and
+/// `max by (job)`), both built at ingestion from one stored per-series sum:
+/// Stage 1 shares the per-series sums the two queries read (over scans that
+/// project other labels). A coarse sum instead would roll up from the fine
+/// one, which over 6 series holds at most 6 groups, and store one group
+/// sum, not two. The per-series sum is listed first, then each group output, which
 /// reads only it, with its time selection under a definition of its own;
 /// built in that order from stored inputs, they answer as the query-time
 /// reference.
@@ -1218,7 +1220,7 @@ fn relative_time(from_ms: i64, to_ms: i64) -> Vec<SelectionBox> {
 async fn group_sums_from_one_stored_per_series_sum_are_listed_and_built() {
     let workload = exact_workload(
         &[
-            "sum by (job) (sum_over_time(m[1m]))",
+            "max by (job) (sum_over_time(m[1m]))",
             "sum by (job, instance) (sum_over_time(m[1m]))",
         ],
         "",
@@ -1261,7 +1263,7 @@ async fn group_sums_from_one_stored_per_series_sum_are_listed_and_built() {
         &mut SummaryStore::new(),
     );
     assert_eq!(run.outputs_built, 3);
-    assert_eq!(run.answers_per_query[0].len(), 2, "one sum per job");
+    assert_eq!(run.answers_per_query[0].len(), 2, "one maximum per job");
     assert_eq!(run.answers_per_query[1].len(), 6, "one sum per series");
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
 }
