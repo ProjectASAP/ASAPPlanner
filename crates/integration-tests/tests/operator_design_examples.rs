@@ -256,8 +256,9 @@ async fn sql_window_and_filtered_aggregate_types() {
 
 /// A real query batch replaces each SUM by its exact accumulator state,
 /// retains two result roots, and executes both selected plans. Pass 2
-/// shares the identical state, and building it once per evaluation for both
-/// queries (`MatAtQuery`) is the cheapest plan, so both roots read one
+/// shares the identical state, and building the shared sub-DAG once per
+/// evaluation for both queries (`MatAtQuery`, on the state or on its
+/// finalized sum above it) is the cheapest plan, so both roots read one
 /// state. No replacement dag is constructed by the test.
 #[tokio::test]
 async fn batch_planning_replaces_summary_operators() {
@@ -321,10 +322,14 @@ async fn batch_planning_replaces_summary_operators() {
     let [state] = &states[..] else {
         panic!("one SUM state for both queries: {states:?}")
     };
-    assert!(matches!(
-        state.materialization,
-        asap_types::physical::Materialization::MatAtQuery(_)
-    ));
+    assert!(output.operators().into_iter().any(|n| {
+        matches!(
+            n.materialization,
+            asap_types::physical::Materialization::MatAtQuery(_)
+        ) && OperatorNode::reachable(&n)
+            .iter()
+            .any(|m| Rc::ptr_eq(m, state))
+    }));
     for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
         let root = &plan.root;
         root.validate_structure().unwrap();
@@ -374,8 +379,8 @@ async fn batch_planning_replaces_summary_operators() {
             rows
         );
     }
-    // The batch exports as one physical DAG: a root per query and the one
-    // SUM state, with the materialization the selected plan assigned it.
+    // The batch exports as one physical DAG: a root per query, the one SUM
+    // state, and the shared node the selected plan builds once.
     let workload_dag = output.physical_asap_dag().unwrap();
     assert_eq!(workload_dag.roots.len(), 2);
     assert_ne!(workload_dag.roots[0], workload_dag.roots[1]);
@@ -394,8 +399,28 @@ async fn batch_planning_replaces_summary_operators() {
     let [state] = &states[..] else {
         panic!("one SUM state: {states:?}")
     };
-    assert!(matches!(
-        state.materialization,
+    // The node built once is the state or a node above it.
+    let reaches_state = |from| {
+        let mut stack = vec![from];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = stack.pop() {
+            if id == state.id {
+                return true;
+            }
+            if seen.insert(id) {
+                stack.extend(
+                    workload_dag
+                        .edges
+                        .iter()
+                        .filter(|e| e.consumer == id)
+                        .map(|e| e.producer),
+                );
+            }
+        }
+        false
+    };
+    assert!(workload_dag.nodes.iter().any(|n| matches!(
+        n.materialization,
         asap_types::physical::Materialization::MatAtQuery(_)
-    ));
+    ) && reaches_state(n.id)));
 }

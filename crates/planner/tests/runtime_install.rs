@@ -1115,7 +1115,16 @@ fn untime(
     copy.timing = None;
     copy.materialization = Materialization::NotMaterialized;
     let copy = Rc::new(copy);
-    let materialization = store(node).unwrap_or(node.materialization);
+    // A shared non-summary node Stage 2 built once per evaluation is not
+    // kept: a build forced to ingestion time above it cannot read a
+    // query-time result.
+    let own = match node.asap() {
+        Some(
+            ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. } | ASAPOp::SummaryMerge { .. },
+        ) => node.materialization,
+        _ => Materialization::NotMaterialized,
+    };
+    let materialization = store(node).unwrap_or(own);
     if materialization != Materialization::NotMaterialized {
         assignment.set(&copy, materialization);
     }

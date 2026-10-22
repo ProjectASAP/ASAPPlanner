@@ -173,7 +173,15 @@ fn assert_materialized_outputs_cover_their_consumers(
     let run = run_promql(workload);
     for p in &run.physical {
         for n in &p.dag().nodes {
-            if materialization(p, n.id) == NotMaterialized {
+            // A shared scan or range built once per evaluation holds its
+            // rows within that evaluation; plan selection reads it over the
+            // longest window above it.
+            let shared_rows = materialization(p, n.id) == MatAtQuery
+                && matches!(
+                    relational(&n.payload).as_deref(),
+                    Some("scan" | "time_range" | "time_shift")
+                );
+            if materialization(p, n.id) == NotMaterialized || shared_rows {
                 continue;
             }
             let need = readers(p.dag(), &p.query_roots, n.id)

@@ -206,15 +206,66 @@ fn unique_deployments(output: &PlanOutput) -> usize {
 }
 
 /// p50 and p99 over the same window and accuracy read one KLL: the
-/// equal-params subset of summary capability. Both plans hold the same `Rc`,
-/// so a consumer maintains it once.
-#[tokio::test]
-async fn quantiles_with_equal_params_share_one_producer() {
-    let output = plan_promql(&[
+/// equal-params subset of summary capability. In the cheapest valid
+/// candidate where both queries read a KLL, both roots hold the same `Rc`,
+/// so a consumer maintains it once. (At one row per second, the exact plan
+/// over one time range built once per evaluation is selected.)
+#[test]
+fn quantiles_with_equal_params_share_one_producer() {
+    let run = promql_stages(&[
         ("quantile_over_time(0.5, lat[5m])", 0.01),
         ("quantile_over_time(0.99, lat[5m])", 0.01),
-    ])
-    .await;
+    ]);
+    let selection = run.stage3_plan_selection.as_ref().expect("a selection");
+    let (_, cheapest) = run
+        .stage2_physical_asap_optimization
+        .iter()
+        .filter(|p| {
+            p.roots
+                .iter()
+                .all(|root| root_operators(root).into_iter().any(reads_sketch))
+        })
+        .filter_map(|p| Some((selection.costs.get(&p.id)?.cost_per_second?, p)))
+        .min_by(|(a, _), (b, _)| a.total_cmp(b))
+        .expect("a valid candidate in which both queries read a KLL");
+    let states: Vec<Vec<Rc<OperatorNode>>> = cheapest
+        .roots
+        .iter()
+        .map(|root| {
+            root_operators(root)
+                .into_iter()
+                .flat_map(OperatorNode::reachable)
+                .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
+                .collect()
+        })
+        .collect();
+    assert_eq!(states[0].len(), 1, "{}", cheapest.id);
+    assert!(same_states(&states), "{}", cheapest.id);
+}
+
+/// The same through the whole planner, over 1,000,000 series sampled every
+/// 1.5 s, where a KLL costs less than the exact plan: both plans hold the
+/// same KLL `Rc`, so a consumer maintains it once.
+#[tokio::test]
+async fn quantiles_with_equal_params_deploy_one_producer() {
+    let mut workload = promql_workload(&[
+        ("quantile_over_time(0.5, lat[5m])", 0.01),
+        ("quantile_over_time(0.99, lat[5m])", 0.01),
+    ]);
+    let data = workload.data_workload.as_mut().unwrap();
+    data.arrival = DataArrival::Ingesting {
+        rows_per_second: 666_666.67,
+    };
+    let lat = data.sources.get_mut("lat").unwrap();
+    lat.series_count = Some(1_000_000);
+    lat.sample_interval = Some(DurationMs(1_500));
+    let output = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Promql { histograms: None },
+        PlanningModels::builtin(),
+    ))
+    .await
+    .expect("workload plans");
     assert!(same_states(&states(&output)));
     assert!(!Rc::ptr_eq(&output.plans[0].root, &output.plans[1].root));
     assert_eq!(unique_deployments(&output), 1);

@@ -9,8 +9,9 @@ windows" and the Pass 2 section. Tests:
 pipeline in `asap_devtools::{planner_layering_examples, planning_stages}`).
 Devtool: `stage_pipeline --example planner-layering-3a` and
 `planner-layering-3b`, with `--enforce-accuracy-guarantees` (without it,
-`stage_pipeline` ignores accuracy guarantees and DDSketch is not rejected). Both run every candidate (972 for 3a: 243 from
-Pass 1, each with 3 Pass 2 shared-input candidates) through plan
+`stage_pipeline` ignores accuracy guarantees and DDSketch is not rejected). Both run every candidate (2,187 physical for 3a:
+243 from Pass 1, each with 3 Pass 2 shared-input candidates, 972 logical,
+and each shared input also built once per evaluation) through plan
 selection; `--max-displayed` (default 64) limits only how many the document
 shows, so 3a selects P485: KLL for all five queries.
 
@@ -44,8 +45,8 @@ Shared data workload, except Pattern A's `arrival` is `Mixed`.
 | Query-language frontends | A: five scan → range → quantile chains. B: one. | Same; q3–q5 also have a `time_shift`. |
 | Logical ASAP-aware optimization, Pass 1 | A: exact or KLL over its own interval per query, 2⁵ = 32. B: exact, KLL. | A: exact, KLL (k = 547), DDSketch per query, 3⁵ = **243**. B: exact, KLL (k = 269), DDSketch, **3**. |
 | Logical ASAP-aware optimization, Pass 2 | A: window composition adds one EH of KLLs over [T − 5 y, T], one merge + p99 estimate per query, plus a candidate for every grouping of two or more queries onto shared window summaries ("hundreds"). B: each Pass 1 option × {none, sliding L = 5 min s = 1 min (5 active windows), 1-min tumbling (merge 5)} = 6. Independent kept. | Identical-expression rule: each Pass 1 candidate also gets its shared-input candidates (A: 3 per Pass 1 candidate; B: none). Window-composition rule, tumbling panes only: B's KLL and DDSketch each also come as 1-min tumbling panes (a `PaneChain` of 5, merged before the p99 estimate), **5** in all; A is run once, so it gets none. No sliding windows or EHs. |
-| Physical ASAP-aware optimization | See Example 4. | Each logical candidate with every sub-DAG `NotMaterialized` (A: 972; B: 5), plus, for B, each pane chain maintained `MatAtIngestion(Memory)` (B: 7 in all). |
-| Plan selection | Not stated for Example 3. | A: 128 valid, 844 invalid: every candidate with a DDSketch misses the rank target (its bound is relative). KLL for all five queries (P485) is selected at 39,828.80 per second (cost model 1); all exact costs 46,252.80, about 16% more. B: KLL (P2, 2.100 per second); the 1-min KLL panes rebuilt at every evaluation cost 2.183 (the same rows and updates plus merging 5 panes per series); maintained at ingestion time they keep six panes of 1,000,000 per-series KLLs for 654.53; exact costs 2.400; DDSketch, whole or in panes, misses the rank target. Every valid B plan meets 200 ms: 126 ms for the whole-window KLL, 131 ms for the rebuilt panes, 7 ms for the maintained panes, 144 ms exact. |
+| Physical ASAP-aware optimization | See Example 4. | Each logical candidate with every sub-DAG `NotMaterialized` (A: 972; B: 5), plus, for A, each highest shared input (a scan or a shift) also built once per evaluation, `MatAtQuery(Memory)` (A: 2,187 in all), and, for B, each pane chain maintained `MatAtIngestion(Memory)` (B: 7 in all). |
+| Plan selection | Not stated for Example 3. | A: 288 valid, 1,899 invalid: every candidate with a DDSketch misses the rank target (its bound is relative). KLL for all five queries (P485) is selected at 39,828.80 per second (cost model 1); all exact costs 46,252.80, about 16% more. B: KLL (P2, 2.100 per second); the 1-min KLL panes rebuilt at every evaluation cost 2.183 (the same rows and updates plus merging 5 panes per series); maintained at ingestion time they keep six panes of 1,000,000 per-series KLLs for 654.53; exact costs 2.400; DDSketch, whole or in panes, misses the rank target. Every valid B plan meets 200 ms: 126 ms for the whole-window KLL, 131 ms for the rebuilt panes, 7 ms for the maintained panes, 144 ms exact. |
 
 ## Invariants and tests
 

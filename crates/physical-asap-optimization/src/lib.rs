@@ -7,7 +7,11 @@
 //! Each summary build (a `SummaryAgg` or a `PaneChain`) is one
 //! materialization candidate ([`MaterializationCandidate`]) whose
 //! output materialization may store (#509 §Materialization, Algorithm 3).
-//! Each has up to four options:
+//! So is the highest node of each other sub-DAG that two or more queries
+//! read (e.g. a `Scan` that a 1 m and a 5 m window read): one a root or a
+//! node only one query reads consumes. Such a node has only
+//! `NotMaterialized` and `MatAtQuery(Memory)`, so a shared sub-DAG adds one
+//! option, not one per node. A summary build has up to four options:
 //!
 //! * `NotMaterialized`: rebuilt at query time by every query that reads it;
 //! * `MatAtIngestion(Memory)`: maintained as data arrives and kept for the
@@ -25,7 +29,8 @@
 //!   when both apply, and Stage 3 prices each.
 //!
 //! A build at ingestion time needs every build below it at ingestion time too
-//! (#509 Algorithm 3, line 13); such assignments are not generated. Every
+//! (#509 Algorithm 3, line 13), and every shared non-summary node below it
+//! `NotMaterialized`; other assignments are not generated. Every
 //! other combination of options is one physical candidate, the
 //! all-`NotMaterialized` one first: nothing is capped. A node that one
 //! query reads at ingestion time and another at query time is copied, one
@@ -131,18 +136,21 @@ pub struct PhysicalCandidate {
     pub dag: PhysicalASAPDAG,
     /// Its materialization assignment: the option chosen for each summary
     /// build (`SummaryAgg` or `PaneChain`) of `dag`, by node id, including
-    /// the builds left `NotMaterialized`. A build one query reads at
-    /// ingestion time and another at query time appears once per copy.
+    /// the builds left `NotMaterialized`, and each other node materialized
+    /// (a shared node built once per evaluation). A build one query reads
+    /// at ingestion time and another at query time appears once per copy.
     pub materialization: BTreeMap<PhysicalASAPNodeId, Materialization>,
-    /// The option chosen for each summary build of its logical candidate,
-    /// in discovery order (query by query, each query's builds as a walk
-    /// from its root meets them): what [`optimize_physical_asap_assigned`]
-    /// rebuilds it from.
+    /// The option chosen for each materialization candidate of its logical
+    /// candidate: each summary build in discovery order (query by query,
+    /// each query's builds as a walk from its root meets them), then each
+    /// highest shared non-summary node in the same order. What
+    /// [`optimize_physical_asap_assigned`] rebuilds it from.
     pub assignment: Vec<Materialization>,
 }
 
 impl PhysicalCandidate {
-    /// Whether any summary build is materialized.
+    /// Whether any node is materialized: a summary build, or a shared
+    /// non-summary node built once per evaluation.
     pub fn materializes_any(&self) -> bool {
         self.materialization
             .values()
@@ -204,9 +212,13 @@ pub(crate) enum IngestionPruneReason {
     PanesOffPhase,
     /// Something below it can only run at query time.
     UpstreamAtQueryTime(String),
+    /// It is not a summary build (e.g. a shared `Scan`): only a summary's
+    /// state is maintained as data arrives.
+    NotASummaryBuild,
 }
 
-/// One summary build Stage 2 may store, with its materialization options.
+/// One summary build, or one highest shared non-summary node, Stage 2 may
+/// store, with its materialization options.
 /// It is not a whole-workload plan like [`PhysicalCandidate`]: it is Stage
 /// 2's enumeration bookkeeping, and the physical candidates are the
 /// combinations of the materialization candidates' options. For example,
@@ -226,7 +238,9 @@ pub(crate) enum IngestionPruneReason {
 /// | Max acc ×5 panes (q2)     | q2      | NotMaterialized, MatAtIngestion |
 ///
 /// One read by two or more queries also gets `MatAtQuery` (built once per
-/// evaluation and reused). The physical candidates are the product of the
+/// evaluation and reused), and so does the highest node of a shared
+/// non-summary sub-DAG, e.g. a `Scan` both queries read when Stage 1
+/// shares it. The physical candidates are the product of the
 /// options, here 2 × 2 = 4, less the assignments that put a build at
 /// ingestion time over one that is not; Stage 3 prices each.
 /// `at_ingestion` records why ingestion is ruled out when it is (e.g.
@@ -424,8 +438,9 @@ fn reads_raw_at_query_time(
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
 /// assignment: the physical candidate [`optimize_physical_asap`] lists for
-/// it. `choose(readers)` gives the option for each summary build in
-/// discovery order, `readers` being the queries that read it. `None` when
+/// it. `choose(readers)` gives the option for each materialization
+/// candidate in the order of [`PhysicalCandidate::assignment`], `readers`
+/// being the queries that read it. `None` when
 /// a chosen option is not one of the build's, or the assignment
 /// materializes a build at ingestion time above one at query time.
 pub fn optimize_physical_asap_assigned(
@@ -448,13 +463,7 @@ pub fn optimize_physical_asap_assigned(
         }
     }
     let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
-    let below = candidates_below(&nodes);
-    let at_ingestion = |m: &Materialization| m.timing() == ExecutionTiming::IngestionTime;
-    let down_closed = assignment
-        .iter()
-        .enumerate()
-        .all(|(c, m)| !at_ingestion(m) || below[c].iter().all(|&v| at_ingestion(&assignment[v])));
-    if !down_closed {
+    if !down_closed(&mat_candidates, &candidates_below(&nodes), &assignment) {
         return Ok(None);
     }
     assigned_candidate(from_logical, &implemented, &mat_candidates, assignment).map(Some)
@@ -503,7 +512,7 @@ fn assigned_candidate(
             matches!(
                 n.payload,
                 Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
-            )
+            ) || n.materialization != Materialization::NotMaterialized
         })
         .map(|n| (n.id, n.materialization))
         .collect();
@@ -573,29 +582,45 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     }
 }
 
-/// Every summary build of `roots` (implemented), in discovery order, with
-/// its readers, whether it may run at ingestion time and whether it may be
-/// kept from query time across evaluations.
+/// Whether `node` is a summary build (`SummaryAgg` or `PaneChain`).
+fn is_summary_build(node: &OperatorNode) -> bool {
+    matches!(
+        node.asap(),
+        Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+    )
+}
+
+/// The materialization candidates of `roots` (implemented), with their
+/// readers, whether each may run at ingestion time and whether it may be
+/// kept from query time across evaluations: every summary build, in
+/// discovery order, then every highest shared non-summary node, in
+/// discovery order. A shared node is one two or more queries read; the
+/// highest are those a root or an unshared node reads (e.g. a `Scan` that
+/// two windows read). Only a highest one is offered `MatAtQuery`, so a
+/// shared sub-DAG adds one candidate, not one per node.
 pub(crate) fn materialization_candidates(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
 ) -> Vec<MaterializationCandidate> {
-    let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
+    let mut reached: Vec<Rc<OperatorNode>> = Vec::new();
     let mut readers: HashMap<*const OperatorNode, Vec<usize>> = HashMap::new();
+    let mut consumers: HashMap<*const OperatorNode, Vec<*const OperatorNode>> = HashMap::new();
+    let mut root_nodes: HashSet<*const OperatorNode> = HashSet::new();
     for (query, root) in roots.iter().enumerate() {
         for operator in root_operators(root) {
+            root_nodes.insert(Rc::as_ptr(operator));
             for node in OperatorNode::reachable(operator) {
-                if !matches!(
-                    node.asap(),
-                    Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
-                ) {
-                    continue;
-                }
                 let entry = readers.entry(Rc::as_ptr(&node)).or_default();
                 if entry.is_empty() {
-                    nodes.push(Rc::clone(&node));
+                    reached.push(Rc::clone(&node));
+                    for child in node.children() {
+                        consumers
+                            .entry(Rc::as_ptr(child))
+                            .or_default()
+                            .push(Rc::as_ptr(&node));
+                    }
                 }
                 if !entry.contains(&query) {
                     entry.push(query);
@@ -603,44 +628,61 @@ pub(crate) fn materialization_candidates(
             }
         }
     }
+    let shared = |node: *const OperatorNode| readers[&node].len() > 1;
+    let highest_shared = |node: &Rc<OperatorNode>| {
+        let ptr = Rc::as_ptr(node);
+        shared(ptr)
+            && (root_nodes.contains(&ptr)
+                || consumers
+                    .get(&ptr)
+                    .is_some_and(|c| c.iter().any(|&consumer| !shared(consumer))))
+    };
+    let (nodes, shared_results): (Vec<_>, Vec<_>) =
+        reached.into_iter().partition(|n| is_summary_build(n));
     let below = candidates_below(&nodes);
-    nodes
-        .iter()
-        .enumerate()
-        .map(|(c, node)| {
-            let readers = readers[&Rc::as_ptr(node)].clone();
-            let at_ingestion =
-                ingestion_eligibility(node, &readers, entries, data).and_then(|()| {
-                    // Only this build and the builds below it at ingestion time.
-                    let mut trial =
-                        MaterializationAssignment::with_default(Materialization::NotMaterialized);
-                    for &v in below[c].iter().chain([&c]) {
-                        trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
-                    }
-                    apply_materialization_timings(node, &trial, &mut TimingMemo::new())
-                        .map(|_| ())
-                        .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
-                });
-            // A reader without a workload entry has an unknown recurrence.
-            let recurrences: Option<Vec<&QueryRecurrence>> = readers
-                .iter()
-                .map(|&q| entries.get(q).map(|e| &e.recurrence))
-                .collect();
-            let may_keep_across_evaluations = deployment.query_time_results_retained
-                && match (node.asap(), recurrences) {
-                    (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
-                        builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
-                    }
-                    _ => false,
-                };
-            MaterializationCandidate {
-                node: Rc::clone(node),
-                readers,
-                at_ingestion,
-                may_keep_across_evaluations,
+    let builds = nodes.iter().enumerate().map(|(c, node)| {
+        let readers = readers[&Rc::as_ptr(node)].clone();
+        let at_ingestion = ingestion_eligibility(node, &readers, entries, data).and_then(|()| {
+            // Only this build and the builds below it at ingestion time.
+            let mut trial =
+                MaterializationAssignment::with_default(Materialization::NotMaterialized);
+            for &v in below[c].iter().chain([&c]) {
+                trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
             }
-        })
-        .collect()
+            apply_materialization_timings(node, &trial, &mut TimingMemo::new())
+                .map(|_| ())
+                .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
+        });
+        // A reader without a workload entry has an unknown recurrence.
+        let recurrences: Option<Vec<&QueryRecurrence>> = readers
+            .iter()
+            .map(|&q| entries.get(q).map(|e| &e.recurrence))
+            .collect();
+        let may_keep_across_evaluations = deployment.query_time_results_retained
+            && match (node.asap(), recurrences) {
+                (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
+                    builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
+                }
+                _ => false,
+            };
+        MaterializationCandidate {
+            node: Rc::clone(node),
+            readers,
+            at_ingestion,
+            may_keep_across_evaluations,
+        }
+    });
+    // A node fixed at ingestion time cannot be built at query time.
+    let shared_results = shared_results
+        .into_iter()
+        .filter(|n| highest_shared(n) && n.timing != Some(ExecutionTiming::IngestionTime))
+        .map(|node| MaterializationCandidate {
+            readers: readers[&Rc::as_ptr(&node)].clone(),
+            node,
+            at_ingestion: Err(IngestionPruneReason::NotASummaryBuild),
+            may_keep_across_evaluations: false,
+        });
+    builds.chain(shared_results).collect()
 }
 
 /// Whether every scan below `node` reads a time series (a PromQL source).
@@ -788,9 +830,34 @@ fn candidates_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
         .collect()
 }
 
+/// Whether, below every ingestion-time build of `assignment`, every build
+/// is at ingestion time too and every shared non-summary node is
+/// `NotMaterialized`: ingestion work reads it as it arrives, and its
+/// query-time readers read a copy ([`split_shared_by_timing`]).
+/// Simplification: that copy is not offered `MatAtQuery` even when two
+/// query-time readers remain. `below` is [`candidates_below`] of
+/// `mat_candidates`.
+fn down_closed(
+    mat_candidates: &[MaterializationCandidate],
+    below: &[Vec<usize>],
+    assignment: &[Materialization],
+) -> bool {
+    let at_ingestion = |m: &Materialization| m.timing() == ExecutionTiming::IngestionTime;
+    assignment.iter().enumerate().all(|(c, m)| {
+        !at_ingestion(m)
+            || below[c].iter().all(|&v| {
+                if is_summary_build(&mat_candidates[v].node) {
+                    at_ingestion(&assignment[v])
+                } else {
+                    assignment[v] == Materialization::NotMaterialized
+                }
+            })
+    })
+}
+
 /// Every assignment of an option to each materialization candidate (mixed
-/// radix, the last varying fastest, all `NotMaterialized` first) in which
-/// every build below an ingestion-time build is at ingestion time too.
+/// radix, the last varying fastest, all `NotMaterialized` first) that is
+/// [`down_closed`].
 fn materialization_assignments(
     mat_candidates: &[MaterializationCandidate],
 ) -> impl Iterator<Item = Vec<Materialization>> + '_ {
@@ -818,11 +885,7 @@ fn materialization_assignments(
         if carried {
             digits = None;
         }
-        let at_ingestion = |m: &Materialization| m.timing() == ExecutionTiming::IngestionTime;
-        let down_closed = assignment.iter().enumerate().all(|(c, m)| {
-            !at_ingestion(m) || below[c].iter().all(|&v| at_ingestion(&assignment[v]))
-        });
-        if down_closed {
+        if down_closed(mat_candidates, &below, &assignment) {
             return Some(assignment);
         }
         digits.as_ref()?;
@@ -1831,7 +1894,10 @@ mod tests {
 
     /// Two queries share one scan: one reads it through panes maintained at
     /// ingestion time, the other at query time. The scan is split, one copy
-    /// per timing; with nothing materialized it stays one node.
+    /// per timing; with nothing materialized it stays one node. The shared
+    /// scan may also be built once per evaluation (`MatAtQuery`), but not
+    /// under ingestion-time panes, where only one query reads it at query
+    /// time.
     #[test]
     fn a_scan_two_queries_read_at_two_timings_is_split() {
         let QueryRoot::Operator(panes) = in_panes(summary_root("quantile_over_time(0.99, m[5m])"))
@@ -1864,22 +1930,96 @@ mod tests {
             &DeploymentCapabilities::default(),
         )
         .unwrap();
-        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates.len(), 3);
         let scans = |c: &PhysicalCandidate| {
-            let mut timings: Vec<_> = c
+            let mut scans: Vec<_> = c
                 .dag
                 .nodes
                 .iter()
                 .filter(|n| matches!(n.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
-                .map(|n| n.output_state.timing)
+                .map(|n| (n.output_state.timing, n.materialization))
                 .collect();
-            timings.sort_by_key(|t| *t == ExecutionTiming::QueryTime);
-            timings
+            scans.sort_by_key(|(t, _)| *t == ExecutionTiming::QueryTime);
+            scans
         };
-        assert_eq!(scans(&candidates[0]), [ExecutionTiming::QueryTime]);
+        let not_materialized = Materialization::NotMaterialized;
+        assert_eq!(
+            scans(&candidates[0]),
+            [(ExecutionTiming::QueryTime, not_materialized)]
+        );
         assert_eq!(
             scans(&candidates[1]),
-            [ExecutionTiming::IngestionTime, ExecutionTiming::QueryTime]
+            [(
+                ExecutionTiming::QueryTime,
+                Materialization::MatAtQuery(Medium::Memory)
+            )]
+        );
+        assert_eq!(
+            scans(&candidates[2]),
+            [
+                (ExecutionTiming::IngestionTime, not_materialized),
+                (ExecutionTiming::QueryTime, not_materialized)
+            ]
+        );
+    }
+
+    /// Only the highest shared non-summary nodes are materialization
+    /// candidates, each with `NotMaterialized` and `MatAtQuery` only: a
+    /// 5 m range two queries read (not the scan below it, which only that
+    /// shared range reads for them), and the scan, which a third query
+    /// also reads through its own 1 m range.
+    #[test]
+    fn only_the_highest_shared_non_summary_nodes_are_candidates() {
+        let QueryRoot::Operator(p99) = summary_root("quantile_over_time(0.99, m[5m])") else {
+            unreachable!()
+        };
+        let scan = OperatorNode::reachable(&p99)
+            .into_iter()
+            .find(|n| matches!(n.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .unwrap();
+        let ranged = |ms: u64| {
+            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+                range: std::time::Duration::from_millis(ms),
+                kind: asap_types::ir::TimeRangeKind::Range,
+                child: Rc::clone(&scan),
+            }))
+            .unwrap()
+        };
+        let aggregate = |intent: AggIntent, input: Rc<OperatorNode>| {
+            QueryRoot::Operator(asap_logical_asap_optimization::test_support::aggregate(
+                Reduction::by(vec![]),
+                vec![intent],
+                vec![],
+                None,
+                input,
+            ))
+        };
+        let five_minutes = ranged(5 * MINUTE);
+        let roots = [
+            aggregate(AggIntent::Max { col: None }, Rc::clone(&five_minutes)),
+            aggregate(AggIntent::Min { col: None }, five_minutes),
+            aggregate(AggIntent::Max { col: None }, ranged(MINUTE)),
+        ];
+        let mat_candidates = materialization_candidates(
+            &roots,
+            &[],
+            &DataWorkload::default(),
+            &DeploymentCapabilities::default(),
+        );
+        let found: Vec<_> = mat_candidates
+            .iter()
+            .map(|c| (c.node.operator.kind_name(), c.readers.clone(), c.options()))
+            .collect();
+        let options = vec![
+            Materialization::NotMaterialized,
+            Materialization::MatAtQuery(Medium::Memory),
+        ];
+        assert_eq!(
+            found,
+            [
+                ("TimeRange", vec![0, 1], options.clone()),
+                ("Scan", vec![0, 1, 2], options)
+            ]
         );
     }
 

@@ -6,8 +6,8 @@ dimensions". Tests: `crates/integration-tests/tests/planner_layering_example1.rs
 (helpers in `tests/planner_layering_common/`). Viewer fixture:
 `tools/dag-viewer/examples/planner-layering-example1.json`, written by
 `stage_pipeline --example planner-layering-1 --exhaustive
---enforce-accuracy-guarantees` (`stage_pipeline` ignores accuracy guarantees
-without the flag).
+--enforce-accuracy-guarantees --max-displayed 100` (`stage_pipeline` ignores
+accuracy guarantees without the flag).
 
 This spec was written by a test designer before the stages existed. A test
 whose expectation needs a feature that is not in the stack yet is
@@ -19,7 +19,7 @@ whose expectation needs a feature that is not in the stack yet is
 |---|---|---|
 | Query-language frontends | 1 workload `LogicalDAG` | same |
 | Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 (3), each with 2 identical-expression candidates and 6 window-composition candidates (Q1's rate and Q2's option in six 10-s tumbling panes, alone or both, each also with a shared scan) = **27**. Sliding windows are not implemented. |
-| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, plus materialization: each logical candidate with every sub-DAG `NotMaterialized` (27: the doc's Raw plans, with panes rebuilt at every refresh), and each pane chain also `MatAtIngestion(Memory)` (30 more) = **57** |
+| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, plus materialization: each logical candidate with every sub-DAG `NotMaterialized` (27: the doc's Raw plans, with panes rebuilt at every refresh), each pane chain also `MatAtIngestion(Memory)` (30 more), and each shared input built once per evaluation, `MatAtQuery(Memory)`, with every pane chain at query time (15 more) = **72** |
 | Plan selection | 1 plan | 1 plan |
 
 Every MVP candidate is one of the doc's candidates: in logical ASAP-aware
@@ -94,7 +94,7 @@ Ignored until their feature lands:
 * Hydra (`HydraCms` over all (job, series) keys, a heap per job) as a third
   Q2 summary (#605).
 
-## Physical ASAP-aware optimization: 57 candidates
+## Physical ASAP-aware optimization: 72 candidates
 
 The three whole-window candidates without a shared input:
 
@@ -115,7 +115,11 @@ Invariants:
   chain `NotMaterialized` or `MatAtIngestion(Memory)` (ids `P<n>-m<k>`).
   Only pane chains are placed at ingestion time; Q1's rate panes may be,
   because continuously ingesting PromQL data is taken to arrive in time
-  order per series.
+  order per series. A logical candidate with a shared input has one more:
+  the highest node both queries read (the scan, or the time range above
+  it) `MatAtQuery(Memory)`, with every chain at query time. A chain at
+  ingestion time leaves one query reading the input at query time, so
+  the input stays `NotMaterialized` there.
 * Each physical candidate keeps its logical Q2 option and input sharing.
 * Exact top-*k* is implemented as a sort followed by a limit: each job's
   series sorted by the ranked value, descending, then a `Project` that
@@ -131,14 +135,15 @@ Invariants:
 
 | Id | Outcome | Reason |
 |---|---|---|
-| P1 | selected | all exact, at 7.94 per second (cost model 1) |
-| P2, P3 | valid · costlier | the shared-scan and shared-scan-and-range candidates of P1; they tie with it up to rounding and lose on enumeration order |
+| P3-m1 | selected | all exact over one time range built once per evaluation for both queries, at 5.33 per second (cost model 1) |
+| P2-m1 | valid · costlier | all exact over one scan built once per evaluation, at 5.73 per second: each query still reads its own 1 m time range |
+| P1, P2, P3 | valid · costlier | all exact at 7.94 per second, with separate inputs (P1) or a `NotMaterialized` shared scan (P2) or scan and range (P3), charged once per query; they tie with each other up to rounding |
 | P10 | invalid | Count-Min + heap: a top-*k* output has no guarantee (a heap's bound is per item frequency, not top-*k* membership), and the deployment has no evidence that it meets the target |
 | P19 | invalid | CountSketch + heap: the same reason |
 
-The 38 heap candidates (whole window or panes, rebuilt or maintained) are
-invalid for that reason; the other 18 exact candidates are valid but
-costlier. Count-Min's weights are the raw samples of `http_requests_total`,
+The 48 heap candidates (whole window or panes, rebuilt or maintained,
+with or without a shared input built once) are invalid for that reason; the
+other 23 exact candidates are valid but costlier. Count-Min's weights are the raw samples of `http_requests_total`,
 which the workload declares a counter, so they are proven non-negative;
 without that declaration Count-Min is also rejected on its weights. Exact
 panes rebuilt at every refresh cost 8.54, and maintaining a query's exact
@@ -160,9 +165,10 @@ Invariants:
 * For each Q2 option, the shared-input candidate costs no more than its
   separate counterpart.
 
-The doc's typical winners need summaries that plan selection can accept for
-Q2, or materialization that pays off; neither happens here. The latency
-check runs: P1's Q2 takes about 46 ms per evaluation, within its 100 ms.
+The doc's summary winners need summaries that plan selection can accept for
+Q2, which does not happen here; of its typical winners, "Raw with a shared
+input" is selected. The latency check runs: the exact Q2 takes about 46 ms
+per evaluation, within its 100 ms.
 
 ## Where the doc and the planner differ
 
@@ -182,8 +188,10 @@ check runs: P1's Q2 takes about 46 ms per evaluation, within its 100 ms.
    example.** Example 1 lists only window-form and materialization options.
    The planner also reads "physical operator implementation" from the
    physical ASAP-aware optimization section ("TopK as a sort followed by a
-   limit"), and enumerates materialization only for summary builds: each
-   pane chain is `NotMaterialized` or `MatAtIngestion(Memory)`.
+   limit"), and enumerates materialization for summary builds and shared
+   inputs: each pane chain is `NotMaterialized` or `MatAtIngestion(Memory)`,
+   and the highest node both queries read is `NotMaterialized` or
+   `MatAtQuery(Memory)`.
 5. **Where exact top-*k* becomes sort + limit.** The Pass 1 diagram draws
    exact Q2 as "sort + limit 10 per job", but the frontend emits
    `Aggregate{[TopK]}` and the physical ASAP-aware optimization section calls
@@ -194,8 +202,10 @@ check runs: P1's Q2 takes about 46 ms per evaluation, within its 100 ms.
 7. **"Shared summary charged once"** does not apply literally: the doc says
    no summary is shared in Example 1. Plan selection charges a
    `NotMaterialized` node once per consuming query and a materialized one
-   once; the tests check that rule. Stage 2 materializes only summary
-   builds, so a shared input saves nothing here.
+   once; the tests check that rule. A `NotMaterialized` shared input
+   therefore saves nothing here; built once per evaluation (`MatAtQuery`),
+   it is read once, and that candidate (the doc's "Raw with a shared
+   input") is selected.
 8. **Latency.** The doc says an exact top 10 rebuilt at every refresh "may
    miss" 100 ms. With the illustrative calibration it takes about 46 ms, so
    the exact plan meets the bound.

@@ -801,10 +801,16 @@ the `DataWorkload`. Typical outcomes:
 A shared summary is materialized once for all its consumers. See Example 4.
 
 The planner implements a subset of these options today. Stage 2 enumerates
-materialization only for summary builds (`SummaryAgg` and `PaneChain`); each
+materialization for summary builds (`SummaryAgg` and `PaneChain`); each
 gets `NotMaterialized`, `MatAtIngestion(Memory)` when it is eligible to run
 at ingestion time, and `MatAtQuery(Memory)` when two or more queries read
-it. A `MatAtQuery` state is reused within one evaluation only. When the
+it. Of every other sub-DAG that two or more queries read (for example a
+`Scan` that a 1 m and a 5 m window both read), only the highest node is a
+materialization candidate: one that a query's output, or a node only one
+query reads, consumes. It gets `NotMaterialized` and `MatAtQuery(Memory)`
+only, since raw rows are not maintained at ingestion time. Below an
+ingestion-time build it stays `NotMaterialized`: the ingestion side reads
+its own copy. A `MatAtQuery` state is reused within one evaluation only. When the
 deployment's capabilities declare `query_time_results_retained`, a
 tumbling-pane chain that builds exactly one new pane per evaluation also gets
 `MatAtQueryKeptAcrossEvaluations(Memory)`: the panes built at query time are

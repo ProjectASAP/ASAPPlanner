@@ -15,18 +15,15 @@ use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
-use asap_plan_selection::select_plan;
 use asap_plan_selection::{run_stage1_to_stage3_with, PlanningModels, Stage1ToStage3Run};
-use asap_types::ir::physical_export::{
-    compile_physical_asap_dag_with_node_ids, PhysicalASAPOperatorPayload,
-};
+use asap_types::ir::physical_export::compile_physical_asap_dag_with_node_ids;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
     OperatorNode, QueryRoot, TimingMemo,
 };
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::Materialization;
 use asap_types::workload::{
     DataArrival, DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
     RepetitionInterval,
@@ -210,75 +207,6 @@ fn nested_sum_merge_is_selected_and_answers_as_the_nested_sums() {
     assert_eq!(answer, execute(&nested));
 }
 
-/// A stand-in for materialization Stage 2 does not offer: Stage 2 builds a
-/// shared summary once per evaluation (`MatAtQuery`), but not a shared exact
-/// computation such as a top-k ranking. Here the highest computed nodes
-/// (not a raw scan or time range) that more than one query reads are
-/// computed once per evaluation. Returns what the selected candidate reuses.
-fn materialize_shared(run: &Stage1ToStage3Run<usize>) -> Vec<String> {
-    let mut candidates = run.stage2_physical_asap_optimization.clone();
-    for candidate in &mut candidates {
-        let dag = &mut candidate.dag;
-        let mut readers: BTreeMap<_, Vec<usize>> = BTreeMap::new();
-        for (query, &root) in dag.roots.iter().enumerate() {
-            let mut stack = vec![root];
-            while let Some(id) = stack.pop() {
-                let queries = readers.entry(id).or_default();
-                if queries.contains(&query) {
-                    continue;
-                }
-                queries.push(query);
-                stack.extend(
-                    dag.edges
-                        .iter()
-                        .filter(|e| e.consumer == id)
-                        .map(|e| e.producer),
-                );
-            }
-        }
-        let shared = |id| readers.get(&id).is_some_and(|q| q.len() > 1);
-        // The highest shared nodes: read by a root or an unshared node.
-        let highest: Vec<_> = dag
-            .nodes
-            .iter()
-            .map(|node| node.id)
-            .filter(|&id| {
-                shared(id)
-                    && (dag.roots.contains(&id)
-                        || dag
-                            .edges
-                            .iter()
-                            .any(|e| e.producer == id && !shared(e.consumer)))
-            })
-            .collect();
-        for node in &mut dag.nodes {
-            let raw = matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::NonASAP(
-                    NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. }
-                )
-            );
-            if !raw && highest.contains(&node.id) {
-                node.materialization = Materialization::MatAtQuery(Medium::Memory);
-            }
-        }
-    }
-    let queries = run.stage1_pass1_per_computation.roots.len();
-    let selection = select_plan(
-        &candidates,
-        &vec![exact(repeating()); queries],
-        &data(),
-        PlanningModels::builtin(),
-    )
-    .unwrap();
-    let from = &candidates
-        .iter()
-        .find(|c| c.id == selection.selected)
-        .unwrap()
-        .from_logical;
-    reused(run, from)
-}
-
 /// What the logical candidate `id` of `run` answers from another
 /// computation: one devtools label per rollup or exact top-k reuse
 /// candidate it applies (e.g. "Sum acc for Q1 rolled up from Q2"); empty
@@ -372,13 +300,10 @@ fn rollup_is_selected_when_the_finer_sums_are_computed_once() {
 #[test]
 fn exact_topk_reuse_is_selected_when_the_ranking_is_computed_once() {
     assert_eq!(
-        materialize_shared(&plan(
-            &[
-                "topk by (job) (5, rate(m[1m]))",
-                "topk by (job) (10, rate(m[1m]))",
-            ],
-            repeating(),
-        )),
+        selected_reuse(&[
+            "topk by (job) (5, rate(m[1m]))",
+            "topk by (job) (10, rate(m[1m]))",
+        ]),
         ["top-k for Q1, Q2 from one top-10"]
     );
 }
