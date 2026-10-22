@@ -730,25 +730,31 @@ flowchart TB
 ```
 
 The planner implements a subset of the window-composition rule today:
-`Tumbling(L)` only, as a `PaneChain` (one node for all `W_q / L` panes)
-read through a `SummaryMerge`, with `L = gcd(W_q, E_q)` for each query. Two
-or more queries share one chain when their builds have the same family (at
-any size), the same summary input data and the same output column names,
-their windows end at the same time, and their pane widths are equal. The shared chain has the most panes
-any of them reads and is sized for all of them, each parameter at its
-largest value among them, as the summary-capability rule sizes a shared
-build. Each query merges only its own newest `W_q / L` panes
-(`SummaryMerge.newest_panes`), since a shorter window ending at the same
-time is the newest part of the longest. For example, `quantile_over_time(0.5,
-m[1m])` and `quantile_over_time(0.9, m[5m])`, both every 10 s, read one
-chain of thirty 10-s KLL panes: the 1-min query merges the newest 6, the
-5-min query all 30. A family that merges exactly keeps each query's
-guarantee, since a merge of fewer panes is one build over the shorter
-window, and each query fails with at most the shared state's failure
-probability. Stage 3 prices each merge by the panes it reads. The per-query
-chains stay candidates too. Panes at the greatest common divisor of
-different pane widths, long-window segments, sliding windows and
-Exponential Histograms are not implemented yet.
+`Tumbling(L)` only, as a `PaneChain` (one node for all its panes) read
+through a `SummaryMerge`, with `L = gcd(W_q, E_q)` for each query. Two or
+more queries share one chain when their builds have the same family (at any
+size), the same summary input data and the same output column names, and
+their windows end at the same time. The shared chain's pane width is the
+finest of their own pane widths, offered only when it divides every other
+one (the gcd of their widths, never finer than a chain some query builds
+anyway), so queries that repeat at different intervals read the same panes,
+each at its own cadence. The chain covers the longest window and is sized
+for all of them, each parameter at its largest value among them, as the
+summary-capability rule sizes a shared build. Each query merges only the
+newest panes covering its own window (`SummaryMerge.newest_panes`), since a
+shorter window ending at the same time is the newest part of the longest.
+For example, `quantile_over_time(0.5, m[1m])` and
+`quantile_over_time(0.9, m[5m])`, both every 10 s, read one chain of thirty
+10-s KLL panes: the 1-min query merges the newest 6, the 5-min query all
+30. And `quantile_over_time(0.5, m[15m])` every 1 min and every 5 min read
+one chain of fifteen 1-min panes instead of fifteen 1-min and three 5-min
+panes. A family that merges exactly keeps each query's guarantee, since a
+merge of fewer panes is one build over the shorter window, and each query
+fails with at most the shared state's failure probability. Stage 3 prices
+each merge by the panes it reads, at its query's rate. The per-query chains
+stay candidates too. A grid finer than every query's own panes, long-window
+segments, sliding windows and Exponential Histograms are not implemented
+yet.
 
 ### 2. Physical ASAP-aware optimization
 

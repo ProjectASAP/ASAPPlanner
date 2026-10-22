@@ -14,8 +14,8 @@ use crate::asap_aware_cse::{
     capability_sharing_candidates, identical_expression_pass2_candidates, pane_candidates,
     rollup_candidates, rollup_pass2_candidates, sharing_candidates,
     summary_capability_pass2_candidates, topk_reuse_candidates, topk_reuse_pass2_candidates,
-    window_composition_pass2_candidates, PaneCandidate, RollupCandidate, SharingCandidate,
-    TopKReuseCandidate, MAX_REUSE_CANDIDATES,
+    window_composition_pass2_candidates, PaneCandidate, RollupCandidate, SharedPaneChain,
+    SharingCandidate, TopKReuseCandidate, MAX_REUSE_CANDIDATES,
 };
 use crate::per_computation_candidates::{
     compose_logical_candidate, PerComputationCandidateError, PerComputationCandidates,
@@ -40,9 +40,9 @@ pub struct Pass2Candidate {
     pub shared_builds: Vec<Vec<Rc<OperatorNode>>>,
     /// Window-composition rule: the builds built as tumbling panes.
     pub pane_candidates: Vec<PaneCandidate>,
-    /// Window-composition rule: groups of positions in `pane_candidates`
-    /// whose builds read one shared chain, each merging its newest panes.
-    pub shared_pane_chains: Vec<Vec<usize>>,
+    /// Window-composition rule: the chains each shared by several of
+    /// `pane_candidates`, each member merging its newest panes.
+    pub shared_pane_chains: Vec<SharedPaneChain>,
     /// Rollup rule: the Pass 1 candidate's coarse builds answered from
     /// finer ones.
     pub rollup_candidates: Vec<RollupCandidate>,
@@ -226,7 +226,7 @@ struct Pass2 {
 struct Rules {
     shared_builds: Vec<Vec<Rc<OperatorNode>>>,
     pane_candidates: Vec<PaneCandidate>,
-    shared_pane_chains: Vec<Vec<usize>>,
+    shared_pane_chains: Vec<SharedPaneChain>,
     rollup_candidates: Vec<RollupCandidate>,
     topk_reuse_candidates: Vec<TopKReuseCandidate>,
 }
