@@ -17,6 +17,7 @@ design is extended.
   - [Design Intuition](#design-intuition)
   - [Assumptions](#assumptions)
   - [ASAPPlanner System Overview: Planning Stages](#asapplanner-system-overview-planning-stages)
+  - [The stages over a memo of sub-expressions](#the-stages-over-a-memo-of-sub-expressions)
 - [ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies](#asapplanner-detailed-design-planning-stages-and-their-decisionsstrategies)
   - [0. Language-specific frontends](#0-language-specific-frontends)
   - [1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization)
@@ -242,6 +243,47 @@ Stage details:
 - [2. Physical ASAP-aware optimization](#2-physical-asap-aware-optimization) ·
 - [3. Plan selection](#3-plan-selection) ·
 - [4. Execution](#4-execution)
+
+### The stages over a memo of sub-expressions
+
+The stages above exchange whole-workload candidates, and their number is the
+product of every sub-DAG's choices. The memo search (being built beside the
+current search, not yet the default) runs the same stages with the same
+semantics and code boundaries, but on the workload's distinct logical
+sub-expressions: each choice is made once per sub-expression, and only the
+choices several sub-expressions depend on are made jointly.
+
+**Components.**
+
+| Component | What it is |
+|---|---|
+| Memo group | One distinct logical sub-expression: the workload's logical DAG hash-consed, so identical expressions of several queries are one group with several parents. Equal scans are one group; a node without a unique key (e.g. a range window) is one group per reader. |
+| Implementation candidate | One way to implement a group over its child groups: its own nodes, the child groups it reads, how it was made (Pass 1 or which Pass 2 rule), the coupling sites its cost depends on, and the materializations Stage 2 may give it. A fused computation is one candidate implementing several groups. |
+| Coupling site | A choice several groups' candidates depend on, keyed so that equal keys are one site, with its thresholds (the values the choice can take) and a check of whether a reader may read a threshold. |
+
+Each stage keeps its decision, on groups instead of whole candidates:
+
+| Stage | Over the memo |
+|---|---|
+| 1, Pass 1 | Emits each group's implementation candidates: exact, exact accumulator, each summary family and size, fused computations. |
+| 1, Pass 2 | Each rule adds candidates to groups. Identical expression is group identity (nothing to add). Summary capability: a reader reading a build shared with other groups, with a shared-build size site (thresholds: the joins of the readers' sizes). Window composition: tumbling panes, and the newest panes of a shared chain with a pane-chain site (grid, longest window, size). Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping, a ranking). Scan widening: a reader of a metric's scans widened to a shared label set, with a scan-labels site. Raw horizon: a source's raw-data horizon site on every candidate that reads a raw window of it. |
+| 2 | Chooses each candidate's materialization, once for a group however many parents read it. A scan read through one window is built once; one read through different windows may also be read per reader. |
+| 3 | Prices each candidate's own nodes, per node, given its readers and the thresholds of its sites; plan-level charges are added once per plan. |
+
+**Algorithm.** Hash-cons the workload into groups; generate each group's
+candidates (Pass 1, then the Pass 2 transformations); choose one candidate
+per needed group and one threshold per coupling site the chosen candidates
+read; compose the choice into one plan and check and price it with
+Stage 2 and Stage 3. The reference search enumerates every such choice
+(brute force) and must select the exhaustive search's price; the decomposed
+search that replaces it enumerates thresholds with bounds and chooses the
+rest per group.
+
+**Code interface.** `crates/plan-selection/src/pass/subexpr/`: `Memo`,
+`MemoGroup`, `ImplementationCandidate`, `CouplingSite` and `CouplingKind`
+in `mod.rs`; `search::memo` builds the memo and `search::brute_force` is
+the reference search, run by `run_stage1_to_stage3_from_pass1` when
+`Stage1ToStage3Search::memo_groups` is set.
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
