@@ -52,10 +52,14 @@
 //!   not taken to be ordered;
 //! * it is a tumbling-pane chain whose readers of known phase all evaluate
 //!   on its pane boundaries, anchored at the epoch, or a whole-window build whose readers
-//!   all run at one fixed interval with a known phase, over a window no
-//!   longer than that interval and not shifted, and none is a range
-//!   evaluation of more than one step per request (one window per request
-//!   cannot serve every step);
+//!   all run at one fixed interval and phase, over a window that is not
+//!   shifted and whose evaluations all end on the grid of its width
+//!   anchored at the epoch (the interval and a known phase are multiples
+//!   of the window; a reader of unknown phase is taken to run on the grid,
+//!   as a chain's is), and none is a range evaluation of more than one
+//!   step per request (one window per request cannot serve every step).
+//!   So a window equal to its interval (`m[5m]` every 5 minutes) is one
+//!   tumbling window maintained at ingestion time;
 //! * everything below it can run at ingestion time.
 //!
 //! ## Range evaluations
@@ -200,9 +204,13 @@ pub(crate) enum IngestionPruneReason {
     /// continuously ingesting time-series (PromQL) sources are.
     CounterNeedsTimeOrder,
     /// A whole-window build whose readers do not all run at one fixed
-    /// interval with a known phase, or whose window is longer than that
-    /// interval, shifted, or not a range.
+    /// interval and one phase, or whose window is shifted or not a range.
     WindowNotFixed,
+    /// A whole-window build whose evaluations do not all end on the grid of
+    /// its window's width anchored at the epoch, where the backend builds
+    /// it (e.g. `m[20s]` every 20 s at phase 5 s, or every 30 s): the
+    /// interval or the known phase is not a multiple of the window.
+    WindowOffEpochGrid,
     /// A whole-window build read by a range evaluation of more than one
     /// step per request: it keeps one window per request, not one per step.
     RangeEvaluatedWholeWindow,
@@ -781,36 +789,59 @@ fn ingestion_eligibility(
     }) {
         return Err(Why::RangeEvaluatedWholeWindow);
     }
-    // A whole-window build: one window per evaluation, at one known phase,
-    // that ends at the evaluation and fits in the interval.
-    let mut cadence = None;
+    // A whole-window build: one tumbling window per evaluation, built (like
+    // a chain's panes) on the grid of its width anchored at the epoch, so
+    // every evaluation must end on that grid. The readers share one fixed
+    // interval and their known phases agree; a reader of unknown phase is
+    // taken to run on the grid, as a chain's is.
+    let mut interval_ms = None;
+    let mut phase_ms = None;
     for d in demands.into_iter().flatten() {
-        let QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
-            interval,
-            evaluation_phase,
-        }) = &d.recurrence
-        else {
-            return Err(Why::WindowNotFixed);
+        let (interval, phase) = match &d.recurrence {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+                (u64::from(interval.0), None)
+            }
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval,
+                evaluation_phase,
+            }) => (
+                u64::from(interval.0),
+                evaluation_phase.0.checked_rem(u64::from(interval.0)),
+            ),
+            _ => return Err(Why::WindowNotFixed),
         };
-        if cadence.is_some_and(|c| c != (interval.0, evaluation_phase.0)) {
+        if interval == 0 {
             return Err(Why::WindowNotFixed);
         }
-        cadence = Some((interval.0, evaluation_phase.0));
+        if *interval_ms.get_or_insert(interval) != interval {
+            return Err(Why::WindowNotFixed);
+        }
+        if let Some(phase) = phase {
+            if *phase_ms.get_or_insert(phase) != phase {
+                return Err(Why::WindowNotFixed);
+            }
+        }
     }
-    let Some((interval_ms, _)) = cadence else {
+    let Some(interval_ms) = interval_ms else {
         return Err(Why::WindowNotFixed);
     };
-    match node.children()[0].non_asap() {
-        Some(NonASAPOp::TimeRange {
-            range,
-            kind: asap_types::ir::TimeRangeKind::Range,
-            child,
-        }) if range.as_millis() <= u128::from(interval_ms)
-            && !matches!(child.non_asap(), Some(NonASAPOp::TimeShift { .. })) =>
-        {
-            Ok(())
-        }
-        _ => Err(Why::WindowNotFixed),
+    let Some(NonASAPOp::TimeRange {
+        range,
+        kind: asap_types::ir::TimeRangeKind::Range,
+        child,
+    }) = node.children()[0].non_asap()
+    else {
+        return Err(Why::WindowNotFixed);
+    };
+    if matches!(child.non_asap(), Some(NonASAPOp::TimeShift { .. })) {
+        return Err(Why::WindowNotFixed);
+    }
+    let window_ms = u64::try_from(range.as_millis()).map_err(|_| Why::WindowNotFixed)?;
+    let on_grid = |ms: u64| window_ms > 0 && ms.is_multiple_of(window_ms);
+    if on_grid(interval_ms) && phase_ms.is_none_or(on_grid) {
+        Ok(())
+    } else {
+        Err(Why::WindowOffEpochGrid)
     }
 }
 
@@ -1668,19 +1699,25 @@ mod tests {
     }
 
     /// A whole-window build is maintained only for one window per
-    /// evaluation at a known phase: a fixed interval with a phase, a window
-    /// no longer than it, and no filter.
+    /// evaluation on the epoch grid of its width, where the backend builds
+    /// it: a fixed interval that is a multiple of the window, a phase (if
+    /// known) on that grid, and no filter. `m[1m]` every minute with no
+    /// declared phase is one tumbling 1-minute window per evaluation, taken
+    /// to run on the grid like a chain's reader of unknown phase; at phase
+    /// 30 s its windows would end off the grid, and every 30 s or every
+    /// 90 s some evaluations would.
     #[test]
-    fn a_whole_window_build_needs_a_known_phase_and_a_window_within_the_interval() {
+    fn a_whole_window_build_needs_evaluations_on_the_epoch_grid_of_its_window() {
         use IngestionPruneReason as Why;
         let root = summary_root("quantile_over_time(0.99, m[1m])");
-        let at = |interval_ms: u32| QueryWorkloadEntry {
+        let at_phase = |interval_ms: u32, phase_ms: u64| QueryWorkloadEntry {
             recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 interval: RepetitionInterval(interval_ms),
-                evaluation_phase: TimestampMs(0),
+                evaluation_phase: TimestampMs(phase_ms),
             }),
             ..every_minute()
         };
+        let at = |interval_ms: u32| at_phase(interval_ms, 0);
         let mat_candidates = |root: &QueryRoot, demand: QueryWorkloadEntry| {
             let mut memo = HashMap::new();
             let implemented =
@@ -1695,11 +1732,24 @@ mod tests {
             .at_ingestion
         };
         assert_eq!(mat_candidates(&root, at(MINUTE as u32)), Ok(()));
+        assert_eq!(mat_candidates(&root, every_minute()), Ok(()));
+        assert_eq!(mat_candidates(&root, at(2 * MINUTE as u32)), Ok(()));
         assert_eq!(
-            mat_candidates(&root, every_minute()),
-            Err(Why::WindowNotFixed)
+            mat_candidates(&root, at_phase(MINUTE as u32, 3 * MINUTE)),
+            Ok(())
         );
-        assert_eq!(mat_candidates(&root, at(30_000)), Err(Why::WindowNotFixed));
+        assert_eq!(
+            mat_candidates(&root, at_phase(MINUTE as u32, 30_000)),
+            Err(Why::WindowOffEpochGrid)
+        );
+        assert_eq!(
+            mat_candidates(&root, at(30_000)),
+            Err(Why::WindowOffEpochGrid)
+        );
+        assert_eq!(
+            mat_candidates(&root, at(90_000)),
+            Err(Why::WindowOffEpochGrid)
+        );
         let candidates = optimize_physical_asap(
             "L1",
             std::slice::from_ref(&root),
