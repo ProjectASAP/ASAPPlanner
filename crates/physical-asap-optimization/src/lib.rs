@@ -56,8 +56,9 @@
 //!   window that is not shifted and whose evaluations all end on the grid
 //!   of its width anchored at the epoch (the interval and a declared phase
 //!   are multiples of the window; a reader with no declared phase is taken
-//!   to evaluate at multiples of its interval, as a chain's is), and none is a range evaluation of more than one
-//!   step per request (one window per request cannot serve every step).
+//!   to evaluate at multiples of its interval, as a chain's is), and none
+//!   is a range evaluation of more than one step per request (one window
+//!   per request cannot serve every step).
 //!   So a window equal to its interval (`m[5m]` every 5 minutes) is one
 //!   tumbling window maintained at ingestion time;
 //! * everything below it can run at ingestion time.
