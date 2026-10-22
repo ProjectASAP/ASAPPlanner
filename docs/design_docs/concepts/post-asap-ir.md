@@ -44,9 +44,12 @@ Implemented:
   population, including membership changes.
 - `EvaluatePopulation { child, evaluation }`: read an aggregate or TopK prefix from a
   maintained population.
-- `SummaryMerge { children }`: merge summary states with identical schemas
-  (same family, parameters and grouping) into the state of their union; its
-  coverage check rejects inputs whose selections overlap. The timing pass does
+- `SummaryMerge { children, newest_panes, group_by }`: merge summary states with identical
+  schemas (same family, parameters and grouping) into the state of their
+  union; its coverage check rejects inputs whose selections overlap. With
+  `group_by` (a rollup) the output is keyed by those input group columns, and
+  each output state merges the input states of its key; `newest_panes`
+  merges only the newest panes of one pane chain, never with `group_by`. The timing pass does
   not place it yet (`ExecutionDataStateError::UnimplementedOperator`).
 
 Reserved (migrated but unimplemented; schema derivation rejects them with

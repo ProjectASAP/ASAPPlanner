@@ -1120,6 +1120,7 @@ fn in_panes(
             let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![Rc::clone(&chain)],
                 newest_panes: (newest < candidates[longest].pane_count).then_some(newest),
+                group_by: None,
             }))?;
             replaced.insert(Rc::as_ptr(&candidates[i].build), Rc::new(merge));
         }
@@ -1132,6 +1133,7 @@ fn in_panes(
                 ASAPOp::SummaryMerge {
                     children: vec![pane_chain(candidate)?],
                     newest_panes: None,
+                    group_by: None,
                 },
             ))?));
         }

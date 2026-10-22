@@ -76,6 +76,7 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
     let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: panes.clone(),
         newest_panes: None,
+        group_by: None,
     }))
     .unwrap();
     let root = replace(root, &agg, &merged);
@@ -690,6 +691,7 @@ fn panes_at(root: &Rc<OperatorNode>, panes: &[(i64, i64)]) -> Result<Rc<Operator
     let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children,
         newest_panes: None,
+        group_by: None,
     }))
     .map_err(|error| format!("{error:?}"))?;
     Ok(replace(root, &agg, &merged))

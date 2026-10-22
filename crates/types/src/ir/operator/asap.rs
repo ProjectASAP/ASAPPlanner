@@ -54,9 +54,9 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         child: C,
         evaluation: PopulationStatistic,
     },
-    /// Merge compatible partial states for the same grouping and family:
-    /// every input state of a group, including each pane of a
-    /// [`PaneChain`](ASAPOp::PaneChain), into one state per group.
+    /// Merge compatible partial states of one family: every input state of
+    /// a group, including each pane of a [`PaneChain`](ASAPOp::PaneChain),
+    /// into one state per group.
     SummaryMerge {
         children: Vec<C>,
         /// Merge only the newest `n` panes of the one `PaneChain` this
@@ -66,6 +66,13 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         /// `None` merges every input state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         newest_panes: Option<u32>,
+        /// A rollup (regrouping merge): the input's plain columns the
+        /// merged states are keyed by, in output order. Every input state
+        /// whose values in these columns match goes into one output state,
+        /// so states keyed by `(region, job)` merge into one per `job`.
+        /// `None` keeps the input's groups.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_by: Option<Vec<ColumnId>>,
     },
     /// A tumbling-pane window summary (#509 Pass 2, window-composition
     /// rule): the `SummaryAgg` with these `family`, `input`, `reduction`,
@@ -198,9 +205,11 @@ impl<C> ASAPOp<C> {
             SummaryMerge {
                 children,
                 newest_panes,
+                group_by,
             } => SummaryMerge {
                 children: children.iter().map(&mut f).collect(),
                 newest_panes: *newest_panes,
+                group_by: group_by.clone(),
             },
             SummarySubtract { left, right } => SummarySubtract {
                 left: f(left),
@@ -358,6 +367,10 @@ impl ASAPOp {
                 schema
             }
             FinalizeExactAccumulator { child } => {
+                // A rollup finalizes as the coarse build it stands for.
+                if let Some(build) = rolled_up_build(child) {
+                    return FinalizeExactAccumulator { child: build }.output_schema();
+                }
                 // Merged panes finalize as one build over their window.
                 if super::pane_chain::merged_chain(child).is_some() {
                     return FinalizeExactAccumulator {
@@ -508,9 +521,15 @@ impl ASAPOp {
                     .output_schema()?
                 }
             }
-            SummaryMerge { children, .. } => {
+            SummaryMerge {
+                children, group_by, ..
+            } => {
                 self.validate_inputs()?;
-                children[0].schema.clone()
+                let input = &children[0].schema;
+                match group_by {
+                    None => input.clone(),
+                    Some(keys) => regrouped_schema(input, keys)?,
+                }
             }
             SummarySubtract { .. }
             | SummaryDelete { .. }
@@ -554,7 +573,13 @@ impl ASAPOp {
             SummaryMerge {
                 children,
                 newest_panes,
+                group_by,
             } => {
+                if newest_panes.is_some() && group_by.is_some() {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "a rollup merges every input state, not the newest panes".into(),
+                    ));
+                }
                 if let Some(n) = newest_panes {
                     let pane_count = match children.as_slice() {
                         [chain] => match chain.asap() {
@@ -761,6 +786,91 @@ impl ASAPOp {
     }
 }
 
+/// The build a rollup (a `SummaryMerge` with `group_by` of one input)
+/// stands for: the input's build (one build over a merged chain's window)
+/// grouped by the input columns the rollup's keys name. `None` for any
+/// other node, or a rollup whose build does not derive.
+fn rolled_up_build(state: &OperatorNode) -> Option<Rc<OperatorNode>> {
+    let ASAPOp::SummaryMerge {
+        children,
+        group_by: Some(keys),
+        ..
+    } = state.asap()?
+    else {
+        return None;
+    };
+    let [input] = children.as_slice() else {
+        return None;
+    };
+    let build = match input.asap()? {
+        ASAPOp::SummaryAgg { .. } => (**input).clone(),
+        _ if super::pane_chain::merged_chain(input).is_some() => {
+            super::pane_chain::merged_window_build(input).ok()?
+        }
+        _ => return None,
+    };
+    let ASAPOp::SummaryAgg {
+        child,
+        family,
+        input: update,
+        reduction,
+        grouping,
+        filter,
+    } = build.asap()?
+    else {
+        return None;
+    };
+    let mapped = keys
+        .iter()
+        .map(|&key| match reduction {
+            Reduction::Reduce(by) if !by.is_without() => by.keys().get(key).copied(),
+            Reduction::PerEntity => Some(key),
+            Reduction::Reduce(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    OperatorNode::new_shared(super::node::Operator::ASAP(ASAPOp::SummaryAgg {
+        child: Rc::clone(child),
+        family: family.clone(),
+        input: update.clone(),
+        reduction: Reduction::by(mapped),
+        grouping: grouping.clone(),
+        filter: filter.clone(),
+    }))
+    .ok()
+}
+
+/// The schema of a regrouping `SummaryMerge` over states of schema `input`:
+/// the key columns `keys`, in order, then the state column. Each key must
+/// be a distinct plain column of `input` other than its time column.
+fn regrouped_schema(input: &Schema, keys: &[ColumnId]) -> Result<Schema, SchemaDerivationError> {
+    let invalid = |message: &str| SchemaDerivationError::InvalidScalarSignature(message.into());
+    let mut fields = Vec::with_capacity(keys.len() + 1);
+    for (position, &key) in keys.iter().enumerate() {
+        let field = input
+            .fields
+            .get(key)
+            .ok_or_else(|| invalid("a regrouping merge key is not an input column"))?;
+        if !field.is_plain() || input.time_index == Some(key) || keys[..position].contains(&key) {
+            return Err(invalid(
+                "a regrouping merge keys by distinct plain input columns other than time",
+            ));
+        }
+        fields.push(field.clone());
+    }
+    fields.extend(input.fields.iter().find(|field| !field.is_plain()).cloned());
+    // As an aggregate's: one row per key value, and no other column.
+    Ok(Schema {
+        fields,
+        time_index: None,
+        unique_keys: if keys.is_empty() {
+            Vec::new()
+        } else {
+            vec![(0..keys.len()).collect()]
+        },
+        closed: true,
+    })
+}
+
 /// The plain value an exact accumulator finalizes to.
 fn finalized_data_type(kind: &crate::ir::schema::sketch::ExactKind) -> DataType {
     use crate::ir::schema::sketch::ExactKind;
@@ -794,8 +904,14 @@ fn source_kind(node: &OperatorNode) -> OperatorResultKind {
 /// input.
 fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
     use crate::ir::schema::SummaryInputExpr;
+    // A rollup reads items as the coarse build it stands for.
+    let rolled_up = rolled_up_build(state);
+    let build = match &rolled_up {
+        Some(build) => build.asap(),
+        None => state.summary_build(),
+    };
     let (Some(ASAPOp::SummaryAgg { child, input, .. })
-    | Some(ASAPOp::PaneChain { child, input, .. })) = state.summary_build()
+    | Some(ASAPOp::PaneChain { child, input, .. })) = build
     else {
         return None;
     };

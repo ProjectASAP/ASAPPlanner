@@ -16,7 +16,7 @@ The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in
 | `FinalizeExactAccumulator` | exact accumulator state → value | implemented |
 | `MaintainPopulation` | values → maintained membership (state) | implemented |
 | `EvaluatePopulation` | maintained membership → value | implemented |
-| `SummaryMerge` | state × N → state | implemented (#560: identical schemas); coverage check in #646 |
+| `SummaryMerge` | state × N → state | implemented (#560: identical schemas); coverage check in #646; rollup with `group_by` |
 | `SummarySubtract` | state × state → state | reserved |
 | `SummaryDelete` | state → state without one key | reserved |
 | `SummaryJoin` | state × state → state | reserved |
@@ -115,7 +115,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2.1 |
 | How is it computed? | by the planner, from the sub-DAG the node covers, in one walk that yields both the definition and the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; cached per node | §4.2.3 |
-| What uses it? | merge (in #646); rollup, slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
+| What uses it? | merge (in #646), rollup; slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.1, §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
@@ -660,17 +660,17 @@ With an exact target, the planner can keep all latencies per job in one maintain
 
 ### 5.6 `SummaryMerge`: state × N → state (merge and rollup)
 
-**Operator definition.** Combines several states of the same kind into one. With `group_by` (planned) it can also make the grouping coarser (rollup).
+**Operator definition.** Combines several states of the same kind into one. With `group_by` it can also make the grouping coarser (rollup).
 
 **Status.**
 
-- **On `main` (since #560):** implemented. All children must be state with exactly one state field and identical schemas.
-- **#646 (open):** also requires equal `definition`s and selections that do not overlap, and computes the merged coverage.
+- **Implemented.** All children must be state with exactly one state field and identical schemas.
+- **Coverage.** It also requires equal `definition`s and selections that do not overlap, and computes the merged coverage.
 - **Newest panes:** an optional `newest_panes: n` merges only the newest `n` panes of the one `PaneChain` the merge reads (`1 ≤ n <` its pane count). Its coverage is one build over those panes' window, so one chain kept for the longest window serves every query whose window, on the same panes, ends at the same time and is shorter.
-- **Planned:** a `group_by` field, so one operator does both merge and rollup:
+- **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state, so it does not take `newest_panes`; it reads a merge of the newest panes instead:
 
 ```rust
-SummaryMerge { children: Vec<C>, group_by: Reduction }
+SummaryMerge { children: Vec<C>, newest_panes: Option<u32>, group_by: Option<Vec<ColumnId>> }
 ```
 
 **Example A: time panes.** p99 of each series of metric `m` over the last 2 minutes:
@@ -751,7 +751,7 @@ The first two build `KLL(latency) by[job]` states. The third can be answered by 
                               [ Scan t ]
 ```
 
-**Example C: rollup (planned).** p99 latency per region and job, and per job:
+**Example C: rollup.** p99 latency per region and job, and per job:
 
 ```sql
 SELECT region, job, approx_percentile_cont(latency, 0.99) FROM t GROUP BY region, job;
@@ -773,7 +773,7 @@ One `by[region, job]` state answers the first query directly. Rolled up to `by[j
                │  state Sketch(KLL k=200)              │
                │                                       │
      [[ SummaryMerge ]]                                │
-     group_by: by job                                  │
+     group_by: [job]                                   │
                ▲                                       │
                │                                       │
                └───────────────────┬───────────────────┘
@@ -822,10 +822,26 @@ input groups                       output groups
 
 | Question | Answer |
 |---|---|
-| What comes out? | the children's schema; with `group_by`, only the remaining group columns |
-| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); `group_by` is not a subset of the children's grouping (planned) |
-| What is its coverage? | the shared `definition` (with the new grouping, once `group_by` exists), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(−2m, −1m]` and `(−1m, 0]` give `(−2m, 0]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
+| What comes out? | the children's schema; with `group_by`, its columns in order, then the state column |
+| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` is empty over a SQL relation (a global SQL aggregate has a row over no input rows, a merge of no states has none); `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra); `group_by` together with `newest_panes` |
+| What is its coverage? | the shared `definition` (with `group_by`, the same build grouped by the columns `group_by` names), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(−2m, −1m]` and `(−1m, 0]` give `(−2m, 0]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
 | State or value? | state in, state out |
+
+**Guarantee after a rollup.** The groups of one build partition its rows, so the states a rollup merges into one output group are disjoint, and the family-capability table's merged error applies. A rolled-up state of these families keeps the guarantee one build of the same size would have over the coarse group's rows; most are exactly that build's state:
+
+| Family | Merge | Guarantee of the rolled-up state |
+|---|---|---|
+| Exact `Sum`, `Count`, `Min`, `Max` | adds, or keeps the extremum | exact |
+| KMV | keeps the `k` smallest distinct hashes of the union (one shared hash seed) | the same state as a direct build: relative error of the distinct count |
+| HLL | keeps each register's maximum | the same state as a direct build: relative error of the distinct count |
+| DDSketch | adds the bucket counts (one shared bucket mapping) | the same state as a direct build: relative error of every quantile; its total count |
+| KLL | concatenates and compacts the levels | not the same state (compactions are randomized), but the same rank error bound and failure probability as a direct build of that `k` |
+| Count-Min | adds the counters (shared hashes) | the same state as a direct build: item frequency and total, the error relative to the coarse group's total, `ε·‖group‖₁` |
+| Count Sketch | adds the counters (shared hashes) | the same state as a direct build: item frequency, the error relative to the coarse group's L2 norm, `ε·‖group‖₂`; the L2 estimate |
+| UnivMon | adds the layer counters and re-ranks the union of the heap keys | total, L2 and distinct count as a direct build; entropy approximate |
+| Count-Min or Count Sketch with heap | adds the counters | item frequencies as a direct build; top-k approximate (an item heavy in the coarse group may be in no finer group's heap) |
+
+Rejected: counter states (`Rate`, `Increase`), which merge consecutive windows of one series, not different series; `IRate` and Theta, which have no merge; Hydra, whose groups share one state, so they are no `group_by` columns.
 
 **Other uses of coverage.** The planner also uses coverage to read or reuse a state without merging:
 
@@ -973,6 +989,13 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     SummaryMerge {
         /// The states to merge; all have the same schema.
         children: Vec<C>,
+        /// Merge only the newest `n` panes of the one `PaneChain` read;
+        /// `None` merges every input state. Not with `group_by`.
+        newest_panes: Option<u32>,
+        /// A rollup: the input's group columns the merged states are keyed
+        /// by, in output order; every input state whose values in them match
+        /// goes into one output state. `None` keeps the input's groups.
+        group_by: Option<Vec<ColumnId>>,
     },
     // Reserved: migrated but unimplemented.
     SummarySubtract {
@@ -1383,7 +1406,11 @@ impl SummaryCoverage {
     /// `DefinitionMismatch` (inputs compute different things) or
     /// `InputsOverlap { required }` (inputs not proven disjoint, or disjoint
     /// in time for counter states, as the family's `MergeInputRule`
-    /// requires).
+    /// requires); for a rollup, also `NotAGroupKey` (a `group_by` column is
+    /// not a group key of the inputs' build), `FamilyCannotRegroup` (counter
+    /// states, a family without a merge, or a Hydra), `GlobalRelationRegroup`
+    /// (no keys over a SQL relation) or `RegroupedBuild` (the coarse build
+    /// it stands for does not derive).
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
 }
 ```

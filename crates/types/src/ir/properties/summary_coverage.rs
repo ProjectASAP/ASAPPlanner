@@ -19,11 +19,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ir::operator::asap::ASAPOp;
-use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::node::{Operator, OperatorNode, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
+use crate::ir::operator::operator_properties::Reduction;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{Predicate, ScalarExpr};
 use crate::ir::schema::family_capability::{FamilyCapability, MergeInputRule};
+use crate::ir::schema::sketch::GroupingStrategy;
 use crate::ir::schema::{ColumnId, Schema};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +220,26 @@ pub enum CoverageError {
         }
     )]
     InputsOverlap { required: MergeInputRule },
+    /// A regrouping `SummaryMerge` key that is not one of the group keys
+    /// its input states are built by (a build grouped `without` keys has
+    /// none): bad input.
+    #[error("regrouping merge key {key} is not a group key of its input states")]
+    NotAGroupKey { key: ColumnId },
+    /// A regrouping `SummaryMerge` of states whose family does not merge
+    /// different groups: counter states (`Rate`, `Increase`) merge
+    /// consecutive windows of one series, a family without a merge merges
+    /// nothing, and a Hydra's groups share one state. Bad input.
+    #[error("the inputs' family cannot merge different groups")]
+    FamilyCannotRegroup,
+    /// The build a regrouping `SummaryMerge` stands for does not derive:
+    /// bad input.
+    #[error("the regrouped build does not derive: {reason}")]
+    RegroupedBuild { reason: String },
+    /// A regrouping `SummaryMerge` to no keys over a relation's states: a
+    /// global SQL aggregate has one row over no input rows, a merge of no
+    /// states none. Bad input.
+    #[error("a regrouping merge to no keys cannot stand for a global SQL aggregate")]
+    GlobalRelationRegroup,
 }
 
 /// Coverage already derived during one validation, by node address. The
@@ -276,6 +298,7 @@ impl SummaryCoverage {
             // window does.
             Some(ASAPOp::SummaryMerge {
                 newest_panes: Some(_),
+                group_by: None,
                 ..
             }) => of_summary_agg(
                 &crate::ir::operator::pane_chain::merged_window_build(node).map_err(|error| {
@@ -284,12 +307,18 @@ impl SummaryCoverage {
                     }
                 })?,
             ),
-            Some(ASAPOp::SummaryMerge { children, .. }) => {
+            Some(ASAPOp::SummaryMerge {
+                children, group_by, ..
+            }) => {
                 let inputs = children
                     .iter()
                     .map(|child| Self::derive_memoized(child, memo))
                     .collect::<Result<Vec<_>, _>>()?;
-                of_merge(&inputs)?
+                let merged = of_merge(&inputs)?;
+                match group_by {
+                    None => merged,
+                    Some(keys) => regrouped(merged, keys)?,
+                }
             }
             _ => return Err(CoverageError::NotSummary),
         };
@@ -339,6 +368,75 @@ fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError
     Ok(SummaryCoverage {
         definition: Rc::clone(&first.definition),
         selection: union(inputs.iter().flat_map(|c| c.selection.clone()).collect()),
+    })
+}
+
+/// The coverage of a regrouping merge `node`, keyed by `keys`, of states
+/// whose merge covers `merged`: the same rows (`selection`), computed by
+/// the input's build grouped by the columns `keys` name. The input states of
+/// one output group are different groups of one build, so their rows are
+/// disjoint. A counter family merges only time-disjoint windows, never
+/// different groups at one time.
+fn regrouped(merged: SummaryCoverage, keys: &[ColumnId]) -> Result<SummaryCoverage, CoverageError> {
+    let Some(ASAPOp::SummaryAgg {
+        child,
+        family,
+        input,
+        reduction,
+        grouping,
+        filter,
+    }) = merged.definition.asap()
+    else {
+        return Err(CoverageError::NotSummary);
+    };
+    if !FamilyCapability::merges_groups(family)
+        || *grouping != GroupingStrategy::PerSubpopulationInstance
+    {
+        return Err(CoverageError::FamilyCannotRegroup);
+    }
+    if keys.is_empty() && child.result_kind == OperatorResultKind::Relation {
+        return Err(CoverageError::GlobalRelationRegroup);
+    }
+    let state = &merged.definition.schema;
+    // The build's input column each key of the state names.
+    let mapped = keys
+        .iter()
+        .map(|&key| {
+            let column = match reduction {
+                Reduction::Reduce(by) if !by.is_without() => by.keys().get(key).copied(),
+                // A per-series state keeps its input's columns in place.
+                Reduction::PerEntity => Some(key),
+                Reduction::Reduce(_) => None,
+            };
+            column
+                .filter(|&column| {
+                    let (Some(at_state), Some(at_input)) =
+                        (state.fields.get(key), child.schema.fields.get(column))
+                    else {
+                        return false;
+                    };
+                    at_state.is_plain()
+                        && at_state.name == at_input.name
+                        && at_state.table == at_input.table
+                })
+                .ok_or(CoverageError::NotAGroupKey { key })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Derived as a direct build's schema, so its definition id is the same.
+    let definition = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: Rc::clone(child),
+        family: family.clone(),
+        input: input.clone(),
+        reduction: Reduction::by(mapped),
+        grouping: grouping.clone(),
+        filter: filter.clone(),
+    }))
+    .map_err(|error| CoverageError::RegroupedBuild {
+        reason: error.to_string(),
+    })?;
+    Ok(SummaryCoverage {
+        definition,
+        selection: merged.selection,
     })
 }
 

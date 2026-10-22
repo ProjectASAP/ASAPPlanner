@@ -1025,15 +1025,27 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 None => Ok(build),
             }
         }
-        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
+        Payload::ASAP(ASAPOp::SummaryMerge { group_by, .. }) => {
             let state = summary_column(input)?;
-            Operator::summary_merge(
-                input.clone(),
-                state,
-                (0..input.fields.len())
+            let groups = match group_by {
+                // A rollup: each output group merges the input states whose
+                // keys match. Counter states join time-ordered windows of
+                // one series, never different series, and a Hydra's groups
+                // share one state.
+                Some(keys) => {
+                    let family = &input.fields[state].dtype;
+                    if !FamilyCapability::merges_groups(family) {
+                        return Err(invalid(format!(
+                            "a rollup of {family:?} states: the family cannot merge different groups"
+                        )));
+                    }
+                    keys.clone()
+                }
+                None => (0..input.fields.len())
                     .filter(|&i| i != state && Some(i) != input.time_index)
                     .collect(),
-            )
+            };
+            Operator::summary_merge(input.clone(), state, groups)
         }
         Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
             if let SketchStatistic::TopK { k } = query {

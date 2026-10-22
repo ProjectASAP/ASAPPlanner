@@ -204,6 +204,7 @@ fn try_run(
                 Payload::ASAP(ASAPOp::SummaryMerge {
                     children: vec![1],
                     newest_panes: None,
+                    group_by: None,
                 }),
                 (*state).clone(),
             ),

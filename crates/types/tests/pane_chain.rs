@@ -77,6 +77,7 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children,
         newest_panes: None,
+        group_by: None,
     }))
     .unwrap()
 }
@@ -264,6 +265,7 @@ fn newest(chain: Rc<OperatorNode>, newest_panes: u32) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![chain],
         newest_panes: Some(newest_panes),
+        group_by: None,
     }))
     .unwrap()
 }
@@ -305,6 +307,7 @@ fn a_merge_of_the_newest_panes_reads_one_chain_and_fewer_than_all_panes() {
         let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
             children,
             newest_panes: Some(newest_panes),
+            group_by: None,
         }));
         assert!(merge.is_err(), "newest {newest_panes}");
     }
@@ -350,6 +353,7 @@ fn newest_panes_serializes_only_when_set() {
     let full: ASAPOp<()> = ASAPOp::SummaryMerge {
         children: vec![()],
         newest_panes: None,
+        group_by: None,
     };
     let json = serde_json::to_string(&full).unwrap();
     assert!(!json.contains("newest_panes"), "{json}");
@@ -358,7 +362,69 @@ fn newest_panes_serializes_only_when_set() {
     let partial: ASAPOp<()> = ASAPOp::SummaryMerge {
         children: vec![()],
         newest_panes: Some(6),
+        group_by: None,
     };
     let json = serde_json::to_string(&partial).unwrap();
     assert_eq!(serde_json::from_str::<ASAPOp<()>>(&json).unwrap(), partial);
+}
+
+/// A rollup of a chain's panes to no keys (every series' panes into one
+/// state) is no pane merge, and expansion keeps its keys: the expanded
+/// rollup covers what the planned one does, one build over the whole
+/// window and every series.
+#[test]
+fn expansion_keeps_a_rollup_of_the_panes() {
+    let chain = chain(scan());
+    let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![Rc::clone(&chain)],
+        group_by: Some(vec![]),
+        newest_panes: None,
+    }))
+    .unwrap();
+    assert!(merged_chain(&rollup).is_none());
+    let expanded = expand_pane_chains(&rollup).unwrap();
+    let Some(ASAPOp::SummaryMerge {
+        children, group_by, ..
+    }) = expanded.asap()
+    else {
+        panic!("{:?}", expanded.operator)
+    };
+    assert_eq!((children.len(), group_by), (5, &Some(vec![])));
+    let coverage = rollup.coverage().unwrap();
+    assert_eq!(expanded.coverage(), Some(coverage.clone()));
+    let Some(ASAPOp::SummaryAgg { reduction, .. }) = coverage.definition.asap() else {
+        panic!("{:?}", coverage.definition.operator)
+    };
+    assert_eq!(*reduction, Reduction::by(vec![]));
+    // A rollup merges every input state: it reads a merge of the newest
+    // panes, it is not one.
+    assert!(OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![chain],
+        newest_panes: Some(2),
+        group_by: Some(vec![]),
+    }))
+    .is_err());
+}
+
+/// A rollup reads a merge of the newest panes: every series' newest 2 of 5
+/// panes into one state covers one build by no keys over the newest 2
+/// minutes.
+#[test]
+fn a_rollup_of_the_newest_panes_covers_their_window() {
+    let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![newest(chain(scan()), 2)],
+        newest_panes: None,
+        group_by: Some(vec![]),
+    }))
+    .unwrap();
+    rollup.validate_structure().unwrap();
+    let coverage = rollup.coverage().unwrap();
+    let Some(ASAPOp::SummaryAgg { reduction, .. }) = coverage.definition.asap() else {
+        panic!("{:?}", coverage.definition.operator)
+    };
+    assert_eq!(*reduction, Reduction::by(vec![]));
+    assert_eq!(
+        coverage.selection[0].relative_time,
+        Some((Bound::Excluded(-2 * MINUTE as i64), Bound::Included(0)))
+    );
 }
