@@ -19,7 +19,8 @@
 //! A miss rejects the candidate as invalid, with a reason; only this stage
 //! discards valid candidates.
 //! A candidate whose evaluation of some query takes longer than that
-//! query's latency bound is rejected as invalid too ("Latency" below).
+//! query's latency bound, or than its repeat interval, is rejected as
+//! invalid too ("Latency" below).
 //! Every valid candidate's resource usage is measured node by node over its
 //! physical DAG ([`ResourceUsage`]), and the deployment's [`CostModel`]
 //! chooses among them ("Cost models" below). The rest are reported valid
@@ -205,8 +206,23 @@
 //! the measured table has one; with
 //! one core there is nothing to compact. A query with
 //! `Some(bound)` whose latency is above the
-//! bound makes the candidate invalid, with the latency as the reason.
+//! bound makes the candidate invalid, with the latency as the reason
+//! ([`RejectionCause::LatencyBoundExceeded`]). With or without a bound, a
+//! query repeating every `I` ms whose latency is above `I` makes the
+//! candidate invalid too ([`RejectionCause::LatencyOverRepeatInterval`]):
+//! each evaluation starts before the last one ends, so it falls further
+//! behind with every evaluation. Only a fixed interval is checked: an
+//! estimated rate, a schedule or a one-time query has none. A range
+//! evaluation is checked by its latency per step, as priced: the latency
+//! model gives each step a full core, so a request's steps may run in
+//! parallel. Run one after another they take `S` times as long, which this
+//! check does not assume.
 //! [`ResourceUsage::latency_per_query`] reports every query's latency.
+//!
+//! No memory limit applies outside cost model 3, where the cluster's memory
+//! is declared ([`ClusterLimits::memory_bytes`]); without one, a selected
+//! plan whose peak memory is over [`LARGE_PEAK_MEMORY_BYTES`] gets a
+//! warning, which `stage_pipeline` reports ([`large_peak_memory_warning`]).
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -686,26 +702,77 @@ impl QueryLatency {
     }
 }
 
-/// The first query whose latency is over its bound, as a rejection reason.
-fn latency_violation(cost: &CandidateCost, entries: &[QueryWorkloadEntry]) -> Option<String> {
-    cost.usage
-        .latency_per_query
-        .iter()
-        .zip(entries)
-        .enumerate()
-        .find_map(
+/// The first query whose latency per evaluation is over its
+/// `max_latency_ms` bound or, with no bound broken, over its repeat
+/// interval (a query evaluated every `I` ms whose evaluation takes longer
+/// than `I` falls further behind with every evaluation), as a rejection
+/// cause and reason.
+fn latency_violation(
+    cost: &CandidateCost,
+    entries: &[QueryWorkloadEntry],
+) -> Option<(RejectionCause, String)> {
+    let per_query = || cost.usage.latency_per_query.iter().zip(entries).enumerate();
+    let latency_text = |query: usize, latency: &QueryLatency| {
+        format!(
+            "q{}: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms)",
+            query + 1,
+            latency.total_ms(),
+            latency.compaction_ms,
+            latency.query_ms
+        )
+    };
+    let over_bound =
+        per_query().find_map(
             |(query, (latency, entry))| match entry.requirements.max_latency_ms {
-                Some(bound) if latency.total_ms() > bound => Some(format!(
-                    "q{}: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms) \
-                 is over its {bound} ms bound",
-                    query + 1,
-                    latency.total_ms(),
-                    latency.compaction_ms,
-                    latency.query_ms
+                Some(bound) if latency.total_ms() > bound => Some((
+                    RejectionCause::LatencyBoundExceeded,
+                    format!(
+                        "{} is over its {bound} ms bound",
+                        latency_text(query, latency)
+                    ),
                 )),
                 _ => None,
             },
-        )
+        );
+    over_bound.or_else(|| {
+        per_query().find_map(|(query, (latency, entry))| {
+            match entry.recurrence.fixed_interval_ms() {
+                Some(interval_ms) if latency.total_ms() > interval_ms as f64 => Some((
+                    RejectionCause::LatencyOverRepeatInterval,
+                    format!(
+                        "{} is over its {interval_ms} ms repeat interval, so its evaluations \
+                         cannot keep up",
+                        latency_text(query, latency)
+                    ),
+                )),
+                _ => None,
+            }
+        })
+    })
+}
+
+/// Peak memory above which a candidate's report carries a warning when the
+/// deployment declares no memory capacity: 10^12 bytes (1 TB), more than
+/// one large machine holds.
+pub const LARGE_PEAK_MEMORY_BYTES: u64 = 1_000_000_000_000;
+
+/// A warning when `peak_memory_bytes` is over [`LARGE_PEAK_MEMORY_BYTES`]
+/// and `cost_model` declares no memory capacity (cost models 1 and 2). Under
+/// cost model 3 the cluster's memory is declared and a candidate over it is
+/// rejected ([`RejectionCause::OverClusterCapacity`]), so there is none.
+pub fn large_peak_memory_warning(peak_memory_bytes: u64, cost_model: &CostModel) -> Option<String> {
+    match cost_model {
+        CostModel::ClusterCapacity(_) => None,
+        CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_) => {
+            (peak_memory_bytes > LARGE_PEAK_MEMORY_BYTES).then(|| {
+                format!(
+                    "peak memory {} bytes is over {LARGE_PEAK_MEMORY_BYTES} bytes and the \
+                     deployment declares no memory capacity to check it against",
+                    peak_memory_bytes
+                )
+            })
+        }
+    }
 }
 
 /// Each entry's accuracy target, as the per-query targets Stage 3 checks.
@@ -725,7 +792,7 @@ pub struct Rejection {
     pub reason: String,
 }
 
-/// Why Stage 3 did not select a candidate. The first eight mean the
+/// Why Stage 3 did not select a candidate. The first ten mean the
 /// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
 /// rest mean it was valid and lost under the cost model. JSON: the
 /// snake_case variant name, e.g. `"costlier"`.
@@ -763,6 +830,10 @@ pub enum RejectionCause {
     RawDataNotRetained,
     /// A query's latency is over its `max_latency_ms` bound.
     LatencyBoundExceeded,
+    /// A repeating query's latency per evaluation is over its repeat
+    /// interval, so its evaluations cannot keep up; checked whether or not
+    /// it has a latency bound.
+    LatencyOverRepeatInterval,
     /// Under cost model 3, its usage is over one of the cluster's limits.
     OverClusterCapacity,
     /// Under cost models 1 and 2, its price is higher than the selected
@@ -786,7 +857,7 @@ pub enum RejectionCause {
 
 impl RejectionCause {
     /// Whether the candidate failed a check (executability, accuracy, raw
-    /// data, latency bound or cluster capacity) rather than losing under the
+    /// data, latency bound, repeat interval or cluster capacity) rather than losing under the
     /// cost model.
     pub fn failed_a_check(self) -> bool {
         matches!(
@@ -799,6 +870,7 @@ impl RejectionCause {
                 | Self::NoAccuracyGuarantee
                 | Self::RawDataNotRetained
                 | Self::LatencyBoundExceeded
+                | Self::LatencyOverRepeatInterval
                 | Self::OverClusterCapacity
         )
     }
@@ -1256,9 +1328,8 @@ impl<'a> PlanSelector<'a> {
             node,
             error,
         })?;
-        let violation = latency_violation(&cost, self.entries)
-            .map(|reason| (RejectionCause::LatencyBoundExceeded, reason))
-            .or_else(|| match &settings.cost_model {
+        let violation =
+            latency_violation(&cost, self.entries).or_else(|| match &settings.cost_model {
                 CostModel::ClusterCapacity(limits) => capacity_violation(&cost.usage, limits)
                     .map(|reason| (RejectionCause::OverClusterCapacity, reason)),
                 _ => None,
@@ -8442,6 +8513,154 @@ mod tests {
             rejected.reason
         );
         assert!(!selection.costs.contains_key(&candidates[0].id));
+    }
+
+    /// A query evaluated every minute whose evaluation takes longer than a
+    /// minute never keeps up, so even without a latency bound the
+    /// candidate is invalid. Over data fast enough that rebuilding the
+    /// panes at query time (B2) takes over a minute while merging the
+    /// maintained ones (B1) does not, B2 is rejected with its latency and
+    /// the interval, and B1 is selected.
+    #[test]
+    fn a_candidate_slower_than_a_querys_repeat_interval_is_rejected_without_a_bound() {
+        let rows_per_s = 1e9;
+        let candidates = pane_candidates(rows_per_s);
+        let latency = |c: &PhysicalCandidate| {
+            price(
+                &c.dag,
+                &[repeating(MINUTE)],
+                &arriving(rows_per_s),
+                &PlanSelectionSettings::default(),
+            )
+            .unwrap()
+            .usage
+            .latency_per_query[0]
+        };
+        let (b2, b1) = (latency(&candidates[0]), latency(&candidates[1]));
+        assert!(
+            b1.total_ms() < f64::from(MINUTE) && b2.total_ms() > f64::from(MINUTE),
+            "{b1:?} vs {b2:?}"
+        );
+        let unbounded = every_minute();
+        assert_eq!(unbounded.requirements.max_latency_ms, None);
+        let selection = select_plan(
+            &candidates,
+            &[unbounded],
+            &arriving(rows_per_s),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
+        assert_eq!(selection.selected, candidates[1].id);
+        let rejected = &selection.rejected[0];
+        assert_eq!(rejected.id, candidates[0].id);
+        assert_eq!(rejected.cause, RejectionCause::LatencyOverRepeatInterval);
+        assert!(rejected.cause.failed_a_check());
+        assert_eq!(
+            rejected.reason,
+            format!(
+                "q1: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms) is \
+                 over its {MINUTE} ms repeat interval, so its evaluations cannot keep up",
+                b2.total_ms(),
+                b2.compaction_ms,
+                b2.query_ms
+            )
+        );
+        assert!(!selection.costs.contains_key(&candidates[0].id));
+    }
+
+    /// With no repeat interval (a one-time query) there is nothing to keep
+    /// up with: the slow candidate stays valid and is selected when it is
+    /// cheaper.
+    #[test]
+    fn a_one_time_query_has_no_repeat_interval_to_keep_up_with() {
+        let rows_per_s = 1e9;
+        let candidates = pane_candidates(rows_per_s);
+        let once = QueryWorkloadEntry {
+            recurrence: QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            },
+            ..every_minute()
+        };
+        let selection = select_plan(
+            &candidates,
+            &[once],
+            &arriving(rows_per_s),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
+        // Run once an hour, rebuilding at query time is the cheaper plan,
+        // over a minute per evaluation or not.
+        assert_eq!(selection.selected, candidates[0].id);
+        assert_eq!(selection.rejected.len(), 1, "{:?}", selection.rejected);
+        assert_eq!(selection.rejected[0].id, candidates[1].id);
+        assert_eq!(selection.rejected[0].cause, RejectionCause::Costlier);
+    }
+
+    /// A query over both its latency bound and its repeat interval is
+    /// reported over its bound: the bound is the user's own requirement.
+    /// The interval is also checked for a repetition at a declared phase.
+    #[test]
+    fn a_broken_latency_bound_is_reported_before_the_repeat_interval() {
+        let rows_per_s = 1e9;
+        let candidates = pane_candidates(rows_per_s);
+        let mut bounded = QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: asap_types::workload::RepetitionInterval(MINUTE),
+                evaluation_phase: asap_types::workload::TimestampMs(0),
+            }),
+            ..every_minute()
+        };
+        let select = |entry: &QueryWorkloadEntry| {
+            select_plan(
+                &candidates,
+                std::slice::from_ref(entry),
+                &arriving(rows_per_s),
+                PlanningModels::builtin(),
+            )
+            .unwrap()
+        };
+        let unbounded = select(&bounded);
+        assert_eq!(
+            unbounded.rejected[0].cause,
+            RejectionCause::LatencyOverRepeatInterval
+        );
+        bounded.requirements.max_latency_ms = Some(f64::from(MINUTE));
+        let selection = select(&bounded);
+        assert_eq!(selection.selected, candidates[1].id);
+        assert_eq!(selection.rejected[0].id, candidates[0].id);
+        assert_eq!(
+            selection.rejected[0].cause,
+            RejectionCause::LatencyBoundExceeded
+        );
+    }
+
+    /// Without a declared memory capacity nothing rejects a candidate for
+    /// its memory, so a peak over [`LARGE_PEAK_MEMORY_BYTES`] is reported
+    /// as a warning (the eval's 24 h quantiles plan peaked at 1.43 TB).
+    /// Under cost model 3 the cluster's memory is declared and its capacity
+    /// check applies instead, so there is no warning.
+    #[test]
+    fn a_very_large_peak_memory_is_warned_about_only_without_a_declared_capacity() {
+        let usage_over_time = CostModel::UsageOverTime(ResourceUnitCost::illustrative());
+        assert_eq!(
+            large_peak_memory_warning(1_430_000_000_000, &usage_over_time).as_deref(),
+            Some(
+                "peak memory 1430000000000 bytes is over 1000000000000 bytes and the deployment \
+                 declares no memory capacity to check it against"
+            )
+        );
+        assert_eq!(
+            large_peak_memory_warning(LARGE_PEAK_MEMORY_BYTES, &usage_over_time),
+            None
+        );
+        let cluster = CostModel::ClusterCapacity(ClusterLimits {
+            memory_bytes: u64::MAX,
+            disk_bytes: u64::MAX,
+            cpu_cores: None,
+            objective: ClusterObjective::LowestLatency,
+        });
+        assert_eq!(large_peak_memory_warning(1_430_000_000_000, &cluster), None);
     }
 
     /// When a maintained state's ingestion work needs more than one core,

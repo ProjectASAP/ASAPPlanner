@@ -164,7 +164,9 @@ it (plus once for each query that also reads them directly).
 A selected or costlier plan also says, per query, which metric its accuracy
 was accepted in, e.g. `q1: metric not set; accepted rank (Kll)`.
 - **✗ invalid**: fails a check, with the reason. Examples: an accuracy target
-  the sketch cannot guarantee, an evaluation over the latency bound, a
+  the sketch cannot guarantee, an evaluation over the latency bound, an
+  evaluation of a repeating query that takes longer than its repeat interval
+  (checked even without a latency bound: it could never keep up), a
   query-time scan of raw data the deployment does not retain, or, under cost
   model 3, a plan over the cluster's memory or disk, or a PromQL plan the
   executor cannot compile. A summary the deployment

@@ -171,7 +171,8 @@ const FAILED_CHECK_CAUSES = [
   'failure_probability_resize_failed', 'accuracy_target_missed',
   'count_min_weights_not_proven_non_negative', 'per_entity_aggregate_not_executable',
   'executor_cannot_compile', 'no_accuracy_guarantee',
-  'raw_data_not_retained', 'latency_bound_exceeded', 'over_cluster_capacity',
+  'raw_data_not_retained', 'latency_bound_exceeded', 'latency_over_repeat_interval',
+  'over_cluster_capacity',
 ];
 // Every `stage3_plan_selection.rejected[].cause` Stage 3 writes: the failed
 // checks, then the losses under the cost model (priced, not selected).
@@ -363,7 +364,8 @@ function stageCandidateRows(doc) {
 // The candidate list's header: how many candidates Stage 1 enumerated, how
 // many the document shows when it caps them, why Stage 1 failed (a Pass 1
 // error) and why plan selection failed when it failed for a reason other
-// than rejecting every candidate.
+// than rejecting every candidate, then the selection's warnings (e.g. a
+// very large peak memory with no declared memory capacity).
 function stageCandidateHeader(doc) {
   const logical = doc.stage1_logical_asap_optimization || {};
   const selection = doc.stage3_plan_selection || {};
@@ -371,6 +373,7 @@ function stageCandidateHeader(doc) {
   const error = [
     logical.error ? ` · Stage 1 failed: ${logical.error}` : '',
     selection.error ? ` · selection failed: ${selection.error}` : '',
+    ...(selection.warnings || []).map((warning) => ` · warning: ${warning}`),
   ].join('');
   return `${logical.combinations ?? 0} candidates${shown}${error}`;
 }

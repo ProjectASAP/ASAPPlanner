@@ -91,7 +91,8 @@ populations for instant top-k, quantile and sum) in Stage 1, and
    that is not.
 4. **Stage 3** checks each physical candidate: every query's root guarantee
    against its target (binding the statistics Stage 1 left symbolic from the
-   `DataWorkload`), every query's latency against `max_latency_ms`, raw-data
+   `DataWorkload`), every query's latency against `max_latency_ms` and, for a
+   repeating query, against its repeat interval (with or without a bound), raw-data
    scans against `raw_data_retained`, and, under cost model 3, the cluster's
    limits. It measures the valid ones and selects one under the cost model;
    ties keep enumeration order.

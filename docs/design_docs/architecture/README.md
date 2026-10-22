@@ -31,7 +31,8 @@ flowchart TD
 ```
 
 Stages 1 and 2 enumerate candidates without comparing them. Stage 3 rejects
-the candidates that miss a query's accuracy target or latency bound, or that
+the candidates that miss a query's accuracy target or latency bound, whose
+evaluation of a repeating query takes longer than its repeat interval, or that
 the deployment cannot run, and selects one of the rest under the deployment's
 cost model. Missing accuracy evidence never certifies a candidate: a
 candidate whose output has no guarantee is rejected for an approximate
