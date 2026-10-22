@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ir::operator::asap::ASAPOp;
-use crate::ir::operator::node::{Operator, OperatorNode, OperatorResultKind};
+use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
 use crate::ir::operator::operator_properties::Reduction;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
@@ -235,11 +235,6 @@ pub enum CoverageError {
     /// bad input.
     #[error("the regrouped build does not derive: {reason}")]
     RegroupedBuild { reason: String },
-    /// A regrouping `SummaryMerge` to no keys over a relation's states: a
-    /// global SQL aggregate has one row over no input rows, a merge of no
-    /// states none. Bad input.
-    #[error("a regrouping merge to no keys cannot stand for a global SQL aggregate")]
-    GlobalRelationRegroup,
 }
 
 /// Coverage already derived during one validation, by node address. The
@@ -393,9 +388,6 @@ fn regrouped(merged: SummaryCoverage, keys: &[ColumnId]) -> Result<SummaryCovera
         || *grouping != GroupingStrategy::PerSubpopulationInstance
     {
         return Err(CoverageError::FamilyCannotRegroup);
-    }
-    if keys.is_empty() && child.result_kind == OperatorResultKind::Relation {
-        return Err(CoverageError::GlobalRelationRegroup);
     }
     let state = &merged.definition.schema;
     // The build's input column each key of the state names.

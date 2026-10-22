@@ -183,6 +183,11 @@ enum Kind {
     SummaryMerge {
         state: usize,
         groups: Vec<usize>,
+        /// Whether a merge of no input state outputs one empty state, as a
+        /// global SQL aggregate has one row over no input rows. Only a merge
+        /// with no groups; `false` (no output row) by default.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        emit_empty_global: bool,
     },
     Evaluation {
         state: usize,

@@ -340,9 +340,9 @@ async fn quantiles_rolled_up_keep_the_sketch_bound() {
     }
 }
 
-/// A regrouping merge keys only by group keys of its input states, does
-/// not stand for a global SQL aggregate, and never merges counter states
-/// of different groups.
+/// A regrouping merge keys only by group keys of its input states (or by
+/// none, a global aggregate), and never merges counter states of different
+/// groups.
 #[tokio::test]
 async fn invalid_rollups_are_rejected() {
     let accuracy = AccuracyTarget::max_error(0.05)
@@ -383,9 +383,8 @@ async fn invalid_rollups_are_rejected() {
     for keys in [vec![2], vec![1, 1]] {
         assert!(regroup(keys.clone()).is_err(), "{keys:?}");
     }
-    assert!(regroup(vec![])
-        .unwrap_err()
-        .contains(&CoverageError::GlobalRelationRegroup.to_string()));
+    // No keys: the global build over the same rows.
+    assert!(regroup(vec![]).unwrap().coverage().is_some());
     // Both keys, swapped, are still group keys of the input.
     assert!(regroup(vec![1, 0]).unwrap().coverage().is_some());
     // Rate states merge consecutive windows of one series, not groups.

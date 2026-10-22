@@ -40,9 +40,12 @@
 //! shared across consumers when its row identity is stable across reads, so
 //! an ungrouped aggregate, a `without(..)` grouping, a `Concat`/`SetOp` that
 //! drops its keys, … is always inserted fresh even when it is structurally
-//! identical to something already interned. An ASAP node (summary state and
-//! its evaluations) has no such gate: equal operator, schema and guarantee make
-//! it shareable, exactly as post-ASAP sharing decided before this IR.
+//! identical to something already interned. A `Scan` is the exception: equal
+//! scans read the same source rows, so every reader of one shared scan reads
+//! the rows it would have read alone, a SQL table's keyless rows included.
+//! An ASAP node (summary state and its evaluations) has no such gate: equal
+//! operator, schema and guarantee make it shareable, exactly as post-ASAP
+//! sharing decided before this IR.
 //!
 //! ## Single-query CSE falls out for free
 //!
@@ -56,6 +59,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::NonASAPOp;
 
 /// [`structural_hash`]'s memoization cache: an already-hashed node's `Rc`
 /// pointer to its hash. A fresh cache is always correct; what matters is
@@ -207,7 +211,9 @@ impl InternTable {
         // A node that is not legal to share is never *returned* as a match
         // for something else; it still occupies a fresh slot in the bucket
         // (harmless: later scans require legality of the new node too).
-        let reusable = node.is_asap() || node.schema.has_unique_key();
+        let reusable = node.is_asap()
+            || node.schema.has_unique_key()
+            || matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
         let bucket = self.buckets.entry(hash).or_default();
         if reusable {
             if let Some(existing) = bucket
@@ -404,6 +410,33 @@ mod tests {
             !Rc::ptr_eq(&ra, &rb),
             "no unique key ⇒ never hoisted, even for an identical structural match"
         );
+    }
+
+    /// Two equal scans of a keyless table (SQL rows) are one node: each
+    /// reader reads every row the scan outputs.
+    #[test]
+    fn equal_scans_without_a_unique_key_are_shared() {
+        let table_scan = || {
+            node(NonASAPOp::Scan {
+                source: Source::Table {
+                    table_ref: "metrics".into(),
+                },
+                predicates: vec![],
+                schema: Schema::with_time_index(
+                    vec![
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("city", DataType::Utf8, true),
+                        Field::plain("value", DataType::Float64, true),
+                    ],
+                    0,
+                    vec![],
+                ),
+            })
+        };
+        let a = table_scan();
+        assert!(!a.schema.has_unique_key(), "fixture sanity: keyless rows");
+        let (ra, rb) = two_roots(a, table_scan());
+        assert!(Rc::ptr_eq(&ra, &rb));
     }
 
     /// Grouped quantiles differing only in accuracy keep two roots over one shared scan.

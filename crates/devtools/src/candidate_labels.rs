@@ -216,8 +216,18 @@ pub fn pass2_label(
         .collect();
     let shared = pass2.shared_pane_chains.iter().map(|shared| {
         let build = &candidates[shared.members[0]].build;
+        // The chain is one member's build in panes (a coarser member reads
+        // it rolled up).
         let chain = |node: &OperatorNode| {
-            is_pane_chain_of(node, build, shared.pane_width_ms, shared.pane_count, true)
+            shared.members.iter().any(|&m| {
+                is_pane_chain_of(
+                    node,
+                    &candidates[m].build,
+                    shared.pane_width_ms,
+                    shared.pane_count,
+                    true,
+                )
+            })
         };
         let mut text = format!(
             "one {} in {} × {} panes",
