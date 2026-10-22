@@ -367,12 +367,12 @@ fn boundary(
 /// derives. Memoized per node (the memo keeps each node alive, so its
 /// address is not reused).
 #[derive(Default)]
-struct NodeKeys {
+pub(super) struct NodeKeys {
     memo: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
 }
 
 impl NodeKeys {
-    fn key(&mut self, node: &Rc<OperatorNode>) -> u64 {
+    pub(super) fn key(&mut self, node: &Rc<OperatorNode>) -> u64 {
         if let Some((_, key)) = self.memo.get(&Rc::as_ptr(node)) {
             return *key;
         }

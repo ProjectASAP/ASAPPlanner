@@ -228,6 +228,7 @@ fn reader_build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass::subexpr::MemoGroup;
     use asap_logical_asap_optimization::test_support::{metric_scan, time_range};
     use asap_types::ir::scalar::ColumnRef;
     use asap_types::ir::schema::sketch::{SketchAlgorithm, SketchKind, SketchStatistic};
@@ -398,5 +399,44 @@ mod tests {
             .find(|t| t.params == Some(SketchParams::DDSketch { alpha: 0.01 }))
             .unwrap();
         assert!(readers.iter().all(|r| may_read(strictest, r)));
+    }
+
+    /// Identical expression is group identity: the per-job rate sum of two
+    /// queries is one group, reached by both and read by each query's
+    /// arithmetic, and the summary-capability transformation adds nothing
+    /// for it.
+    #[test]
+    fn identical_sub_expressions_are_one_group_with_two_parents() {
+        use crate::pass::subexpr::groups::memo_of;
+        use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+        use asap_logical_asap_optimization::test_support::lower_promql;
+        use asap_types::ir::properties::AccuracyTarget;
+        use asap_types::ir::QueryRoot;
+        let roots = [
+            "sum by (job) (rate(m[5m])) * 2",
+            "sum by (job) (rate(m[5m])) / 2",
+        ]
+        .iter()
+        .map(|q| QueryRoot::Operator(lower_promql(q, AccuracyTarget::exact())))
+        .enumerate()
+        .collect();
+        let mut memo = memo_of(&generate_per_computation_candidates(roots).unwrap());
+        let before: Vec<usize> = memo.candidates.iter().map(Vec::len).collect();
+        add_shared_builds(&mut memo);
+        let after: Vec<usize> = memo.candidates.iter().map(Vec::len).collect();
+        assert_eq!(before, after);
+        let sums: Vec<&MemoGroup> = memo
+            .groups
+            .iter()
+            .filter(|g| g.node.operator.kind_name() == "Aggregate" && g.queries == vec![0, 1])
+            .collect();
+        let sum = sums.last().expect("the shared sum");
+        assert_eq!(sum.parents.len(), 2);
+        let parents_roots: Vec<Vec<usize>> = sum
+            .parents
+            .iter()
+            .map(|p| memo.groups[p.0 as usize].roots_of.clone())
+            .collect();
+        assert_eq!(parents_roots, vec![vec![0], vec![1]]);
     }
 }
