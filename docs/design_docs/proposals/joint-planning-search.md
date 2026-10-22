@@ -387,6 +387,83 @@ Threshold enumeration still turns each coupling site into discrete choices: a sh
 
 **Cost models 2 and 3.** The same variables. Peaks and capacity limits become linear constraints over the per-node peak contributions, and each objective is as specified.
 
+**Formulation.**
+
+Sets:
+- `Q`: queries; `G`: memo groups; `C(g)`: candidates of group `g`.
+- `ch(g,c)`: child groups that candidate `(g,c)` reads; `impl(g,c)`: groups it implements (more than `{g}` for a fused candidate).
+- `O = {nm, mq, ing, kept}`: materializations (not materialized, built once per evaluation, at ingestion, kept across evaluations).
+- `S`: coupling sites; `T(s)`: thresholds of site `s`.
+- `K = Q ∪ {(g,c,o) : o ≠ nm}`: consumers, the queries and the materialized slots.
+
+Parameters, all priced by Stage 3, in cost per second unless noted:
+- `rate(k)`: evaluations per second of consumer `k`.
+- `w(g,c)`: cost of one computation of `(g,c)`'s own nodes.
+- `a(g,c,o)`: standing cost of slot `(g,c,o)` (ingestion upkeep, kept state).
+- `σ(s,t)`: cost of site `s` at threshold `t`.
+- `may(s,t,g)`: whether group `g` may read site `s` at threshold `t`.
+- `ℓ(g,c)`: latency of one computation, in ms.
+- `B(q)`: the latency limit of query `q`, `min(max_latency_ms, repeat interval)`.
+- `hz(n)`: raw horizon bytes of raw scan `n`; `span(q,h)`: retention that reader `q` needs from pane chain `h`; `β(h)`: cost per second of keeping one span unit of `h`; `p_disk`: disk price.
+
+Variables:
+
+```text
+x[g,c]   ∈ {0,1}   group g is implemented by candidate c
+m[g,c,o] ∈ {0,1}   candidate (g,c) is materialized as o
+u[s,t]   ∈ {0,1}   coupling site s takes threshold t
+r[k,g]   ∈ {0,1}   consumer k computes group g (reaches it through unmaterialized nodes)
+y[k,g,c] ∈ {0,1}   r[k,g] ∧ x[g,c]
+λ[q,g]   ∈ {0,1}   g is computed within q's evaluation (reached through nm or mq nodes)
+R[s]     ≥ 0       raw horizon kept for source s
+keep[h]  ≥ 0       retention kept for pane chain h
+θ        ≥ 0       held memory (memory × latency), added by lazy cuts
+```
+
+Objective, cost model 1:
+
+```text
+min  Σ_k Σ_(g,c) rate(k) · w(g,c) · y[k,g,c]      computation, once per consumer that reaches it
+   + Σ_(g,c,o) a(g,c,o) · m[g,c,o]                standing cost of materialized slots
+   + Σ_(s,t)   σ(s,t) · u[s,t]                    coupling sites at their thresholds
+   + p_disk · Σ_s R[s]  +  Σ_h β(h) · keep[h]     raw and pane retention
+   + θ                                            held memory (lazy)
+```
+
+Constraints:
+
+```text
+(1) cover      Σ_{(h,c): g ∈ impl(h,c)} x[h,c] = need[g]            each needed group covered once
+               need[root(q)] = 1;   need[g] ≥ x[p,c]  for g ∈ ch(p,c)
+(2) materialize Σ_o m[g,c,o] = x[g,c]
+               m[g,c,ing] ≤ Σ_c' m[g',c',ing] + rawsource(g')   for g' ∈ ch(g,c)   (ingestion needs ingestion below)
+(3) reach      r[q,root(q)] = 1;   r[(g,c,o),g'] ≥ m[g,c,o]      for g' ∈ ch(g,c)
+               r[k,g'] ≥ r[k,p] + x[p,c] − Σ_{o≠nm} m[p,c,o] − 1  for g' ∈ ch(p,c)
+(4) product    y[k,g,c] ≥ r[k,g] + x[g,c] − 1
+(5) sites      Σ_t u[s,t] ≤ 1;   x[g,c] ≤ Σ_{t: may(s,t,g)} u[s,t]  for each candidate (g,c) that reads site s
+(6) retention  R[s] ≥ hz(n) · λ[q,n]   for each raw scan n of s and each q
+               keep[h] ≥ span(q,h) · x[q's reader of h]
+(7) latency    λ[q,root(q)] = 1;   λ[q,g'] ≥ λ[q,p] + x[p,c] − m[p,c,ing] − m[p,c,kept] − 1
+               Σ_(g,c) ℓ(g,c) · (λ[q,g] + x[g,c] − 1)^+  + compaction(q)  ≤  B(q)
+               (the product linearized as in (4))
+(8) rules      combination limits, e.g. x[top-k reuse] + x[pane candidate of the same group] ≤ 1
+```
+
+Minimization keeps `r`, `y`, `λ`, `R` and `keep` at their smallest feasible values, so their lower-bound constraints make them exact.
+
+Lazy cuts, added by the loop for an incumbent plan `P` (a set of chosen `(g,c)` and `(g,c,o)`):
+
+```text
+held memory     θ ≥ H(P) · ( Σ_{(g,c) ∈ P} x[g,c] − |P| + 1 )     H(P) = Stage 3's held-memory cost of P
+accuracy        Σ_{(g,c) ∈ B} x[g,c] ≤ |B| − 1                     B = a combination whose composed guarantee fails
+```
+
+Each held-memory cut is binding only when every choice of `P` is made, so it never cuts off another plan, and its bound is exact for `P`.
+
+Cost models 2 and 3 keep (1)–(8) and the cuts, and change the objective:
+- **Cost model 2:** `min π_mem · M + π_cpu · N + π_disk · D`, with `M ≥ Σ peak contributions`, `N ≥` ingestion cores `+` concurrently evaluating queries, and `D ≥` retention.
+- **Cost model 3:** no prices. Add `M ≤ cap_mem`, `D ≤ cap_disk` (and `N ≤ cap_cores`), then minimize the chosen objective: the worst latency `L ≥ L_q` for every `q`, or `M`.
+
 **Why a MILP rather than a hand-written search.** The memo is small: the whole paper workloads have 74 groups and 284 candidates (W-RangeHeavy) and 158 groups and 584 candidates (W-RollupHeavy), each built in under 0.3 s. Cost model 1 is not additive per node:
 - memory held while a query runs costs bytes × that query's latency;
 - how often a node runs depends on the materialization choices above it.
