@@ -90,7 +90,14 @@ pub(crate) struct ImplementationCandidate {
     pub requires_exact_children: Vec<GroupId>,
     /// For a rollup, what it rolls up and from where; `None` otherwise.
     pub rollup_of: Option<RollupRead>,
+    /// The materializations Stage 2 may give it; empty for every one
+    /// Stage 2 allows. A scan group whose readers all read one window is
+    /// only built once (`MatAtQuery`); one read through different windows
+    /// may also be read per reader (`NotMaterialized`)
+    /// ([`scans::scan_materializations`]).
+    pub materializations: Vec<Materialization>,
 }
+
 /// What a [`CandidateOrigin::Rollup`] candidate reads, and what it
 /// rewrites: the search checks that the finer group's chosen
 /// implementation is the one the joint rule would roll up from.

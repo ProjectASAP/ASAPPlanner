@@ -32,6 +32,7 @@ use asap_types::ir::schema::sketch::{GroupingStrategy, SketchParams};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode};
 
+use super::groups::NodeKeys;
 use super::{CandidateOrigin, CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo};
 
 /// One size a shared build may take: the per-parameter maximum
@@ -159,7 +160,8 @@ fn same_size(a: &SketchParams, b: &SketchParams) -> bool {
 
 /// The site key of `candidate`'s summary build, when it is a shareable
 /// one over a group of `memo`: a hash of the family (algorithm and
-/// grouping, or the exact accumulator), the input group, the reduction,
+/// grouping, or the exact accumulator), the input group's structure (equal
+/// input groups are one input), the reduction,
 /// the grouping, the filter, and the item and weight.
 fn site_key(memo: &Memo, candidate: &ImplementationCandidate) -> Option<u64> {
     let (build, _) = reader_build(candidate)?;
@@ -174,10 +176,14 @@ fn site_key(memo: &Memo, candidate: &ImplementationCandidate) -> Option<u64> {
     else {
         return None;
     };
-    let input_group = candidate.children.iter().find(|&&GroupId(g)| {
-        let node = &memo.groups[g as usize].node;
-        Rc::ptr_eq(node, child) || **node == **child
-    })?;
+    // The build reads one of its child groups; equal input groups (two
+    // queries' identical windows, which are not one group without a
+    // unique key) are one input, as the rule's `same_input_data` decides.
+    candidate
+        .children
+        .iter()
+        .find(|&&GroupId(g)| Rc::ptr_eq(&memo.groups[g as usize].node, child))?;
+    let input = (NodeKeys::default().key(child), input);
     let family_key = match family {
         FieldDataType::Sketch(kind, strategy) => format!("{:?}/{strategy:?}", kind.algorithm()),
         exact => format!("{exact:?}"),
@@ -185,8 +191,8 @@ fn site_key(memo: &Memo, candidate: &ImplementationCandidate) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     (
         family_key,
-        input_group,
-        format!("{reduction:?}/{grouping:?}/{filter:?}/{input:?}"),
+        input.0,
+        format!("{reduction:?}/{grouping:?}/{filter:?}/{:?}", input.1),
     )
         .hash(&mut hasher);
     Some(hasher.finish())
@@ -315,6 +321,7 @@ mod tests {
                 children: vec![GroupId(1)],
                 origin: CandidateOrigin::Pass1,
                 coupling_sites: Vec::new(),
+                materializations: Vec::new(),
                 budget_share: 1,
                 requires_exact_children: Vec::new(),
                 rollup_of: None,
@@ -441,5 +448,54 @@ mod tests {
             .map(|p| memo.groups[p.0 as usize].roots_of.clone())
             .collect();
         assert_eq!(parents_roots, vec![vec![0], vec![1]]);
+    }
+
+    /// On a memo built by `memo_of`: the 0.9 quantile of one 5-minute
+    /// window within 1% and within 2% error. The scan is one group; the two
+    /// windows (no unique key) are a group each but equal, so each query's
+    /// KLL candidate gets a shared-build twin with one site, whose
+    /// thresholds are the two sizes.
+    #[test]
+    fn kll_readers_of_equal_windows_share_a_site_on_a_real_memo() {
+        use crate::pass::subexpr::groups::memo_of;
+        use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+        use asap_logical_asap_optimization::test_support::lower_promql;
+        use asap_types::ir::properties::AccuracyTarget;
+        use asap_types::ir::QueryRoot;
+        let roots = [0.01, 0.02]
+            .iter()
+            .map(|&e| {
+                QueryRoot::Operator(lower_promql(
+                    "quantile_over_time(0.9, m[5m])",
+                    AccuracyTarget::max_error(e),
+                ))
+            })
+            .enumerate()
+            .collect();
+        let mut memo = memo_of(&generate_per_computation_candidates(roots).unwrap());
+        add_shared_builds(&mut memo);
+        let (readers, sites) = shared(&memo);
+        let kll_sites: Vec<&CouplingSite> = sites
+            .iter()
+            .filter(|site| {
+                size_thresholds(&memo, site)
+                    .iter()
+                    .all(|t| matches!(t.params, Some(SketchParams::Kll { .. })))
+            })
+            .collect();
+        assert_eq!(kll_sites.len(), 1);
+        let kll_readers: Vec<_> = readers
+            .iter()
+            .filter(|r| r.coupling_sites.contains(kll_sites[0]))
+            .collect();
+        assert_eq!(kll_readers.len(), 2);
+        assert_ne!(kll_readers[0].implements, kll_readers[1].implements);
+        let mut ks: Vec<u32> = size_thresholds(&memo, kll_sites[0])
+            .iter()
+            .map(k_of)
+            .collect();
+        ks.sort_unstable();
+        assert_eq!(ks.len(), 2);
+        assert!(ks[0] < ks[1]);
     }
 }
