@@ -405,3 +405,26 @@ fn expansion_keeps_a_rollup_of_the_panes() {
     }))
     .is_err());
 }
+
+/// A rollup reads a merge of the newest panes: every series' newest 2 of 5
+/// panes into one state covers one build by no keys over the newest 2
+/// minutes.
+#[test]
+fn a_rollup_of_the_newest_panes_covers_their_window() {
+    let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![newest(chain(scan()), 2)],
+        newest_panes: None,
+        group_by: Some(vec![]),
+    }))
+    .unwrap();
+    rollup.validate_structure().unwrap();
+    let coverage = rollup.coverage().unwrap();
+    let Some(ASAPOp::SummaryAgg { reduction, .. }) = coverage.definition.asap() else {
+        panic!("{:?}", coverage.definition.operator)
+    };
+    assert_eq!(*reduction, Reduction::by(vec![]));
+    assert_eq!(
+        coverage.selection[0].relative_time,
+        Some((Bound::Excluded(-2 * MINUTE as i64), Bound::Included(0)))
+    );
+}

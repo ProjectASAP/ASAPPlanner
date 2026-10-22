@@ -367,6 +367,10 @@ impl ASAPOp {
                 schema
             }
             FinalizeExactAccumulator { child } => {
+                // A rollup finalizes as the coarse build it stands for.
+                if let Some(build) = rolled_up_build(child) {
+                    return FinalizeExactAccumulator { child: build }.output_schema();
+                }
                 // Merged panes finalize as one build over their window.
                 if super::pane_chain::merged_chain(child).is_some() {
                     return FinalizeExactAccumulator {
@@ -782,6 +786,59 @@ impl ASAPOp {
     }
 }
 
+/// The build a rollup (a `SummaryMerge` with `group_by` of one input)
+/// stands for: the input's build (one build over a merged chain's window)
+/// grouped by the input columns the rollup's keys name. `None` for any
+/// other node, or a rollup whose build does not derive.
+fn rolled_up_build(state: &OperatorNode) -> Option<Rc<OperatorNode>> {
+    let ASAPOp::SummaryMerge {
+        children,
+        group_by: Some(keys),
+        ..
+    } = state.asap()?
+    else {
+        return None;
+    };
+    let [input] = children.as_slice() else {
+        return None;
+    };
+    let build = match input.asap()? {
+        ASAPOp::SummaryAgg { .. } => (**input).clone(),
+        _ if super::pane_chain::merged_chain(input).is_some() => {
+            super::pane_chain::merged_window_build(input).ok()?
+        }
+        _ => return None,
+    };
+    let ASAPOp::SummaryAgg {
+        child,
+        family,
+        input: update,
+        reduction,
+        grouping,
+        filter,
+    } = build.asap()?
+    else {
+        return None;
+    };
+    let mapped = keys
+        .iter()
+        .map(|&key| match reduction {
+            Reduction::Reduce(by) if !by.is_without() => by.keys().get(key).copied(),
+            Reduction::PerEntity => Some(key),
+            Reduction::Reduce(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    OperatorNode::new_shared(super::node::Operator::ASAP(ASAPOp::SummaryAgg {
+        child: Rc::clone(child),
+        family: family.clone(),
+        input: update.clone(),
+        reduction: Reduction::by(mapped),
+        grouping: grouping.clone(),
+        filter: filter.clone(),
+    }))
+    .ok()
+}
+
 /// The schema of a regrouping `SummaryMerge` over states of schema `input`:
 /// the key columns `keys`, in order, then the state column. Each key must
 /// be a distinct plain column of `input` other than its time column.
@@ -847,8 +904,14 @@ fn source_kind(node: &OperatorNode) -> OperatorResultKind {
 /// input.
 fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
     use crate::ir::schema::SummaryInputExpr;
+    // A rollup reads items as the coarse build it stands for.
+    let rolled_up = rolled_up_build(state);
+    let build = match &rolled_up {
+        Some(build) => build.asap(),
+        None => state.summary_build(),
+    };
     let (Some(ASAPOp::SummaryAgg { child, input, .. })
-    | Some(ASAPOp::PaneChain { child, input, .. })) = state.summary_build()
+    | Some(ASAPOp::PaneChain { child, input, .. })) = build
     else {
         return None;
     };

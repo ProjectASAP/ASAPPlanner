@@ -1030,3 +1030,22 @@ fn group_by_is_serialized_only_for_a_rollup() {
     );
     assert!(rollup(state, vec![1]).is_ok());
 }
+
+/// An exact sum rolled up from (job, region) to region finalizes to the
+/// direct build's column, type and nullability.
+#[test]
+fn a_finalized_rollup_has_the_direct_builds_schema() {
+    let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let finer = grouped(table(), sum.clone(), Reduction::by(vec![JOB, REGION]));
+    let coarse = grouped(table(), sum, Reduction::by(vec![REGION]));
+    let finalize = |state: Rc<OperatorNode>| {
+        OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: state,
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        finalize(rollup(finer, vec![1]).unwrap()).schema,
+        finalize(coarse).schema
+    );
+}

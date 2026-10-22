@@ -298,6 +298,7 @@ impl SummaryCoverage {
             // window does.
             Some(ASAPOp::SummaryMerge {
                 newest_panes: Some(_),
+                group_by: None,
                 ..
             }) => of_summary_agg(
                 &crate::ir::operator::pane_chain::merged_window_build(node).map_err(|error| {
@@ -388,13 +389,9 @@ fn regrouped(merged: SummaryCoverage, keys: &[ColumnId]) -> Result<SummaryCovera
     else {
         return Err(CoverageError::NotSummary);
     };
-    // Counter states merge consecutive windows of one series; a family
-    // without a merge merges nothing; a Hydra's groups share one state.
-    let merges_groups = matches!(
-        FamilyCapability::of(family).merge_inputs,
-        Some(MergeInputRule::Disjoint | MergeInputRule::MayOverlap)
-    );
-    if !merges_groups || *grouping != GroupingStrategy::PerSubpopulationInstance {
+    if !FamilyCapability::merges_groups(family)
+        || *grouping != GroupingStrategy::PerSubpopulationInstance
+    {
         return Err(CoverageError::FamilyCannotRegroup);
     }
     if keys.is_empty() && child.result_kind == OperatorResultKind::Relation {

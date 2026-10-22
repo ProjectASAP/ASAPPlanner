@@ -19,7 +19,7 @@ use planner_types::ir::physical_export::{
 };
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{
-    DataType, FamilyCapability, FieldDataType, MergeInputRule, SketchStatistic, SummaryInputExpr,
+    DataType, FamilyCapability, FieldDataType, SketchStatistic, SummaryInputExpr,
 };
 // `promql_rows` reads `LogicalOperator` and `OperatorNode` through `super::*`
 // only in its test-support helpers.
@@ -1034,15 +1034,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 // share one state.
                 Some(keys) => {
                     let family = &input.fields[state].dtype;
-                    let merges_groups = matches!(
-                        FamilyCapability::of(family).merge_inputs,
-                        Some(MergeInputRule::Disjoint | MergeInputRule::MayOverlap)
-                    ) && !matches!(
-                        family,
-                        FieldDataType::Sketch(_, grouping)
-                            if *grouping != planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance
-                    );
-                    if !merges_groups {
+                    if !FamilyCapability::merges_groups(family) {
                         return Err(invalid(format!(
                             "a rollup of {family:?} states: the family cannot merge different groups"
                         )));

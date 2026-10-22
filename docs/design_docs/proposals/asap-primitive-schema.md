@@ -115,7 +115,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2.1 |
 | How is it computed? | by the planner, from the sub-DAG the node covers, in one walk that yields both the definition and the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; cached per node | §4.2.3 |
-| What uses it? | merge (in #646); rollup, slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
+| What uses it? | merge (in #646), rollup; slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.1, §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
@@ -823,11 +823,11 @@ input groups                       output groups
 | Question | Answer |
 |---|---|
 | What comes out? | the children's schema; with `group_by`, its columns in order, then the state column |
-| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` is empty over a SQL relation (a global SQL aggregate has a row over no input rows, a merge of no states has none); `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra) |
+| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` is empty over a SQL relation (a global SQL aggregate has a row over no input rows, a merge of no states has none); `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra); `group_by` together with `newest_panes` |
 | What is its coverage? | the shared `definition` (with `group_by`, the same build grouped by the columns `group_by` names), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(−2m, −1m]` and `(−1m, 0]` give `(−2m, 0]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
 | State or value? | state in, state out |
 
-**Guarantee after a rollup.** The groups of one build partition its rows, so the states a rollup merges into one output group are disjoint, and the family-capability table's merged error applies. A rolled-up state of these families is the state one build of the same size would have over the coarse group's rows, so it keeps that build's guarantee:
+**Guarantee after a rollup.** The groups of one build partition its rows, so the states a rollup merges into one output group are disjoint, and the family-capability table's merged error applies. A rolled-up state of these families keeps the guarantee one build of the same size would have over the coarse group's rows; most are exactly that build's state:
 
 | Family | Merge | Guarantee of the rolled-up state |
 |---|---|---|

@@ -104,6 +104,22 @@ pub enum MergedError {
 }
 
 impl FamilyCapability {
+    /// Whether a rollup may merge different groups' states of `family`: its
+    /// merge takes disjoint or overlapping inputs, and each group has its own
+    /// state. Counter states merge consecutive windows of one series; a
+    /// family without a merge merges nothing; a Hydra's groups share one
+    /// state.
+    pub fn merges_groups(family: &FieldDataType) -> bool {
+        matches!(
+            Self::of(family).merge_inputs,
+            Some(MergeInputRule::Disjoint | MergeInputRule::MayOverlap)
+        ) && !matches!(
+            family,
+            FieldDataType::Sketch(_, grouping)
+                if *grouping != GroupingStrategy::PerSubpopulationInstance
+        )
+    }
+
     /// Whether one state of the family answers `statistic`.
     pub fn answers(&self, statistic: &SketchStatistic) -> bool {
         self.readout(statistic).is_some()
@@ -365,6 +381,60 @@ mod tests {
                 assert!(!capability.answers(&statistic), "{family:?} {statistic:?}");
             }
         }
+    }
+
+    /// A rollup merges different groups' states only of a family whose
+    /// merge takes disjoint or overlapping inputs and that keeps one state
+    /// per group: not counters, IRate or a Hydra.
+    #[test]
+    fn only_per_group_mergeable_families_merge_groups() {
+        use crate::ir::schema::{HydraKind, HydraParams};
+        let kll = sketch(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+        );
+        assert!(FamilyCapability::merges_groups(&kll));
+        assert!(FamilyCapability::merges_groups(
+            &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        ));
+        for (kind, params) in [
+            (ExactKind::Rate, ExactParams::Rate),
+            (ExactKind::Increase, ExactParams::Increase),
+            (ExactKind::IRate, ExactParams::IRate),
+        ] {
+            assert!(!FamilyCapability::merges_groups(
+                &FieldDataType::ExactAggregate(kind, params)
+            ));
+        }
+        let FieldDataType::Sketch(kind, _) = sketch(
+            SketchAlgorithm::Cms,
+            SketchParams::Cms {
+                width: 64,
+                depth: 5,
+            },
+        ) else {
+            unreachable!()
+        };
+        let hydra = FieldDataType::Sketch(
+            kind,
+            GroupingStrategy::SharedMultiSubpopulation {
+                kind: HydraKind::HydraCms,
+                params: HydraParams::HydraCms {
+                    width: 64,
+                    depth: 5,
+                    shared_rows: 3,
+                    shared_columns: 256,
+                },
+            },
+        );
+        assert_eq!(
+            FamilyCapability::of(&hydra).merge_inputs,
+            Some(MergeInputRule::Disjoint)
+        );
+        assert!(!FamilyCapability::merges_groups(&hydra));
     }
 
     /// An exact accumulator is read as its finalized value, not a readout.
