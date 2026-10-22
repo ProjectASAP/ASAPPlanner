@@ -526,6 +526,48 @@ fn assigned_candidate(
     })
 }
 
+/// One materialization candidate of a plan, as Stage 2 finds it: a summary
+/// build, or the highest node of a shared non-summary sub-DAG.
+#[derive(Debug, Clone)]
+pub struct MaterializationSlot {
+    /// The node, in the implemented plan.
+    pub node: Rc<OperatorNode>,
+    /// The queries (indices into the roots) that read it.
+    pub readers: Vec<usize>,
+    /// Its options, `NotMaterialized` first.
+    pub options: Vec<Materialization>,
+    /// The slots below it (by index): one at ingestion time needs every one
+    /// below it at ingestion time too.
+    pub below: Vec<usize>,
+}
+
+/// The materialization candidates of `roots`, in the order
+/// [`optimize_physical_asap_assigned`]'s `choose` is called for them, with
+/// their options: what a search that chooses each one itself needs.
+pub fn materialization_slots(
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+) -> Result<Vec<MaterializationSlot>, PhysicalASAPOptimizationError> {
+    let mut memo = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
+    check_panes_on_range_steps(&mat_candidates, entries)?;
+    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
+    let below = candidates_below(&nodes);
+    Ok(mat_candidates
+        .iter()
+        .zip(below)
+        .map(|(c, below)| MaterializationSlot {
+            node: Rc::clone(&c.node),
+            readers: c.readers.clone(),
+            options: c.options(),
+            below,
+        })
+        .collect())
+}
+
 /// The number of physical candidates [`optimize_physical_asap`] returns for
 /// `roots`, without building them; `Err` when a candidate cannot be
 /// implemented.
