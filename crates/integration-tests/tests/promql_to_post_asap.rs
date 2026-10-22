@@ -13,9 +13,7 @@ use asap_integration_tests::physical_export::{
     at_ingestion, at_ingestion_physical_asap_dag, physical_asap_dag,
 };
 use asap_integration_tests::planning::logical_candidates;
-use asap_logical_asap_optimization::accuracy::OperandDomain;
 use asap_physical_asap_optimization::PhysicalCandidate;
-use asap_plan_selection::AccuracyEvidenceProvider;
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::Selection;
 use asap_types::ir::operator::operator_properties::Reduction;
@@ -683,29 +681,13 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
     assert_eq!(restored, node.payload);
 }
 
-struct FixtureQuantileDomain {
-    lower: f64,
-    upper: f64,
-}
-impl AccuracyEvidenceProvider for FixtureQuantileDomain {
-    fn operand_domain(&self, _: &OperatorNode) -> Option<OperandDomain> {
-        Some(OperandDomain {
-            lower: self.lower,
-            upper: self.upper,
-            max_samples: 1000,
-            contract: "enforced nonempty finite fixture window".into(),
-        })
-    }
-}
-
-/// `query` lowered at `planned` and selected with `evidence` at `accuracy`:
-/// the physical candidates
-/// whose two summaries are both DDSketch, and plan selection over all of them.
+/// `query` lowered at `planned` and selected at `accuracy`: the physical
+/// candidates whose two summaries are both DDSketch, and plan selection over
+/// all of them.
 fn ddsketch_ratio_selection(
     query: &str,
     planned: AccuracyTarget,
     accuracy: AccuracyTarget,
-    evidence: &dyn AccuracyEvidenceProvider,
 ) -> (Vec<PhysicalCandidate>, Selection) {
     let root = lower_promql(query, planned).unwrap();
     let run = asap_plan_selection::run_stage1_to_stage3_with(
@@ -721,7 +703,7 @@ fn ddsketch_ratio_selection(
             range_evaluation: None,
         }],
         &DataWorkload::default(),
-        PlanningModels::builtin().with_evidence(evidence),
+        PlanningModels::builtin(),
         asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .unwrap();
@@ -747,57 +729,17 @@ fn ddsketch_ratio_selection(
     (ratios, run.stage3_plan_selection.unwrap())
 }
 
-/// A missing proof for one side must not hide an invalid proof for the other.
-#[test]
-fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
-    struct PartialUnsafeDomain;
-    impl AccuracyEvidenceProvider for PartialUnsafeDomain {
-        fn operand_domain(&self, operand: &OperatorNode) -> Option<OperandDomain> {
-            let Some(NonASAPOp::Aggregate { measures, .. }) = operand.non_asap() else {
-                return None;
-            };
-            matches!(
-                measures.as_slice(),
-                [asap_types::ir::operator::agg_intent::AggIntent::Quantile { q, .. }] if *q == 0.9
-            )
-            .then(|| OperandDomain {
-                lower: -1.0,
-                upper: 1.0,
-                max_samples: 1000,
-                contract: "unsafe numerator".into(),
-            })
-        }
-    }
-
-    let (ratios, selection) = ddsketch_ratio_selection(
-        "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-        AccuracyTarget::max_error(0.01),
-        AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative),
-        &PartialUnsafeDomain,
-    );
-    assert!(!ratios.is_empty());
-    assert!(
-        ratios
-            .iter()
-            .all(|candidate| !selection.costs.contains_key(&candidate.id)),
-        "{selection:?}"
-    );
-}
-
-/// The committed planner alpha is exercised against the pinned sketch implementation.
+/// A ratio of two DDSketch quantiles is selected with no operand-domain
+/// evidence, and the committed planner alpha is exercised against the
+/// pinned sketch implementation on one-signed data.
 #[test]
 fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
     for sign in [-1., 1.] {
-        let evidence = FixtureQuantileDomain {
-            lower: if sign < 0. { -100. } else { 1. },
-            upper: if sign < 0. { -1. } else { 100. },
-        };
         let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
         let (ratios, selection) = ddsketch_ratio_selection(
             "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
             AccuracyTarget::max_error(0.01),
             target.clone(),
-            &evidence,
         );
         let accepted: Vec<_> = ratios
             .iter()

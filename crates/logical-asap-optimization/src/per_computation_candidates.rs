@@ -120,8 +120,8 @@ use thiserror::Error;
 use crate::accuracy::composition::propagate;
 use crate::accuracy::composition::raw_data_samples_sign_statistic;
 use crate::accuracy::composition::{
-    additive_as_absolute, StreamNorm, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT,
-    PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
+    additive_as_absolute, StreamNorm, GROUP_ROW_COUNT, PRODUCT_OPERAND_DOMAINS,
+    QUOTIENT_OPERAND_DOMAINS,
 };
 use crate::accuracy::estimators::local_guarantee;
 use crate::accuracy::estimators::{hll, univmon};
@@ -2440,8 +2440,11 @@ type Operand = (Option<AccuracyGuarantee>, Option<f64>);
 ///   `|c|` (or `1/|c|`); a relative error is kept, as it is by `x · y` or
 ///   `x / y` with `y` exact.
 /// - `x · y` of two relative errors: relative `a + b + a·b`.
-/// - `x · y` of two other estimates, `x / y` with `y` approximate: a bound
-///   that needs enforced operand domains, left symbolic
+/// - `x / y` with `y` a relative error and `x` a relative error or exact:
+///   relative `(a + b)/(1 − b)` (`a = 0` for an exact `x`), none when
+///   `b ≥ 1`.
+/// - `x · y` of two other estimates, `x / y` with any other approximate
+///   `y`: a bound that needs enforced operand domains, left symbolic
 ///   ([`operand_domain_statistic`]) for plan selection to bind.
 /// - Everything else (a relative error shifted by a constant or added to
 ///   another, a rank error, `%`, `^`, `atan2`) has none.
@@ -2478,6 +2481,13 @@ pub(crate) fn arithmetic_guarantee(
             Some(0.0) => None,
             c => scaled(l, c.map(|c| 1.0 / c.abs())),
         },
+        (ArithmeticOpKind::Div, _, false) if statistic.is_none() => propagate(
+            &CompositionOperator::ExactDivision,
+            &[l, r],
+            None,
+            &PropagationStats::default(),
+        )
+        .ok(),
         (ArithmeticOpKind::Mul | ArithmeticOpKind::Div, _, _) => symbolic(l, r, statistic?),
         _ => None,
     }?;
@@ -2492,11 +2502,11 @@ pub(crate) fn arithmetic_guarantee(
 /// its operands' domains, when it is one whose bound needs them: a product
 /// of two estimates, other than of two relative errors
 /// ([`PRODUCT_OPERAND_DOMAINS`]); a quotient with an approximate
-/// denominator ([`DIVISION_OPERAND_DOMAINS`] when both operands are
-/// relative or exact, [`QUOTIENT_OPERAND_DOMAINS`] otherwise). `None` for
-/// any other operation, or when an operand's error has no value form (a
-/// rank error). Plan selection (Stage 3) finds the operations to bind with
-/// this same rule.
+/// denominator, other than of relative or exact over relative
+/// ([`QUOTIENT_OPERAND_DOMAINS`]). `None` for any other operation (a
+/// product or quotient of relative errors has a closed form), or when an
+/// operand's error has no value form (a rank error). Plan selection
+/// (Stage 3) finds the operations to bind with this same rule.
 pub fn operand_domain_statistic(
     op: &ArithmeticOpKind,
     l: &AccuracyGuarantee,
@@ -2523,11 +2533,9 @@ pub fn operand_domain_statistic(
         {
             Some(PRODUCT_OPERAND_DOMAINS)
         }
-        ArithmeticOpKind::Div if !r.is_exact() => Some(if relative(l) && relative(r) {
-            DIVISION_OPERAND_DOMAINS
-        } else {
-            QUOTIENT_OPERAND_DOMAINS
-        }),
+        ArithmeticOpKind::Div if !r.is_exact() && !(relative(l) && relative(r)) => {
+            Some(QUOTIENT_OPERAND_DOMAINS)
+        }
         _ => None,
     }
 }
@@ -2586,19 +2594,14 @@ fn shifted(input: AccuracyGuarantee) -> Option<AccuracyGuarantee> {
 
 /// A product or quotient whose bound needs its operands' domains, which
 /// Stage 1 does not read: the bound is the symbolic `statistic`
-/// ([`operand_domain_statistic`]), relative for a ratio of relative errors
-/// and absolute otherwise, with the union bound on the failure probability.
+/// ([`operand_domain_statistic`]), absolute, with the union bound on the
+/// failure probability.
 fn symbolic(
     l: AccuracyGuarantee,
     r: AccuracyGuarantee,
     statistic: &'static str,
 ) -> Option<AccuracyGuarantee> {
     let (metric, operator, rule) = match statistic {
-        DIVISION_OPERAND_DOMAINS => (
-            AccuracyMetric::Relative,
-            CompositionOperator::ExactDivision,
-            "relative_division_needs_operand_domains",
-        ),
         QUOTIENT_OPERAND_DOMAINS => (
             AccuracyMetric::ABSOLUTE,
             CompositionOperator::ExactDivision,
@@ -3741,10 +3744,10 @@ mod tests {
         /// `|x|·e_y + |y|·e_x + e_x·e_y`, and a quotient with an approximate
         /// denominator one that needs the denominator bounded away from
         /// zero: both need operand domains, so Stage 1 leaves them symbolic
-        /// for plan selection to bind; a ratio of relative errors keeps its
-        /// relative form. A product of relative errors has the closed form
-        /// `(1 + a)(1 + b) − 1`. The failure probability is the union bound.
-        /// A rank error composes to none.
+        /// for plan selection to bind. Relative errors need no domain: a
+        /// product has the closed form `(1 + a)(1 + b) − 1`, a quotient
+        /// `(a + b) / (1 − b)` (`a = 0` for an exact numerator). The failure
+        /// probability is the union bound. A rank error composes to none.
         #[test]
         fn products_and_quotients_of_estimates_have_symbolic_bounds() {
             use ArithmeticOpKind::*;
@@ -3773,9 +3776,20 @@ mod tests {
                     "{quotient:?}"
                 );
             }
-            let ratio = of(&arith(Div, scalar(rel(0.01)), scalar(rel(0.02)))).unwrap();
+            let ratio = of(&arith(
+                Div,
+                scalar(with_bound(AccuracyMetric::Relative, 0.01, 0.001)),
+                scalar(with_bound(AccuracyMetric::Relative, 0.02, 0.002)),
+            ))
+            .unwrap();
             assert_eq!(ratio.spec.accuracy_metric, AccuracyMetric::Relative);
-            assert_eq!(ratio.spec.error, unknown(DIVISION_OPERAND_DOMAINS));
+            assert!(close(bound(&ratio), (0.01 + 0.02) / (1.0 - 0.02)));
+            assert!(close(delta(&ratio), 0.003));
+            let reciprocal = of(&arith(Div, lit(2.0), scalar(rel(0.02)))).unwrap();
+            assert_eq!(reciprocal.spec.accuracy_metric, AccuracyMetric::Relative);
+            assert!(close(bound(&reciprocal), 0.02 / (1.0 - 0.02)));
+            // A denominator bound of 1 or more leaves the ratio unbounded.
+            assert_eq!(of(&arith(Div, scalar(rel(0.01)), scalar(rel(1.0)))), None);
             let relative = of(&arith(Mul, scalar(rel(0.01)), scalar(rel(0.02)))).unwrap();
             assert_eq!(relative.spec.accuracy_metric, AccuracyMetric::Relative);
             assert!(close(bound(&relative), 0.01 + 0.02 + 0.0002));

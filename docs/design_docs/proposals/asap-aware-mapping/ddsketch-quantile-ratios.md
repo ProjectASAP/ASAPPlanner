@@ -3,7 +3,12 @@
 > **Status: historical.** The DDSketch ratio candidate and its
 > `quantile_input_domain` evidence belonged to the legacy replacement search,
 > which has been removed; Pass 1 does not offer a ratio candidate. The
-> document is kept as a record of the bound and its preconditions.
+> document is kept as a record of the bound and its preconditions. Stage 1
+> now composes a ratio of two relative errors with the same bound,
+> `(a + b)/(1 − b)`, without operand domains: it relies on each operand's
+> own relative guarantee, as a single quantile does, and a zero denominator
+> gives the same non-finite answer exactly and approximately (see
+> [accuracy models](../../concepts/accuracy-models.md)).
 
 Planner uses `asap_sketchlib` commit `da3635a80f8f854d47b772d49d5a9e5fb6927d8e` from [sketchlib PR #141](https://github.com/ProjectASAP/asap_sketchlib/pull/141) for mapping bounds and numerical integration tests. This pin does not update Collector or backend deployments.
 

@@ -13,9 +13,6 @@ pub const INPUT_ROW_COUNT: &str = "input_row_count";
 pub(crate) const GROUP_ROW_COUNT: &str = "group_row_count";
 /// Whether every input value is non-negative.
 pub(crate) const VALUES_NON_NEGATIVE: &str = "values_non_negative";
-/// The relative bound of a quantile ratio, given enforced operand domains
-/// (`OperandDomain`).
-pub const DIVISION_OPERAND_DOMAINS: &str = "division_operand_domains";
 /// The absolute bound of a product of two estimates,
 /// `|x|·e_y + |y|·e_x + e_x·e_y`, given enforced operand domains.
 pub const PRODUCT_OPERAND_DOMAINS: &str = "product_operand_domains";
@@ -421,13 +418,18 @@ fn relative_fold(
     ))
 }
 
-/// Exact division of two relative-value estimates. If the numerator is
-/// within `a` and the denominator within `b`, their ratio is within
-/// `(a + b) / (1 - b)`. DDSketch supplies those deterministic bounds.
+/// Exact division of two relative-value estimates (an exact operand has
+/// bound 0). If the numerator is within relative `a` and the denominator
+/// within `b < 1`, the ratio is within
+/// `max((1 + a)/(1 − b) − 1, 1 − (1 − a)/(1 + b)) = (a + b)/(1 − b)`, and
+/// fails with the union bound of their failure probabilities. No operand
+/// domain is needed: a relative bound keeps a zero denominator at zero, so
+/// the true and estimated ratios are then the same non-finite value.
+/// Float64 overflow and underflow of the quotient are not bounded, as for a
+/// product.
 fn exact_division(
     op: &CompositionOperator,
     inputs: &[AccuracyGuarantee],
-    stats: &PropagationStats,
 ) -> Result<AccuracyGuarantee, AccuracyError> {
     let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
         operator: op.clone(),
@@ -454,58 +456,10 @@ fn exact_division(
             "denominator relative bound is unavailable".into(),
         ));
     };
-    if !(numerator.is_finite()
-        && denominator.is_finite()
-        && numerator >= 0.0
-        && (0.0..1.0).contains(&denominator))
-    {
+    if !(numerator.is_finite() && numerator >= 0.0 && (0.0..1.0).contains(&denominator)) {
         return Err(unsupported(
             "division needs finite non-negative bounds and a denominator bound below one".into(),
         ));
-    }
-    let Some(domains) = &stats.division_operand_domains else {
-        return Err(unsupported(
-            "division needs finite operand domains and a nonzero denominator proof".into(),
-        ));
-    };
-    for domain in domains {
-        if !domain.lower.is_finite()
-            || !domain.upper.is_finite()
-            || domain.lower > domain.upper
-            || domain.contract.trim().is_empty()
-        {
-            return Err(unsupported("invalid division operand domain".into()));
-        }
-    }
-    if domains[1].lower <= 0.0 && domains[1].upper >= 0.0 {
-        return Err(unsupported("denominator domain includes zero".into()));
-    }
-    // Keep the true and perturbed quotients finite and out of the
-    // subnormal range, where Float64 division loses relative accuracy.
-    // A nonzero numerator interval touching zero cannot prove this.
-    let num = &domains[0];
-    if num.lower <= 0.0 && num.upper >= 0.0 && (num.lower != 0.0 || num.upper != 0.0) {
-        return Err(unsupported(
-            "numerator domain cannot exclude underflow near zero".into(),
-        ));
-    }
-    for n in [num.lower, num.upper] {
-        for d in [domains[1].lower, domains[1].upper] {
-            for nf in [1.0 - numerator, 1.0 + numerator] {
-                for df in [1.0 - denominator, 1.0 + denominator] {
-                    let quotient = (n * nf) / (d * df);
-                    if !(n * nf).is_finite()
-                        || !(d * df).is_finite()
-                        || !quotient.is_finite()
-                        || (n != 0.0 && quotient.abs() < f64::MIN_POSITIVE)
-                    {
-                        return Err(unsupported(
-                            "division may overflow or underflow Float64".into(),
-                        ));
-                    }
-                }
-            }
-        }
     }
     Ok(AccuracyGuarantee::new(
         AccuracyMetric::Relative,
@@ -518,27 +472,12 @@ fn exact_division(
                 .map(|input| input.spec.failure_probability.clone())
                 .collect(),
         },
-        inputs
-            .iter()
-            .enumerate()
-            .map(|(input_index, guarantee)| GuaranteeSource::ChildGuarantee {
-                input_index,
-                guarantee: Box::new(guarantee.clone()),
-            })
-            .chain(domains.iter().enumerate().map(|(input_index, domain)| {
-                GuaranteeSource::InputValueDomain {
-                    input_index,
-                    lower: domain.lower,
-                    upper: domain.upper,
-                    max_samples: domain.max_samples,
-                    contract: domain.contract.clone(),
-                }
-            }))
-            .chain(std::iter::once(GuaranteeSource::CompositionStep {
-                operator: op.clone(),
-                rule: "relative_division".into(),
-            }))
-            .collect(),
+        composed_provenance(
+            op,
+            inputs,
+            &AccuracyGuarantee::exact("exact division"),
+            "relative_division_union_bound",
+        ),
     ))
 }
 
@@ -870,7 +809,7 @@ pub fn propagate(
         CompositionOperator::ExactSum => exact_sum(op, inputs, stats),
         CompositionOperator::ExactAverage => exact_average(op, inputs, stats),
         CompositionOperator::ExactExtremum => exact_extremum(op, inputs, stats),
-        CompositionOperator::ExactDivision => exact_division(op, inputs, stats),
+        CompositionOperator::ExactDivision => exact_division(op, inputs),
         CompositionOperator::CounterRate
         | CompositionOperator::InstantCounterRate
         | CompositionOperator::CounterIncrease => Err(unsupported(
@@ -1000,14 +939,6 @@ mod tests {
             vec![],
         )
     }
-    fn domain(lower: f64, upper: f64) -> OperandDomain {
-        OperandDomain {
-            lower,
-            upper,
-            max_samples: 1000,
-            contract: "enforced test population".into(),
-        }
-    }
     fn with_metric(metric: AccuracyMetric, bound: f64) -> AccuracyGuarantee {
         let mut g = abs(bound, 0.0);
         g.spec.accuracy_metric = metric;
@@ -1024,76 +955,44 @@ mod tests {
         assert!(propagate(&op, &[rank.clone(), rank], None, &Default::default()).is_err());
         assert!(propagate(&op, &[rel(0.01), rel(1.0)], None, &Default::default()).is_err());
     }
+    /// A ratio of relative bounds `a`, `b` is within `(a + b)/(1 − b)`,
+    /// the larger of its over- and under-estimate bounds, with the union
+    /// bound on failure; no operand domain is needed. A denominator bound of
+    /// 1 or more, or a bound that is not finite and non-negative, has no
+    /// rule.
     #[test]
-    fn relative_division_requires_operand_domains() {
-        assert!(propagate(
+    fn relative_division_bounds_the_ratio_without_operand_domains() {
+        let mut numerator = rel(0.02);
+        numerator.spec.failure_probability = ProbabilityExpr::Constant { value: 0.001 };
+        let got = propagate(
             &CompositionOperator::ExactDivision,
-            &[rel(0.01), rel(0.01)],
+            &[numerator, rel(0.03)],
             None,
-            &PropagationStats::default()
+            &PropagationStats::default(),
         )
-        .is_err());
-    }
-    #[test]
-    fn relative_division_preserves_asymmetric_bound_and_domain_provenance() {
-        for denominator in [domain(1., 10.), domain(-10., -1.)] {
-            let stats = PropagationStats {
-                division_operand_domains: Some([domain(-20., -2.), denominator]),
-                ..Default::default()
-            };
-            let got = propagate(
-                &CompositionOperator::ExactDivision,
-                &[rel(0.02), rel(0.03)],
-                None,
-                &stats,
-            )
-            .unwrap();
-            assert!((got.spec.error.evaluate().unwrap() - 0.05 / 0.97).abs() < 1e-14);
-            assert_eq!(got.spec.failure_probability.evaluate(), Some(0.));
-            assert_eq!(
-                got.provenance
-                    .iter()
-                    .filter(|p| matches!(p, GuaranteeSource::InputValueDomain { .. }))
-                    .count(),
-                2
-            );
-        }
-    }
-    #[test]
-    fn relative_division_rejects_zero_special_and_extreme_domains() {
-        for domains in [
-            [domain(1., 2.), domain(0., 0.)],
-            [domain(1., 2.), domain(-1., 1.)],
-            [domain(f64::NAN, 2.), domain(1., 2.)],
-            [domain(1., 2.), domain(1., f64::INFINITY)],
-            [domain(1e250, 1e250), domain(1e-250, 1e-250)],
-            [domain(1e-250, 1e-250), domain(1e250, 1e250)],
-        ] {
-            let stats = PropagationStats {
-                division_operand_domains: Some(domains),
-                ..Default::default()
-            };
-            assert!(propagate(
-                &CompositionOperator::ExactDivision,
-                &[rel(0.01), rel(0.01)],
-                None,
-                &stats
-            )
-            .is_err());
-        }
-        let stats = PropagationStats {
-            division_operand_domains: Some([domain(1., 2.), domain(1., 2.)]),
-            ..Default::default()
-        };
+        .unwrap();
+        let (a, b): (f64, f64) = (0.02, 0.03);
+        let over = (1.0 + a) / (1.0 - b) - 1.0;
+        let under = 1.0 - (1.0 - a) / (1.0 + b);
+        assert!((got.spec.error.evaluate().unwrap() - over.max(under)).abs() < 1e-14);
+        assert!((got.spec.failure_probability.evaluate().unwrap() - 0.001).abs() < 1e-15);
         for bound in [1., f64::NAN, f64::INFINITY, -0.1] {
             assert!(propagate(
                 &CompositionOperator::ExactDivision,
                 &[rel(0.01), rel(bound)],
                 None,
-                &stats
+                &PropagationStats::default()
             )
             .is_err());
         }
+        let rank = with_metric(AccuracyMetric::Rank, 0.01);
+        assert!(propagate(
+            &CompositionOperator::ExactDivision,
+            &[rank.clone(), rank],
+            None,
+            &PropagationStats::default()
+        )
+        .is_err());
     }
     #[test]
     fn exact_child_contributes_zero_error() {
