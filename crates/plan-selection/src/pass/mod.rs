@@ -13,6 +13,7 @@
 //! downstream consumers rely on.
 
 mod components;
+mod interchangeable;
 mod query_candidates;
 mod stage1_to_stage3;
 

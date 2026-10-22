@@ -143,7 +143,7 @@ impl QueryCandidates {
 /// The digits of a whole-workload choice that decide `root`'s plan: the
 /// targets whose aggregate it reads, and the targets whose fused
 /// computation absorbs one of those, in increasing order.
-fn query_digits<Id>(
+pub(super) fn query_digits<Id>(
     per_computation: &PerComputationCandidates<Id>,
     root: &QueryRoot,
 ) -> Vec<usize> {
@@ -174,7 +174,7 @@ fn query_digits<Id>(
 
 /// Mixed-radix increment of `choice` over `digits` only (the last varying
 /// fastest); `false` after the last combination.
-fn next_digits<Id>(
+pub(super) fn next_digits<Id>(
     per_computation: &PerComputationCandidates<Id>,
     digits: &[usize],
     choice: &mut [usize],
