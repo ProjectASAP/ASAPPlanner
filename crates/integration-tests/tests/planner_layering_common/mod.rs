@@ -210,11 +210,34 @@ pub fn run_stages_with(
     settings: &PlanSelectionSettings,
     deployment: &DeploymentCapabilities,
 ) -> Run {
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let data = workload.data_workload.clone().unwrap_or_default();
     let models = asap_plan_selection::PlanningModels::builtin()
         .with_plan_selection(settings)
         .with_deployment_capabilities(deployment);
+    run_stages_over(workload, roots, models)
+}
+
+/// [`run_stages_under`], with Stage 3 rejecting every candidate the
+/// executor cannot compile, as `plan_installable` and `stage_pipeline` do.
+pub fn run_stages_compiled(
+    workload: &PlanningWorkload,
+    roots: Vec<QueryRoot>,
+    settings: &PlanSelectionSettings,
+) -> Run {
+    let deployment = DeploymentCapabilities::default();
+    let models = asap_plan_selection::PlanningModels::builtin()
+        .with_plan_selection(settings)
+        .with_deployment_capabilities(&deployment)
+        .with_executor_compile_check(&asap_planner::PlannerExecutorCompileCheck);
+    run_stages_over(workload, roots, models)
+}
+
+fn run_stages_over(
+    workload: &PlanningWorkload,
+    roots: Vec<QueryRoot>,
+    models: asap_plan_selection::PlanningModels<'_>,
+) -> Run {
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
     let run = run_planning_stages_over(roots, &entries, &data, None, models)
         .expect("planning stages run");
     let logical_candidates = run

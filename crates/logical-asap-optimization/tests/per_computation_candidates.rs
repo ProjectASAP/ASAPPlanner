@@ -1124,6 +1124,46 @@ fn composed_multi_measure_aggregate_joins_its_measures() {
     }
 }
 
+/// A measure left exact beside a sketched one keeps its output name: the
+/// split exact aggregate names its one measure as the target named it, so the
+/// executor finds one name per measure.
+#[test]
+fn composed_mixed_exact_and_sketch_measures_keep_output_names() {
+    let quantile = |q| AggIntent::Quantile {
+        col: Some(1),
+        q,
+        accuracy: approximate(),
+    };
+    let node = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
+        child: scan(false),
+        reduction: Reduction::by(vec![]),
+        measures: vec![quantile(0.5), quantile(0.9)],
+        output_names: vec!["p50".into(), "p90".into()],
+        filters: vec![],
+        having: None,
+    }))
+    .unwrap();
+    assert_eq!(
+        candidates_for(quantile(0.5))[0],
+        ComputationCandidate::Exact
+    );
+    // p50 exact, p90 from the first sketch family.
+    let [root] = <[_; 1]>::try_from(composed(vec![node.clone()], &[0, 1])).unwrap();
+    let exact_parts: Vec<_> = OperatorNode::reachable(&root)
+        .into_iter()
+        .filter_map(|node| match node.non_asap() {
+            Some(NonASAPOp::Aggregate {
+                measures,
+                output_names,
+                ..
+            }) => Some((measures.len(), output_names.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(exact_parts, vec![(1, vec!["p50".to_string()])]);
+    assert_eq!(columns(&root), columns(&node));
+}
+
 /// A summary estimate carries its sized family's bound; an exact accumulator
 /// is exact; anything computed from an approximate value, a value `HAVING`
 /// included, has no guarantee.

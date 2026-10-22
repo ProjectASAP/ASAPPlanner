@@ -3058,7 +3058,12 @@ fn substitute_measure(
     raw_data_samples_of: Option<&str>,
     (sizing, key): (&Sizing, MeasureKey),
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
-    let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
+    let Some(NonASAPOp::Aggregate {
+        reduction,
+        output_names,
+        ..
+    }) = target.non_asap()
+    else {
         unreachable!("substitute checked the aggregate")
     };
     let state = |family: FieldDataType, intent: &AggIntent, read: SummaryInputExpr| {
@@ -3088,7 +3093,9 @@ fn substitute_measure(
                 child: input.clone(),
                 reduction: reduction.clone(),
                 measures: vec![intent.clone()],
-                output_names: vec![],
+                // One name per measure, as the target names this one (an
+                // empty name is the intent's synthetic one).
+                output_names: vec![output_names.get(key.1).cloned().unwrap_or_default()],
                 filters: vec![filter.clone()],
                 having: None,
             }))?
