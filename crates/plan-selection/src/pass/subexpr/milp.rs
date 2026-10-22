@@ -231,27 +231,23 @@ enum Consumer {
 pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     let mut vars = ProblemVariables::new();
     let n = input.group_count;
-    let relaxed = std::env::var_os("JP_MILP_LP").is_some();
-    let binary = || {
-        if relaxed {
-            variable().min(0).max(1)
-        } else {
-            variable().binary()
-        }
-    };
-    let x: Vec<Variable> = input.choices.iter().map(|_| vars.add(binary())).collect();
-    let need: Vec<Variable> = (0..n).map(|_| vars.add(binary())).collect();
+    let x: Vec<Variable> = input
+        .choices
+        .iter()
+        .map(|_| vars.add(variable().binary()))
+        .collect();
+    let need: Vec<Variable> = (0..n).map(|_| vars.add(variable().binary())).collect();
     let once: BTreeMap<GroupId, Variable> = input
         .group_slots
         .iter()
-        .map(|slot| (slot.group, vars.add(binary())))
+        .map(|slot| (slot.group, vars.add(variable().binary())))
         .collect();
     // Which queries' plans reach each group at all (any materialization):
     // the union rate of a node built once reads them.
     let mut reaches_at_all: HashMap<(usize, usize), Variable> = HashMap::new();
     for (g, queries) in input.group_queries.iter().enumerate() {
         for &q in queries {
-            reaches_at_all.insert((q, g), vars.add(binary()));
+            reaches_at_all.insert((q, g), vars.add(variable().binary()));
         }
     }
     // Consumers that may reach each group's own node, and through it its
@@ -325,7 +321,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
     for &g in &groups_with_rates {
         let sets = class_sets(g)
             .into_iter()
-            .map(|set| (set, vars.add(binary())))
+            .map(|set| (set, vars.add(variable().binary())))
             .collect();
         rate_of.insert(g, sets);
     }
@@ -344,12 +340,6 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             }
             Consumer::Group(_) => None,
         }
-    };
-    let slowest_rate = |g: usize| -> f64 {
-        rate_of[&g]
-            .iter()
-            .map(|(set, _)| input.union_rate[set])
-            .fold(f64::INFINITY, f64::min)
     };
     // Products of a variable rate (a set selector) and a reach variable.
     let mut rated: Vec<(Variable, Variable, f64)> = Vec::new();
@@ -397,15 +387,10 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                     Consumer::Slot { choice, .. } => input.choices[choice].group.0 as usize,
                     Consumer::Query(_) => unreachable!("a query's rate is constant"),
                 };
-                // At least the slowest class's rate is charged linearly
-                // (some query reaches the group), the rest through the
-                // selector products: a tighter relaxation.
-                let slowest = slowest_rate(g);
-                objective += slowest * cost * v;
                 for (set, selector) in &rate_of[&g] {
                     let union = input.union_rate[set];
-                    if cost != 0.0 && union > slowest {
-                        rated.push((*selector, v, (union - slowest) * cost));
+                    if cost != 0.0 {
+                        rated.push((*selector, v, union * cost));
                     }
                     if shared != 0.0 {
                         let z = product(&mut vars, *selector, v);
@@ -434,12 +419,8 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             + built_once_shared[c].iter().map(|(_, w)| w).sum::<f64>();
         let a = vars.add(variable().min(0));
         let b = vars.add(variable().min(0));
-        let u = vars.add(binary());
+        let u = vars.add(variable().binary());
         objective += a + b;
-        objective += shared_cost[c] * slowest_rate(input.choices[c].group.0 as usize) * x[c];
-        if std::env::var_os("JP_MILP_NOMIN").is_some() {
-            continue;
-        }
         cheaper_of.push((a, b, u, c, big_m));
     }
     for (c, choice) in input.choices.iter().enumerate() {
@@ -448,14 +429,12 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             if slot.cost_per_unit_rate != 0.0
                 && !matches!(slot.materialization, Materialization::MatAtIngestion(_))
             {
-                let g = choice.group.0 as usize;
-                let slowest = slowest_rate(g);
-                objective += slowest * slot.cost_per_unit_rate * x[c];
-                for (set, selector) in &rate_of[&g] {
-                    let union = input.union_rate[set];
-                    if union > slowest {
-                        rated.push((*selector, x[c], (union - slowest) * slot.cost_per_unit_rate));
-                    }
+                for (set, selector) in &rate_of[&(choice.group.0 as usize)] {
+                    rated.push((
+                        *selector,
+                        x[c],
+                        input.union_rate[set] * slot.cost_per_unit_rate,
+                    ));
                 }
             }
         }
@@ -476,7 +455,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         objective += e;
     }
 
-    let vars_exclusive = (vars.add(binary()), vars.add(binary()));
+    let vars_exclusive = (vars.add(variable().binary()), vars.add(variable().binary()));
     let source_count = input
         .raw_scans
         .iter()
@@ -530,29 +509,15 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             }
         }
     }
-    // Aggregated over a group's choices (one is chosen when it is
-    // needed), which keeps the LP relaxation tight.
-    let mut choices_of: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (c, choice) in input.choices.iter().enumerate() {
-        choices_of[choice.group.0 as usize].push(c);
-    }
-    for (g, of_g) in choices_of.iter().enumerate() {
-        let mut children: BTreeSet<usize> = BTreeSet::new();
-        for &c in of_g {
-            children.extend(input.choices[c].children.iter().map(|h| h.0 as usize));
-        }
-        for h in children {
-            let mut with_child = Expression::from(0.0);
-            for &c in of_g {
-                if input.choices[c].children.iter().any(|k| k.0 as usize == h) {
-                    with_child += x[c];
-                }
-            }
+        let g = choice.group.0 as usize;
+        for child in &choice.children {
             for &q in &input.group_queries[g] {
-                if let (Some(&above), Some(&below)) =
-                    (reaches_at_all.get(&(q, g)), reaches_at_all.get(&(q, h)))
-                {
-                    constraints.push(constraint!(below >= above + with_child.clone() - 1));
+                if let (Some(&above), Some(&below)) = (
+                    reaches_at_all.get(&(q, g)),
+                    reaches_at_all.get(&(q, child.0 as usize)),
+                ) {
+                    constraints.push(constraint!(below >= above + x[c] - 1));
                 }
             }
         }
@@ -613,26 +578,19 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         let g = input.choices[c].group.0 as usize;
         constraints.push(constraint!(v >= passes[&(k, g)] + x[c] - 1));
     }
-    for (&(k, g), &p) in &passes {
-        let mut into = Expression::from(0.0);
-        for &c in &choices_of[g] {
-            into += y[&(k, c)];
-        }
-        // Unless a fused choice of another group implements it.
-        for (c, choice) in input.choices.iter().enumerate() {
-            if choice.group.0 as usize != g && choice.implements.iter().any(|i| i.0 as usize == g) {
-                into += x[c];
-            }
-        }
-        constraints.push(constraint!(into >= p));
-    }
     for (c, choice) in input.choices.iter().enumerate() {
         for (child, via) in choice.children.iter().zip(&choice.coefficients.child_via) {
             let h = child.0 as usize;
             match via {
                 Via::Direct => {
-                    // Aggregated below, over the group's choices.
-                    let _ = h;
+                    for &(k, g) in passes.keys() {
+                        if g != choice.group.0 as usize {
+                            continue;
+                        }
+                        if let Some(&r) = reach.get(&(k, h)) {
+                            constraints.push(constraint!(r >= y[&(k, c)]));
+                        }
+                    }
                 }
                 Via::Slot(slot) => {
                     let k = Consumer::Slot {
@@ -643,43 +601,6 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                         constraints.push(constraint!(r >= x[c]));
                     }
                 }
-            }
-        }
-    }
-    for (g, of_g) in choices_of.iter().enumerate() {
-        let mut children: BTreeSet<usize> = BTreeSet::new();
-        for &c in of_g {
-            for (child, via) in input.choices[c]
-                .children
-                .iter()
-                .zip(&input.choices[c].coefficients.child_via)
-            {
-                if *via == Via::Direct {
-                    children.insert(child.0 as usize);
-                }
-            }
-        }
-        for h in children {
-            for &(k, pg) in passes.keys() {
-                if pg != g {
-                    continue;
-                }
-                let Some(&r) = reach.get(&(k, h)) else {
-                    continue;
-                };
-                let mut into = Expression::from(0.0);
-                for &c in of_g {
-                    let choice = &input.choices[c];
-                    if choice
-                        .children
-                        .iter()
-                        .zip(&choice.coefficients.child_via)
-                        .any(|(child, via)| child.0 as usize == h && *via == Via::Direct)
-                    {
-                        into += y[&(k, c)];
-                    }
-                }
-                constraints.push(constraint!(r >= into));
             }
         }
     }
@@ -695,14 +616,8 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         for &(v, w) in &built_once_shared[c] {
             built_once += w * v;
         }
-        // Both are at least the slowest class's rate (some query reaches
-        // the chosen choice): charged linearly, which keeps the relaxation
-        // tight; only the excess goes through the binary choice.
-        let floor = shared_cost[c] * slowest_rate(input.choices[c].group.0 as usize);
-        constraints.push(constraint!(a >= per_consumer - floor * x[c] - big_m * u));
-        constraints.push(constraint!(
-            b >= built_once - floor * x[c] - big_m * (1 - u)
-        ));
+        constraints.push(constraint!(a >= per_consumer - big_m * u));
+        constraints.push(constraint!(b >= built_once - big_m * (1 - u)));
     }
     // Latency bounds: the work each query reaches at query time.
     for (q, query) in input.queries.iter().enumerate() {
@@ -789,13 +704,10 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         }
     }
     let constraint_count = constraints.len() as u64;
-    let mut model = model
+    let model = model
         .with_all(constraints)
         .with_mip_gap(0.0)
         .map_err(|e| format!("MIP gap: {e:?}"))?;
-    if std::env::var_os("JP_MILP_VERBOSE").is_some() {
-        model.set_verbose(true);
-    }
     let solution = match model.solve() {
         Ok(solution) => solution,
         Err(good_lp::ResolutionError::Infeasible) => return Ok(None),
@@ -808,25 +720,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         .map(|(c, _)| c)
         .collect();
     if std::env::var_os("JP_MILP_TRACE").is_some() {
-        if relaxed {
-            for (g, v) in once.iter() {
-                eprintln!("  once g{} = {:.3}", g.0, solution.value(*v));
-            }
-            for (g, v) in need.iter().enumerate() {
-                eprintln!("  need g{} = {:.3}", g, solution.value(*v));
-            }
-        }
-        let shown: Vec<usize> = if relaxed {
-            (0..x.len())
-                .filter(|&c| solution.value(x[c]) > 1e-6)
-                .collect()
-        } else {
-            chosen.clone()
-        };
-        for &c in &shown {
-            if relaxed {
-                eprintln!("  x = {:.3}", solution.value(x[c]));
-            }
+        for &c in &chosen {
             let choice: &Choice = &input.choices[c];
             let reach: Vec<String> = y
                 .iter()

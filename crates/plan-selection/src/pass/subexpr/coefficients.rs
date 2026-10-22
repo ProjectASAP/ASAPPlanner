@@ -263,6 +263,27 @@ pub(super) fn choice_parts(
                     }
                     let mut seen: Vec<Vec<Materialization>> = Vec::new();
                     for physical in &physicals {
+                        // A shared scan's horizon is the longest window of
+                        // its readers: no shorter than this choice's own
+                        // window on it (through time shifts).
+                        if !horizons.is_empty() {
+                            let dag = &physical.dag;
+                            let nodes = node_map(dag);
+                            let kept = kept_pane_chains(dag);
+                            let too_short = dag.nodes.iter().any(|n| match &n.payload {
+                                Operator::NonASAP(NonASAPOp::Scan { source, .. }) => horizons
+                                    .get(&super::scans::raw_horizon_key(source))
+                                    .is_some_and(|&h| {
+                                        windows_read(dag, &nodes, n.id, &kept)
+                                            .into_iter()
+                                            .any(|w| w > h)
+                                    }),
+                                _ => false,
+                            });
+                            if too_short {
+                                continue;
+                            }
+                        }
                         let keys = keys_of(&physical.dag, cache.keys_mut());
                         let shallow = shallow_keys(&physical.dag, cache.keys_mut());
                         let private: Vec<bool> =
