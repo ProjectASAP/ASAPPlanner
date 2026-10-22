@@ -8597,7 +8597,8 @@ mod tests {
     }
 
     /// With no repeat interval (a one-time query) there is nothing to keep
-    /// up with: the slow candidate is only costlier.
+    /// up with: the slow candidate stays valid and is selected when it is
+    /// cheaper.
     #[test]
     fn a_one_time_query_has_no_repeat_interval_to_keep_up_with() {
         let rows_per_s = 1e9;
@@ -8616,9 +8617,11 @@ mod tests {
             PlanningModels::builtin(),
         )
         .unwrap();
-        assert_eq!(selection.selected, candidates[1].id);
+        // Run once an hour, rebuilding at query time is the cheaper plan,
+        // over a minute per evaluation or not.
+        assert_eq!(selection.selected, candidates[0].id);
         assert_eq!(selection.rejected.len(), 1, "{:?}", selection.rejected);
-        assert_eq!(selection.rejected[0].id, candidates[0].id);
+        assert_eq!(selection.rejected[0].id, candidates[1].id);
         assert_eq!(selection.rejected[0].cause, RejectionCause::Costlier);
     }
 
