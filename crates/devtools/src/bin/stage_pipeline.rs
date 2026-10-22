@@ -33,6 +33,13 @@
 // `"default"`. `--exhaustive` instead composes and prices every candidate
 // (the search the default one is tested against, for small workloads and
 // comparison) and the document lists them; `search` is `"exhaustive"`.
+// `--search legacy|memo-brute-force|memo-milp` picks the default search's
+// algorithm (`SearchAlgorithm`): `legacy` (the default, `search` is
+// `"default"`), the memo over logical sub-expressions searched by brute
+// force (the reference), or solved as a MILP; `search` names it, and the
+// search report says which ran (`algorithm`, omitted for legacy) and,
+// when the legacy search ran instead, why (`routed_to_legacy`). Not with
+// `--exhaustive`.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.
@@ -202,7 +209,7 @@ use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_default_search_over, run_planning_stages_over,
+    lower_promql_roots, lower_sql_roots, run_planning_stages_over, run_search_over,
     PlanningStagesError, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
@@ -213,8 +220,8 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
-    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection,
-    SelectionError,
+    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
+    SearchAlgorithm, Selection, SelectionError,
 };
 use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -233,7 +240,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--max-displayed <n>] --out <file>";
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) an exhaustive run enumerates.
@@ -334,6 +341,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_selection_settings_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
+    let mut search_algorithm: Option<SearchAlgorithm> = None;
     let mut max_combinations_given = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -393,6 +401,19 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
+            "--search" => {
+                search_algorithm = Some(match value()?.as_str() {
+                    "legacy" => SearchAlgorithm::Legacy,
+                    "memo-brute-force" => SearchAlgorithm::MemoBruteForce,
+                    "memo-milp" => SearchAlgorithm::MemoMilp,
+                    other => {
+                        return Err(format!(
+                            "--search {other}: expected legacy, memo-brute-force or memo-milp"
+                        )
+                        .into())
+                    }
+                })
+            }
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -403,6 +424,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
+    if exhaustive && search_algorithm.is_some() {
+        return Err(
+            "--search picks the default search's algorithm: drop it with --exhaustive".into(),
+        );
+    }
+    let search_algorithm = search_algorithm.unwrap_or_default();
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
     }
@@ -614,7 +641,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             Some(max_combinations),
             models,
         ),
-        false => run_default_search_over(roots.clone(), &entries, &data, models),
+        false => run_search_over(roots.clone(), &entries, &data, models, search_algorithm),
     };
     // A selected plan's very large peak memory, when the deployment
     // declares no memory capacity to check it against.
@@ -636,7 +663,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     document["workload"]["data_workload"] =
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
-    document["search"] = json!(if exhaustive { "exhaustive" } else { "default" });
+    document["search"] = json!(match (exhaustive, search_algorithm) {
+        (true, _) => "exhaustive",
+        (false, SearchAlgorithm::Legacy) => "default",
+        (false, SearchAlgorithm::MemoBruteForce) => "memo-brute-force",
+        (false, SearchAlgorithm::MemoMilp) => "memo-milp",
+    });
     document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
         "enforced"
     } else {

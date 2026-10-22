@@ -5,7 +5,7 @@
 //! Stage 3, and searched by enumerating coupling thresholds with bounds and
 //! a dynamic program over the rest.
 //!
-//! Behind [`crate::pass::Stage1ToStage3Search::memo_groups`] until it
+//! Behind [`crate::pass::Stage1ToStage3Search::search`] until it
 //! selects the exhaustive search's price on every equivalence test.
 //!
 //! - [`groups`] (W1): the hash-consed group DAG and Pass 1's
@@ -19,11 +19,14 @@
 //! - [`pricing`] (W2): local prices per (group, candidate, context),
 //!   cached, and frontiers;
 //! - [`search`] (integrator): clusters, coupling thresholds with branch and
-//!   bound, the dynamic program, build-late.
+//!   bound, the dynamic program, build-late;
+//! - [`milp`] (integrator): the memo solved as a mixed-integer linear
+//!   program.
 #![allow(dead_code)]
 
 pub(crate) mod capability;
 pub(crate) mod groups;
+pub(crate) mod milp;
 pub(crate) mod pricing;
 pub(crate) mod scans;
 pub(crate) mod search;

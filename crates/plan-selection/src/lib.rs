@@ -1028,6 +1028,71 @@ pub struct SearchReport {
     /// candidate costs the same, under cost model 3, or for a combination
     /// of components.
     pub runner_up_cost_per_second: Option<f64>,
+    /// The search algorithm that ran; omitted in JSON for the legacy
+    /// search.
+    #[serde(default, skip_serializing_if = "SearchAlgorithm::is_legacy")]
+    pub algorithm: SearchAlgorithm,
+    /// Why the legacy search ran instead of the requested memo search;
+    /// `None` when the requested algorithm ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_to_legacy: Option<RoutedToLegacy>,
+    /// The MILP solver's relative gap between its best plan and its bound
+    /// at the end ([`SearchAlgorithm::MemoMilp`]); 0 when the plan is
+    /// proven optimal. `None` for every other search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_gap: Option<f64>,
+    /// The MILP solver's simplex iterations; 0 (omitted in JSON) for every
+    /// other search.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub solver_iterations: u32,
+    /// The MILP solver's wall time in milliseconds; 0 (omitted in JSON) for
+    /// every other search.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub solver_time_ms: u64,
+}
+
+/// How the Stage 1 to Stage 3 search explores the plans
+/// ([`Stage1ToStage3Search::search`]).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum SearchAlgorithm {
+    /// The search over whole-workload candidates: each query's own
+    /// candidates checked first, independent components searched
+    /// separately, only the best so far kept.
+    #[default]
+    Legacy,
+    /// Every plan of the memo over logical sub-expressions, each priced by
+    /// Stage 3: the reference the MILP is checked against.
+    MemoBruteForce,
+    /// The memo over logical sub-expressions solved as a mixed-integer
+    /// linear program.
+    MemoMilp,
+}
+
+impl SearchAlgorithm {
+    fn is_legacy(&self) -> bool {
+        *self == SearchAlgorithm::Legacy
+    }
+}
+
+fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+/// Why the legacy search ran instead of the requested memo search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutedToLegacy {
+    /// The caller asked for the exhaustive search, which the memo searches
+    /// do not replace.
+    ExhaustiveRequested,
+    /// The MILP's objective is cost model 1's sum of local prices; cost
+    /// models 2 and 3 are searched by the legacy search.
+    CostModelNotSupported,
+    /// The MILP model is not built yet.
+    MilpNotBuilt,
 }
 
 /// One independent component of the workload: queries that can read no

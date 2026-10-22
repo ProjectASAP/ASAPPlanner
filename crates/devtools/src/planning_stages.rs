@@ -11,7 +11,7 @@ use asap_plan_selection::pass::{
     run_stage1_to_stage3_from_pass1, run_stage2_and_stage3, Stage1ToStage3Search,
 };
 pub use asap_plan_selection::pass::{LogicalCandidate, PrunedCandidate};
-use asap_plan_selection::PlanningModels;
+use asap_plan_selection::{PlanningModels, SearchAlgorithm};
 use asap_plan_selection::{Selection, SelectionError};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
@@ -220,12 +220,14 @@ pub fn run_planning_stages_over(
 /// fails), and Stage 3 records the first rejection of each cause and the
 /// search's report (`Selection::search`). `models` should be the ones
 /// `plan_installable` plans with (the executor's summary families and
-/// compile check) to see what it selects. No limit applies.
-pub fn run_default_search_over(
+/// compile check) to see what it selects. No limit applies. `algorithm`
+/// picks the search ([`SearchAlgorithm::Legacy`] is the default search).
+pub fn run_search_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
+    algorithm: SearchAlgorithm,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
     let per_computation =
@@ -236,7 +238,7 @@ pub fn run_default_search_over(
         entries,
         data,
         models,
-        Stage1ToStage3Search::default(),
+        Stage1ToStage3Search::with_algorithm(algorithm),
     );
     if let Some(Ok(roots)) = run.stage1_selected.as_ref().map(|c| &c.roots) {
         validate(roots)?;
