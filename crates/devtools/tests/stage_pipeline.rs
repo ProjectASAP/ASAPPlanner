@@ -1500,8 +1500,8 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
 /// Two windowed quantiles over one metric (Q1 over 1 m, Q2 over 5 m, both
 /// every 10 s): with a shared scan, Stage 2 also offers the scan built once
 /// per evaluation (`query time, shared: Scan`). It reads the 5 m window
-/// once (≈0.1360/s) instead of once per reader (0.2200/s), and beats the
-/// separate scans (0.1528/s).
+/// once (≈0.1364/s) instead of once per reader (0.2203/s), and beats the
+/// separate scans (0.1530/s).
 #[test]
 fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
     let query = |q: &str| {
@@ -1562,5 +1562,5 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
         .unwrap()["id"]
         .as_str()
         .unwrap();
-    assert!((cost(separate) - 0.1528).abs() < 1e-4, "{}", cost(separate));
+    assert!((cost(separate) - 0.1530).abs() < 1e-4, "{}", cost(separate));
 }
