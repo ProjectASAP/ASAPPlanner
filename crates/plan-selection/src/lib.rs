@@ -2018,12 +2018,21 @@ fn declared_distinct_values(
         | NonASAPOp::Limit { child, .. }
         | NonASAPOp::TimeRange { child, .. }
         | NonASAPOp::TimeShift { child, .. } => declared_distinct_values(child, column, data),
-        // A grouped aggregate returns its keys first, unchanged.
+        // A grouped aggregate returns its keys first, unchanged; but a
+        // `count_values` label named like a key takes that key's place
+        // with the stringified sample values.
         NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(keys),
+            measures,
             child,
             ..
-        } if !keys.is_without() => declared_distinct_values(child, *keys.keys().get(column)?, data),
+        } if !keys.is_without()
+            && !measures
+                .iter()
+                .any(|m| matches!(m, AggIntent::CountValues { .. })) =>
+        {
+            declared_distinct_values(child, *keys.keys().get(column)?, data)
+        }
         // A per-series reduction keeps every column but the one it reduces.
         NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
@@ -2440,7 +2449,8 @@ fn guarantee_check(
                     "q{query}: the output's guarantee holds for each value, and the number \
                      of values one evaluation returns is not bound (no declared series \
                      count for a source a PromQL vector reads, and no declared \
-                     `distinct_values_per_label` for every group key), so it does not meet \
+                     `distinct_values_per_label` for every group key, or a key that is not \
+                     an unchanged source column), so it does not meet \
                      whole-result target {target:?}, and \
                      the deployment has no evidence that it meets it (a target on the groups \
                      holding a share of the records, `groups_with_record_share_at_least`, \
@@ -6217,6 +6227,11 @@ mod tests {
                 10_000,
             ),
             ("sort_desc(sum by (job) (rate(x[5m])))", 10),
+            // `count_values("job", ...)` overwrites `job` with sample values.
+            (
+                r#"sum by (job) (count_values by (job) ("job", rate(x[5m])))"#,
+                10_000,
+            ),
         ] {
             assert_eq!(values_of(&root(query), &data), Some(values), "{query}");
         }

@@ -125,3 +125,14 @@ fn a_partly_declared_grouping_leaves_only_the_exact_plan() {
     let sketches = selected_sketches(P99_LATENCY, "rank", serde_json::json!({"region": 4}));
     assert!(sketches.is_empty(), "{sketches:?}");
 }
+
+/// A computed key named like a declared column no longer holds that
+/// column's values: `upper(service) AS service` gives no bound.
+#[test]
+fn a_computed_grouping_column_leaves_only_the_exact_plan() {
+    let query = "SELECT service, COUNT(DISTINCT user_id) AS value FROM \
+         (SELECT concat(service, endpoint) AS service, user_id, ts FROM http) \
+         WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
+    let sketches = selected_sketches(query, "relative", every_column());
+    assert!(sketches.is_empty(), "{sketches:?}");
+}
