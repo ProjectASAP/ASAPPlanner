@@ -84,7 +84,13 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
     per_computation: &'a PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
 ) -> impl Iterator<Item = Stage1Candidate> + 'a {
-    stage1_logical_asap_optimization_skipping(per_computation, entries, |_| None, |_| true)
+    stage1_logical_asap_optimization_skipping(
+        per_computation,
+        entries,
+        |_| None,
+        |_| true,
+        |roots| roots,
+    )
 }
 
 /// [`stage1_logical_asap_optimization`] without the Pass 1 choices
@@ -95,12 +101,16 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
 /// Neither are the candidates `viable` rejects, nor the identical-expression
 /// Pass 2 candidates of one it rejects: `viable(roots)` is `false` only
 /// when no implementation of `roots`, nor of any of its identical-expression
-/// candidates, can be valid ([`Pass2List::push`]).
+/// candidates, can be valid ([`Pass2List::push`]). Each composed candidate
+/// is first rewritten by `shared_first` (identical nodes a caller proved
+/// are always shared, e.g. interchangeable queries'), and its Pass 2
+/// candidates derive from the rewritten roots.
 pub fn stage1_logical_asap_optimization_skipping<'a, Id: Clone>(
     per_computation: &'a PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
     mut invalid_prefix: impl FnMut(&[usize]) -> Option<usize> + 'a,
     viable: impl Fn(&[QueryRoot]) -> bool + 'a,
+    shared_first: impl Fn(Vec<QueryRoot>) -> Vec<QueryRoot> + 'a,
 ) -> impl Iterator<Item = Stage1Candidate> + 'a {
     let evaluation_grid_ms: Vec<Option<u64>> = entries
         .iter()
@@ -134,6 +144,7 @@ pub fn stage1_logical_asap_optimization_skipping<'a, Id: Clone>(
                 &evaluation_grid_ms,
                 from,
                 &viable,
+                &shared_first,
             ));
         }
         position += 1;
@@ -155,20 +166,29 @@ pub fn stage1_candidates_of_choice<Id: Clone>(
         .iter()
         .map(QueryWorkloadEntry::evaluation_grid_ms)
         .collect();
-    choice_candidates(per_computation, choice, &evaluation_grid_ms, 0, viable)
+    choice_candidates(
+        per_computation,
+        choice,
+        &evaluation_grid_ms,
+        0,
+        viable,
+        &|roots| roots,
+    )
 }
 
 /// [`stage1_candidates_of_choice`] with each query's evaluation grid, its
-/// Pass 2 candidates recording `from` as their Pass 1 candidate's position.
+/// Pass 2 candidates recording `from` as their Pass 1 candidate's position,
+/// the composed candidate rewritten by `shared_first`.
 fn choice_candidates<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     choice: &[usize],
     evaluation_grid_ms: &[Option<u64>],
     from: usize,
     viable: &dyn Fn(&[QueryRoot]) -> bool,
+    shared_first: &dyn Fn(Vec<QueryRoot>) -> Vec<QueryRoot>,
 ) -> Vec<Stage1Candidate> {
     let roots = compose_logical_candidate(per_computation, choice)
-        .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
+        .map(|roots| shared_first(roots.into_iter().map(|(_, root)| root).collect()));
     let (pass2, composed_viable) = match &roots {
         Ok(roots) => {
             let composed_viable = viable(roots);
@@ -632,6 +652,7 @@ mod tests {
                 &[],
                 |choice| (choice[0] == 1).then_some(1),
                 |_| true,
+                |roots| roots,
             )
             .collect(),
         );
@@ -639,8 +660,14 @@ mod tests {
         assert_eq!(skipped, expected);
         assert!(skipped.len() < every.len());
         assert_eq!(
-            stage1_logical_asap_optimization_skipping(&inventory, &[], |_| Some(0), |_| true)
-                .count(),
+            stage1_logical_asap_optimization_skipping(
+                &inventory,
+                &[],
+                |_| Some(0),
+                |_| true,
+                |roots| roots
+            )
+            .count(),
             0
         );
     }

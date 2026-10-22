@@ -9044,8 +9044,8 @@
             }
           ]
         },
-        "display_name": "Q1 exact (nested Sum acc) · Q2 exact (nested Sum acc) · Q3 DDSketch (Sum/Count acc) · Q4 DDSketch (Sum/Count acc) · Q5 DDSketch (Sum/Count acc) · Q6 exact (Sum acc) · Q7 exact (Sum acc) · Q8 exact (Increase acc) · Q9 exact (Rate acc) · one DDSketch · Sum acc for Q1, Q2 in 30 × 20s panes, DDSketch for Q3, Q4, Q5 in 100 × 1s panes, Sum acc for Q6 in 60 × 1s panes, Sum acc for Q7 in 40 × 30s panes, Increase acc for Q8 in 30 × 20s panes, Rate acc for Q9 in 40 × 30s panes · Sum acc rolled up · shared PaneChain (Q3, Q4, Q5), SummaryMerge (Q3, Q4, Q5)",
-        "id": "L1"
+        "display_name": "Q1 exact (nested Sum acc) · Q2 exact (nested Sum acc) · Q3 DDSketch (Sum/Count acc) · Q4 DDSketch (Sum/Count acc) · Q5 DDSketch (Sum/Count acc) · Q6 exact (Sum acc) · Q7 exact (Sum acc) · Q8 exact (Increase acc) · Q9 exact (Rate acc) · one DDSketch · Sum acc for Q1, Q2 in 30 × 20s panes, DDSketch for Q3, Q4, Q5 in 100 × 1s panes, Sum acc for Q6 in 60 × 1s panes, Sum acc for Q7 in 40 × 30s panes, Increase acc for Q8 in 30 × 20s panes, Rate acc for Q9 in 40 × 30s panes · Sum acc rolled up",
+        "id": "L168"
       }
     ],
     "capped": false,
@@ -19653,16 +19653,16 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (nested Sum acc) · Q2 exact (nested Sum acc) · Q3 DDSketch (Sum/Count acc) · Q4 DDSketch (Sum/Count acc) · Q5 DDSketch (Sum/Count acc) · Q6 exact (Sum acc) · Q7 exact (Sum acc) · Q8 exact (Increase acc) · Q9 exact (Rate acc) · one DDSketch · Sum acc for Q1, Q2 in 30 × 20s panes, DDSketch for Q3, Q4, Q5 in 100 × 1s panes, Sum acc for Q6 in 60 × 1s panes, Sum acc for Q7 in 40 × 30s panes, Increase acc for Q8 in 30 × 20s panes, Rate acc for Q9 in 40 × 30s panes · Sum acc rolled up · shared PaneChain (Q3, Q4, Q5), SummaryMerge (Q3, Q4, Q5) · ingestion time: Sum acc ×30 panes, DDSketch ×100 panes, Sum acc ×60 panes, Sum acc ×40 panes, Increase acc ×30 panes, Rate acc ×40 panes · query time, shared: FinalizeExactAccumulator, SummaryMerge",
-        "from_logical": "L1",
-        "id": "P390-m79+P1-m3"
+        "display_name": "Q1 exact (nested Sum acc) · Q2 exact (nested Sum acc) · Q3 DDSketch (Sum/Count acc) · Q4 DDSketch (Sum/Count acc) · Q5 DDSketch (Sum/Count acc) · Q6 exact (Sum acc) · Q7 exact (Sum acc) · Q8 exact (Increase acc) · Q9 exact (Rate acc) · one DDSketch · Sum acc for Q1, Q2 in 30 × 20s panes, DDSketch for Q3, Q4, Q5 in 100 × 1s panes, Sum acc for Q6 in 60 × 1s panes, Sum acc for Q7 in 40 × 30s panes, Increase acc for Q8 in 30 × 20s panes, Rate acc for Q9 in 40 × 30s panes · Sum acc rolled up · ingestion time: Sum acc ×30 panes, DDSketch ×100 panes, Sum acc ×60 panes, Sum acc ×40 panes, Increase acc ×30 panes, Rate acc ×40 panes · query time, shared: FinalizeExactAccumulator, SummaryMerge",
+        "from_logical": "L168",
+        "id": "P168-m319"
       }
     ],
     "pruned": []
   },
   "stage3_plan_selection": {
     "accepted": {
-      "P390-m79+P1-m3": [
+      "P168-m319": [
         {
           "accepted_metric": null,
           "accepted_regardless_of_guarantee": false,
@@ -19744,7 +19744,7 @@
       ]
     },
     "costs": {
-      "P390-m79+P1-m3": {
+      "P168-m319": {
         "cost_per_second": 7.777162034453446e-6,
         "cost_unit": "cost_per_second",
         "per_node": {
@@ -20200,29 +20200,13 @@
     "rejected": [],
     "rejected_by_cause": {},
     "search": {
-      "candidates_checked": 1103,
-      "components": [
-        {
-          "candidates_checked": 1100,
-          "queries": [
-            0,
-            1,
-            2,
-            3,
-            4,
-            5,
-            6
-          ],
-          "selected": "P390-m79"
-        },
-        {
-          "candidates_checked": 2,
-          "queries": [
-            7,
-            8
-          ],
-          "selected": "P1-m3"
-        }
+      "candidates_checked": 562,
+      "components": [],
+      "interchangeable_queries": [
+        [
+          2,
+          4
+        ]
       ],
       "queries": [
         {
@@ -20365,13 +20349,13 @@
           "discarded": []
         }
       ],
-      "raw_scan_assignments_skipped": 71257,
-      "raw_scan_candidates_skipped": 0,
-      "runner_up_cost_per_second": null,
-      "searched_as_one": null
+      "raw_scan_assignments_skipped": 128990,
+      "raw_scan_candidates_skipped": 4728,
+      "runner_up_cost_per_second": 7.777163777273414e-6,
+      "searched_as_one": "not_in_joint_space"
     },
     "search_rejected": [],
-    "selected": "P390-m79+P1-m3",
+    "selected": "P168-m319",
     "stored_outputs": [
       {
         "built_at": "ingestion_run",

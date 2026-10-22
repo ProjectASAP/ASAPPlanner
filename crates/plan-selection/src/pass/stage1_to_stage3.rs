@@ -52,6 +52,7 @@ use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 
+use super::interchangeable::Classes;
 use super::query_candidates::QueryCandidates;
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::PlanningModels;
@@ -227,13 +228,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
-    let components = super::components::source_components(
-        &per_computation
-            .roots
-            .iter()
-            .map(|(_, root)| root.clone())
-            .collect::<Vec<_>>(),
-    );
+    let components = super::components::sharing_components(&per_computation, entries, &models);
     let searched_as_one = match super::components::searched_as_one(&components, &models, search) {
         Some(reason) => reason,
         None => match super::components::search_components(
@@ -288,6 +283,7 @@ fn search_as_one<Id: Clone + std::fmt::Debug>(
         return run.with_inventory(per_computation);
     }
     let queries = QueryCandidates::check(&per_computation, entries, data, models);
+    let classes = Classes::of(&per_computation, entries, &models);
     // Stage 1 candidates left out because every assignment of theirs scans
     // raw data at query time.
     let stage1_raw_skipped = std::cell::Cell::new(0u64);
@@ -296,7 +292,13 @@ fn search_as_one<Id: Clone + std::fmt::Debug>(
     let stage1 = stage1_logical_asap_optimization_skipping(
         &per_computation,
         entries,
-        |choice| queries.invalid_prefix(choice),
+        |choice| match (
+            queries.invalid_prefix(choice),
+            classes.invalid_prefix(choice),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        },
         |roots| {
             let viable = viable(roots, entries, data, models, skip_raw);
             if !viable {
@@ -304,6 +306,7 @@ fn search_as_one<Id: Clone + std::fmt::Debug>(
             }
             viable
         },
+        |roots| classes.shared_first(roots, entries),
     );
     // The calibration is fitted over every candidate, as the exhaustive
     // search fits it, the discarded ones included.
@@ -313,7 +316,14 @@ fn search_as_one<Id: Clone + std::fmt::Debug>(
         data,
         models,
     );
-    let run = search_stage2_and_stage3(
+    // Members of a class of interchangeable queries read the same builds.
+    let stage1 = stage1.filter(|candidate| {
+        candidate
+            .roots
+            .as_ref()
+            .map_or(true, |roots| classes.reads_shared_builds(roots))
+    });
+    let mut run = search_stage2_and_stage3(
         &per_computation,
         stage1,
         entries,
@@ -325,6 +335,9 @@ fn search_as_one<Id: Clone + std::fmt::Debug>(
         skip_raw,
         &stage1_raw_skipped,
     );
+    if let Ok(selection) = &mut run.selection {
+        selection.search.interchangeable_queries = classes.members();
+    }
     run.with_inventory(per_computation)
 }
 

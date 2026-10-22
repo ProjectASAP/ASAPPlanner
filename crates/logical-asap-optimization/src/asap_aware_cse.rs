@@ -499,6 +499,16 @@ pub fn identical_expression_pass2_candidates(
         .collect()
 }
 
+/// `roots` with every one of `candidates` (sharing candidates of `roots`,
+/// or some of them) made one node: the identical-expression Pass 2
+/// candidate that shares them all.
+pub fn share_identical_expressions(
+    roots: &[QueryRoot],
+    candidates: &[SharingCandidate],
+) -> Vec<QueryRoot> {
+    apply(roots, candidates, &vec![true; candidates.len()]).0
+}
+
 /// `roots` with the sharing candidates in `subset` shared, and the ones
 /// that leaves shared: those whose every node still read became one node (a
 /// node below a shared node other than the one kept is no longer read).

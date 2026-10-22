@@ -1019,6 +1019,12 @@ pub struct SearchReport {
     /// deployment that keeps none (nor their identical-expression Pass 2
     /// candidates, which inherit that).
     pub raw_scan_candidates_skipped: u64,
+    /// The classes of interchangeable queries, by query index: queries
+    /// that differ at most in a quantile rank, which the search gave one
+    /// shared choice and the same summary builds (design method 4). Empty
+    /// for the exhaustive search and outside cost model 1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interchangeable_queries: Vec<Vec<usize>>,
     /// Under cost models 1 and 2, the cost per second of the cheapest
     /// valid candidate priced more than rounding (1e-12 of it) above the
     /// cheapest: how close the selection came to a tie. Candidates within
@@ -1028,8 +1034,9 @@ pub struct SearchReport {
     pub runner_up_cost_per_second: Option<f64>,
 }
 
-/// One independent component of the workload: queries that read no source
-/// another component reads, so no Pass 2 rule, raw-data retention or
+/// One independent component of the workload: queries that can read no
+/// node another component's queries read, nor any source when raw data on
+/// disk is priced, so no Pass 2 rule, raw-data retention or
 /// node charge links them to another component.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ComponentReport {
@@ -1045,7 +1052,8 @@ pub struct ComponentReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchedAsOne {
-    /// Its queries all read sources that link them.
+    /// Its queries are all linked: through common sources, and over one
+    /// source through a node two of them can read.
     OneComponent,
     /// The cost model's objective or limits are not a sum over components
     /// (cost models 2 and 3: peak cores and cluster limits).
@@ -1065,8 +1073,7 @@ pub enum SearchedAsOne {
     NotAdditive,
     /// The combination of the components' selections is not a candidate
     /// the joint search enumerates: the Pass 2 rules combine only some
-    /// rewrites (top-k reuse is not combined with panes), and cap their
-    /// candidates over the whole workload.
+    /// rewrites (exact top-k reuse is not combined with panes).
     NotInJointSpace,
 }
 
