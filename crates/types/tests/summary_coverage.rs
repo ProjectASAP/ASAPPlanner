@@ -966,9 +966,8 @@ fn a_rollup_of_per_series_states_covers_the_build_by_its_labels() {
 }
 
 /// A rollup is rejected when a key is no group key of the input's build,
-/// when its family cannot merge different groups (counter states merge
-/// consecutive windows of one series, IRate has no merge), and over no
-/// keys of a SQL relation.
+/// and when its family cannot merge different groups (counter states merge
+/// consecutive windows of one series, IRate has no merge).
 #[test]
 fn invalid_rollups_fail_construction() {
     let without = grouped(
@@ -998,10 +997,21 @@ fn invalid_rollups_fail_construction() {
             "{kind:?}"
         );
     }
+}
+
+/// A rollup to no keys of a SQL relation's states covers the global build
+/// over the same rows: a global SQL aggregate, one row even over no input
+/// rows, as the rollup's one state.
+#[test]
+fn a_rollup_to_no_keys_of_a_relation_covers_the_global_build() {
     let by_job = grouped(table(), kll_family(), Reduction::by(vec![JOB]));
-    assert!(rollup(by_job, vec![])
-        .unwrap_err()
-        .contains(&CoverageError::GlobalRelationRegroup.to_string()));
+    let global = grouped(table(), kll_family(), Reduction::by(vec![]));
+    let rolled = rollup(by_job, vec![]).unwrap();
+    assert_eq!(rolled.schema, global.schema);
+    assert_eq!(
+        rolled.coverage().unwrap().definition_id(),
+        global.coverage().unwrap().definition_id()
+    );
 }
 
 /// `group_by` is left out of JSON when unset, so a merge that keeps its

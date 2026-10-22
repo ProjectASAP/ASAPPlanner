@@ -12,7 +12,7 @@
 //! A *sharing candidate* ([`SharingCandidate`]) of a whole-workload
 //! candidate is a set of two or more of its nodes with identical input and
 //! computation semantics that are legal to share: the `ir::cse` interning
-//! merges only ASAP nodes and nodes with a unique key.
+//! merges only ASAP nodes, scans, and nodes with a unique key.
 //! [`identical_expression_pass2_candidates`] returns one Pass 2 candidate
 //! per non-empty subset of the sharing candidates (Algorithm 2, line 31):
 //! each sharing candidate in the subset becomes one node serving every
@@ -91,9 +91,12 @@
 //! same panes, each at its own cadence. Every window ends at the evaluation
 //! time, so each shorter one is the chain's newest panes: its
 //! `SummaryMerge` merges only those (`newest_panes`), and has the guarantee
-//! of one build over its own window. Stage 2 never keeps a chain read at
-//! different intervals across evaluations from query time (each reader
-//! would need one new pane per evaluation). Long-window segments, sliding
+//! of one build over its own window. A build grouped by fewer keys also
+//! reads the chain of a finer grouping over a window at least its own
+//! ([`rollup_window_groups`]): it merges its newest panes, then rolls the
+//! groups up into its own, as the rollup rule does. Stage 2 never keeps a
+//! chain read at different intervals across evaluations from query time
+//! (each reader would need one new pane per evaluation). Long-window segments, sliding
 //! windows and Exponential Histograms are not implemented.
 //!
 //! # Rollup rule
@@ -148,11 +151,11 @@ use asap_types::ir::schema::{
     ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergeInputRule, MergedError,
     Schema, SketchKind, PROMQL_SERIES_IDENTITY,
 };
+use asap_types::ir::ScalarExpr;
 use asap_types::ir::SortKey;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, TimeRangeKind,
 };
-use asap_types::ir::{OperatorResultKind as ResultKind, ScalarExpr};
 
 use crate::accuracy::estimators::size_for_all_readers;
 use crate::per_computation_candidates::{recompose_guarantees, PerComputationCandidateError};
@@ -1265,6 +1268,13 @@ pub fn window_composition_pass2_candidates(
         if on_gcd_panes != on_member_panes {
             push_shared_chains(roots, &chosen, &on_gcd_panes, &mut pass2_candidates);
         }
+        // Coarser groupings read a finer grouping's chain, rolled up.
+        push_shared_chains(
+            roots,
+            &chosen,
+            &rollup_window_groups(roots, &chosen),
+            &mut pass2_candidates,
+        );
     }
     Ok(pass2_candidates)
 }
@@ -1396,6 +1406,135 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
     shared
 }
 
+/// The pane candidates (positions in `candidates`) that can read one
+/// chain of a finer grouping's panes, each group with its chain: a host,
+/// and every candidate whose group keys are the host's or fewer
+/// ([`rolls_up_into`]), whose window is at most the host's and whose pane
+/// width the host's divides. Each member merges the newest panes of its
+/// window, and a coarser member then rolls the host's groups up into its
+/// own (a regrouping `SummaryMerge`): `p90 per city over 20 minutes` in
+/// 10 s panes serves `p90 over 5 minutes` as the newest 30 panes merged
+/// across cities. A coarser member's every reader in `roots` is an
+/// estimate whose merged readout keeps a guarantee, as for the rollup rule.
+/// Hosts are tried by most group keys, then longest window, and each
+/// candidate joins one group. Only groups with a coarser member are
+/// listed; the others are [`nested_window_groups`]'s.
+fn rollup_window_groups(roots: &[QueryRoot], candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
+    let mut nodes = Vec::new();
+    let mut seen = HashSet::new();
+    for node in roots.iter().flat_map(root_operators) {
+        collect_children_first(node, &mut seen, &mut nodes);
+    }
+    let mut readers: HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>> = HashMap::new();
+    for node in &nodes {
+        for child in node.children() {
+            readers.entry(Rc::as_ptr(child)).or_default().push(node);
+        }
+    }
+    let rolls_up_with_guarantee = |member: &PaneCandidate| match member.build.asap() {
+        Some(ASAPOp::SummaryAgg { family, .. }) => readers
+            .get(&Rc::as_ptr(&member.build))
+            .is_some_and(|readers| read_with_merged_guarantee(family, readers)),
+        _ => false,
+    };
+    let mut hosts: Vec<usize> = (0..candidates.len()).collect();
+    hosts.sort_by_key(|&i| {
+        (
+            std::cmp::Reverse(group_key_count(&candidates[i].build)),
+            std::cmp::Reverse(candidates[i].window_ms()),
+            i,
+        )
+    });
+    let mut grouped = vec![false; candidates.len()];
+    let mut groups = Vec::new();
+    for host in hosts {
+        if grouped[host] {
+            continue;
+        }
+        let coarser = |i: usize| {
+            group_key_count(&candidates[i].build) < group_key_count(&candidates[host].build)
+        };
+        let reads_host = |i: usize| {
+            let (member, chain) = (&candidates[i], &candidates[host]);
+            i == host
+                || (!grouped[i]
+                    && member.window_ms() <= chain.window_ms()
+                    && member.pane_width_ms.is_multiple_of(chain.pane_width_ms)
+                    && rolls_up_into(member, chain)
+                    && (!coarser(i) || rolls_up_with_guarantee(member)))
+        };
+        let members: Vec<usize> = (0..candidates.len()).filter(|&i| reads_host(i)).collect();
+        if !members.iter().any(|&i| coarser(i)) {
+            continue;
+        }
+        for &i in &members {
+            grouped[i] = true;
+        }
+        groups.push(SharedPaneChain {
+            members,
+            pane_width_ms: candidates[host].pane_width_ms,
+            pane_count: candidates[host].pane_count,
+        });
+    }
+    groups.sort_by_key(|group| group.members[0]);
+    groups
+}
+
+/// The number of group keys of a build grouped by listed keys; 0 for any
+/// other build.
+fn group_key_count(build: &OperatorNode) -> usize {
+    match build.asap() {
+        Some(ASAPOp::SummaryAgg {
+            reduction: Reduction::Reduce(by),
+            ..
+        }) if !by.is_without() => by.len(),
+        _ => 0,
+    }
+}
+
+/// Whether `member`'s build is `host`'s ([`same_build_over_one_input`]),
+/// or the same but grouped by fewer of `host`'s keys, of a family whose
+/// states merge across groups ([`FamilyCapability::merges_groups`]), so a
+/// rollup of `host`'s states answers it.
+fn rolls_up_into(member: &PaneCandidate, host: &PaneCandidate) -> bool {
+    if same_build_over_one_input(member, host) {
+        return true;
+    }
+    let (
+        Some(ASAPOp::SummaryAgg {
+            child: range,
+            family,
+            input,
+            reduction: Reduction::Reduce(by),
+            grouping,
+            filter,
+        }),
+        Some(ASAPOp::SummaryAgg {
+            child: host_range,
+            family: host_family,
+            input: host_input,
+            reduction: Reduction::Reduce(host_by),
+            grouping: host_grouping,
+            filter: host_filter,
+        }),
+    ) = (member.build.asap(), host.build.asap())
+    else {
+        return false;
+    };
+    let (below, host_below) = (range.children()[0], host_range.children()[0]);
+    // Both ranges read the same rows below, so a key names one column.
+    !by.is_without()
+        && !host_by.is_without()
+        && by.len() < host_by.len()
+        && by.keys().iter().all(|key| host_by.keys().contains(key))
+        && FamilyCapability::merges_groups(family)
+        && same_family(family, host_family)
+        && (Rc::ptr_eq(below, host_below) || below == host_below)
+        && input == host_input
+        && grouping == host_grouping
+        && filter == host_filter
+}
+
 /// Whether two pane candidates build one family (at any size) over the
 /// same input below their ranges, read the same way, with the same output
 /// column names.
@@ -1455,7 +1594,16 @@ fn shared_chain_build(
     candidates: &[PaneCandidate],
     group: &[usize],
 ) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
-    let host = longest(candidates, group);
+    // Of the longest windows, the finest grouping: a rollup group's host.
+    let host = *group
+        .iter()
+        .max_by_key(|&&i| {
+            (
+                candidates[i].window_ms(),
+                group_key_count(&candidates[i].build),
+            )
+        })
+        .expect("a group has members");
     let members: Vec<&Rc<OperatorNode>> = std::iter::once(host)
         .chain(group.iter().copied().filter(|&i| i != host))
         .map(|i| &candidates[i].build)
@@ -1482,12 +1630,21 @@ fn in_panes(
         for &i in &shared.members {
             let newest = u32::try_from(candidates[i].window_ms() / shared.pane_width_ms)
                 .expect("a member's window is at most the chain's");
-            let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
+            let merge = Rc::new(OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![Rc::clone(&chain)],
                 newest_panes: (newest < shared.pane_count).then_some(newest),
                 group_by: None,
-            }))?;
-            replaced.insert(Rc::as_ptr(&candidates[i].build), Rc::new(merge));
+            }))?);
+            // A coarser member rolls the chain's groups up into its own.
+            let member = &candidates[i].build;
+            let read = if group_key_count(member) == group_key_count(build) {
+                merge
+            } else {
+                regrouped(member, &merge).ok_or(PerComputationCandidateError::Unsupported(
+                    "a coarser pane build whose keys the shared chain does not hold",
+                ))?
+            };
+            replaced.insert(Rc::as_ptr(member), read);
         }
     }
     for candidate in candidates {
@@ -1764,22 +1921,10 @@ fn sketch_rollup_candidates(
         let Some(ASAPOp::SummaryAgg { family, .. }) = coarse.asap() else {
             continue;
         };
-        // Every reader is an estimate whose merged readout keeps a
-        // guarantee: not a heap's top-k or a UnivMon's entropy.
-        let capability = FamilyCapability::of(family);
-        let read_with_guarantee = readers.get(&Rc::as_ptr(coarse)).is_some_and(|readers| {
-            readers.iter().all(|reader| match reader.asap() {
-                Some(ASAPOp::SummaryEstimate { query, .. }) => {
-                    capability.answers(query)
-                        && matches!(
-                            capability.merged_error(query),
-                            Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
-                        )
-                }
-                _ => false,
-            })
-        });
-        if !read_with_guarantee {
+        if !readers
+            .get(&Rc::as_ptr(coarse))
+            .is_some_and(|readers| read_with_merged_guarantee(family, readers))
+        {
             continue;
         }
         // A build finer than the one with the most keys would have more.
@@ -1795,6 +1940,23 @@ fn sketch_rollup_candidates(
         }
     }
     candidates
+}
+
+/// Whether every one of `readers`, the readers of a build of `family`, is
+/// an estimate whose merged readout keeps a guarantee: not a heap's top-k
+/// or a UnivMon's entropy.
+fn read_with_merged_guarantee(family: &FieldDataType, readers: &[&Rc<OperatorNode>]) -> bool {
+    let capability = FamilyCapability::of(family);
+    readers.iter().all(|reader| match reader.asap() {
+        Some(ASAPOp::SummaryEstimate { query, .. }) => {
+            capability.answers(query)
+                && matches!(
+                    capability.merged_error(query),
+                    Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
+                )
+        }
+        _ => false,
+    })
 }
 
 /// Whether `node` is a per-group sketch build grouped by listed keys whose
@@ -1911,11 +2073,8 @@ fn finer_keys(coarse: &OperatorNode, fine: &OperatorNode) -> Option<usize> {
         && same_filter
         && fine_keys.len() > coarse_keys.len()
         && coarse_keys.iter().all(|key| fine_keys.contains(key))
-        && same_rows(child, fine_child)
-        // A global SQL aggregate has a row over no input; a rollup of no
-        // finer group has none.
-        && !(coarse_keys.is_empty() && child.result_kind == ResultKind::Relation))
-        .then_some(fine_keys.len())
+        && same_rows(child, fine_child))
+    .then_some(fine_keys.len())
 }
 
 type ColumnName = (Option<String>, String);

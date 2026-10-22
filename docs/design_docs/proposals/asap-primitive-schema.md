@@ -822,8 +822,8 @@ input groups                       output groups
 
 | Question | Answer |
 |---|---|
-| What comes out? | the children's schema; with `group_by`, its columns in order, then the state column |
-| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` is empty over a SQL relation (a global SQL aggregate has a row over no input rows, a merge of no states has none); `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra); `group_by` together with `newest_panes` |
+| What comes out? | the children's schema; with `group_by`, its columns in order, then the state column. A `group_by` of no columns over a SQL relation's states stands for a global SQL aggregate, which has one row over no input rows: it outputs one state, empty when there is no input state |
+| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra); `group_by` together with `newest_panes` |
 | What is its coverage? | the shared `definition` (with `group_by`, the same build grouped by the columns `group_by` names), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(−2m, −1m]` and `(−1m, 0]` give `(−2m, 0]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
 | State or value? | state in, state out |
 
@@ -1408,9 +1408,8 @@ impl SummaryCoverage {
     /// in time for counter states, as the family's `MergeInputRule`
     /// requires); for a rollup, also `NotAGroupKey` (a `group_by` column is
     /// not a group key of the inputs' build), `FamilyCannotRegroup` (counter
-    /// states, a family without a merge, or a Hydra), `GlobalRelationRegroup`
-    /// (no keys over a SQL relation) or `RegroupedBuild` (the coarse build
-    /// it stands for does not derive).
+    /// states, a family without a merge, or a Hydra) or `RegroupedBuild`
+    /// (the coarse build it stands for does not derive).
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
 }
 ```

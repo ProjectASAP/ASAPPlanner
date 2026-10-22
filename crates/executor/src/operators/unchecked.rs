@@ -190,8 +190,17 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::KeyedEvaluation { state, k } => {
                 Operator::keyed_evaluation(input(0)?, state, k, output.clone())?
             }
-            Kind::SummaryMerge { state, groups } => {
-                Operator::summary_merge(input(0)?, state, groups)?
+            Kind::SummaryMerge {
+                state,
+                groups,
+                empty_global_state,
+            } => {
+                let merge = Operator::summary_merge(input(0)?, state, groups)?;
+                if empty_global_state {
+                    merge.with_empty_global_state()?
+                } else {
+                    merge
+                }
             }
             Kind::Evaluation { state, query } => Operator::evaluation(input(0)?, state, query)?,
         }

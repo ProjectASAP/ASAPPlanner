@@ -278,10 +278,33 @@ impl Operator {
             .collect::<Vec<_>>();
         fields.push(input.fields[state].clone());
         Ok(Self {
-            kind: Kind::SummaryMerge { state, groups },
+            kind: Kind::SummaryMerge {
+                state,
+                groups,
+                empty_global_state: false,
+            },
             inputs: vec![input],
             output: schema(fields),
         })
+    }
+    /// A merge into no groups that outputs one empty state when it has no
+    /// input state: the global SQL aggregate a rollup of a relation's
+    /// grouped states to no keys stands for, whose one row is NULL over no
+    /// input rows.
+    pub fn with_empty_global_state(mut self) -> Result<Self, Error> {
+        match &mut self.kind {
+            Kind::SummaryMerge {
+                groups,
+                empty_global_state,
+                ..
+            } if groups.is_empty() => *empty_global_state = true,
+            _ => {
+                return Err(invalid(
+                    "an empty global state needs a merge into no groups",
+                ))
+            }
+        }
+        Ok(self)
     }
     pub fn evaluation(
         input: SchemaRef,
@@ -485,10 +508,20 @@ pub(super) fn execute_merge<'a>(
     let input_schema = operator.inputs[0].clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     Ok(futures::stream::once(async move {
-        let Kind::SummaryMerge { state, groups } = &operator.kind else {
+        let Kind::SummaryMerge {
+            state,
+            groups,
+            empty_global_state,
+        } = &operator.kind
+        else {
             unreachable!()
         };
-        merge_summary(input, *state, groups, &input_schema, &output, &context).await
+        let merge = Merge {
+            state_column: *state,
+            groups,
+            empty_global_state: *empty_global_state,
+        };
+        merge_summary(input, merge, &input_schema, &output, &context).await
     })
     .boxed_local())
 }
@@ -831,16 +864,27 @@ fn state_indices(batch: &Batch, state: usize) -> Result<(&StateColumn, &UInt32Ar
 }
 
 /// Merge the states of each group across all input rows.
+/// A `SummaryMerge`'s parameters.
+struct Merge<'a> {
+    state_column: usize,
+    groups: &'a [usize],
+    empty_global_state: bool,
+}
+
 async fn merge_summary(
     mut input: Input<'_, Batch>,
-    state_column: usize,
-    groups: &[usize],
+    merge: Merge<'_>,
     input_schema: &SchemaRef,
     output: &SchemaRef,
     context: &RunContext,
 ) -> Result<Batch, Error> {
     use crate::summary_kernels::exact::ScalarState;
     use crate::values::StateStorage;
+    let Merge {
+        state_column,
+        groups,
+        empty_global_state,
+    } = merge;
     let family = &input_schema.fields[state_column].dtype;
     let mut batches = Vec::new();
     let mut reservations = Vec::new();
@@ -860,6 +904,13 @@ async fn merge_summary(
                 .enumerate()
                 .map(|(row, group)| (index, row, group)),
         );
+    }
+    // A global SQL aggregate's one row over no input rows: one empty state.
+    if entries.is_empty() && empty_global_state {
+        table.add_empty_group()?;
+        let mut updater = StateColumnUpdater::new(family)?;
+        updater.add_group()?;
+        return grouped_states(&table, updater.seal(), input_schema, output);
     }
     let columns = batches
         .iter()

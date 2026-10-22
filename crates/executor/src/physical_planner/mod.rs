@@ -626,6 +626,21 @@ fn compile_internal(
                     continue;
                 }
             }
+            // A rollup of a relation's states to no keys is a global SQL
+            // aggregate: one row, an empty state, over no input rows.
+            if let Payload::ASAP(ASAPOp::SummaryMerge {
+                group_by: Some(keys),
+                ..
+            }) = &node.payload
+            {
+                if keys.is_empty() && built_from_relation(&restored[&id]) {
+                    let operator = compile_node(node, &schemas)
+                        .and_then(Operator::with_empty_global_state)
+                        .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                    physical_dag.add(id, inputs, operator)?;
+                    continue;
+                }
+            }
             // A SQL table's trailing window (and a tumbling pane's shift
             // under it) runs as a filter on the table's time column against
             // the evaluation time.
@@ -652,6 +667,21 @@ fn compile_internal(
     }
     physical_dag.validate()?;
     Ok(physical_dag)
+}
+
+/// Whether every summary state `state` merges was built from a relation's
+/// rows (a SQL table's), where a global aggregate has a row over no input
+/// row; not from a PromQL vector's, where it has none.
+fn built_from_relation(state: &OperatorNode) -> bool {
+    match state.asap() {
+        Some(ASAPOp::SummaryMerge { children, .. }) => {
+            children.iter().all(|child| built_from_relation(child))
+        }
+        Some(ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. }) => {
+            child.result_kind == planner_types::ir::OperatorResultKind::Relation
+        }
+        _ => false,
+    }
 }
 
 /// The native operator of `id` when it is a range `TimeRange` or a

@@ -559,7 +559,10 @@ as one input: the implementation widens every scan of the metric without label
 matchers to the union of those labels. Time ranges, time shifts, and per-series
 summaries without a filter (with the nodes that read their state) keep the
 wider rows; every other consumer reads its own columns through a projection.
-These candidates are kept only when they share a scan.
+These candidates are kept only when they share a scan. A SQL table scan reads
+every column of the table, so two queries over one table already have equal
+scans; a scan is shared even though a table's rows have no unique key, since
+each reader reads every row the scan outputs.
 
 The examples behind these rules:
 
@@ -761,9 +764,21 @@ For example, `quantile_over_time(0.5, m[1m])` and
 10-s KLL panes: the 1-min query merges the newest 6, the 5-min query all
 30. And `quantile_over_time(0.5, m[15m])` every 1 min and every 5 min read
 one chain of fifteen 1-min panes instead of fifteen 1-min and three 5-min
-panes. A family that merges exactly keeps each query's guarantee, since a
-merge of fewer panes is one build over the shorter window, and each query
-fails with at most the shared state's failure probability. Stage 3 prices
+panes. A query grouped by fewer keys also reads the chain of a finer
+grouping whose window is at least its own, on panes that divide its own,
+when the family merges states of different groups: it merges its newest
+panes, then rolls the groups up into its own (a regrouping `SummaryMerge`
+over the newest-panes merge). For example, `SELECT city,
+percentile_cont(0.9) … INTERVAL '20' MINUTE GROUP BY city` and the global
+p50 and p90 over the last 5 minutes, both every 10 s, read one chain of 120
+per-city 10-s KLL panes: the 5-minute query merges each city's newest 30,
+then all cities into one state that answers both its percentiles. The chain
+is sized for every reader, here both queries' ε. A rollup to no keys over
+a SQL table's states stands for a global SQL aggregate, so it has one
+state, empty over no rows. A family that merges exactly keeps each query's
+guarantee, since a merge of fewer panes is one build over the shorter
+window, and each query fails with at most the shared state's failure
+probability. Stage 3 prices
 each merge by the panes it reads, at its query's rate. The per-query chains
 stay candidates too. A chain read at different intervals is not kept across
 evaluations from query time: that option needs every reader to build one
