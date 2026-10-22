@@ -71,7 +71,8 @@
 //     its `cause`: a failed check (`failure_probability_resize_failed`,
 //     `accuracy_target_missed`, `count_min_weights_not_proven_non_negative`,
 //     `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`, `raw_data_not_retained`,
-//     `latency_bound_exceeded`, `over_cluster_capacity`) or a loss under
+//     `latency_bound_exceeded`, `latency_over_repeat_interval`,
+//     `over_cluster_capacity`) or a loss under
 //     the cost model (`costlier`, `slower`, `more_memory`,
 //     `not_lowest_latency_on_pareto_front`, `dominated`,
 //     `tied_lost_on_enumeration_order`). Each node's `cost` is one
@@ -99,6 +100,9 @@
 //     pane chain the selected plan keeps beyond one evaluation (by node id)
 //     to how far back from the newest evaluation the runtime must keep its
 //     panes: the window plus the longest range-evaluation span reading it.
+//     `warnings` are one-line warnings about the selected plan: its peak
+//     memory when over 10^12 bytes and the cost model declares no memory
+//     capacity (`large_peak_memory_warning`); absent when there are none.
 // `workload.data_workload` is the `DataWorkload` the run planned with, as
 // declared (`--workload`, `--example`) or built from `--sample-interval-ms`
 // (`--promql`); each query also carries its `recurrence` and
@@ -207,8 +211,9 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 };
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts, PlanSelectionSettings,
-    PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection, SelectionError,
+    large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
+    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection,
+    SelectionError,
 };
 use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -622,7 +627,24 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         ),
         false => run_default_search_over(roots.clone(), &entries, &data, models),
     };
+    // A selected plan's very large peak memory, when the deployment
+    // declares no memory capacity to check it against.
+    let warnings: Vec<String> = result
+        .as_ref()
+        .ok()
+        .and_then(|run| run.stage3_plan_selection.as_ref().ok())
+        .and_then(|selection| {
+            large_peak_memory_warning(
+                &selection.costs[&selection.selected].usage,
+                &plan_selection.cost_model,
+            )
+        })
+        .into_iter()
+        .collect();
     let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
+    if !warnings.is_empty() {
+        document["stage3_plan_selection"]["warnings"] = json!(warnings);
+    }
     document["workload"]["data_workload"] =
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
     document["search"] = json!(if exhaustive { "exhaustive" } else { "default" });

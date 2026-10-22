@@ -348,6 +348,7 @@ fn viewer_knows_every_stored_output_build_and_rejection_cause() {
         C::NoAccuracyGuarantee,
         C::RawDataNotRetained,
         C::LatencyBoundExceeded,
+        C::LatencyOverRepeatInterval,
         C::OverClusterCapacity,
         C::Costlier,
         C::Slower,
@@ -366,6 +367,7 @@ fn viewer_knows_every_stored_output_build_and_rejection_cause() {
             | C::NoAccuracyGuarantee
             | C::RawDataNotRetained
             | C::LatencyBoundExceeded
+            | C::LatencyOverRepeatInterval
             | C::OverClusterCapacity
             | C::Costlier
             | C::Slower

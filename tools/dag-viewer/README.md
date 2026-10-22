@@ -224,8 +224,8 @@ are ignored, `stage_pipeline`'s default.
   priced it, else `analytical`).
 - Each `stage3_plan_selection.rejected` entry has a `cause`: a failed check
   (`failure_probability_resize_failed`, `accuracy_target_missed`,
-  `raw_data_not_retained`, `latency_bound_exceeded`, `over_cluster_capacity`)
-  or a loss under the cost model (`costlier`, `slower`, `more_memory`,
+  `raw_data_not_retained`, `latency_bound_exceeded`,
+  `latency_over_repeat_interval`, `over_cluster_capacity`) or a loss under the cost model (`costlier`, `slower`, `more_memory`,
   `not_lowest_latency_on_pareto_front`, `dominated`,
   `tied_lost_on_enumeration_order`).
 - `accuracy_guarantees` is `ignored` (`stage_pipeline`'s default: Stage 3
@@ -247,6 +247,10 @@ are ignored, `stage_pipeline`'s default.
   Stage 3's `SearchReport`: the physical candidates checked, the components
   searched separately with their selections, and per query its own
   candidates checked and those discarded with why.
+- `stage3_plan_selection.warnings` holds one-line warnings about the
+  selected plan, e.g. its peak memory when over 10^12 bytes and the cost
+  model declares no memory capacity; absent when there are none. The candidate
+  list's header shows them.
 - `search_rejected` lists the rejections that name no candidate the
   document holds: under the default search, the first rejection of each
   cause (their candidates are not kept), and the search's own (e.g. `q2`

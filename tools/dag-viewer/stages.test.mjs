@@ -103,3 +103,15 @@ test('stored outputs group by pane chain', () => {
   assert.equal(groups.reduce((n, g) => n + g.panes.length, 0), doc.stage3_plan_selection.stored_outputs.length);
   assert.equal(groups[0].panesText, `${body.pane_count} × 20 s`);
 });
+
+test('the candidate header shows the selection\'s warnings', () => {
+  const warned = {
+    stage1_logical_asap_optimization: { combinations: 2 },
+    stage3_plan_selection: { warnings: ['peak memory 1430000000000 bytes is over 1000000000000 bytes'] },
+  };
+  assert.equal(
+    call('stageCandidateHeader', warned),
+    '2 candidates · warning: peak memory 1430000000000 bytes is over 1000000000000 bytes',
+  );
+  assert.equal(call('stageCandidateHeader', { stage1_logical_asap_optimization: { combinations: 2 } }), '2 candidates');
+});

@@ -171,7 +171,7 @@ its query text. The nested requirement fields expand as follows:
 | Structure | Field | Meaning |
 |---|---|---|
 | `QueryRequirements` | `accuracy` | An `AccuracyTarget`; omitted, it is `AccuracyTarget::exact()`. Set ε (and δ) when approximation is allowed. |
-| `QueryRequirements` | `max_latency_ms` | An optional finite, non-negative maximum in milliseconds for one evaluation; omitted, there is no bound. |
+| `QueryRequirements` | `max_latency_ms` | An optional finite, non-negative maximum in milliseconds for one evaluation; omitted, there is no bound. Either way, a repeating query's evaluation must not take longer than its repeat interval. |
 
 Frontend lowering produces one Pre-ASAP `Rc<OperatorNode>` root for each normalized
 query entry. The caller must retain each root's association with its workload

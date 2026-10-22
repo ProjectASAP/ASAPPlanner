@@ -99,8 +99,10 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 - Each candidate is then either invalid or valid, recorded as a `Rejection`
   with its `cause` (`RejectionCause`) and reason: a failed check
   (`FailureProbabilityResizeFailed`, `AccuracyTargetMissed`,
-  `RawDataNotRetained`, `LatencyBoundExceeded`, or `OverClusterCapacity`
-  under cost model 3) or a loss under the cost model (`Costlier`, `Slower`,
+  `RawDataNotRetained`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
+  (a repeating query's latency per evaluation is over its repeat interval,
+  checked with or without a latency bound), or `OverClusterCapacity` under
+  cost model 3) or a loss under the cost model (`Costlier`, `Slower`,
   `MoreMemory`, `NotLowestLatencyOnParetoFront`, `Dominated`,
   `TiedLostOnEnumerationOrder`). A candidate that cannot be resized for its failure
   probability is rejected alone.
