@@ -854,12 +854,13 @@ A runtime builds every ingestion-time state on the grid of its width anchored
 at the epoch, so an ingestion-time build must end on that grid at every
 evaluation of its readers. For a pane chain, the pane width divides each
 known evaluation phase. For a whole-window build (one window per evaluation,
-no pane chain), the readers share one fixed interval and phase, and the
-interval and the phase are multiples of the window: `m[5m]` every 5 minutes
+no pane chain), the readers share one fixed interval, their declared phases
+agree, and the interval and a declared phase are multiples of the window: `m[5m]` every 5 minutes
 is one tumbling 5-minute window maintained at ingestion time and read at each
 evaluation, as a one-pane chain would be, while `m[20s]` every 20 s at phase
 5 s, or every 30 s, is not kept whole (Pass 2 offers 5 s or 10 s panes). A
-reader whose phase is not declared is taken to run on the grid.
+reader whose phase is not declared is taken to evaluate at multiples of its
+interval, as for a pane chain.
 
 #### Physical operator implementation
 
