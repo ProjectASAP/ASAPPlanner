@@ -24,6 +24,9 @@ pub fn per_input_target(
     if target.is_exact() || !(target.max_error.is_finite() && target.max_error > 0.0) {
         return None;
     }
+    if approximate_inputs <= 1 {
+        return Some(target.clone());
+    }
     let fraction = 1.0 / approximate_inputs.max(1) as f64;
     let max_error = match metric {
         AccuracyMetric::Relative => 1.0 - (1.0 + target.max_error).powf(-fraction),
@@ -77,6 +80,10 @@ mod tests {
         let ratio = (share + share) / (1.0 - share);
         let product = (1.0 + share) * (1.0 + share) - 1.0;
         assert!(ratio <= 0.05 && product <= 0.05, "{ratio} {product}");
+        assert_eq!(
+            per_input_target(&target, AccuracyMetric::Relative, 1),
+            Some(target)
+        );
     }
 
     /// No approximate input meets an exact target.

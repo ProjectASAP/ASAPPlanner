@@ -423,8 +423,10 @@ fn relative_fold(
 /// within `b < 1`, the ratio is within
 /// `max((1 + a)/(1 − b) − 1, 1 − (1 − a)/(1 + b)) = (a + b)/(1 − b)`, and
 /// fails with the union bound of their failure probabilities. No operand
-/// domain is needed: a relative bound keeps a zero denominator at zero, so
-/// the true and estimated ratios are then the same non-finite value.
+/// domain is needed: a relative bound below 1 keeps a zero denominator at
+/// zero and a numerator's sign, so the true and estimated ratios are then
+/// the same non-finite value. Both bounds must be constants: a symbolic one
+/// has no rule.
 /// Float64 overflow and underflow of the quotient are not bounded, as for a
 /// product.
 fn exact_division(

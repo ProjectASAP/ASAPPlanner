@@ -73,7 +73,7 @@
 //! When a query's value composes several approximate inputs (every sketch
 //! summary below its root, when its guarantee is not exact), each is sized
 //! for an equal share of that requirement: `ε/n` (a relative error
-//! `(1 + ε)^{1/n} − 1`) and `δ/n` for `n` inputs (#669b). Only the inputs
+//! `1 − (1 + ε)^{−1/n}`) and `δ/n` for `n` inputs (#669b). Only the inputs
 //! approximate in this candidate count. Stage 1 sizes for ε and δ per output
 //! value; plan selection enlarges the parameters that depend on δ for a
 //! target over the whole result. Sizing belongs after Pass 2, where a shared
@@ -2601,20 +2601,18 @@ fn symbolic(
     r: AccuracyGuarantee,
     statistic: &'static str,
 ) -> Option<AccuracyGuarantee> {
-    let (metric, operator, rule) = match statistic {
+    let (operator, rule) = match statistic {
         QUOTIENT_OPERAND_DOMAINS => (
-            AccuracyMetric::ABSOLUTE,
             CompositionOperator::ExactDivision,
             "absolute_division_needs_operand_domains",
         ),
         _ => (
-            AccuracyMetric::ABSOLUTE,
             CompositionOperator::ExactProduct,
             "absolute_product_needs_operand_domains",
         ),
     };
     Some(binary_guarantee(
-        metric,
+        AccuracyMetric::ABSOLUTE,
         BoundExpr::Unknown {
             statistic: statistic.into(),
         },
@@ -3333,7 +3331,8 @@ impl Sizing {
 
 /// `algorithm` sized for one of `share` equal shares of `intent`'s accuracy
 /// requirement ([`per_input_target`]), split in the metric of the summary's own
-/// bound: a relative error splits multiplicatively.
+/// bound: a relative error splits so products and quotients of the shares
+/// meet it.
 fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> SketchKind {
     let target = sizing_target(intent).unwrap_or_else(AccuracyTarget::exact);
     let size = |target: &AccuracyTarget| {
@@ -3749,7 +3748,7 @@ mod tests {
         /// `(a + b) / (1 − b)` (`a = 0` for an exact numerator). The failure
         /// probability is the union bound. A rank error composes to none.
         #[test]
-        fn products_and_quotients_of_estimates_have_symbolic_bounds() {
+        fn products_and_quotients_of_estimates_have_closed_or_symbolic_bounds() {
             use ArithmeticOpKind::*;
             let unknown = |statistic: &str| BoundExpr::Unknown {
                 statistic: statistic.into(),
@@ -3790,6 +3789,14 @@ mod tests {
             assert!(close(bound(&reciprocal), 0.02 / (1.0 - 0.02)));
             // A denominator bound of 1 or more leaves the ratio unbounded.
             assert_eq!(of(&arith(Div, scalar(rel(0.01)), scalar(rel(1.0)))), None);
+            // A relative bound still symbolic in Stage 1 has no ratio rule.
+            let symbolic = AccuracyGuarantee::new(
+                AccuracyMetric::Relative,
+                unknown("values_sign"),
+                ProbabilityExpr::Zero,
+                vec![],
+            );
+            assert_eq!(of(&arith(Div, scalar(symbolic), scalar(rel(0.01)))), None);
             let relative = of(&arith(Mul, scalar(rel(0.01)), scalar(rel(0.02)))).unwrap();
             assert_eq!(relative.spec.accuracy_metric, AccuracyMetric::Relative);
             assert!(close(bound(&relative), 0.01 + 0.02 + 0.0002));

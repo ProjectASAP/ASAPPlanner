@@ -235,8 +235,8 @@ They are explicit frontend function arguments, not one generic
 
 **A model is planning logic; evidence is a scoped fact used by that logic.**
 For example, `DefaultAccuracyModel` knows how to combine error bounds, while
-an input-domain observation tells it whether a particular quantile ratio has
-the required bound. The former can be provided by a built-in default; the
+an operand-domain contract tells it whether a particular product or quotient
+of absolute-error estimates has a bound. The former can be provided by a built-in default; the
 latter cannot be fabricated by one.
 
 | Input | Where it enters / default | Why it matters |

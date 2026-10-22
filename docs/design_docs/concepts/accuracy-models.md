@@ -218,8 +218,12 @@ a simultaneous guarantee across every query or evaluation time in a dashboard.
 For relative errors, two eligible layers with errors `e1` and `e2` compose as
 `(1 + e1)(1 + e2) - 1`, not simply `e1 + e2`. A ratio of relative errors `a`
 over `b` is within `max((1 + a)/(1 − b) − 1, 1 − (1 − a)/(1 + b)) = (a + b)/(1 − b)`.
-A relative bound keeps zero at zero, so a zero denominator gives the same
-non-finite answer exactly and approximately. A sum or difference of relative
+A relative bound below 1 keeps zero at zero and keeps the sign, so a zero
+denominator gives the same non-finite answer exactly and approximately. The
+rule relies on each operand's own relative guarantee (for DDSketch, its
+estimator contract: one-signed values within the mapping's range). A ratio
+of operands whose relative bound is still symbolic in Stage 1 (e.g. a sum of
+quantiles gated on the values' sign) gets no guarantee. A sum or difference of relative
 errors has no relative bound (cancellation), and a rank error (KLL) has no
 value bound, so neither composes through division. Likewise, an exact sum above
 approximate values retains their uncertainty: exact arithmetic does not
