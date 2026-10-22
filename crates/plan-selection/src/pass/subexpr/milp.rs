@@ -145,7 +145,9 @@ pub(crate) struct ModelInput {
     pub union_rate: HashMap<Vec<usize>, f64>,
     /// No-good cuts from earlier iterations: at most `bound` of these
     /// choices together (a plan whose every group took one of them).
-    pub excluded: Vec<(Vec<usize>, f64)>,
+    /// With the groups that plan does not need: a plan needing any of them
+    /// is another plan, not cut.
+    pub excluded: Vec<(Vec<usize>, Vec<usize>, f64)>,
     /// Lower bounds on the omitted cost, added as `extra ≥ bound` when all
     /// of a choice set is chosen (local cuts).
     pub extra_bounds: Vec<(Vec<usize>, f64)>,
@@ -718,10 +720,13 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         constraints.push(constraint!(latency <= bound));
     }
     // Cuts.
-    for (set, bound) in &input.excluded {
+    for (set, outside, bound) in &input.excluded {
         let mut chosen = Expression::from(0.0);
         for &c in set {
             chosen += x[c];
+        }
+        for &g in outside {
+            chosen -= need[g];
         }
         constraints.push(constraint!(chosen <= *bound));
     }
@@ -1054,7 +1059,7 @@ pub(crate) fn search<Id: Clone>(
                                             == group_choice[b.0 .0 as usize].unwrap())
                             })
                             .collect();
-                        input.excluded.push((members, 1.0));
+                        input.excluded.push((members, Vec::new(), 1.0));
                         cut = true;
                     }
                 }
@@ -1065,7 +1070,7 @@ pub(crate) fn search<Id: Clone>(
                                 && Some(input.choices[c].candidate) == group_choice[a.0 .0 as usize]
                         })
                         .collect();
-                    input.excluded.push((members, 0.0));
+                    input.excluded.push((members, Vec::new(), 0.0));
                     cut = true;
                 }
             }
@@ -1096,7 +1101,65 @@ pub(crate) fn search<Id: Clone>(
             .filter(|(_, choice)| group_choice[choice.group.0 as usize] == Some(choice.candidate))
             .map(|(c, _)| c)
             .collect();
-        input.excluded.push((excluded, groups as f64 - 1.0));
+        let mut covered = vec![false; memo.groups.len()];
+        for (g, c) in group_choice.iter().enumerate() {
+            if let Some(c) = c {
+                for i in &memo.candidates[g][*c].implements {
+                    covered[i.0 as usize] = true;
+                }
+            }
+        }
+        let outside = (0..memo.groups.len()).filter(|&g| !covered[g]).collect();
+        input
+            .excluded
+            .push((excluded, outside, groups as f64 - 1.0));
+    }
+    if std::env::var_os("JP_MILP_CHECK").is_some() {
+        // Debugging aid: every group choice's exact price against the
+        // model's value restricted to it.
+        let incumbent = selector.cheapest_price().unwrap_or(f64::INFINITY);
+        for group_choice in super::search::group_choices(&memo).unwrap_or_default() {
+            let mut one = PlanSelector::new(entries, data, models, false)?;
+            let mut scratch = HashMap::new();
+            let mut k = 0usize;
+            super::search::offer_group_choice(
+                &memo,
+                per_computation,
+                &group_choice,
+                entries,
+                data,
+                models,
+                &mut one,
+                &mut scratch,
+                &mut k,
+            )?;
+            let Some(exact) = one.cheapest_price() else {
+                continue;
+            };
+            let mut restricted = model_input_clone(&input);
+            restricted.excluded.clear();
+            let outside: Vec<usize> = (0..restricted.choices.len())
+                .filter(|&c| {
+                    group_choice[restricted.choices[c].group.0 as usize]
+                        != Some(restricted.choices[c].candidate)
+                })
+                .collect();
+            restricted.excluded.push((outside, Vec::new(), 0.0));
+            let value = solve(&restricted)
+                .map_err(SelectionError::Solver)?
+                .map(|s| s.objective);
+            let bad = value.is_none_or(|v| v > exact * (1.0 + 1e-9));
+            if bad || exact < incumbent * (1.0 - 1e-9) {
+                eprintln!(
+                    "check: {group_choice:?} exact {exact:.7e} model {value:?}{}",
+                    if bad {
+                        " NOT A LOWER BOUND"
+                    } else {
+                        " BELOW INCUMBENT"
+                    }
+                );
+            }
+        }
     }
     let (mut selection, selected) = selector.finish()?;
     let price = selection.costs[&selection.selected].cost_per_second;
@@ -1117,6 +1180,24 @@ pub(crate) fn search<Id: Clone>(
         .remove(&selected.from_logical)
         .expect("the selection's logical roots are kept");
     Ok((selection, selected, roots))
+}
+
+fn model_input_clone(input: &ModelInput) -> ModelInput {
+    ModelInput {
+        group_count: input.group_count,
+        group_queries: input.group_queries.clone(),
+        choices: input.choices.clone(),
+        group_slots: input.group_slots.clone(),
+        queries: input.queries.clone(),
+        schedule: input.schedule.clone(),
+        union_rate: input.union_rate.clone(),
+        excluded: input.excluded.clone(),
+        extra_bounds: input.extra_bounds.clone(),
+        requires: input.requires.clone(),
+        exclusive: input.exclusive.clone(),
+        raw_scans: input.raw_scans.clone(),
+        raw_data_retained: input.raw_data_retained,
+    }
 }
 
 /// The model's input for `memo`'s `choices`.
