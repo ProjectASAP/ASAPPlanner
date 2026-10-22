@@ -75,6 +75,31 @@ pub(crate) struct ImplementationCandidate {
     pub origin: CandidateOrigin,
     /// The coupling sites its cost depends on.
     pub coupling_sites: Vec<CouplingSite>,
+    /// Groups whose chosen implementation must be exact for this one to
+    /// be valid (a rollup's finer group, a top-k reuse's input group); a
+    /// child or a descendant.
+    pub requires_exact_children: Vec<GroupId>,
+    /// For a rollup, what it rolls up and from where; `None` otherwise.
+    pub rollup_of: Option<RollupRead>,
+}
+
+/// What a [`CandidateOrigin::Rollup`] candidate reads, and what it
+/// rewrites: the search checks that the finer group's chosen
+/// implementation is the one the joint rule would roll up from.
+#[derive(Debug, Clone)]
+pub(crate) struct RollupRead {
+    /// The finer group it reads.
+    pub finer_group: GroupId,
+    /// For a sketch rollup, the finer build whose state it merges, as its
+    /// node reads it: a boundary node, priced with `finer_group`, which
+    /// must choose an implementation building that state and exposing it
+    /// at the same [`CouplingKind::SharedBuildSize`] site. `None` for an
+    /// exact rollup, which reads `finer_group`'s output.
+    pub finer_state: Option<Rc<OperatorNode>>,
+    /// The coarse group's candidate it rewrites.
+    pub coarse_candidate: Rc<OperatorNode>,
+    /// That candidate's coarse build, which it no longer builds.
+    pub coarse_build: Rc<OperatorNode>,
 }
 
 /// Where an implementation candidate came from.

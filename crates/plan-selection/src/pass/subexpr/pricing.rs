@@ -559,6 +559,8 @@ mod tests {
                 children,
                 origin: CandidateOrigin::Pass1,
                 coupling_sites: Vec::new(),
+                requires_exact_children: Vec::new(),
+                rollup_of: None,
             };
         let memo = Memo {
             groups: vec![group(&below, vec![]), group(top, vec![GroupId(0)])],

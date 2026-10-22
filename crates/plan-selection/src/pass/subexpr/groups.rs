@@ -182,6 +182,8 @@ fn pass1_candidates<Id: Clone>(
         children: groups[g].children.clone(),
         origin: CandidateOrigin::Pass1,
         coupling_sites: Vec::new(),
+        requires_exact_children: Vec::new(),
+        rollup_of: None,
     };
     (0..groups.len())
         .map(|g| match targets_of.get(&GroupId(g as u32)) {
@@ -251,6 +253,8 @@ fn target_candidates<Id: Clone>(
                         children: groups[g.0 as usize].children.clone(),
                         origin: CandidateOrigin::Pass1,
                         coupling_sites: Vec::new(),
+                        requires_exact_children: Vec::new(),
+                        rollup_of: None,
                     }
                 } else {
                     let mut children = Vec::new();
@@ -267,6 +271,8 @@ fn target_candidates<Id: Clone>(
                         children,
                         origin: CandidateOrigin::Pass1,
                         coupling_sites: Vec::new(),
+                        requires_exact_children: Vec::new(),
+                        rollup_of: None,
                     }
                 };
                 candidates.push(candidate);

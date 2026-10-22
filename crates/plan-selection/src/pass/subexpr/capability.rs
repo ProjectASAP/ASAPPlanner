@@ -314,6 +314,8 @@ mod tests {
                 children: vec![GroupId(1)],
                 origin: CandidateOrigin::Pass1,
                 coupling_sites: Vec::new(),
+                requires_exact_children: Vec::new(),
+                rollup_of: None,
             }]);
         }
         add_shared_builds(&mut memo);
