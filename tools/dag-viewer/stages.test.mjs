@@ -115,3 +115,8 @@ test('the candidate header shows the selection\'s warnings', () => {
   );
   assert.equal(call('stageCandidateHeader', { stage1_logical_asap_optimization: { combinations: 2 } }), '2 candidates');
 });
+
+test('the physical candidate list is in plan-number order', () => {
+  const ids = ['P10', 'P2-m1', 'P1', 'P3', 'P2'];
+  assert.deepEqual(ids.sort((a, b) => call('byPlanNumber', a, b)), ['P1', 'P2', 'P2-m1', 'P3', 'P10']);
+});
