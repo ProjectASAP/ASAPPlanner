@@ -42,7 +42,9 @@
 #![allow(dead_code)]
 
 pub(crate) mod capability;
+pub(crate) mod coefficients;
 pub(crate) mod groups;
+pub(crate) mod milp;
 pub(crate) mod pricing;
 pub(crate) mod scans;
 pub(crate) mod search;

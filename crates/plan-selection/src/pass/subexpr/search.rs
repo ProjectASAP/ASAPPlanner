@@ -73,12 +73,12 @@ pub(crate) fn stats(memo: &Memo, build_ms: f64) -> MemoStats {
 
 /// One plan of the memo: a candidate per needed group (`None` for a group
 /// no chosen candidate needs, or one a fused candidate implements).
-type GroupChoice = Vec<Option<usize>>;
+pub(super) type GroupChoice = Vec<Option<usize>>;
 
 /// Every consistent choice of one candidate per needed group, parents
 /// before children: a group is needed when it is a query's root or a child
 /// of a chosen candidate, and not implemented by a chosen fused candidate.
-fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
+pub(super) fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
     let order = memo.topological_order()?;
     let parents_first: Vec<GroupId> = order.into_iter().rev().collect();
     let n = memo.groups.len();
@@ -143,7 +143,10 @@ fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
 /// of its coupling sites: every combination of thresholds every reader may
 /// read. A raw-horizon site has no rewrite and leaves its readers as they
 /// are; Stage 3 prices it.
-fn at_thresholds(memo: &Memo, choice: &GroupChoice) -> Vec<Vec<Option<ImplementationCandidate>>> {
+pub(super) fn at_thresholds(
+    memo: &Memo,
+    choice: &GroupChoice,
+) -> Vec<Vec<Option<ImplementationCandidate>>> {
     let chosen: Vec<Option<ImplementationCandidate>> = choice
         .iter()
         .enumerate()
@@ -254,7 +257,7 @@ fn at_thresholds(memo: &Memo, choice: &GroupChoice) -> Vec<Vec<Option<Implementa
 /// them: every closed set of identical nodes made one node, and, when a
 /// metric's scans project different labels, the candidates over every
 /// metric's scans widened to one label set that share a scan.
-fn identical_expression_variants(roots: Vec<QueryRoot>) -> Vec<Vec<QueryRoot>> {
+pub(super) fn identical_expression_variants(roots: Vec<QueryRoot>) -> Vec<Vec<QueryRoot>> {
     let mut variants = Vec::new();
     for shared in identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots)) {
         variants.push(shared.roots);
@@ -283,7 +286,7 @@ fn identical_expression_variants(roots: Vec<QueryRoot>) -> Vec<Vec<QueryRoot>> {
 /// candidate reads from outside its query (a rollup's finer group, a
 /// ranking, a host chain) is built once, by the first query below whose
 /// root it is, or once for all.
-fn composed_roots<Id>(
+pub(super) fn composed_roots<Id>(
     memo: &Memo,
     per_computation: &PerComputationCandidates<Id>,
     chosen: &[Option<ImplementationCandidate>],
@@ -436,7 +439,7 @@ fn substituted(
 /// The shared builds `plan` resized: each shared-build reader's build that
 /// differs from the build of the memo's candidate it was chosen as
 /// (`choice`).
-fn resized_builds(
+pub(super) fn resized_builds(
     memo: &Memo,
     choice: &GroupChoice,
     plan: &[Option<ImplementationCandidate>],
