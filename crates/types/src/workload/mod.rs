@@ -577,6 +577,22 @@ pub struct SourceFacts {
     /// NULL) as one more value, and positive. Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub distinct_values_per_label: BTreeMap<String, u64>,
+    /// How many distinct combinations sets of labels (or columns) take
+    /// together, for labels that depend on each other (default: none
+    /// declared), e.g. `[{"labels": ["service", "endpoint"],
+    /// "distinct_values": 625}]` when each of 625 endpoints is in one of 25
+    /// services. Plan selection prices a grouping at the smallest product
+    /// of declared counts whose labels cover its keys
+    /// ([`SourceFacts::declared_distinct_combinations`]), so
+    /// `by (service, endpoint)` is 625 groups rather than 25 x 625, and
+    /// `by (region, service, endpoint)` is at most 4 x 625. Nothing is
+    /// inferred from the per-label counts. Each set names two or more
+    /// distinct labels, and its count is a positive upper bound (a missing
+    /// label or NULL counts as one more value) no larger than the product
+    /// of its labels' `distinct_values_per_label` counts when all are
+    /// declared. Omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub distinct_values_per_label_set: Vec<LabelSetDistinctValues>,
     /// How many rows (PromQL samples) the source holds at rest, at most
     /// (default: unknown). Plan selection bounds the rows a scan reads by
     /// it: the whole source for a scan with no window above it, such as a
@@ -584,6 +600,81 @@ pub struct SourceFacts {
     /// arrival rate. Must be positive. Omitted from JSON when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows_held: Option<u64>,
+}
+
+/// The distinct combinations of values a set of labels (or columns) of one
+/// source takes together, an upper bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelSetDistinctValues {
+    /// The labels (PromQL) or columns (SQL), two or more, in any order.
+    pub labels: Vec<String>,
+    /// How many distinct combinations of their values the source holds.
+    pub distinct_values: u64,
+}
+
+/// The most keys declared label sets are searched over: covering them
+/// searches every subset of the keys some declared set names.
+const MAX_KEYS_COVERED_BY_LABEL_SETS: usize = 16;
+
+impl SourceFacts {
+    /// An upper bound on the distinct combinations of values `labels` take
+    /// together in this source, from declared counts only: the smallest
+    /// product of counts, of declared label sets
+    /// (`distinct_values_per_label_set`) and of single labels
+    /// (`distinct_values_per_label`), whose labels together cover
+    /// `labels`. A set covering labels beyond `labels` still bounds them.
+    /// `Some(1)` for no labels; `None` when some label is in no declared
+    /// count. Only labels some declared set names are searched over (every
+    /// other label contributes its own count); with more than 16 of them,
+    /// only the per-label product is used.
+    pub fn declared_distinct_combinations(&self, labels: &[&str]) -> Option<u64> {
+        let mut keys = labels.to_vec();
+        keys.sort_unstable();
+        keys.dedup();
+        let label_product = |keys: &[&str]| {
+            keys.iter().try_fold(1u64, |product, key| {
+                Some(product.saturating_mul(*self.distinct_values_per_label.get(*key)?))
+            })
+        };
+        let (in_sets, alone): (Vec<&str>, Vec<&str>) = keys.iter().partition(|key| {
+            self.distinct_values_per_label_set
+                .iter()
+                .any(|set| set.labels.iter().any(|label| label == *key))
+        });
+        if in_sets.is_empty() || in_sets.len() > MAX_KEYS_COVERED_BY_LABEL_SETS {
+            return label_product(&keys);
+        }
+        // Each declared count over `in_sets` as (the keys it covers as a bit
+        // mask, count).
+        let mut counts: Vec<(usize, u64)> = in_sets
+            .iter()
+            .enumerate()
+            .filter_map(|(bit, key)| Some((1 << bit, *self.distinct_values_per_label.get(*key)?)))
+            .collect();
+        counts.extend(self.distinct_values_per_label_set.iter().filter_map(|set| {
+            let covered = in_sets
+                .iter()
+                .enumerate()
+                .filter(|(_, key)| set.labels.iter().any(|label| label == *key))
+                .fold(0, |mask, (bit, _)| mask | 1 << bit);
+            (covered != 0).then_some((covered, set.distinct_values))
+        }));
+        // smallest[m]: the smallest product of counts covering the keys in m.
+        let every_key = (1usize << in_sets.len()) - 1;
+        let mut smallest: Vec<Option<u64>> = vec![None; every_key + 1];
+        smallest[0] = Some(1);
+        for keys_left in 1..=every_key {
+            smallest[keys_left] = counts
+                .iter()
+                .filter(|(covered, _)| covered & keys_left != 0)
+                .filter_map(|(covered, count)| {
+                    Some(smallest[keys_left & !covered]?.saturating_mul(*count))
+                })
+                .min();
+        }
+        Some(smallest[every_key]?.saturating_mul(label_product(&alone)?))
+    }
 }
 
 /// Upper bounds on the norms of the frequency (weight) vector any one
@@ -693,7 +784,7 @@ impl DataWorkload {
     /// or language.
     pub fn validate(&self) -> Result<(), WorkloadError> {
         validate_optional_rate(self.arrival.rows_per_second().map(Rate))?;
-        for facts in self.sources.values() {
+        for (source_name, facts) in &self.sources {
             if facts.series_count == Some(0) {
                 return Err(WorkloadError::ZeroSeriesCount);
             }
@@ -719,6 +810,32 @@ impl DataWorkload {
             }
             if facts.rows_held == Some(0) {
                 return Err(WorkloadError::ZeroRowsHeld);
+            }
+            for set in &facts.distinct_values_per_label_set {
+                let error_labels = || set.labels.clone();
+                let mut distinct_labels: Vec<&String> = set.labels.iter().collect();
+                distinct_labels.sort_unstable();
+                distinct_labels.dedup();
+                if distinct_labels.len() < 2 || distinct_labels.len() != set.labels.len() {
+                    return Err(WorkloadError::LabelSetNeedsTwoLabels {
+                        source_name: source_name.clone(),
+                        labels: error_labels(),
+                    });
+                }
+                if set.distinct_values == 0 {
+                    return Err(WorkloadError::ZeroDistinctValues);
+                }
+                let label_product = set.labels.iter().try_fold(1u64, |product, label| {
+                    Some(product.saturating_mul(*facts.distinct_values_per_label.get(label)?))
+                });
+                if let Some(label_product) = label_product.filter(|&p| set.distinct_values > p) {
+                    return Err(WorkloadError::LabelSetCountAboveLabelProduct {
+                        source_name: source_name.clone(),
+                        labels: error_labels(),
+                        distinct_values: set.distinct_values,
+                        label_product,
+                    });
+                }
             }
         }
         Ok(())
@@ -802,7 +919,7 @@ fn validate_rate(rate: Rate) -> Result<Rate, WorkloadError> {
 }
 
 /// Why a planning workload is rejected. Every variant is bad input.
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum WorkloadError {
     /// Bad input: a PromQL or MetricsQL query has a bare instant selector,
     /// which reads the latest sample within its metric's sample interval,
@@ -865,10 +982,37 @@ pub enum WorkloadError {
     /// Bad input: a source's `max_distinct_per_evaluation` of zero.
     #[error("a source's max_distinct_per_evaluation must be greater than zero")]
     ZeroMaxDistinct,
-    /// Bad input: a label (or column) declared with zero distinct values in
-    /// a source's `distinct_values_per_label`.
-    #[error("a source's distinct_values_per_label counts must be greater than zero")]
+    /// Bad input: a zero count in a source's `distinct_values_per_label`
+    /// or `distinct_values_per_label_set`.
+    #[error(
+        "a source's distinct_values_per_label and distinct_values_per_label_set counts must be \
+         greater than zero"
+    )]
     ZeroDistinctValues,
+    /// Bad input: a `distinct_values_per_label_set` entry naming fewer than
+    /// two labels, or one label twice (one label's count belongs in
+    /// `distinct_values_per_label`).
+    #[error(
+        "source {source_name}: a distinct_values_per_label_set entry must name two or more \
+         distinct labels, got {labels:?}"
+    )]
+    LabelSetNeedsTwoLabels {
+        source_name: String,
+        labels: Vec<String>,
+    },
+    /// Bad input: a label set declaring more combinations than the product
+    /// of its labels' declared distinct values allows.
+    #[error(
+        "source {source_name}: distinct_values_per_label_set declares {distinct_values} \
+         combinations of {labels:?}, more than the {label_product} their \
+         distinct_values_per_label counts allow"
+    )]
+    LabelSetCountAboveLabelProduct {
+        source_name: String,
+        labels: Vec<String>,
+        distinct_values: u64,
+        label_product: u64,
+    },
     /// Bad input: a source's `rows_held` of zero.
     #[error("a source's rows_held must be greater than zero")]
     ZeroRowsHeld,
@@ -1029,6 +1173,128 @@ mod tests {
         };
         assert!(with(1).validate().is_ok());
         assert_eq!(with(0).validate(), Err(WorkloadError::ZeroDistinctValues));
+    }
+
+    /// The `http` source of the eval's RollupHeavy workload: 4 regions, 25
+    /// services and 625 endpoints, each endpoint in one service, so
+    /// (service, endpoint) takes 625 combinations, not 25 x 625.
+    fn hierarchical_facts(declared_sets: &[(&[&str], u64)]) -> SourceFacts {
+        SourceFacts {
+            distinct_values_per_label: BTreeMap::from([
+                ("region".to_string(), 4),
+                ("service".to_string(), 25),
+                ("endpoint".to_string(), 625),
+            ]),
+            distinct_values_per_label_set: declared_sets
+                .iter()
+                .map(|(labels, distinct_values)| LabelSetDistinctValues {
+                    labels: labels.iter().map(|label| label.to_string()).collect(),
+                    distinct_values: *distinct_values,
+                })
+                .collect(),
+            ..SourceFacts::default()
+        }
+    }
+
+    /// A grouping's combinations are bounded by the smallest product over
+    /// declared sets and labels covering its keys: the declared set itself,
+    /// a superset of keys through the set times the other labels, and a
+    /// subset of a declared set through that set. Without a declared set,
+    /// the per-label product stands.
+    #[test]
+    fn declared_label_sets_bound_the_combinations_of_their_labels() {
+        let declared = hierarchical_facts(&[(&["service", "endpoint"], 625)]);
+        let undeclared = hierarchical_facts(&[]);
+        let combinations =
+            |facts: &SourceFacts, labels: &[&str]| facts.declared_distinct_combinations(labels);
+        assert_eq!(combinations(&declared, &["service", "endpoint"]), Some(625));
+        assert_eq!(combinations(&declared, &["endpoint", "service"]), Some(625));
+        assert_eq!(
+            combinations(&declared, &["region", "service", "endpoint"]),
+            Some(4 * 625)
+        );
+        assert_eq!(
+            combinations(&undeclared, &["service", "endpoint"]),
+            Some(25 * 625)
+        );
+        assert_eq!(
+            combinations(&undeclared, &["region", "service", "endpoint"]),
+            Some(4 * 25 * 625)
+        );
+        assert_eq!(combinations(&declared, &["service"]), Some(25));
+        assert_eq!(combinations(&declared, &[]), Some(1));
+        // A key no fact covers leaves the combinations unbound.
+        assert_eq!(combinations(&declared, &["service", "status"]), None);
+        // A declared set covering more labels bounds its subsets: 3 users
+        // have made 7 (user, session) pairs, so at most 7 sessions, while
+        // `session` alone declares no count.
+        let sessions = SourceFacts {
+            distinct_values_per_label_set: vec![LabelSetDistinctValues {
+                labels: vec!["user".to_string(), "session".to_string()],
+                distinct_values: 7,
+            }],
+            ..SourceFacts::default()
+        };
+        assert_eq!(
+            sessions.declared_distinct_combinations(&["session"]),
+            Some(7)
+        );
+        // 70 keys, two in a declared set: only those two are searched over.
+        let mut wide = hierarchical_facts(&[(&["service", "endpoint"], 625)]);
+        let names: Vec<String> = (0..68).map(|i| format!("l{i}")).collect();
+        for name in &names {
+            wide.distinct_values_per_label.insert(name.clone(), 1);
+        }
+        let mut labels: Vec<&str> = names.iter().map(String::as_str).collect();
+        labels.extend(["service", "endpoint"]);
+        assert_eq!(wide.declared_distinct_combinations(&labels), Some(625));
+    }
+
+    /// A declared set count is an input error, naming the source, when it
+    /// is above the product of its labels' declared counts, or when the set
+    /// has fewer than two distinct labels (one label's count belongs in
+    /// `distinct_values_per_label`) or zero values.
+    #[test]
+    fn a_label_set_count_is_at_most_its_labels_product() {
+        let with = |facts: SourceFacts| DataWorkload {
+            sources: BTreeMap::from([("http".to_string(), facts)]),
+            ..DataWorkload::default()
+        };
+        assert!(with(hierarchical_facts(&[(&["service", "endpoint"], 625)]))
+            .validate()
+            .is_ok());
+        // `status` declares no count, so the set's product is unknown.
+        assert!(with(hierarchical_facts(&[(&["service", "status"], 1_000)]))
+            .validate()
+            .is_ok());
+        let error = with(hierarchical_facts(&[(&["region", "service"], 101)]))
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            WorkloadError::LabelSetCountAboveLabelProduct {
+                source_name: "http".to_string(),
+                labels: vec!["region".to_string(), "service".to_string()],
+                distinct_values: 101,
+                label_product: 100,
+            }
+        );
+        assert!(error.to_string().contains("http"), "{error}");
+        for labels in [&["service"][..], &["service", "service"][..]] {
+            let error = with(hierarchical_facts(&[(labels, 25)])).validate();
+            assert!(
+                matches!(
+                    &error,
+                    Err(WorkloadError::LabelSetNeedsTwoLabels { source_name, .. })
+                        if source_name == "http"
+                ),
+                "{error:?}"
+            );
+        }
+        assert_eq!(
+            with(hierarchical_facts(&[(&["service", "endpoint"], 0)])).validate(),
+            Err(WorkloadError::ZeroDistinctValues)
+        );
     }
 
     /// A declared series count is positive: with zero series, `absent(m)`
@@ -1300,7 +1566,14 @@ mod tests {
                             l2: None,
                         }),
                         max_distinct_per_evaluation: Some(100),
-                        distinct_values_per_label: BTreeMap::from([("job".to_string(), 10)]),
+                        distinct_values_per_label: BTreeMap::from([
+                            ("job".to_string(), 10),
+                            ("instance".to_string(), 1_000),
+                        ]),
+                        distinct_values_per_label_set: vec![LabelSetDistinctValues {
+                            labels: vec!["job".to_string(), "instance".to_string()],
+                            distinct_values: 1_000,
+                        }],
                         rows_held: Some(1_000_000),
                     },
                 )]),
@@ -1319,7 +1592,10 @@ mod tests {
                     "sample_interval": 15000,
                     "stream_norms": {"l1": 1e9, "l2": null},
                     "max_distinct_per_evaluation": 100,
-                    "distinct_values_per_label": {"job": 10},
+                    "distinct_values_per_label": {"instance": 1000, "job": 10},
+                    "distinct_values_per_label_set": [
+                        {"labels": ["job", "instance"], "distinct_values": 1000}
+                    ],
                     "rows_held": 1000000
                 }}
             })

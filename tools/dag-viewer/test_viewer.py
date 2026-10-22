@@ -539,6 +539,15 @@ class WorkloadViewTests(unittest.TestCase):
         self.assertEqual(rows["data"]["distinctValuesPerLabel"], "host 1000, job 10")
         self.assertEqual(rows["other"]["distinctValuesPerLabel"], "—")
 
+    def test_data_workload_rows_show_each_label_sets_distinct_values(self):
+        data_workload = {"arrival": "at_rest", "sources": {
+            "http": {"series_count": 10000, "distinct_values_per_label": {"service": 25, "endpoint": 625},
+                     "distinct_values_per_label_set": [{"labels": ["service", "endpoint"], "distinct_values": 625}]},
+            "other": {"series_count": 5}}}
+        rows = {r["name"]: r for r in self.js.call("dataWorkloadView", data_workload, [])["rows"]}
+        self.assertEqual(rows["http"]["distinctValuesPerLabelSet"], "(service, endpoint) 625")
+        self.assertEqual(rows["other"]["distinctValuesPerLabelSet"], "—")
+
     def test_stored_output_rows_map_to_stage2_nodes_and_their_readers(self):
         rows = self.js.call("storedOutputRows", self.doc)
         stored = self.doc["stage3_plan_selection"]["stored_outputs"]

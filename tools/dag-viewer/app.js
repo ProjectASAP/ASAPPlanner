@@ -297,8 +297,8 @@
     $('dataArrival').textContent = `arrival: ${view.arrival}`;
     $('deployment').textContent = doc.deployment_capabilities ? `Deployment: ${deploymentText(doc.deployment_capabilities)}` : '';
     $('dataSources').innerHTML = view.rows.length
-      ? table(['source', 'series', 'type', 'non-negative', 'sample interval', 'stream norms', 'distinct bound', 'distinct values per label', 'read by'],
-        view.rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.series)}</td><td>${esc(r.type)}</td><td>${esc(r.nonNegative)}</td><td>${esc(r.sampleInterval)}</td><td>${esc(r.streamNorms)}</td><td>${esc(r.maxDistinct)}</td><td class="wrap">${esc(r.distinctValuesPerLabel)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join(''))
+      ? table(['source', 'series', 'type', 'non-negative', 'sample interval', 'stream norms', 'distinct bound', 'distinct values per label', 'distinct values per label set', 'read by'],
+        view.rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.series)}</td><td>${esc(r.type)}</td><td>${esc(r.nonNegative)}</td><td>${esc(r.sampleInterval)}</td><td>${esc(r.streamNorms)}</td><td>${esc(r.maxDistinct)}</td><td class="wrap">${esc(r.distinctValuesPerLabel)}</td><td class="wrap">${esc(r.distinctValuesPerLabelSet)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join(''))
       : '<span class="status">No source declared.</span>';
   }
 
