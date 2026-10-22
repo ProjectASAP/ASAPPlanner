@@ -206,7 +206,7 @@ impl OperatorKind {
 
 /// The state family a summary node works on, which selects its entries.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum StateFamily<'a> {
+pub(crate) enum StateFamily<'a> {
     /// No family: a non-summary operator, or a shared (Hydra) structure.
     None,
     Sketch(&'a SketchParams),

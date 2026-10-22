@@ -19,7 +19,6 @@ use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate}
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
 
 use super::{groups, CouplingKind, GroupId, ImplementationCandidate, Memo};
 use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
