@@ -616,6 +616,48 @@ mod tests {
         assert_eq!(builds.len(), 1);
     }
 
+    /// Q1 = `topk(5, sum by (job) (sum_over_time(m[5m])))` and Q2 = its
+    /// inner sum: Q1's fused heap candidate absorbs the inner sum, which is
+    /// Q2's root. No composed plan answers Q2 with the heap, and the plan
+    /// "Q1 by the heap, Q2 by its own sum" is listed.
+    #[test]
+    fn a_fused_candidate_does_not_absorb_another_querys_root() {
+        let target = AccuracyTarget::max_error(0.01);
+        let roots: Vec<(usize, QueryRoot)> = [
+            "topk(5, sum by (job) (sum_over_time(m[5m])))",
+            "sum by (job) (sum_over_time(m[5m]))",
+        ]
+        .iter()
+        .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
+        .enumerate()
+        .collect();
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let memo = groups::memo_of(&per_computation);
+        let uses_heap = |root: &QueryRoot| match root {
+            QueryRoot::Operator(node) => OperatorNode::reachable(node).iter().any(|n| {
+                matches!(n.asap(), Some(asap_types::ir::ASAPOp::SummaryAgg { family, .. })
+                    if format!("{family:?}").contains("Heap"))
+            }),
+            QueryRoot::Scalar(_) => false,
+        };
+        let mut q1_heap_q2_own = false;
+        for choice in group_choices(&memo).unwrap() {
+            for plan in at_thresholds(&memo, &choice) {
+                let roots = composed_roots(&memo, &per_computation, &plan).unwrap();
+                assert!(
+                    !uses_heap(&roots[1]),
+                    "Q2 answered by a heap: {:?}",
+                    roots[1]
+                );
+                q1_heap_q2_own |= uses_heap(&roots[0]);
+            }
+        }
+        assert!(
+            q1_heap_q2_own,
+            "no plan answers Q1 by the heap and Q2 by its own sum"
+        );
+    }
+
     /// A quantile's memo, Pass 1 only, has three groups (scan, window,
     /// quantile) and five candidates (the quantile's exact, KLL and
     /// DDSketch); with one candidate made a pane candidate and coupling

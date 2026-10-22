@@ -1288,7 +1288,8 @@ pub(crate) struct PrivatePricing<'a> {
     /// overhead is charged here).
     pub(crate) root_of: &'a [bool],
     /// The look-back of a query-time scan no window among the private
-    /// nodes bounds ([`DEFAULT_LOOKBACK_MS`] when `None`).
+    /// nodes bounds; `None` when the scan has no window, so it reads the
+    /// source's `rows_held` or fails with `MissingSourceFact`.
     pub(crate) scan_lookback_ms: Option<u64>,
     pub(crate) data: &'a DataWorkload,
     pub(crate) settings: &'a PlanSelectionSettings,
@@ -4003,8 +4004,9 @@ pub(crate) struct EachNodePriced<'a> {
 /// [`price_node`] over every node of `dag`, children first, with the
 /// arguments of [`price_at_scale`]. `root_scan_lookback_ms` is the
 /// look-back of a query-time scan no window above it in `dag` bounds (a
-/// scan priced without its consumers); `None` reads
-/// [`DEFAULT_LOOKBACK_MS`] as Stage 3 does. `root_rates`, when given, are
+/// scan priced without its consumers); `None` when the scan has no
+/// window, so it reads the source's `rows_held` or fails with
+/// `MissingSourceFact`, as Stage 3 does. `root_rates`, when given, are
 /// the computations per second of each root's consumer in place of its
 /// query's own rate ([`computations`]).
 #[allow(clippy::too_many_arguments)]

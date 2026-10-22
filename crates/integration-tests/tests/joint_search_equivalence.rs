@@ -1241,3 +1241,53 @@ fn memo_group_search_selects_the_exhaustive_price() {
     );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
+
+/// A query's top-k over a sum, beside a query of that sum alone: the top-k's
+/// fused heap absorbs the sum, which is the other query's root, so the memo
+/// keeps the sum its own group for the second query. The memo-group search
+/// selects a plan of the exhaustive search's price, with raw data kept and
+/// without.
+#[test]
+fn a_fused_top_k_beside_its_inner_sum_selects_the_exhaustive_price() {
+    let workload = workload_of(
+        &[
+            ("topk(5, sum by (job) (sum_over_time(m[5m])))", 60_000),
+            ("sum by (job) (sum_over_time(m[5m]))", 60_000),
+        ],
+        AccuracyTarget::max_error(0.01),
+    );
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    for deployment in [
+        asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        no_raw_data(),
+    ] {
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        let run = |search| {
+            run_stage1_to_stage3_with(
+                roots.iter().cloned().enumerate().collect(),
+                &entries,
+                &data,
+                models,
+                search,
+            )
+            .unwrap()
+        };
+        let price = |run: &Stage1ToStage3Run<usize>| {
+            run.stage3_plan_selection
+                .as_ref()
+                .ok()
+                .map(|s| s.costs[&s.selected].cost_per_second.unwrap())
+        };
+        let exhaustive = price(&run(Stage1ToStage3Search::exhaustive()));
+        let memo = price(&run(Stage1ToStage3Search {
+            memo_groups: true,
+            ..Stage1ToStage3Search::default()
+        }));
+        match (exhaustive, memo) {
+            (Some(a), Some(f)) => assert!((a - f).abs() <= 1e-9 * a.abs(), "{a} vs {f}"),
+            (a, f) => assert_eq!(a.is_some(), f.is_some(), "{a:?} vs {f:?}"),
+        }
+    }
+}
