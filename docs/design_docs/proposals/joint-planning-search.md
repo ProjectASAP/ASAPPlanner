@@ -16,7 +16,7 @@ ASAPPlanner searches per-query alternatives, sharing choices, and materializatio
 - [Interfaces](#interfaces)
 - [Worked example](#worked-example)
 - [Search and validation](#search-and-validation)
-- [Memo-group search](#memo-group-search)
+- [Memo-group search](#memo-group-search): how the stages and the memo work together, and an end-to-end walk-through with the sharing strategies
 - [Future work](#future-work)
 
 ## Problem
@@ -287,6 +287,66 @@ Where each part of the stage design lives in the memo:
 | Stage 2 materialization | chosen per implementation, once per group |
 | Stage 3 pricing and checks | local price per (group, implementation, context), cached; the full plan is checked once |
 | Raw retention, cost models 2 and 3, measured table | a per-source horizon site; frontiers; a calibration factor fitted once and frozen |
+
+### End to end: the memo with the sharing strategies
+
+This walks one workload through the memo, showing what each sharing strategy (the identical-expression, summary-capability and window-composition rules, rollup and exact top-k reuse) contributes and where each decision is made. All queries read `data`, a gauge.
+
+```promql
+Q1: quantile_over_time(0.9, data[5m])                       every 10 s, relative error 0.01
+Q2: quantile_over_time(0.5, data[1m])                       every 10 s, relative error 0.05
+Q3: topk(5, sum by (job) (sum_over_time(data[5m])))         every 60 s
+Q4: sum by (job, instance) (sum_over_time(data[5m]))        every 60 s
+```
+
+**1. Hash-cons the logical DAGs (identical-expression rule).** Each distinct sub-expression is one group. `Scan(data)` and `TimeRange(5m)` appear once, so every reader of them reads the same group; the identical-expression rule needs no separate pass.
+
+```text
+G1 = Scan(data)                                  read by all four queries
+G2 = TimeRange(5m) over G1                       read by Q1, Q3, Q4
+G3 = TimeRange(1m) over G1                       read by Q2
+G4 = quantile_over_time(0.9) over G2             Q1
+G5 = quantile_over_time(0.5) over G3             Q2
+G6 = sum_over_time over G2                       read by Q3, Q4
+G7 = sum by (job, instance) over G6              Q4
+G8 = sum by (job) over G6                        read by Q3
+G9 = topk(5) over G8                             Q3
+```
+
+**2. Pass 1: each group's own implementations.** Pass 1 gives every group the implementations of its node alone: `G4` and `G5` get exact, KLL and DDSketch, each whole-window or in tumbling panes; `G6` to `G9` get exact operators; `G9` also gets a fused Count-Min heap that implements `G6`, `G8` and `G9` at once.
+
+**3. Pass 2: the sharing strategies add implementations that read other groups.**
+
+| Strategy | Implementation it adds | Coupling site it creates |
+| --- | --- | --- |
+| Summary capability | `G4` and `G5` may read one DDSketch build over `data`, sized for the stricter reader (`G4`, error 0.01) | the shared build's size |
+| Window composition | that build as one chain of 10 s panes over 5 m; `G5` reads its newest 6 panes, `G4` all 30 | the chain's grid (10 s, the gcd of the readers' widths), its longest window (5 m) and its size |
+| Rollup | `G8` (`by (job)`) implemented by regrouping `G7` (`by (job, instance)`) | none beyond `G7` being read twice |
+| Exact top-k reuse | where another query keeps the same ranking, `G9` reads it | the ranking's group |
+| (scan widening) | `G1`'s readers read one scan with the union of their labels | the metric's label set |
+
+Nothing here builds a whole-workload candidate; each strategy only adds alternatives to a group.
+
+**4. Stage 2: materialization per implementation.** For example, the shared pane chain may be kept at ingestion time or rebuilt per evaluation; `G2` may be computed by each reader or built once per evaluation. A group with several parents chooses once.
+
+**5. Stage 3: local prices, frontiers, and clusters.** Each implementation is priced once per context and cached. Groups linked by a shared group or a coupling site form a cluster; here all nine groups form one cluster through `G1`, `G2` and the shared quantile build. A workload with another metric would form a second cluster, solved independently.
+
+**6. Joint choice in the cluster.** The coupling choices are enumerated as thresholds, with branch and bound:
+
+```text
+shared quantile build:  size threshold in {for G4's 0.01, for G5's 0.05, no shared build}
+  at 0.01: G5 may read it (0.05 >= 0.01) and does if that is cheaper for G5
+  at 0.05: G4 cannot read it (0.01 is stricter), so G4 uses its own build
+pane chain:             grid in {10 s}, longest window in {5 m, 1 m}
+G2, G6:                 per reader or built once per evaluation
+raw retention of data:  horizon threshold among the readers that scan raw data
+```
+
+For each combination that survives the bound, dynamic programming chooses every other group's implementation bottom-up from the cached frontiers. For example, it chooses between `G8` exact and `G8` rolled up from `G7`, and between `G9` exact and the fused heap, given the chosen `G2` and `G6`. The threshold enumeration replaces enumerating subsets of readers; dominance inside each group keeps the frontiers small.
+
+**7. Build late.** The selected choices are composed into one physical plan. Stage 3 checks it once (guarantees, latency against each repeat interval, capacity) and the executor's compile check runs on it alone. The runner-ups are built only if a report asks for them.
+
+The result is the plan the exhaustive search would select. It is checked by `joint_search_equivalence` on workloads small enough for `--exhaustive`, one per strategy and per coupling site.
 
 ### Stage interfaces
 
