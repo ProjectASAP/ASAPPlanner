@@ -1,16 +1,17 @@
 //! Independent components (joint-planning-search design, method 5): the
-//! workload's queries split into groups that read disjoint sources, each
+//! workload's queries split into groups that no candidate can link, each
 //! searched on its own, and their selections combined.
 //!
 //! Two queries that read no common source cannot interact under any
 //! alternative: every Pass 2 rule (identical expressions, summary
 //! capability, rollup, top-k reuse) shares only work over the same input
 //! rows, raw-data retention is kept per source, and every node's charge
-//! reads only the queries and sources above and below it. Under cost model
-//! 1 the workload's price is the sum of its nodes', so the cheapest plan is
-//! the union of each component's cheapest. Cost models 2 and 3 price or
-//! limit peak cores, a ceiling over the whole workload's work, so their
-//! workloads are searched as one.
+//! reads only the queries and sources above and below it. Two queries over
+//! one source interact only through a node both can read
+//! ([`sharing_components`]). Under cost model 1 the workload's price is the sum
+//! of its nodes', so the cheapest plan is the union of each component's
+//! cheapest. Cost models 2 and 3 price or limit peak cores, a ceiling over
+//! the whole workload's work, so their workloads are searched as one.
 //!
 //! The combined plan is rebuilt as one whole-workload candidate and checked
 //! and priced by Stage 3 again. It is the exhaustive search's selection
@@ -18,22 +19,31 @@
 //! (where the joint enumeration order would decide): each component's
 //! runner-up must cost more than its selection by a margin above that
 //! tolerance. Otherwise, or when the combined price is not the sum, the
-//! workload is searched as one.
+//! workload is searched as one. The combination is not looked up among the
+//! joint search's candidates: each component's Pass 2 rewrites touch only
+//! its own nodes, so together they are a joint candidate whenever the joint
+//! search combines those rules ([`combined_pass2`]), whatever the rules'
+//! enumeration caps over the whole workload.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::per_computation_candidates::{
-    generate_per_computation_candidates, PerComputationCandidates,
+use asap_logical_asap_optimization::asap_aware_cse::{
+    capability_sharing_candidates, pane_candidates, rollup_candidates, sharing_candidates,
+    topk_reuse_candidates, window_composition_pass2_candidates, with_union_scan_labels,
+    SharedPaneChain,
 };
-use asap_logical_asap_optimization::workload_candidates::stage1_candidates_of_choice;
+use asap_logical_asap_optimization::per_computation_candidates::{
+    compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
+};
+use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::optimize_physical_asap_assigned;
-use asap_types::ir::flat::flatten;
 use asap_types::ir::operator::Source;
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
+use super::query_candidates::{next_digits, query_digits};
 use super::stage1_to_stage3::{
     run_stage1_to_stage3_from_pass1, selected_logical, LogicalCandidate, Stage1ToStage3Run,
     Stage1ToStage3Search,
@@ -99,6 +109,196 @@ pub(crate) fn source_components(roots: &[QueryRoot]) -> Vec<Vec<usize>> {
         components[index].push(query);
     }
     components
+}
+
+/// The workload's queries grouped into components that no candidate can
+/// link: [`source_components`], each split further into the queries that
+/// can read a common node, in workload order, ordered by their first query.
+/// `per_computation` is the Pass 1 inventory of the workload's roots;
+/// `entries[q]` is query `q`'s workload entry.
+///
+/// Two queries over one source are linked when they read a common Pass 1
+/// target, or when, for some choice of their own candidates, a Pass 2 rule
+/// can make them read one node: the identical-expression rule (any
+/// identical node, whole or in panes, with each metric's scans widened to
+/// one label set), the summary-capability rule, the window-composition
+/// rule's shared chains, or a reuse rule (rollup or exact top-k reuse).
+/// Stage 2 can build any node two queries read once per evaluation, so
+/// every such node is a link. Queries whose candidates have no node in
+/// common under any rule share no charge: e.g. SQL queries over one table,
+/// whose table scans have no unique key and are never made one node, with
+/// different groupings.
+///
+/// Raw data kept for query-time scans is charged per source, for the
+/// longest window any query scans: with a disk price, that charge links
+/// every query over one source, and the components stay
+/// [`source_components`].
+pub(crate) fn sharing_components<Id: Clone>(
+    per_computation: &PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    models: &PlanningModels<'_>,
+) -> Vec<Vec<usize>> {
+    let roots: Vec<QueryRoot> = per_computation
+        .roots
+        .iter()
+        .map(|(_, root)| root.clone())
+        .collect();
+    let by_source = source_components(&roots);
+    let disk_priced = match &models.plan_selection.cost_model {
+        CostModel::UsageOverTime(prices) => prices.cost_per_disk_byte_second != 0.0,
+        _ => true,
+    };
+    if disk_priced {
+        return by_source;
+    }
+    let grids: Vec<Option<u64>> = entries
+        .iter()
+        .map(QueryWorkloadEntry::evaluation_grid_ms)
+        .collect();
+    let digits: Vec<Vec<usize>> = roots
+        .iter()
+        .map(|root| query_digits(per_computation, root))
+        .collect();
+    let mut components = Vec::new();
+    for queries in by_source {
+        // Union-find over the component's positions.
+        let mut parent: Vec<usize> = (0..queries.len()).collect();
+        fn find(parent: &mut [usize], i: usize) -> usize {
+            let mut root = i;
+            while parent[root] != root {
+                root = parent[root];
+            }
+            parent[i] = root;
+            root
+        }
+        for i in 0..queries.len() {
+            for j in i + 1..queries.len() {
+                if find(&mut parent, i) == find(&mut parent, j) {
+                    continue;
+                }
+                let (a, b) = (queries[i], queries[j]);
+                if can_share_a_node(per_computation, &digits, &grids, a, b) {
+                    let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                    parent[ri.max(rj)] = ri.min(rj);
+                }
+            }
+        }
+        let mut split: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (i, &query) in queries.iter().enumerate() {
+            let root = find(&mut parent, i);
+            match split.iter_mut().find(|(r, _)| *r == root) {
+                Some((_, members)) => members.push(query),
+                None => split.push((root, vec![query])),
+            }
+        }
+        components.extend(split.into_iter().map(|(_, members)| members));
+    }
+    components.sort_by_key(|members| members[0]);
+    components
+}
+
+/// Whether queries `a` and `b` of `per_computation` can read one node
+/// ([`sharing_components`]): they read a common Pass 1 target, or for some
+/// choice of their own candidates, composed together, a Pass 2 rule links
+/// a node of each. `digits[q]` are query `q`'s digits of a whole-workload choice
+/// ([`query_digits`]); `grids[q]` its evaluation grid.
+fn can_share_a_node<Id: Clone>(
+    per_computation: &PerComputationCandidates<Id>,
+    digits: &[Vec<usize>],
+    grids: &[Option<u64>],
+    a: usize,
+    b: usize,
+) -> bool {
+    if digits[a].iter().any(|d| digits[b].contains(d)) {
+        return true;
+    }
+    let pair = PerComputationCandidates {
+        roots: vec![
+            per_computation.roots[a].clone(),
+            per_computation.roots[b].clone(),
+        ],
+        targets: per_computation.targets.clone(),
+    };
+    let pair_digits: Vec<usize> = digits[a].iter().chain(&digits[b]).copied().collect();
+    let pair_grids = [grids[a], grids[b]];
+    let mut choice = vec![0; per_computation.targets.len()];
+    loop {
+        if !per_computation.absorbed_choice_varies(&choice) {
+            if let Ok(composed) = compose_logical_candidate(&pair, &choice) {
+                let roots: Vec<QueryRoot> = composed.into_iter().map(|(_, root)| root).collect();
+                if rules_link_nodes(&roots, &pair_grids) {
+                    return true;
+                }
+            }
+        }
+        if !next_digits(per_computation, &pair_digits, &mut choice) {
+            return false;
+        }
+    }
+}
+
+/// Whether a Pass 2 rule, on the two-query candidate `roots`, makes both
+/// queries read one node: whole, with the metric's scans widened to one
+/// label set, or in any window-composition candidate (identical pane
+/// chains, or one chain serving nested windows or several intervals).
+fn rules_link_nodes(roots: &[QueryRoot], grids: &[Option<u64>]) -> bool {
+    let reach = |root: &QueryRoot| -> std::collections::HashSet<*const OperatorNode> {
+        root_nodes(root).iter().map(Rc::as_ptr).collect()
+    };
+    let links = |roots: &[QueryRoot]| {
+        let (first, second) = (reach(&roots[0]), reach(&roots[1]));
+        let spans = |nodes: &mut dyn Iterator<Item = &Rc<OperatorNode>>| {
+            let (mut in_first, mut in_second) = (false, false);
+            for node in nodes {
+                in_first |= first.contains(&Rc::as_ptr(node));
+                in_second |= second.contains(&Rc::as_ptr(node));
+            }
+            in_first && in_second
+        };
+        // A rule already made both read one node (a shared pane chain).
+        first.iter().any(|node| second.contains(node))
+            || sharing_candidates(roots)
+                .iter()
+                .any(|c| spans(&mut c.nodes.iter()))
+            || capability_sharing_candidates(roots)
+                .iter()
+                .any(|c| spans(&mut c.members.iter()))
+            || rollup_candidates(roots)
+                .iter()
+                .any(|c| spans(&mut [&c.coarse, &c.finer].into_iter()))
+            || topk_reuse_candidates(roots)
+                .iter()
+                .any(|c| spans(&mut c.members.iter()))
+    };
+    if links(roots) {
+        return true;
+    }
+    // Scans of one metric that project different labels, widened to one.
+    if let Ok(Some(widened)) = with_union_scan_labels(roots) {
+        if links(&widened) {
+            return true;
+        }
+    }
+    let panes = pane_candidates(roots, grids);
+    if panes.is_empty() {
+        return false;
+    }
+    window_composition_pass2_candidates(roots, &panes)
+        .unwrap_or_default()
+        .iter()
+        .any(|in_panes| matches!(&in_panes.roots, Ok(in_panes) if links(in_panes)))
+}
+
+/// Every node `root` reaches.
+fn root_nodes(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
+    let starts: Vec<&Rc<OperatorNode>> = match root {
+        QueryRoot::Operator(node) => vec![node],
+        QueryRoot::Scalar(expr) => expr.operator_refs(),
+    };
+    starts
+        .into_iter()
+        .flat_map(OperatorNode::reachable)
+        .collect()
 }
 
 /// Why `per_computation`'s workload under `models` and `search` is
@@ -256,17 +456,20 @@ pub(crate) fn search_components<Id: Clone + std::fmt::Debug>(
         })
         .collect();
     let joint_choice = joint_choice.ok_or(SearchedAsOne::NotInJointSpace)?;
-    let flat = flatten(&combined).0;
-    let skip_raw = !models.deployment_capabilities.raw_data_retained;
-    let viable = |roots: &[QueryRoot]| {
-        super::stage1_to_stage3::viable(roots, entries, data, models, skip_raw)
-    };
-    let (joint, pass2) =
-        stage1_candidates_of_choice(&joint_inventory, entries, &joint_choice, &viable)
+    let pass2 = combined_pass2(&runs).ok_or(SearchedAsOne::NotInJointSpace)?;
+    // Stage 1 widens every metric's scans to one label set at once, so a
+    // selection with widened scans is a joint candidate only alone.
+    if components.len() > 1 {
+        let composed: Vec<QueryRoot> = compose_logical_candidate(&joint_inventory, &joint_choice)
+            .map_err(|_| SearchedAsOne::NotInJointSpace)?
             .into_iter()
-            .filter_map(|candidate| Some((candidate.roots.ok()?, candidate.pass2)))
-            .find(|(roots, _)| flatten(roots).0 == flat)
-            .ok_or(SearchedAsOne::NotInJointSpace)?;
+            .map(|(_, root)| root)
+            .collect();
+        if widens_a_scan(&combined, &composed) {
+            return Err(SearchedAsOne::NotInJointSpace);
+        }
+    }
+    let joint = combined;
     let mut assignments: Vec<std::vec::IntoIter<Materialization>> = runs
         .iter()
         .map(|run| {
@@ -340,6 +543,17 @@ pub(crate) fn search_components<Id: Clone + std::fmt::Debug>(
         })
         .collect();
     selection.search.runner_up_cost_per_second = None;
+    selection.search.interchangeable_queries = components
+        .iter()
+        .zip(&selections)
+        .flat_map(|(component, s)| {
+            s.search
+                .interchangeable_queries
+                .iter()
+                .map(|class| class.iter().map(|&q| component[q]).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        })
+        .collect();
     selection.search.raw_scan_assignments_skipped = selections
         .iter()
         .map(|s| s.search.raw_scan_assignments_skipped)
@@ -366,6 +580,79 @@ pub(crate) fn search_components<Id: Clone + std::fmt::Debug>(
             pass2,
         }),
     })
+}
+
+/// Whether some query of `selected` reads a scan its root in `composed`
+/// (its Pass 1 candidate's roots) does not read: one Stage 1 widened to
+/// more labels ([`with_union_scan_labels`]).
+fn widens_a_scan(selected: &[QueryRoot], composed: &[QueryRoot]) -> bool {
+    let scans = |root: &QueryRoot| -> Vec<OperatorNode> {
+        root_nodes(root)
+            .into_iter()
+            .filter(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .map(|node| (*node).clone())
+            .collect()
+    };
+    selected.iter().zip(composed).any(|(selected, composed)| {
+        let original = scans(composed);
+        scans(selected).iter().any(|scan| !original.contains(scan))
+    })
+}
+
+/// What the Pass 2 rules changed in the components' selections, together:
+/// `Some(None)` when no rule changed anything. `None` when the joint
+/// search never combines those rewrites: it builds exact top-k reuse and
+/// tumbling panes into no common candidate (Stage 1's reuse rules follow
+/// only a rollup with panes). Each component's rewrites touch only its own
+/// nodes, so the rest is a candidate of the joint search, up to its
+/// enumeration caps, which bound each rule's list for one workload and are
+/// not a property of the plan.
+fn combined_pass2<Id>(runs: &[Stage1ToStage3Run<Id>]) -> Option<Option<Pass2Candidate>> {
+    let mut combined: Option<Pass2Candidate> = None;
+    for pass2 in runs
+        .iter()
+        .filter_map(|run| run.stage1_selected.as_ref()?.pass2.as_ref())
+    {
+        let into = combined.get_or_insert_with(|| Pass2Candidate {
+            from_pass1_position: 0,
+            shared_builds: Vec::new(),
+            pane_candidates: Vec::new(),
+            shared_pane_chains: Vec::new(),
+            rollup_candidates: Vec::new(),
+            topk_reuse_candidates: Vec::new(),
+            sharing_candidates: Vec::new(),
+        });
+        into.shared_builds
+            .extend(pass2.shared_builds.iter().cloned());
+        // Each component's chain groups are positions in its own panes.
+        let offset = into.pane_candidates.len();
+        into.shared_pane_chains
+            .extend(
+                pass2
+                    .shared_pane_chains
+                    .iter()
+                    .map(|chain| SharedPaneChain {
+                        members: chain.members.iter().map(|&p| p + offset).collect(),
+                        ..chain.clone()
+                    }),
+            );
+        into.pane_candidates
+            .extend(pass2.pane_candidates.iter().cloned());
+        into.rollup_candidates
+            .extend(pass2.rollup_candidates.iter().cloned());
+        into.topk_reuse_candidates
+            .extend(pass2.topk_reuse_candidates.iter().cloned());
+        into.sharing_candidates
+            .extend(pass2.sharing_candidates.iter().cloned());
+    }
+    match &combined {
+        Some(pass2)
+            if !pass2.topk_reuse_candidates.is_empty() && !pass2.pane_candidates.is_empty() =>
+        {
+            None
+        }
+        _ => Some(combined),
+    }
 }
 
 /// `rejection` of a component's search with its query numbers (`q<n>` at

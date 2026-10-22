@@ -616,7 +616,7 @@ fn random_workloads_over_disjoint_sources_combine_their_components() {
         let entries: Vec<_> = workload.query_workload.entries().collect();
         let data = workload.data_workload.clone().unwrap();
         let models = PlanningModels::builtin().with_plan_selection(&settings[0]);
-        let run = assert_equivalent(&format!("seed {seed}"), &roots, &entries, &data, models);
+        let run = assert_same_cost(&format!("seed {seed}"), &roots, &entries, &data, models);
         if let Ok(selection) = &run.stage3_plan_selection {
             if !selection.search.components.is_empty() {
                 combined += 1;
@@ -635,7 +635,8 @@ fn random_workloads_over_disjoint_sources_combine_their_components() {
 }
 
 /// Queries reading disjoint sources are separate components, and queries
-/// linked through a common source are one, in workload order.
+/// linked through a summary build they can share are one, in workload
+/// order.
 #[test]
 fn components_follow_shared_sources() {
     let mut workload = random_workload_over(1, &["m", "n"]);
@@ -653,14 +654,15 @@ fn components_follow_shared_sources() {
         entry("sum by (job) (sum_over_time(m[5m]))"),
         entry("sum by (job) (rate(c_total[5m]))"),
         entry("max by (job) (max_over_time(n[5m]))"),
-        entry("sum(sum_over_time(m[1m])) / sum(sum_over_time(n[1m]))"),
+        entry("sum by (job) (sum_over_time(m[5m])) / max by (job) (max_over_time(n[5m]))"),
     ]);
     let roots = lower_promql_roots(&workload).unwrap();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let run = assert_equivalent("linked", &roots, &entries, &data, PlanningModels::builtin());
     let search = &run.stage3_plan_selection.as_ref().unwrap().search;
-    // q4 reads m and n, linking q1 and q3; q2 alone reads c_total.
+    // q4 can share q1's build over m and q3's over n, linking them; q2
+    // alone reads c_total.
     let components: Vec<_> = search
         .components
         .iter()
@@ -897,4 +899,261 @@ fn a_shared_summary_is_combined_with_a_rollup() {
         "{} is not cheaper than {cheapest_with_one_rule}",
         cost(&selected.id)
     );
+}
+
+/// `roots` planned with the exhaustive search and with the default search
+/// under `models`: both select a plan of the same price (within Stage 3's
+/// tie tolerance), or both find none. Rules that keep one of several plans
+/// of equal price (interchangeable queries) may select another plan than
+/// the exhaustive search's first. Returns the default search's run.
+fn assert_same_cost(
+    label: &str,
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Stage1ToStage3Run<usize> {
+    let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
+    let exhaustive = run_stage1_to_stage3_with(
+        indexed(),
+        entries,
+        data,
+        models,
+        Stage1ToStage3Search::exhaustive(),
+    )
+    .unwrap_or_else(|e| panic!("{label}: {e}"));
+    let pruned = run_stage1_to_stage3(indexed(), entries, data, models)
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+    match (
+        &exhaustive.stage3_plan_selection,
+        &pruned.stage3_plan_selection,
+    ) {
+        (Ok(all), Ok(searched)) => {
+            let price =
+                |s: &asap_plan_selection::Selection| s.costs[&s.selected].cost_per_second.unwrap();
+            let (all, searched) = (price(all), price(searched));
+            assert!(
+                (all - searched).abs() <= 1e-9 * all.abs(),
+                "{label}: exhaustive {all}, pruned {searched}"
+            );
+        }
+        (Err(SelectionError::NoValidCandidate(_)), Err(SelectionError::NoValidCandidate(_))) => {}
+        (all, searched) => panic!("{label}: exhaustive {all:?}, pruned {searched:?}"),
+    }
+    pruned
+}
+
+/// A workload of repeating `queries` (each with its interval in ms) over
+/// the gauge `m`, every query with accuracy target `accuracy`.
+fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWorkload {
+    let mut workload = random_workload(1);
+    workload.query_workload.repeating_queries = Some(
+        queries
+            .iter()
+            .map(|&(query, interval_ms)| RepeatingEntry {
+                query: Query(query.into()),
+                demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval_ms)),
+                requirements: QueryRequirements {
+                    accuracy: accuracy.clone(),
+                    max_latency_ms: None,
+                },
+                predictability: Predictability::Predictable { known_at: None },
+                range_evaluation: None,
+            })
+            .collect(),
+    );
+    workload
+}
+
+/// Queries over one gauge that differ at most in a quantile rank, with
+/// equal workload entries, are one class of interchangeable queries: the
+/// default search gives them one shared choice and still selects a plan of
+/// the exhaustive search's price, with raw data kept and without, beside a
+/// query of another shape. A query of another interval at one member's
+/// rank, or a ratio of two members' ranks, can share one member's exact
+/// quantile and not the other's: then there is no class, and the price is
+/// still the exhaustive search's.
+#[test]
+fn interchangeable_queries_select_the_exhaustive_price() {
+    let q = |phi: &str| format!("quantile_over_time({phi}, m[5m])");
+    let (q5, q9, q99) = (q("0.5"), q("0.9"), q("0.99"));
+    let avg = |phi: &str| format!("avg(quantile_over_time({phi}, m[5m]))");
+    let (avg5, avg9) = (avg("0.5"), avg("0.9"));
+    let ratio = format!("{q9} / {q5}");
+    let sum = "sum_over_time(m[5m])";
+    // (label, queries with their intervals, the largest class's size)
+    type Case<'a> = (&'a str, Vec<(&'a str, u32)>, usize);
+    let cases: Vec<Case> = vec![
+        (
+            "three ranks",
+            vec![(&q5, 60_000), (&q9, 60_000), (&q99, 60_000)],
+            3,
+        ),
+        // The 0.9 duplicates can share their exact quantile, which the 0.5
+        // query cannot join: the duplicates are a class of their own.
+        (
+            "two ranks and a duplicate",
+            vec![(&q5, 60_000), (&q9, 60_000), (&q9, 60_000)],
+            2,
+        ),
+        (
+            "averages of two ranks and a duplicate",
+            vec![(&avg9, 60_000), (&avg9, 60_000), (&avg5, 60_000)],
+            2,
+        ),
+        // The 300 s query can share the 0.9 member's exact quantile, not the
+        // 0.5 member's, so the two are no longer alike.
+        (
+            "two intervals",
+            vec![(&q5, 60_000), (&q9, 60_000), (&q9, 300_000)],
+            0,
+        ),
+        // So can the ratio, with each member's exact quantile.
+        (
+            "a ratio of ranks",
+            vec![(&q5, 60_000), (&q9, 60_000), (&ratio, 60_000)],
+            0,
+        ),
+        (
+            "identical sums",
+            vec![(sum, 60_000), (sum, 60_000), (&q5, 60_000)],
+            2,
+        ),
+    ];
+    let deployments = [
+        asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        no_raw_data(),
+    ];
+    for (label, queries, class_size) in cases {
+        for accuracy in [
+            AccuracyTarget::max_error(0.05),
+            AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Rank),
+        ] {
+            let workload = workload_of(&queries, accuracy);
+            let roots = lower_promql_roots(&workload).unwrap();
+            let entries: Vec<_> = workload.query_workload.entries().collect();
+            let data = workload.data_workload.clone().unwrap();
+            for deployment in &deployments {
+                let models = PlanningModels::builtin().with_deployment_capabilities(deployment);
+                let run = assert_same_cost(label, &roots, &entries, &data, models);
+                if let Ok(selection) = &run.stage3_plan_selection {
+                    let largest = selection
+                        .search
+                        .interchangeable_queries
+                        .iter()
+                        .map(Vec::len)
+                        .max()
+                        .unwrap_or(0);
+                    assert_eq!(largest, class_size, "{label}: class size");
+                }
+            }
+        }
+    }
+}
+
+/// Two identical SQL queries and a third over another window, over one
+/// table: the identical two are one class of interchangeable queries, and
+/// the default search selects a plan of the exhaustive search's price.
+#[test]
+fn identical_sql_queries_are_one_class() {
+    let (mut workload, catalog) = example2();
+    let entries = workload.query_workload.repeating_queries.as_mut().unwrap();
+    let first = entries[0].clone();
+    let distinct = |minutes: u32| {
+        RepeatingEntry {
+        query: Query(format!(
+            "SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '{minutes} minute'"
+        )),
+        ..first.clone()
+    }
+    };
+    *entries = vec![distinct(1), distinct(5), distinct(1)];
+    let roots = lower_sql_roots(&workload, &catalog).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = assert_same_cost(
+        "identical SQL queries",
+        &roots,
+        &entries,
+        &data,
+        PlanningModels::builtin(),
+    );
+    let search = &run.stage3_plan_selection.as_ref().unwrap().search;
+    assert_eq!(search.interchangeable_queries, vec![vec![0, 2]]);
+}
+
+/// Seeded random workloads over one gauge whose queries repeat each other
+/// or differ in a quantile rank, at one of two intervals, with raw data
+/// kept or not: the default search selects a plan of the exhaustive
+/// search's price.
+#[test]
+fn random_workloads_with_interchangeable_queries_select_the_exhaustive_price() {
+    let pool = [
+        "quantile_over_time(0.5, m[5m])",
+        "quantile_over_time(0.9, m[5m])",
+        "quantile_over_time(0.99, m[5m])",
+        "sum_over_time(m[5m])",
+        "sum by (job) (sum_over_time(m[5m]))",
+        "max_over_time(m[5m])",
+    ];
+    let mut searched = 0;
+    for seed in 1..=30u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let count = 2 + rng.below(2);
+        let queries: Vec<(&str, u32)> = (0..count)
+            .map(|_| (*rng.pick(&pool), *rng.pick(&[60_000u32, 300_000])))
+            .collect();
+        let workload = workload_of(&queries, AccuracyTarget::max_error(0.05));
+        let roots = lower_promql_roots(&workload).unwrap();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                roots.iter().cloned().enumerate().collect(),
+            )
+            .unwrap();
+        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
+            continue;
+        }
+        searched += 1;
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap();
+        let deployment = match seed % 2 {
+            0 => no_raw_data(),
+            _ => asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        };
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        assert_same_cost(&format!("seed {seed}"), &roots, &entries, &data, models);
+    }
+    assert!(
+        searched >= 15,
+        "only {searched} workloads were small enough"
+    );
+}
+
+/// Queries over different windows, or with a latency bound (a check, not a
+/// charge, so the class argument does not cover it), are in no class.
+#[test]
+fn queries_over_other_windows_or_with_a_latency_bound_are_in_no_class() {
+    let mut workload = workload_of(
+        &[
+            ("quantile_over_time(0.5, m[5m])", 60_000),
+            ("quantile_over_time(0.9, m[10m])", 60_000),
+            ("quantile_over_time(0.99, m[5m])", 60_000),
+        ],
+        AccuracyTarget::max_error(0.05),
+    );
+    workload.query_workload.repeating_queries.as_mut().unwrap()[2]
+        .requirements
+        .max_latency_ms = Some(60_000.0);
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = assert_same_cost(
+        "no class",
+        &roots,
+        &entries,
+        &data,
+        PlanningModels::builtin(),
+    );
+    let search = &run.stage3_plan_selection.as_ref().unwrap().search;
+    assert!(search.interchangeable_queries.is_empty());
 }
