@@ -218,6 +218,33 @@ fn at_thresholds(memo: &Memo, choice: &GroupChoice) -> Vec<Vec<Option<Implementa
                         }
                     }
                 }
+                CouplingKind::SharedBuildSize if super::windows::is_rollup_state(memo, &site) => {
+                    // A sketch rollup's finer build, sized for its readers:
+                    // the rollups and the finer group's exposing candidate.
+                    for threshold in super::windows::state_size_thresholds(memo, &site) {
+                        let mut rewritten = plan.clone();
+                        let mut valid = true;
+                        for candidate in rewritten.iter_mut().flatten() {
+                            if !candidate.coupling_sites.contains(&site) {
+                                continue;
+                            }
+                            if !super::windows::may_read_state(&threshold, candidate, &site) {
+                                valid = false;
+                                break;
+                            }
+                            match super::windows::resize_state_at(candidate, &site, &threshold) {
+                                Ok(node) => candidate.node = node,
+                                Err(_) => {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if valid {
+                            next.push(rewritten);
+                        }
+                    }
+                }
                 CouplingKind::SharedBuildSize => {
                     for threshold in super::capability::size_thresholds(memo, &site) {
                         let mut rewritten = plan.clone();
@@ -701,6 +728,58 @@ mod tests {
                 build_ms: 1.5,
             }
         );
+    }
+
+    /// A per-series quantile over `data[1m]` beside `quantile by (host,
+    /// job)` and `quantile by (job)` of `data`: the `by (job)` group's
+    /// rollup merging the `by (host, job)` KLL build meets its
+    /// requirements. The rolled-up copy of the finer build carries its
+    /// recomposed guarantees, so its state key differs from the memo build's
+    /// that keys the shared-size site; the check keys the site by the memo
+    /// build, so the plan is listed.
+    #[test]
+    fn a_sketch_rollup_beside_another_quantile_meets_its_requirements() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        let qs = [
+            "quantile_over_time(0.5, data[1m])",
+            "quantile by (host, job) (0.5, data)",
+            "quantile by (job) (0.5, data)",
+        ];
+        let roots: Vec<(usize, QueryRoot)> = qs
+            .iter()
+            .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
+            .enumerate()
+            .collect();
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let entries: Vec<QueryWorkloadEntry> = qs
+            .iter()
+            .map(|q| QueryWorkloadEntry {
+                query: asap_types::workload::Query((*q).into()),
+                requirements: QueryRequirements {
+                    accuracy: target.clone(),
+                    max_latency_ms: None,
+                },
+                predictability: Predictability::Predictable { known_at: None },
+                recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                    RepetitionInterval(10_000),
+                )),
+                range_evaluation: None,
+            })
+            .collect();
+        let memo = memo(&per_computation, &entries);
+        let met = group_choices(&memo).unwrap().into_iter().any(|choice| {
+            let chosen: Vec<(GroupId, &ImplementationCandidate)> = choice
+                .iter()
+                .enumerate()
+                .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
+                .collect();
+            chosen.iter().any(|(_, c)| {
+                c.rollup_of
+                    .as_ref()
+                    .is_some_and(|read| read.finer_state.is_some())
+            }) && super::super::windows::requirements_met(&chosen)
+        });
+        assert!(met, "no sketch rollup meets its requirements");
     }
 
     /// The reference search reports the memo it built.

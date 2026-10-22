@@ -1242,21 +1242,10 @@ fn memo_group_search_selects_the_exhaustive_price() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
-/// A query's top-k over a sum, beside a query of that sum alone: the top-k's
-/// fused heap absorbs the sum, which is the other query's root, so the memo
-/// keeps the sum its own group for the second query. The memo-group search
-/// selects a plan of the exhaustive search's price, with raw data kept and
-/// without.
-#[test]
-fn a_fused_top_k_beside_its_inner_sum_selects_the_exhaustive_price() {
-    let workload = workload_of(
-        &[
-            ("topk(5, sum by (job) (sum_over_time(m[5m])))", 60_000),
-            ("sum by (job) (sum_over_time(m[5m]))", 60_000),
-        ],
-        AccuracyTarget::max_error(0.01),
-    );
-    let roots = lower_promql_roots(&workload).unwrap();
+/// The memo-group search selects a plan of the exhaustive search's price
+/// on `workload`, with raw data kept and without (or both find none).
+fn assert_memo_selects_the_exhaustive_price(label: &str, workload: &PlanningWorkload) {
+    let roots = lower_promql_roots(workload).unwrap();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     for deployment in [
@@ -1286,8 +1275,66 @@ fn a_fused_top_k_beside_its_inner_sum_selects_the_exhaustive_price() {
             ..Stage1ToStage3Search::default()
         }));
         match (exhaustive, memo) {
-            (Some(a), Some(f)) => assert!((a - f).abs() <= 1e-9 * a.abs(), "{a} vs {f}"),
-            (a, f) => assert_eq!(a.is_some(), f.is_some(), "{a:?} vs {f:?}"),
+            (Some(a), Some(f)) => assert!(
+                (a - f).abs() <= 1e-9 * a.abs(),
+                "{label}: exhaustive {a}, memo {f}"
+            ),
+            (a, f) => assert_eq!(a.is_some(), f.is_some(), "{label}: {a:?} vs {f:?}"),
         }
     }
+}
+
+/// A query's top-k over a sum, beside a query of that sum alone: the top-k's
+/// fused heap absorbs the sum, which is the other query's root, so the memo
+/// keeps the sum its own group for the second query. The memo-group search
+/// selects a plan of the exhaustive search's price, with raw data kept and
+/// without.
+#[test]
+fn a_fused_top_k_beside_its_inner_sum_selects_the_exhaustive_price() {
+    let workload = workload_of(
+        &[
+            ("topk(5, sum by (job) (sum_over_time(m[5m])))", 60_000),
+            ("sum by (job) (sum_over_time(m[5m]))", 60_000),
+        ],
+        AccuracyTarget::max_error(0.01),
+    );
+    assert_memo_selects_the_exhaustive_price("top-k beside its sum", &workload);
+}
+
+/// A per-series quantile over `data[1m]` beside `quantile by (host, job)`
+/// and `quantile by (job)` of `data` (and, in the whole workload, a 5-minute
+/// quantile), every 10 s over 10,000 series: the exhaustive plan rolls the
+/// `by (job)` quantile up from the `by (host, job)` KLL build, which the
+/// memo lists too.
+#[test]
+fn a_sketch_rollup_beside_other_quantiles_selects_the_exhaustive_price() {
+    let workload = |queries: &[&str]| -> PlanningWorkload {
+        let entries: Vec<serde_json::Value> = queries
+            .iter()
+            .map(|q| {
+                serde_json::json!({
+                    "query": q,
+                    "demand": {"fixed_interval": 10000},
+                    "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
+                    "predictability": {"predictable": {"known_at": null}}
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": entries},
+            "data_workload": {
+                "arrival": {"ingesting": {"rows_per_second": 666.67}},
+                "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}}
+            }
+        }))
+        .unwrap()
+    };
+    let (q1, q2, q3, q4) = (
+        "quantile_over_time(0.5, data[1m])",
+        "quantile_over_time(0.9, data[5m])",
+        "quantile by (host, job) (0.5, data)",
+        "quantile by (job) (0.5, data)",
+    );
+    assert_memo_selects_the_exhaustive_price("Q1, Q3, Q4", &workload(&[q1, q3, q4]));
+    assert_memo_selects_the_exhaustive_price("Q2, Q3, Q4", &workload(&[q2, q3, q4]));
 }

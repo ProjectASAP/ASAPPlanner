@@ -819,6 +819,17 @@ pub(crate) fn state_size_thresholds(memo: &Memo, site: &CouplingSite) -> Vec<Fie
         .collect()
 }
 
+/// Whether `site` is a sketch rollup's state ([`sketch_rollup`]): a
+/// rollup candidate of `memo` reads it.
+pub(crate) fn is_rollup_state(memo: &Memo, site: &CouplingSite) -> bool {
+    memo.candidates.iter().flatten().any(|c| {
+        c.rollup_of
+            .as_ref()
+            .is_some_and(|r| r.finer_state.is_some())
+            && c.coupling_sites.contains(site)
+    })
+}
+
 /// Whether `candidate`, a reader of the sketch rollup state `site`, may
 /// read it at size `threshold`: its size is no stricter.
 pub(crate) fn may_read_state(
@@ -890,9 +901,9 @@ pub(crate) fn requirements_met(chosen: &[(GroupId, &ImplementationCandidate)]) -
             }
         }
     }
-    let rolled: Vec<&RollupRead> = chosen
+    let rolled: Vec<(&ImplementationCandidate, &RollupRead)> = chosen
         .iter()
-        .filter_map(|(_, c)| c.rollup_of.as_ref())
+        .filter_map(|(_, c)| Some((*c, c.rollup_of.as_ref()?)))
         .collect();
     if rolled.is_empty() {
         return true;
@@ -911,7 +922,7 @@ pub(crate) fn requirements_met(chosen: &[(GroupId, &ImplementationCandidate)]) -
         .collect();
     let mut used_state: HashSet<*const OperatorNode> = HashSet::new();
     let mut rolled_coarse: HashSet<*const OperatorNode> = HashSet::new();
-    for read in &rolled {
+    for &(reader, read) in &rolled {
         let Some(finer) = of(read.finer_group) else {
             return false;
         };
@@ -925,14 +936,20 @@ pub(crate) fn requirements_met(chosen: &[(GroupId, &ImplementationCandidate)]) -
             return false;
         }
         rolled_coarse.insert(Rc::as_ptr(&read.coarse_build));
-        let Some(state) = &read.finer_state else {
+        if read.finer_state.is_none() {
             continue;
-        };
+        }
+        // The state the reader reads is the joint rule's finer build's: its
+        // site (keyed by the memo's build, as [`sketch_rollup`] keys it, not
+        // by the resized copy, whose recomposed guarantees change its key),
+        // which the finer group's chosen candidate exposes.
         let site = CouplingSite {
-            key: state_key(state),
+            key: state_key(build),
             kind: CouplingKind::SharedBuildSize,
         };
-        if !finer.coupling_sites.contains(&site) || state_key(build) != site.key {
+        if !reader.requires_sites.contains(&(read.finer_group, site))
+            || !finer.coupling_sites.contains(&site)
+        {
             return false;
         }
         used_state.insert(Rc::as_ptr(build));
