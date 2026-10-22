@@ -1158,6 +1158,30 @@ pub fn compose_logical_candidate<Id: Clone>(
     inventory: &PerComputationCandidates<Id>,
     choice: &[usize],
 ) -> Result<Vec<(Id, QueryRoot)>, PerComputationCandidateError> {
+    compose_with_budget_share(inventory, choice, None)
+}
+
+/// [`compose_logical_candidate`] with every sketch summary sized for one of
+/// `share` equal shares of its measure's budget, whatever the roots
+/// compose: the size a summary gets when it is one of `share` approximate
+/// inputs of a query ([`budget_shares`]). `share` 1 sizes for the whole
+/// budget. The sub-expression memo composes one aggregate alone this way,
+/// once per share its readers may give it.
+pub fn compose_logical_candidate_with_budget_share<Id: Clone>(
+    inventory: &PerComputationCandidates<Id>,
+    choice: &[usize],
+    share: usize,
+) -> Result<Vec<(Id, QueryRoot)>, PerComputationCandidateError> {
+    compose_with_budget_share(inventory, choice, Some(share))
+}
+
+/// [`compose_logical_candidate`], each summary sized for `budget_share`
+/// shares of its budget, or as [`budget_shares`] splits it when `None`.
+fn compose_with_budget_share<Id: Clone>(
+    inventory: &PerComputationCandidates<Id>,
+    choice: &[usize],
+    budget_share: Option<usize>,
+) -> Result<Vec<(Id, QueryRoot)>, PerComputationCandidateError> {
     if choice.len() != inventory.targets.len() {
         return Err(PerComputationCandidateError::InvalidChoice);
     }
@@ -1189,7 +1213,16 @@ pub fn compose_logical_candidate<Id: Clone>(
     // again with each sized for an equal share ([`budget_shares`]).
     let whole = Sizing::default();
     let roots = compose_roots(inventory, &chosen, &pushed_below, &whole)?;
-    let shares = budget_shares(&roots, &whole.built.into_inner());
+    let shares = match budget_share {
+        None => budget_shares(&roots, &whole.built.into_inner()),
+        Some(share) if share > 1 => whole
+            .built
+            .into_inner()
+            .into_iter()
+            .map(|(_, key)| (key, share))
+            .collect(),
+        Some(_) => HashMap::new(),
+    };
     if shares.is_empty() {
         return Ok(roots);
     }

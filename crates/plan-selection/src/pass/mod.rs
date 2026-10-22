@@ -14,9 +14,9 @@
 
 mod components;
 mod interchangeable;
-mod subexpr;
 mod query_candidates;
 mod stage1_to_stage3;
+mod subexpr;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;

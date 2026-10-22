@@ -516,6 +516,7 @@ pub(crate) fn add_topk_reuse(memo: &mut Memo) {
                 children: vec![ranking_group],
                 origin: CandidateOrigin::TopKReuse,
                 coupling_sites: Vec::new(),
+                budget_share: 1,
             };
             push_new(memo, g, reuse);
         }
@@ -550,6 +551,7 @@ fn group_for(
         children,
         origin: CandidateOrigin::TopKReuse,
         coupling_sites: Vec::new(),
+        budget_share: 1,
     }]);
     id
 }
@@ -594,6 +596,7 @@ fn rewritten_candidate(
         children,
         origin,
         coupling_sites: from.coupling_sites.clone(),
+        budget_share: from.budget_share,
     }
 }
 
@@ -766,6 +769,7 @@ mod tests {
                     children: Vec::new(),
                     origin: CandidateOrigin::Pass1,
                     coupling_sites: Vec::new(),
+                    budget_share: 1,
                 })
                 .collect();
             memo.groups.push(MemoGroup {

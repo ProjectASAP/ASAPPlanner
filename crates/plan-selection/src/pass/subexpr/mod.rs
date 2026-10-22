@@ -75,6 +75,12 @@ pub(crate) struct ImplementationCandidate {
     pub origin: CandidateOrigin,
     /// The coupling sites its cost depends on.
     pub coupling_sites: Vec<CouplingSite>,
+    /// The number of equal shares of its measures' accuracy budget its
+    /// summaries are sized for: 1 for the whole budget, `n` when it is one
+    /// of `n` approximate inputs of a query (a ratio's operand). Valid in a
+    /// plan only when `n` is the largest number of approximate inputs among
+    /// the queries that read it.
+    pub budget_share: usize,
 }
 
 /// Where an implementation candidate came from.
