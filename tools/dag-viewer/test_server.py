@@ -387,7 +387,7 @@ class PlanEndpointTests(unittest.TestCase):
 
     def test_plan_workload_endpoint_plans_a_sql_workload_with_its_tables(self):
         document = post_plan({"workload": SQL_WORKLOAD, "tables": [FLOWS_TABLE]}, "/api/plan-workload")
-        self.assertEqual(document["workload"]["queries"][0]["language"], {"sql": "datafusion_sql"})
+        self.assertEqual(document["workload"]["queries"][0]["language"], "sql")
         self.assertIsNotNone(document["stage3_plan_selection"]["selected"])
 
     def test_plan_endpoint_returns_the_stage_pipeline_document(self):
