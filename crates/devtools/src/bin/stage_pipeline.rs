@@ -568,7 +568,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let (described, roots, entries, data) = match (example.as_deref(), queries.is_empty()) {
         (None, true) if from_files.is_some() => {
             let (workloads, catalog) = from_files.expect("checked");
-            lowered_together(&workloads, &catalog)?
+            lowered_together(&workloads, &catalog, &catalog_table_names(&tables)?)?
         }
         (Some(example), true) => {
             let (workload, catalog) = match example {
@@ -784,17 +784,32 @@ fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered,
 /// workload with every file's sources. A source several files declare must
 /// have the same facts in each, and their arrivals must agree
 /// ([`arrival_together`]). When several files' data arrives, every source
-/// must declare its own rate (`series_count` and `sample_interval`): plan
-/// selection shares a workload's `rows_per_second` out over all its
-/// sources, so one file's rate would otherwise be priced on another file's
-/// sources.
+/// must declare its own rate (`series_count` and `sample_interval`): each
+/// declared source, each metric a PromQL query reads and, when a file is
+/// SQL, each of `sql_tables` (the `--table` names). Plan selection shares a
+/// workload's `rows_per_second` out over all its sources, so one file's
+/// rate would otherwise be priced on another file's sources.
 fn lowered_together(
     workloads: &[(&str, PlanningWorkload)],
     catalog: &SqlCatalog,
+    sql_tables: &[String],
 ) -> Result<Lowered, String> {
     let (mut described, mut roots, mut entries) = (Vec::new(), Vec::new(), Vec::new());
     let mut data: Option<DataWorkload> = None;
+    // The sources the queries read, beside the declared ones.
+    let mut read_sources: BTreeSet<String> = BTreeSet::new();
     for (path, workload) in workloads {
+        match workload.query_workload.language {
+            QueryLanguage::PromQL => {
+                for entry in workload.query_workload.entries() {
+                    read_sources.extend(
+                        promql_metric_names(&entry.query.0)
+                            .map_err(|e| format!("--workload {path}: {e}"))?,
+                    );
+                }
+            }
+            _ => read_sources.extend(sql_tables.iter().cloned()),
+        }
         let (queries, more_roots, more_entries, more_data) =
             lowered(workload, catalog).map_err(|e| format!("--workload {path}: {e}"))?;
         described.extend(queries);
@@ -829,10 +844,16 @@ fn lowered_together(
     }
     let data = data.unwrap_or_default();
     if workloads.len() > 1 && data.arrival.rows_per_second().is_some() {
-        if let Some((source, _)) = data
+        let has_own_rate = |source: &String| {
+            data.sources.get(source).is_some_and(|facts| {
+                facts.series_count.is_some() && facts.sample_interval.is_some()
+            })
+        };
+        if let Some(source) = data
             .sources
-            .iter()
-            .find(|(_, facts)| facts.series_count.is_none() || facts.sample_interval.is_none())
+            .keys()
+            .chain(&read_sources)
+            .find(|source| !has_own_rate(source))
         {
             return Err(format!(
                 "--workload: source {source} declares no rate of its own (series_count and \

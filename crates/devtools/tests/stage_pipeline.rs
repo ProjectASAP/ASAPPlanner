@@ -1970,6 +1970,28 @@ fn workload_files_that_disagree_on_the_data_are_refused() {
         stderr.contains("source flows declares no rate of its own"),
         "{stderr}"
     );
+    std::fs::remove_file(&sql).unwrap();
+
+    // A table the SQL file reads but does not declare has no rate either.
+    let (_, sql) = mixed_language_workload_files(
+        serde_json::json!({"ingesting": {"rows_per_second": 500.0}}),
+        serde_json::json!({"series_count": 10, "sample_interval": 1000}),
+    );
+    let mut text: Value = serde_json::from_str(&std::fs::read_to_string(&sql).unwrap()).unwrap();
+    text["data_workload"]["sources"] = serde_json::json!({});
+    std::fs::write(&sql, text.to_string()).unwrap();
+    let (_, stderr) = failure(&[
+        "--workload",
+        promql.to_str().unwrap(),
+        "--workload",
+        sql.to_str().unwrap(),
+        "--table",
+        FLOWS_TABLE,
+    ]);
+    assert!(
+        stderr.contains("source flows declares no rate of its own"),
+        "{stderr}"
+    );
 
     let (promql, sql) = mixed_language_workload_files(
         serde_json::json!("at_rest"),

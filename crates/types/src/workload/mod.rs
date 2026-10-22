@@ -534,9 +534,9 @@ pub struct SourceFacts {
     /// samples are non-negative. Omitted from JSON when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub values_non_negative: bool,
-    /// PromQL and MetricsQL only: how often each series of the metric
-    /// receives a sample (default: unknown). A bare instant selector over
-    /// the metric reads the latest sample within it; lowering such a
+    /// How often each series of the metric (or group of rows of a SQL
+    /// table) receives a sample (default: unknown). A PromQL or MetricsQL
+    /// bare instant selector over the metric reads the latest sample within it; lowering such a
     /// selector without it fails with
     /// [`WorkloadError::MissingSampleInterval`]. With `series_count`, it
     /// gives the source's own arrival rate, `series_count` samples per
