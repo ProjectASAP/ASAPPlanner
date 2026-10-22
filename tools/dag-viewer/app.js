@@ -395,16 +395,17 @@
   // Plan a `PlanningWorkload` JSON with the local server (`stage_pipeline
   // --workload`, default search) under `deploymentCapabilities` and
   // `costModel` (null: the defaults), with accuracy guarantees ignored
-  // unless `accuracyGuarantees` is "enforced", and show the document.
+  // unless `accuracyGuarantees` is "enforced", and the SQL `tables` it reads
+  // (`--table` declarations; null for none), and show the document.
   // Resolves to whether it was shown; rejects when the server could not plan it.
-  function planWorkload(workload, deploymentCapabilities, source, story, costModel, accuracyGuarantees) {
+  function planWorkload(workload, deploymentCapabilities, source, story, costModel, accuracyGuarantees, tables) {
     const ticket = ++loading;
     pressTab(null);
     $('queries').innerHTML = `<span class="status">Planning ${esc(source)} with the local server…</span>`;
     return fetch('/api/plan-workload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workload, deployment_capabilities: deploymentCapabilities || null, cost_model: costModel || null, accuracy_guarantees: accuracyGuarantees || null }),
+      body: JSON.stringify({ workload, tables: tables || null, deployment_capabilities: deploymentCapabilities || null, cost_model: costModel || null, accuracy_guarantees: accuracyGuarantees || null }),
     }).then((r) => r.json().catch(() => ({ error: `HTTP ${r.status}` })).then((result) => {
       if (!r.ok) throw new Error(result.error || `HTTP ${r.status}`);
       if (ticket !== loading) return false;

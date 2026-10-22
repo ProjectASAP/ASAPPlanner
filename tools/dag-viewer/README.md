@@ -31,7 +31,9 @@ To run it, see [RUNNING.md](RUNNING.md).
   labels, the queries (text, how often, accuracy) and the sources they
   read. Clicking a row plans it with the local server (`/api/plan-workload`:
   `stage_pipeline --workload`, default search, the set's
-  `deployment_capabilities`, `cost_model` and `accuracy_guarantees`). Without the server, a row
+  `deployment_capabilities`, `cost_model` and `accuracy_guarantees`, and
+  for a SQL workload the tables in the `tables.json` next to its file).
+  Without the server, a row
   with a precomputed `document` opens it and the others say they need the
   server. `#workload-sets` in the URL opens the section.
 - **Query workload** with each query's accuracy, latency, recurrence,
@@ -51,7 +53,11 @@ To run it, see [RUNNING.md](RUNNING.md).
   says how many candidates Stage 1 enumerated, how many the document shows
   when it caps them, and why Stage 1 or plan selection failed when it did.
   Clicking a row shows it in the lanes. The header also names the search and
-  what it checked; under the default search the list has the selected plan
+  what it checked, why the workload was searched as one when it was
+  (`searched_as_one`, e.g. "searched as one: not in joint space") and the
+  classes of interchangeable queries that took one shared choice
+  (`interchangeable_queries`, e.g. "interchangeable queries: (p50, p90,
+  p99)"); under the default search the list has the selected plan
   and the rejections Stage 3 recorded, which are not clickable.
 - **Three lanes**, stacked top to bottom so each is as wide as the page:
   Stage 0, the chosen Stage 1 candidate, and its Stage 2 candidate
@@ -114,8 +120,14 @@ deployment capabilities and cost model.
 (`ignored`, the default, or `enforced`: the server then passes
 `--enforce-accuracy-guarantees`), `query_labels` (one per
 query, in entry order) and `document` (a precomputed stage document) are
-optional. A new set is a directory of files and an index entry; no code
-changes. `crates/devtools/tests/stage_pipeline.rs` checks that every file
+optional. A PlanningWorkload declares no SQL tables, so a set of SQL
+workloads puts them in `workloads/<set>/tables.json`, a JSON array of
+`stage_pipeline --table` declarations (`{"name": "flows", "time_index": 0,
+"columns": [{"name": "ts", "type": "timestamp", "nullable": false}, ...]}`);
+the page sends them with the workload (`/api/plan-workload`'s `tables`) and
+the server passes one `--table` each. An `examples.json` entry planned from
+a workload file reads the same file. A new set is a directory of files and
+an index entry; no code changes. `crates/devtools/tests/stage_pipeline.rs` checks that every file
 parses and passes `PlanningWorkload::validate`.
 
 The three ASAPQuery sets (seed-862, seed-862-x5, seed-862-long; 10
@@ -254,8 +266,10 @@ are ignored, `stage_pipeline`'s default.
   Stage 1 and Stage 2 hold the selected candidate only (none when selection
   fails), `combinations` is 1, and `stage3_plan_selection.search` is
   Stage 3's `SearchReport`: the physical candidates checked, the components
-  searched separately with their selections, and per query its own
-  candidates checked and those discarded with why.
+  searched separately with their selections or why the workload was
+  searched as one (`searched_as_one`), the classes of interchangeable
+  queries (`interchangeable_queries`, by query index), and per query its
+  own candidates checked and those discarded with why.
 - `stage3_plan_selection.warnings` holds one-line warnings about the
   selected plan, e.g. its peak memory when over 10^12 bytes and the cost
   model declares no memory capacity; absent when there are none. The candidate
