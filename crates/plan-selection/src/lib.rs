@@ -1889,19 +1889,186 @@ fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
 
 /// How many values one evaluation of `root` returns at most (`G`): one for
 /// a scalar root and for a root of at most one row ([`at_most_one_row`]),
-/// provable from the query; otherwise `series_read` ([`series_read`]) for
-/// a PromQL instant vector, which bounds the values it can return: each
-/// branch of an `or` adds its own. `None` when unbound: `series_read` is,
-/// any other SQL result (until a bound on the groups of its source is an
-/// input), and a range vector.
-fn values_per_result(root: &QueryRoot, series_read: Option<u64>) -> Option<u64> {
-    match root {
-        QueryRoot::Scalar(_) => Some(1),
-        QueryRoot::Operator(node) if at_most_one_row(node) => Some(1),
-        QueryRoot::Operator(node) if node.result_kind == OperatorResultKind::InstantVector => {
-            series_read.map(|series| series.max(1))
+/// provable from the query. Otherwise the smaller of two bounds, either
+/// alone when the other is unknown: `series_read` ([`series_read`]) for a
+/// PromQL instant vector, which bounds the values it can return (each
+/// branch of an `or` adds its own), and, for a grouped root of any
+/// language, the groups its keys' declared distinct values allow
+/// ([`declared_group_bound`]), at most `series_read`. `None` when neither
+/// applies: an ungrouped SQL result, a grouping with an undeclared key, a
+/// range vector.
+fn values_per_result(
+    root: &QueryRoot,
+    series_read: Option<u64>,
+    data: &DataWorkload,
+) -> Option<u64> {
+    let node = match root {
+        QueryRoot::Scalar(_) => return Some(1),
+        QueryRoot::Operator(node) if at_most_one_row(node) => return Some(1),
+        QueryRoot::Operator(node) => node,
+    };
+    let by_series = (node.result_kind == OperatorResultKind::InstantVector)
+        .then_some(series_read)
+        .flatten();
+    // Each group holds at least one row read, so the series read also
+    // bound the groups.
+    let by_groups = declared_group_bound(node, data)
+        .map(|groups| series_read.map_or(groups, |series| groups.min(series)));
+    by_groups.or(by_series).map(|values| values.max(1))
+}
+
+/// An upper bound on the groups `node` returns, from the distinct values
+/// the sources it reads declare for its group keys
+/// (`SourceFacts::distinct_values_per_label`): the product over the keys of
+/// each key's declared count ([`declared_distinct_values`]). The grouping is
+/// found below operators that only keep, drop or reorder rows, and through
+/// a summary's estimate (not a top-k, which returns several rows per
+/// group), merge and finalization. `None` when no such grouping is found,
+/// it is a `without (...)`, or a key is not a source column passed through
+/// unchanged with a declared count: the declared counts are upper bounds,
+/// never defaults.
+fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64> {
+    let grouped = |reduction: &Reduction, input: &OperatorNode| -> Option<u64> {
+        let Reduction::Reduce(keys) = reduction else {
+            return None;
+        };
+        if keys.is_without() {
+            return None;
         }
-        QueryRoot::Operator(_) => None,
+        keys.keys().iter().try_fold(1u64, |product, &key| {
+            Some(product.saturating_mul(declared_distinct_values(input, key, data)?))
+        })
+    };
+    match &node.operator {
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            child,
+            ..
+        }) if !measures
+            .iter()
+            .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. })) =>
+        {
+            grouped(reduction, child)
+        }
+        Operator::ASAP(
+            ASAPOp::SummaryAgg {
+                reduction, child, ..
+            }
+            | ASAPOp::PaneChain {
+                reduction, child, ..
+            },
+        ) => grouped(reduction, child),
+        // A merge's children are states of one definition: its first
+        // build's grouping stands for all of them.
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => match node.summary_build() {
+            Some(
+                ASAPOp::SummaryAgg {
+                    reduction, child, ..
+                }
+                | ASAPOp::PaneChain {
+                    reduction, child, ..
+                },
+            ) => grouped(reduction, child),
+            _ => None,
+        },
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query,
+        }) if !matches!(query, SketchStatistic::TopK { .. }) => {
+            declared_group_bound(summary_input, data)
+        }
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
+        | Operator::NonASAP(
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. }
+            | NonASAPOp::Dedup { child, .. },
+        ) => declared_group_bound(child, data),
+        _ => None,
+    }
+}
+
+/// The distinct values column `column` of `node` takes at most, when it is
+/// a source column passed through unchanged: traced down through
+/// operators that keep their input's columns (filter, sort, limit, time
+/// range and shift), a projection that selects it, a grouped aggregate's
+/// key, a per-series reduction's other columns, and each branch of a
+/// union, to the scans, and summed over them from the label (or column)
+/// counts their sources declare. `None` when it is computed or relabeled
+/// on the way (its values are no longer the source's), or a source does
+/// not declare it.
+fn declared_distinct_values(
+    node: &OperatorNode,
+    column: usize,
+    data: &DataWorkload,
+) -> Option<u64> {
+    match node.non_asap()? {
+        NonASAPOp::Scan { source, .. } => {
+            let label = &node.schema.fields.get(column)?.name;
+            data.sources
+                .get(source_name(source))?
+                .distinct_values_per_label
+                .get(label)
+                .copied()
+        }
+        NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::TimeRange { child, .. }
+        | NonASAPOp::TimeShift { child, .. } => declared_distinct_values(child, column, data),
+        // A grouped aggregate returns its keys first, unchanged; but a
+        // `count_values` label named like a key takes that key's place
+        // with the stringified sample values.
+        NonASAPOp::Aggregate {
+            reduction: Reduction::Reduce(keys),
+            measures,
+            child,
+            ..
+        } if !keys.is_without()
+            && !measures
+                .iter()
+                .any(|m| matches!(m, AggIntent::CountValues { .. })) =>
+        {
+            declared_distinct_values(child, *keys.keys().get(column)?, data)
+        }
+        // A per-series reduction keeps every column but the one it reduces.
+        NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures,
+            child,
+            ..
+        } => {
+            let reduced = match measures.first()?.input_cols().first() {
+                Some(&input) => input,
+                None => asap_types::ir::scalar::column_resolution::resolve_column_ref(
+                    &asap_types::ir::scalar::ColumnRef::SampleValue,
+                    &child.schema,
+                )
+                .ok()?,
+            };
+            (column != reduced)
+                .then(|| declared_distinct_values(child, column, data))
+                .flatten()
+        }
+        NonASAPOp::Project { cols, child, .. } => match cols.get(column)?.expr {
+            ScalarExpr::Column(input) => declared_distinct_values(child, input, data),
+            _ => None,
+        },
+        NonASAPOp::SetOp {
+            kind: RelationalSetOpKind::Union,
+            left,
+            right,
+            ..
+        } => Some(
+            declared_distinct_values(left, column, data)?
+                .saturating_add(declared_distinct_values(right, column, data)?),
+        ),
+        NonASAPOp::Concat { children, .. } => children.iter().try_fold(0u64, |total, child| {
+            Some(total.saturating_add(declared_distinct_values(child, column, data)?))
+        }),
+        _ => None,
     }
 }
 
@@ -2036,9 +2203,11 @@ pub fn resize_for_failure_probability(
         else {
             continue;
         };
-        let values = target
-            .accuracy_scope
-            .max_values_covered(values_per_result(root, series_read(root, data)));
+        let values = target.accuracy_scope.max_values_covered(values_per_result(
+            root,
+            series_read(root, data),
+            data,
+        ));
         let Some(values) = values else { continue };
         let inputs = approximate_inputs(root);
         let per_input_failure_probability = delta / (inputs.len() as f64 * values as f64);
@@ -2222,7 +2391,7 @@ fn guarantee_check(
     // A guarantee per value is stated over the values the target's scope
     // covers: the whole result's `G`, or at most `⌊1 / share⌋` groups.
     let series = series_read(root, data);
-    let values = values_per_result(root, series);
+    let values = values_per_result(root, series, data);
     let over_scope = |g: AccuracyGuarantee| g.over_scope(target.accuracy_scope, values);
     let guarantee = bound_root_guarantee(root, series, data, models).map(over_scope);
     let meets = |g: &AccuracyGuarantee| models.effective_accuracy().satisfies(g, target);
@@ -2279,8 +2448,10 @@ fn guarantee_check(
                 format!(
                     "q{query}: the output's guarantee holds for each value, and the number \
                      of values one evaluation returns is not bound (no declared series \
-                     count for a source a PromQL vector reads; no bound on a SQL result's \
-                     groups yet), so it does not meet whole-result target {target:?}, and \
+                     count for a source a PromQL vector reads, and no declared \
+                     `distinct_values_per_label` for every group key, or a key that is not \
+                     an unchanged source column), so it does not meet \
+                     whole-result target {target:?}, and \
                      the deployment has no evidence that it meets it (a target on the groups \
                      holding a share of the records, `groups_with_record_share_at_least`, \
                      covers a bound number of values)"
@@ -4602,7 +4773,7 @@ mod tests {
 
     /// `G` of `root` over `data` ([`values_per_result`]).
     fn values_of(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
-        values_per_result(root, series_read(root, data))
+        values_per_result(root, series_read(root, data), data)
     }
 
     /// [`bound_root_guarantee`] of `root` over `data`.
@@ -6029,6 +6200,41 @@ mod tests {
             few.iter().any(|d| d.contains(" in 50 partitions;")),
             "{few:?}"
         );
+    }
+
+    /// A grouped root's `G` is also bound by its keys' declared distinct
+    /// values, at most the series read: `by (job)` with 10 jobs returns at
+    /// most 10 values, also below a sort; a key without a declared count, a
+    /// relabeled key, `without (...)` and a top-k (several rows per group)
+    /// keep the series bound.
+    #[test]
+    fn values_per_result_is_bound_by_the_declared_distinct_values_of_its_keys() {
+        let root =
+            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::max_error(0.01)));
+        let mut data = with_series(Some(10_000));
+        data.sources.get_mut("x").unwrap().distinct_values_per_label =
+            [("job".to_string(), 10), ("instance".to_string(), 5_000)].into();
+        for (query, values) in [
+            ("sum by (job) (rate(x[5m]))", 10),
+            ("sum by (job, instance) (rate(x[5m]))", 10_000),
+            ("sum by (job, region) (rate(x[5m]))", 10_000),
+            ("sum without (instance) (rate(x[5m]))", 10_000),
+            ("topk by (job) (3, rate(x[5m]))", 10_000),
+            ("sum by (job) (rate(x[5m]) + rate(m[5m]))", 20_000),
+            // A relabeled key no longer holds the declared label's values.
+            (
+                r#"sum by (job) (label_replace(rate(x[5m]), "job", "$1", "instance", "(.*)"))"#,
+                10_000,
+            ),
+            ("sort_desc(sum by (job) (rate(x[5m])))", 10),
+            // `count_values("job", ...)` overwrites `job` with sample values.
+            (
+                r#"sum by (job) (count_values by (job) ("job", rate(x[5m])))"#,
+                10_000,
+            ),
+        ] {
+            assert_eq!(values_of(&root(query), &data), Some(values), "{query}");
+        }
     }
 
     /// `G` counts the values the root can return: an `or` returns the

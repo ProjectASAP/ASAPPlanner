@@ -300,7 +300,8 @@ either way; over several sources a key's counts add). Every fact is declared: th
 clock, so a caller drops facts that no longer hold before planning. Plan
 selection bounds a query's number of values `G`, and its input row count,
 by the `series_count` of the sources it reads, counting each branch of an
-`or` or union. `DataWorkload::validate()` checks the data facts: the
+`or` or union, and a grouped result's `G` (PromQL or SQL) also by the
+product of its keys' declared distinct values when every key declares one. `DataWorkload::validate()` checks the data facts: the
 arrival rate must be finite and nonnegative, a sample interval nonzero,
 stream norms finite and nonnegative, and distinct bounds and per-label
 distinct-value counts positive.
