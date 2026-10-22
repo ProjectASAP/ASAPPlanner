@@ -720,17 +720,38 @@ fn coefficients_of(
     let mut shared_nodes = Vec::new();
     let mut shared_node_keys = Vec::new();
     let direct_set: HashSet<PhysicalASAPNodeId> = direct.iter().copied().collect();
-    for &id in &direct {
-        let node = &dag.nodes[position[&id]];
-        let shareable =
-            matches!(node.payload, Operator::ASAP(_)) || !node.output_schema.unique_keys.is_empty();
-        if id == root || !shareable || is_build(&node.payload) || !query_time(id) {
-            continue;
-        }
-        let below: Vec<PhysicalASAPNodeId> = walk(id)
-            .0
-            .into_iter()
-            .filter(|n| direct_set.contains(n))
+    // Each shareable node with the direct nodes below it.
+    let shareable: Vec<(PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>)> = direct
+        .iter()
+        .copied()
+        .filter(|&id| {
+            let node = &dag.nodes[position[&id]];
+            let shareable = matches!(node.payload, Operator::ASAP(_))
+                || !node.output_schema.unique_keys.is_empty();
+            id != root && shareable && !is_build(&node.payload) && query_time(id)
+        })
+        .map(|id| {
+            let below = walk(id)
+                .0
+                .into_iter()
+                .filter(|n| direct_set.contains(n))
+                .collect();
+            (id, below)
+        })
+        .collect();
+    // Each direct node belongs to its nearest shareable node (itself or
+    // above it), so that no node is in two of them: the model charges
+    // their sum once.
+    for (id, below) in &shareable {
+        let id = *id;
+        let below: Vec<PhysicalASAPNodeId> = below
+            .iter()
+            .copied()
+            .filter(|n| {
+                !shareable.iter().any(|(other, other_below)| {
+                    *other != id && below.contains(other) && other_below.contains(n)
+                })
+            })
             .collect();
         let mut once = dag.clone();
         once.nodes[position[&id]].materialization = Materialization::MatAtQuery(Medium::Memory);
@@ -1408,23 +1429,31 @@ mod tests {
             if p.at_query_time && first_root {
                 actual += coefficients.direct.cost_per_unit_rate * rates[&p.root].1;
                 let mine = below(p.root);
+                let mut matched: HashSet<PhysicalASAPNodeId> = HashSet::new();
                 for (shared, sub) in coefficients
                     .shared_nodes
                     .iter()
                     .zip(&p.part.shared_node_keys)
                 {
+                    // Charged once per plan node at its rate: the node is
+                    // one node for the copies or groups sharing it, built
+                    // once when it (or a node above it) is materialized.
                     let Some(node) = mine.iter().copied().find(|id| {
                         keys[position_of[id]] == sub[0]
-                            && nodes[id].materialization != Materialization::NotMaterialized
+                            && !matched.contains(id)
+                            && nodes[id].output_state.timing == ExecutionTiming::QueryTime
                     }) else {
                         continue;
                     };
+                    matched.insert(node);
                     actual -= shared.cost_per_unit_rate * rates[&p.root].1;
-                    // Its nodes' held memory, at the shared node's rate.
-                    let below_held: Vec<HeldTerm> = lazy
+                    let materialized =
+                        nodes[&node].materialization != Materialization::NotMaterialized;
+                    let part_held: Vec<HeldTerm> = lazy
                         .held
                         .iter()
-                        .filter(|t| sub[1..].contains(&t.node_key))
+                        .filter(|t| sub.contains(&t.node_key))
+                        .filter(|t| !(materialized && t.node_key == sub[0]))
                         .copied()
                         .collect();
                     lazy.held.retain(|term| !sub.contains(&term.node_key));
@@ -1437,14 +1466,13 @@ mod tests {
                             .map(|(q, _)| (q, query_rate(q)))
                             .collect();
                         let rate: f64 = readers.iter().map(|(_, r)| r).sum();
-                        for term in below_held {
+                        let longest = readers.iter().map(|&(q, _)| latency[q]).fold(0.0, f64::max);
+                        for term in part_held {
                             let evaluation_ms = match term.per_reader && rate > 0.0 {
                                 true => {
                                     readers.iter().map(|&(q, r)| r * latency[q]).sum::<f64>() / rate
                                 }
-                                false => {
-                                    readers.iter().map(|&(q, _)| latency[q]).fold(0.0, f64::max)
-                                }
+                                false => longest,
                             };
                             held_extra += prices.cost_per_memory_byte_second
                                 * term.bytes as f64
@@ -1452,17 +1480,13 @@ mod tests {
                                 * evaluation_ms
                                 / 1_000.0;
                         }
-                        let longest = reach
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, r)| r.contains(&node))
-                            .map(|(q, _)| latency[q])
-                            .fold(0.0, f64::max);
-                        held_extra += prices.cost_per_memory_byte_second
-                            * shared.state_bytes as f64
-                            * rates[&node].1
-                            * longest
-                            / 1_000.0;
+                        if materialized {
+                            held_extra += prices.cost_per_memory_byte_second
+                                * shared.state_bytes as f64
+                                * rates[&node].1
+                                * longest
+                                / 1_000.0;
+                        }
                     }
                 }
             }
