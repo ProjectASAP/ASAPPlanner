@@ -568,8 +568,8 @@ pub struct SourceFacts {
     /// grouped result declares a count, their product (at most the series
     /// read) also bounds the values one evaluation returns (`G`), which a
     /// whole-result accuracy target splits its failure probability over:
-    /// each count must be an upper bound, and positive. Omitted from JSON
-    /// when empty.
+    /// each count must be an upper bound, counting a missing label (or a
+    /// NULL) as one more value, and positive. Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub distinct_values_per_label: BTreeMap<String, u64>,
 }

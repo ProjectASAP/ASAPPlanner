@@ -37,16 +37,12 @@ fn http_catalog() -> SqlCatalog {
 
 /// `query` every minute with a whole-result target (`metric` error 0.05,
 /// failure probability 0.05) over `http`: 10,000 label combinations, and
-/// each label's distinct values when `declared`.
-fn workload(query: &str, metric: &str, declared: bool) -> PlanningWorkload {
-    let mut http = serde_json::json!({
+/// `declared` as each column's distinct values.
+fn workload(query: &str, metric: &str, declared: serde_json::Value) -> PlanningWorkload {
+    let http = serde_json::json!({
         "series_count": 10000, "sample_interval": 5, "values_non_negative": true,
-        "max_distinct_per_evaluation": 1000000
+        "max_distinct_per_evaluation": 1000000, "distinct_values_per_label": declared
     });
-    if declared {
-        http["distinct_values_per_label"] =
-            serde_json::json!({"region": 4, "service": 25, "endpoint": 25, "status": 4});
-    }
     serde_json::from_value(serde_json::json!({
         "query_workload": {"language": {"sql": "datafusion_sql"}, "query_batch": null,
             "repeating_queries": [{
@@ -60,8 +56,18 @@ fn workload(query: &str, metric: &str, declared: bool) -> PlanningWorkload {
     .expect("workload")
 }
 
+/// Every `http` column's distinct values: 4 regions, 25 services, 25
+/// endpoints, 4 statuses.
+fn every_column() -> serde_json::Value {
+    serde_json::json!({"region": 4, "service": 25, "endpoint": 25, "status": 4})
+}
+
 /// The sketches the selected plan builds (empty for the exact plan).
-fn selected_sketches(query: &str, metric: &str, declared: bool) -> Vec<SketchAlgorithm> {
+fn selected_sketches(
+    query: &str,
+    metric: &str,
+    declared: serde_json::Value,
+) -> Vec<SketchAlgorithm> {
     let workload = workload(query, metric, declared);
     let roots = lower_sql_roots(&workload, &http_catalog()).expect("lowers");
     let run = run_stages(&workload, roots);
@@ -84,7 +90,7 @@ const P99_LATENCY: &str = "SELECT region, service, approx_percentile_cont(latenc
 /// 0.05 / 625, meets the whole-result target.
 #[test]
 fn declared_grouping_columns_bound_the_groups_of_a_distinct_count() {
-    let sketches = selected_sketches(DISTINCT_USERS, "relative", true);
+    let sketches = selected_sketches(DISTINCT_USERS, "relative", every_column());
     assert!(
         matches!(
             sketches.as_slice(),
@@ -98,7 +104,7 @@ fn declared_grouping_columns_bound_the_groups_of_a_distinct_count() {
 /// group meets the whole-result rank target.
 #[test]
 fn declared_grouping_columns_bound_the_groups_of_a_quantile() {
-    let sketches = selected_sketches(P99_LATENCY, "rank", true);
+    let sketches = selected_sketches(P99_LATENCY, "rank", every_column());
     assert_eq!(sketches, [SketchAlgorithm::Kll]);
 }
 
@@ -107,7 +113,15 @@ fn declared_grouping_columns_bound_the_groups_of_a_quantile() {
 #[test]
 fn undeclared_grouping_columns_leave_only_the_exact_plan() {
     for (query, metric) in [(DISTINCT_USERS, "relative"), (P99_LATENCY, "rank")] {
-        let sketches = selected_sketches(query, metric, false);
+        let sketches = selected_sketches(query, metric, serde_json::json!({}));
         assert!(sketches.is_empty(), "{query}: {sketches:?}");
     }
+}
+
+/// One grouping column declared is not enough: `service` has no declared
+/// count, so the groups of `GROUP BY region, service` stay unbound.
+#[test]
+fn a_partly_declared_grouping_leaves_only_the_exact_plan() {
+    let sketches = selected_sketches(P99_LATENCY, "rank", serde_json::json!({"region": 4}));
+    assert!(sketches.is_empty(), "{sketches:?}");
 }

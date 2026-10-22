@@ -1910,48 +1910,33 @@ fn values_per_result(
     let by_series = (node.result_kind == OperatorResultKind::InstantVector)
         .then_some(series_read)
         .flatten();
+    // Each group holds at least one row read, so the series read also
+    // bound the groups.
     let by_groups = declared_group_bound(node, data)
         .map(|groups| series_read.map_or(groups, |series| groups.min(series)));
-    let values = match (by_series, by_groups) {
-        (Some(series), Some(groups)) => Some(series.min(groups)),
-        (series, groups) => series.or(groups),
-    };
-    values.map(|values| values.max(1))
+    by_groups.or(by_series).map(|values| values.max(1))
 }
 
 /// An upper bound on the groups `node` returns, from the distinct values
 /// the sources it reads declare for its group keys
 /// (`SourceFacts::distinct_values_per_label`): the product over the keys of
-/// each key's counts summed over those sources. The grouping is found
-/// below operators that only keep, drop or reorder rows, and through a
-/// summary's estimate (not a top-k, which returns several rows per group),
-/// merge and finalization. `None` when no such grouping is found, it is a
-/// `without (...)`, or a source read does not declare one of its keys: the
-/// declared counts are upper bounds, never defaults.
+/// each key's declared count ([`declared_distinct_values`]). The grouping is
+/// found below operators that only keep, drop or reorder rows, and through
+/// a summary's estimate (not a top-k, which returns several rows per
+/// group), merge and finalization. `None` when no such grouping is found,
+/// it is a `without (...)`, or a key is not a source column passed through
+/// unchanged with a declared count: the declared counts are upper bounds,
+/// never defaults.
 fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64> {
-    let grouped = |reduction: &Reduction, input: &Rc<OperatorNode>| -> Option<u64> {
+    let grouped = |reduction: &Reduction, input: &OperatorNode| -> Option<u64> {
         let Reduction::Reduce(keys) = reduction else {
             return None;
         };
         if keys.is_without() {
             return None;
         }
-        let mut sources = BTreeSet::new();
-        scan_sources(input, &mut HashSet::new(), &mut sources);
-        if sources.is_empty() {
-            return None;
-        }
-        keys.keys().iter().try_fold(1u64, |product, key| {
-            let label = &input.schema.fields.get(*key)?.name;
-            let count = sources.iter().try_fold(0u64, |total, source| {
-                let count = data
-                    .sources
-                    .get(source)?
-                    .distinct_values_per_label
-                    .get(label)?;
-                Some(total.saturating_add(*count))
-            })?;
-            Some(product.saturating_mul(count))
+        keys.keys().iter().try_fold(1u64, |product, &key| {
+            Some(product.saturating_mul(declared_distinct_values(input, key, data)?))
         })
     };
     match &node.operator {
@@ -1974,6 +1959,8 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
                 reduction, child, ..
             },
         ) => grouped(reduction, child),
+        // A merge's children are states of one definition: its first
+        // build's grouping stands for all of them.
         Operator::ASAP(ASAPOp::SummaryMerge { .. }) => match node.summary_build() {
             Some(
                 ASAPOp::SummaryAgg {
@@ -2003,21 +1990,76 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
     }
 }
 
-/// The sources (PromQL metrics, SQL tables) the scans under `node` read;
-/// `seen` holds the nodes already visited, so a shared node is read once.
-fn scan_sources(
+/// The distinct values column `column` of `node` takes at most, when it is
+/// a source column passed through unchanged: traced down through
+/// operators that keep their input's columns (filter, sort, limit, time
+/// range and shift), a projection that selects it, a grouped aggregate's
+/// key, a per-series reduction's other columns, and each branch of a
+/// union, to the scans, and summed over them from the label (or column)
+/// counts their sources declare. `None` when it is computed or relabeled
+/// on the way (its values are no longer the source's), or a source does
+/// not declare it.
+fn declared_distinct_values(
     node: &OperatorNode,
-    seen: &mut HashSet<*const OperatorNode>,
-    sources: &mut BTreeSet<String>,
-) {
-    if !seen.insert(node as *const OperatorNode) {
-        return;
-    }
-    if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
-        sources.insert(source_name(source).to_string());
-    }
-    for child in node.children() {
-        scan_sources(child, seen, sources);
+    column: usize,
+    data: &DataWorkload,
+) -> Option<u64> {
+    match node.non_asap()? {
+        NonASAPOp::Scan { source, .. } => {
+            let label = &node.schema.fields.get(column)?.name;
+            data.sources
+                .get(source_name(source))?
+                .distinct_values_per_label
+                .get(label)
+                .copied()
+        }
+        NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::TimeRange { child, .. }
+        | NonASAPOp::TimeShift { child, .. } => declared_distinct_values(child, column, data),
+        // A grouped aggregate returns its keys first, unchanged.
+        NonASAPOp::Aggregate {
+            reduction: Reduction::Reduce(keys),
+            child,
+            ..
+        } if !keys.is_without() => declared_distinct_values(child, *keys.keys().get(column)?, data),
+        // A per-series reduction keeps every column but the one it reduces.
+        NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures,
+            child,
+            ..
+        } => {
+            let reduced = match measures.first()?.input_cols().first() {
+                Some(&input) => input,
+                None => asap_types::ir::scalar::column_resolution::resolve_column_ref(
+                    &asap_types::ir::scalar::ColumnRef::SampleValue,
+                    &child.schema,
+                )
+                .ok()?,
+            };
+            (column != reduced)
+                .then(|| declared_distinct_values(child, column, data))
+                .flatten()
+        }
+        NonASAPOp::Project { cols, child, .. } => match cols.get(column)?.expr {
+            ScalarExpr::Column(input) => declared_distinct_values(child, input, data),
+            _ => None,
+        },
+        NonASAPOp::SetOp {
+            kind: RelationalSetOpKind::Union,
+            left,
+            right,
+            ..
+        } => Some(
+            declared_distinct_values(left, column, data)?
+                .saturating_add(declared_distinct_values(right, column, data)?),
+        ),
+        NonASAPOp::Concat { children, .. } => children.iter().try_fold(0u64, |total, child| {
+            Some(total.saturating_add(declared_distinct_values(child, column, data)?))
+        }),
+        _ => None,
     }
 }
 
@@ -6152,8 +6194,9 @@ mod tests {
 
     /// A grouped root's `G` is also bound by its keys' declared distinct
     /// values, at most the series read: `by (job)` with 10 jobs returns at
-    /// most 10 values; a key without a declared count, `without (...)` and
-    /// a top-k (several rows per group) keep the series bound.
+    /// most 10 values, also below a sort; a key without a declared count, a
+    /// relabeled key, `without (...)` and a top-k (several rows per group)
+    /// keep the series bound.
     #[test]
     fn values_per_result_is_bound_by_the_declared_distinct_values_of_its_keys() {
         let root =
@@ -6168,6 +6211,12 @@ mod tests {
             ("sum without (instance) (rate(x[5m]))", 10_000),
             ("topk by (job) (3, rate(x[5m]))", 10_000),
             ("sum by (job) (rate(x[5m]) + rate(m[5m]))", 20_000),
+            // A relabeled key no longer holds the declared label's values.
+            (
+                r#"sum by (job) (label_replace(rate(x[5m]), "job", "$1", "instance", "(.*)"))"#,
+                10_000,
+            ),
+            ("sort_desc(sum by (job) (rate(x[5m])))", 10),
         ] {
             assert_eq!(values_of(&root(query), &data), Some(values), "{query}");
         }
