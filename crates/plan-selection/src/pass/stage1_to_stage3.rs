@@ -165,6 +165,12 @@ pub struct Stage1ToStage3Search {
     /// [`SearchAlgorithm::Legacy`] until the MILP selects the exhaustive
     /// search's price on every equivalence test.
     pub search: SearchAlgorithm,
+    /// The longest the MILP search may run, in ms; `None` for no limit.
+    /// Stopped at the limit, it selects its best plan so far and reports
+    /// the gap to its bound ([`crate::SearchReport::solver_gap`]) and
+    /// [`crate::SearchReport::solver_time_limit_reached`]: not proven
+    /// optimal unless the gap is 0.
+    pub milp_time_limit_ms: Option<u64>,
 }
 
 impl Stage1ToStage3Search {
@@ -175,6 +181,7 @@ impl Stage1ToStage3Search {
             keep_every_candidate: true,
             exhaustive: true,
             search: SearchAlgorithm::Legacy,
+            milp_time_limit_ms: None,
         }
     }
 
@@ -268,7 +275,13 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
                 let pruned = per_computation
                     .clone()
                     .without_unsupported_summaries(models.deployment_capabilities);
-                let found = super::subexpr::milp::search(&pruned, entries, data, models);
+                let found = super::subexpr::milp::search(
+                    &pruned,
+                    entries,
+                    data,
+                    models,
+                    search.milp_time_limit_ms,
+                );
                 return memo_run(pruned, found, entries, data, SearchAlgorithm::MemoMilp);
             }
         }

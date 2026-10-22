@@ -1060,6 +1060,11 @@ pub struct SearchReport {
     /// every other search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver_first_bound_cost_per_second: Option<f64>,
+    /// Whether the MILP search stopped at its time limit
+    /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]): its plan is
+    /// then proven optimal only if [`Self::solver_gap`] is 0.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub solver_time_limit_reached: bool,
 }
 
 /// The size of a sub-expression memo (joint-planning-search design,
@@ -2111,6 +2116,10 @@ impl<'a> PlanSelector<'a> {
     /// into the cheapest price and the runner-up ([`ROUNDING`]).
     /// Under a price ranking, the cheapest price of the valid candidates
     /// offered so far.
+    pub(crate) fn rejections(&self) -> &[Rejection] {
+        &self.rejected
+    }
+
     pub(crate) fn cheapest_price(&self) -> Option<f64> {
         self.cheapest
     }

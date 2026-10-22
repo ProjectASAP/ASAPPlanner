@@ -505,6 +505,7 @@ fn a_known_bound_that_misses_is_not_discarded_before_composition() {
             keep_every_candidate: true,
             exhaustive: false,
             search: SearchAlgorithm::Legacy,
+            milp_time_limit_ms: None,
         },
     )
     .unwrap();

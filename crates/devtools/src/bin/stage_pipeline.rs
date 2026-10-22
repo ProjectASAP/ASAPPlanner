@@ -221,7 +221,7 @@ use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
     PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
-    SearchAlgorithm, Selection, SelectionError,
+    SearchAlgorithm, Selection, SelectionError, Stage1ToStage3Search,
 };
 use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -240,7 +240,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp] [--max-displayed <n>] --out <file>";
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp [--milp-time-limit-s <f64>]] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) an exhaustive run enumerates.
@@ -342,6 +342,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
     let mut search_algorithm: Option<SearchAlgorithm> = None;
+    let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -401,6 +402,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
+            "--milp-time-limit-s" => {
+                let seconds: f64 = value()?
+                    .parse()
+                    .map_err(|e| format!("--milp-time-limit-s: {e}"))?;
+                milp_time_limit_ms = Some((seconds * 1e3) as u64);
+            }
             "--search" => {
                 search_algorithm = Some(match value()?.as_str() {
                     "legacy" => SearchAlgorithm::Legacy,
@@ -430,6 +437,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         );
     }
     let search_algorithm = search_algorithm.unwrap_or_default();
+    if milp_time_limit_ms.is_some() && search_algorithm != SearchAlgorithm::MemoMilp {
+        return Err(
+            "--milp-time-limit-s limits the MILP search: it needs --search memo-milp".into(),
+        );
+    }
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
     }
@@ -641,7 +653,16 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             Some(max_combinations),
             models,
         ),
-        false => run_search_over(roots.clone(), &entries, &data, models, search_algorithm),
+        false => run_search_over(
+            roots.clone(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search {
+                milp_time_limit_ms,
+                ..Stage1ToStage3Search::with_algorithm(search_algorithm)
+            },
+        ),
     };
     // A selected plan's very large peak memory, when the deployment
     // declares no memory capacity to check it against.
