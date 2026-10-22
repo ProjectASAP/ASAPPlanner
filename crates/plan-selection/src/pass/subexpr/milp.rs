@@ -76,6 +76,11 @@ pub(crate) struct ChoiceCoefficients {
     /// than its own node: each may be one node for every copy of the group
     /// (the identical-expression rule), and then built once at query time.
     pub shared_nodes: Vec<SharedNodeCoefficients>,
+    /// Shareable nodes another group's choices may also have (equal keys):
+    /// one node once shared, so charged once per key, at the dearest of
+    /// the chosen ones (key, price per unit of rate). Moved out of
+    /// `direct` and `shared_nodes` by the model's input.
+    pub cross_shared: Vec<(u64, f64)>,
 }
 
 /// A shareable node of a choice's direct part ([`ChoiceCoefficients::shared_nodes`]).
@@ -88,6 +93,9 @@ pub(crate) struct SharedNodeCoefficients {
     pub cost_per_unit_rate: f64,
     pub work_ms: f64,
     pub state_bytes: u64,
+    /// A loose key of the node (kind, family, panes, raw sources): equal
+    /// for nodes of different groups that may be one node once shared.
+    pub key: u64,
 }
 
 /// One choice of a group: a candidate and an option per private slot.
@@ -230,14 +238,17 @@ fn held_at_query_time(
     choice: &Choice,
     lazy: &LazyTerms,
     prices: &ResourceUnitCost,
+    shared_keys: &BTreeSet<(u64, usize)>,
 ) -> HeldAtQueryTime {
     let mut held = HeldAtQueryTime::default();
     for term in &lazy.held {
         if let Via::Slot(i) = term.via {
-            if matches!(
-                choice.coefficients.slots[i].materialization,
-                Materialization::MatAtIngestion(_)
-            ) {
+            let slot = &choice.coefficients.slots[i];
+            if matches!(slot.materialization, Materialization::MatAtIngestion(_))
+                || slot
+                    .shared_site
+                    .is_some_and(|key| shared_keys.contains(&key))
+            {
                 continue;
             }
         }
@@ -336,6 +347,9 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
             node.cost_per_unit_rate *= scale;
         }
         choice.scan_project_cost_per_unit_rate *= scale;
+        for (_, cost) in &mut choice.coefficients.cross_shared {
+            *cost *= scale;
+        }
     }
     for scan in &mut scaled.raw_scans {
         scan.cost *= scale;
@@ -616,6 +630,14 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                 .entry((site, threshold, format!("{:?}", slot.materialization)))
                 .or_default()
                 .push((c, charge));
+        }
+    }
+    for (c, choice) in input.choices.iter().enumerate() {
+        for &(key, cost) in &choice.coefficients.cross_shared {
+            shared_slots
+                .entry((key, usize::MAX, "node".to_string()))
+                .or_default()
+                .push((c, slowest_rate(choice.group.0 as usize) * cost));
         }
     }
     let mut shared_slot_vars: Vec<(Variable, Vec<(usize, f64)>)> = Vec::new();
@@ -1602,7 +1624,7 @@ pub(super) fn model_input_of(
     let mut cache = super::pricing::PriceCache::new(scale);
     let mut choices: Vec<Choice> = Vec::new();
     let mut raw_scans: Vec<(usize, String, u64, Via)> = Vec::new();
-    let mut held: Vec<HeldAtQueryTime> = Vec::new();
+    let mut lazies: Vec<LazyTerms> = Vec::new();
     let CostModel::UsageOverTime(prices) = &models.plan_selection.cost_model else {
         unreachable!("the caller routes cost models 2 and 3 to the legacy search");
     };
@@ -1630,7 +1652,7 @@ pub(super) fn model_input_of(
             {
                 continue;
             }
-            held.push(held_at_query_time(&choice, &lazy, prices));
+            lazies.push(lazy.clone());
             raw_scans.extend(
                 lazy.raw_scans
                     .iter()
@@ -1683,7 +1705,52 @@ pub(super) fn model_input_of(
         });
     }
     input.raw_data_retained = models.deployment_capabilities.raw_data_retained;
-    input.held = held;
+    // Shareable nodes several groups' choices may have: one node once
+    // shared, charged once per key (`ChoiceCoefficients::cross_shared`).
+    let mut groups_of_node: HashMap<u64, BTreeSet<GroupId>> = HashMap::new();
+    for choice in &input.choices {
+        for node in &choice.coefficients.shared_nodes {
+            groups_of_node
+                .entry(node.key)
+                .or_default()
+                .insert(choice.group);
+        }
+    }
+    for choice in &mut input.choices {
+        let k = &mut choice.coefficients;
+        let (cross, own): (Vec<_>, Vec<_>) = k
+            .shared_nodes
+            .drain(..)
+            .partition(|node| groups_of_node[&node.key].len() > 1);
+        k.shared_nodes = own;
+        for node in cross {
+            k.direct.cost_per_unit_rate -= node.cost_per_unit_rate;
+            k.cross_shared.push((node.key, node.cost_per_unit_rate));
+        }
+        k.direct.cost_per_unit_rate = k.direct.cost_per_unit_rate.max(0.0);
+    }
+    // A slot whose build several groups' choices may share is one node
+    // charged once (`SlotCoefficients::shared_site`): its held memory is
+    // left out rather than charged per choice.
+    let mut groups_of_key: HashMap<(u64, usize), BTreeSet<GroupId>> = HashMap::new();
+    for choice in &input.choices {
+        for slot in &choice.coefficients.slots {
+            if let Some(key) = slot.shared_site {
+                groups_of_key.entry(key).or_default().insert(choice.group);
+            }
+        }
+    }
+    let shared_keys: BTreeSet<(u64, usize)> = groups_of_key
+        .into_iter()
+        .filter(|(_, groups)| groups.len() > 1)
+        .map(|(key, _)| key)
+        .collect();
+    input.held = input
+        .choices
+        .iter()
+        .zip(&lazies)
+        .map(|(choice, lazy)| held_at_query_time(choice, lazy, prices, &shared_keys))
+        .collect();
     Ok(input)
 }
 
@@ -1951,6 +2018,7 @@ mod tests {
                 slots: Vec::new(),
                 child_via: children.iter().map(|_| Via::Direct).collect(),
                 shared_nodes: Vec::new(),
+                cross_shared: Vec::new(),
             },
             copy_of: None,
             scan_children: Vec::new(),

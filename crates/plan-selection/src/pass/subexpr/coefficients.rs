@@ -517,6 +517,43 @@ fn raw_windows(memo: &Memo) -> HashMap<u64, BTreeSet<u64>> {
     windows
 }
 
+/// A key equal for builds that may be one node once shared: `node`'s
+/// operator kind, state family and panes, and the raw sources below it.
+fn build_key(
+    dag: &PhysicalASAPDAG,
+    node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
+    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sources: BTreeSet<u64> = BTreeSet::new();
+    let mut stack = vec![node.id];
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(n) = dag.nodes.iter().find(|n| n.id == id) {
+            if let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &n.payload {
+                sources.insert(super::scans::raw_horizon_key(source));
+            }
+        }
+        stack.extend(producers_of.get(&id).into_iter().flatten().copied());
+    }
+    let shape = match &node.payload {
+        Operator::ASAP(ASAPOp::PaneChain {
+            family,
+            pane_width_ms,
+            pane_count,
+            ..
+        }) => format!("chain {family:?} {pane_width_ms} {pane_count}"),
+        Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => format!("build {family:?}"),
+        other => other.kind_name().to_string(),
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (shape, sources).hash(&mut hasher);
+    hasher.finish()
+}
+
 /// The child groups of `candidate`: its own, and every other group whose
 /// node equals a node its node reaches and that no other child already
 /// reaches, which some Pass 2 candidates read without listing (a pane
@@ -815,6 +852,7 @@ fn coefficients_of(
             cost_per_unit_rate: below.iter().map(|&n| per_rate(n)).sum(),
             work_ms: work(&below),
             state_bytes,
+            key: build_key(dag, &dag.nodes[position[&id]], &producers_of),
         });
         shared_node_keys.push(
             below
@@ -848,9 +886,11 @@ fn coefficients_of(
                 false => rate_cost,
             },
             work_ms: work(&part),
-            // Equal builds over equal inputs are one node when shared (a
-            // site's build at one threshold, or identical expressions).
-            shared_site: Some((u64::from(keys[position[&node.id]]), 0)),
+            // Builds that may be one node when shared (a site's build at
+            // one threshold, identical expressions, scans widened to one
+            // label set): the same kind, family and panes over the same
+            // sources. Keyed loosely (a wider key only lowers the bound).
+            shared_site: Some((build_key(dag, node, &producers_of), 0)),
         });
         slot_keys.push(shallow[position[&node.id]]);
         part_keys.push(part.iter().map(|id| keys[position[id]]).collect());
@@ -916,6 +956,7 @@ fn coefficients_of(
             slots,
             child_via,
             shared_nodes,
+            cross_shared: Vec::new(),
         },
         lazy: LazyTerms {
             held,
@@ -1677,6 +1718,17 @@ mod tests {
         intervals_ms: &[u32],
         targets: &[AccuracyTarget],
     ) {
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true);
+    }
+
+    /// [`assert_model_is_a_lower_bound`] in a deployment that keeps raw
+    /// data or not.
+    fn assert_model_is_a_lower_bound_in(
+        queries: &[&str],
+        intervals_ms: &[u32],
+        targets: &[AccuracyTarget],
+        raw_data_retained: bool,
+    ) {
         let roots: Vec<(usize, QueryRoot)> = queries
             .iter()
             .zip(targets)
@@ -1689,7 +1741,13 @@ mod tests {
         let per_computation = generate_per_computation_candidates(roots).unwrap();
         let entries = entries(intervals_ms, targets);
         let data = data();
-        let models = PlanningModels::builtin();
+        let deployment =
+            asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities {
+                raw_data_retained,
+                query_time_results_retained: false,
+                ..Default::default()
+            };
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         let memo = memo(&per_computation, &entries);
         let input = super::super::milp::model_input_of(
             &memo,
@@ -1760,6 +1818,21 @@ mod tests {
             ],
             &[20_000, 20_000, 1_000, 1_000],
             &[target.clone(), target.clone(), target.clone(), target],
+        );
+    }
+
+    /// #840's rollup: a quantile by host and job and its rollup by job, at
+    /// the rollup's state-size thresholds.
+    #[test]
+    fn the_model_is_a_lower_bound_with_a_sketch_rollup() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        assert_model_is_a_lower_bound(
+            &[
+                "quantile by (host, job) (0.5, m)",
+                "quantile by (job) (0.5, m)",
+            ],
+            &[10_000, 10_000],
+            &[target.clone(), target],
         );
     }
 
