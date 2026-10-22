@@ -1,5 +1,6 @@
 //! Couplings through a source's rows: scan widening and the raw-data
-//! horizon (joint-planning-search design, "Memo-group search", step 4).
+//! horizon (planner-layering design, "The stages over a memo of
+//! sub-expressions").
 //!
 //! - **Scan widening** ([`add_scan_widening`]): the time-series scans of a
 //!   metric that project different labels are separate groups (an unkeyed

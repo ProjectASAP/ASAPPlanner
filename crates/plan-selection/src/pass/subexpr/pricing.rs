@@ -1,6 +1,6 @@
 //! Local prices of implementation candidates, cached, and the frozen
-//! calibration factor (design "Memo-group search": Local price, Coupled
-//! charges). Cost model 1 only: cost models 2 and 3 keep the current
+//! calibration factor (planner-layering design, "The stages over a memo
+//! of sub-expressions"). Cost model 1 only: cost models 2 and 3 keep the current
 //! search.
 //!
 //! A candidate's local price is Stage 3's per-node price

@@ -1,5 +1,5 @@
 //! The window-composition, rollup and exact top-k reuse transformations
-//! (joint-planning-search design, "Memo-group search", stage interfaces):
+//! (planner-layering design, "The stages over a memo of sub-expressions"):
 //! Pass 2 rules that add implementation candidates to the memo's groups.
 //!
 //! - **Window composition** ([`add_window_composition`]): a group whose

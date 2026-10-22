@@ -1029,8 +1029,8 @@ pub struct SearchReport {
     pub memo: Option<MemoStats>,
 }
 
-/// The size of a sub-expression memo (joint-planning-search design,
-/// "Memo-group search"), for the selection report.
+/// The size of a sub-expression memo (planner-layering design, "The
+/// stages over a memo of sub-expressions"), for the selection report.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MemoStats {
     /// Its groups: the workload's distinct logical sub-expressions.
@@ -1371,12 +1371,17 @@ fn family_below<'a>(
 }
 
 /// The unchanged source columns of node `id` of `dag`
-/// ([`unchanged_source_columns`]), without pricing.
+/// ([`unchanged_source_columns`]), without pricing; memoized by node in
+/// `known`, so a node shared below several is walked once.
 fn unchanged_below<'a>(
     dag: &'a PhysicalASAPDAG,
     nodes: &NodeMap<'a>,
     id: PhysicalASAPNodeId,
+    known: &mut HashMap<PhysicalASAPNodeId, BTreeSet<&'a str>>,
 ) -> BTreeSet<&'a str> {
+    if let Some(columns) = known.get(&id) {
+        return columns.clone();
+    }
     let producers: Vec<(&'a Schema, BTreeSet<&'a str>)> = dag
         .edges
         .iter()
@@ -1384,7 +1389,7 @@ fn unchanged_below<'a>(
         .map(|e| {
             (
                 &nodes[&e.producer].output_schema,
-                unchanged_below(dag, nodes, e.producer),
+                unchanged_below(dag, nodes, e.producer, known),
             )
         })
         .collect();
@@ -1392,7 +1397,9 @@ fn unchanged_below<'a>(
         .iter()
         .map(|(schema, columns)| (*schema, columns))
         .collect();
-    unchanged_source_columns(nodes[&id], &views)
+    let columns = unchanged_source_columns(nodes[&id], &views);
+    known.insert(id, columns.clone());
+    columns
 }
 
 /// Price `input`'s private nodes as Stage 3 prices them in the whole plan
@@ -1556,6 +1563,7 @@ pub(crate) fn price_private_nodes(
     );
     // Price each private node, children first.
     let mut priced: HashMap<PhysicalASAPNodeId, PricedNode<'_>> = HashMap::new();
+    let mut unchanged_known = HashMap::new();
     for node in dag.nodes.iter().filter(|n| private_ids.contains(&n.id)) {
         let views: Vec<ProducerOutput<'_>> = producers_of
             .get(&node.id)
@@ -1580,7 +1588,7 @@ pub(crate) fn price_private_nodes(
                         .unwrap_or(EdgeStatistics { rows: 1, bytes: 1 }),
                     sources: sources_below(dag, &nodes, *p),
                     family: family_below(dag, &nodes, *p),
-                    unchanged_columns: unchanged_below(dag, &nodes, *p),
+                    unchanged_columns: unchanged_below(dag, &nodes, *p, &mut unchanged_known),
                 },
             })
             .collect();

@@ -1,8 +1,7 @@
-//! Clusters, coupling thresholds with branch and bound, the dynamic
-//! program, build-late (design "Memo-group search", steps 3–7).
+//! The search over the memo (planner-layering design, "The stages over a
+//! memo of sub-expressions").
 //!
-//! [`brute_force`] is the reference the decomposed search is checked
-//! against: every consistent choice of one candidate per needed group and
+//! [`brute_force`] is the reference the MILP search is checked against: every consistent choice of one candidate per needed group and
 //! one threshold per coupling site, composed into a plan and priced by
 //! Stage 2 and Stage 3 in every materialization.
 
