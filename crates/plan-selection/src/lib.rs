@@ -1185,6 +1185,54 @@ pub struct PlanSelector<'a> {
     runner_up: Option<f64>,
 }
 
+/// Stage 3's per-node pricing of `candidate`, a part of a workload whose
+/// roots are read by the queries of `entries` (one entry per root), sized
+/// for their failure probabilities when that resizes, with the formulas'
+/// CPU time scaled by `formula_scale`: its cost and calibration fit.
+/// `None` when it fails a check no summary size repairs: a per-series
+/// aggregate the executor cannot run, or raw data the deployment does not
+/// keep. The memo over sub-expressions prices each group's sub-DAG this
+/// way; accuracy and latency are checked on the whole plan.
+pub(crate) fn price_part(
+    candidate: &PhysicalCandidate,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: &PlanningModels<'_>,
+    formula_scale: f64,
+) -> Result<Option<(CandidateCost, CalibrationFit)>, SelectionError> {
+    let targets = accuracy_targets(entries);
+    let sized = sized_for_failure_probability(candidate, &targets, data)
+        .unwrap_or_else(|_| candidate.clone());
+    if per_entity_aggregate_violation(&sized.dag).is_some() {
+        return Ok(None);
+    }
+    let nodes = node_map(&sized.dag);
+    let kept_chains = kept_pane_chains(&sized.dag);
+    if !models.deployment_capabilities.raw_data_retained
+        && raw_data_violation(&sized.dag, &nodes, &kept_chains).is_some()
+    {
+        return Ok(None);
+    }
+    let recurrence: Vec<QueryRecurrence> = entries.iter().map(|e| e.recurrence.clone()).collect();
+    let range_evaluations: Vec<_> = entries.iter().map(|e| e.range_evaluation).collect();
+    price_at_scale(
+        &sized.dag,
+        &nodes,
+        &kept_chains,
+        &recurrence,
+        &range_evaluations,
+        data,
+        models.plan_selection,
+        formula_scale,
+    )
+    .map(Some)
+    .map_err(|(node, error)| SelectionError::Cost {
+        candidate: candidate.id.clone(),
+        node,
+        error,
+    })
+}
+
 /// Prices within this fraction of each other are the same sum of charges
 /// rounded differently (Stage 3's tie tolerance is 1e-9).
 const ROUNDING: f64 = 1e-12;
@@ -4064,7 +4112,7 @@ impl CalibrationFit {
 
     /// Measured ÷ formula time, 1 without measured nodes (or with only
     /// nodes the formulas price free).
-    fn factor(self) -> f64 {
+    pub(crate) fn factor(self) -> f64 {
         match self.formula_ms_per_second > 0.0 && self.measured_ms_per_second > 0.0 {
             true => self.measured_ms_per_second / self.formula_ms_per_second,
             false => 1.0,
