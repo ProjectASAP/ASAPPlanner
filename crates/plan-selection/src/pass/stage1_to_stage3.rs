@@ -57,8 +57,8 @@ use super::query_candidates::QueryCandidates;
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::PlanningModels;
 use crate::{
-    CalibrationFit, PlanSelector, QuerySearchReport, Rejection, RejectionCause, Selection,
-    SelectionError,
+    CalibrationFit, CostModel, PlanSelector, QuerySearchReport, Rejection, RejectionCause,
+    RoutedToLegacy, SearchAlgorithm, Selection, SelectionError,
 };
 use asap_logical_asap_optimization::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError, PerComputationCandidates,
@@ -159,11 +159,12 @@ pub struct Stage1ToStage3Search {
     /// own candidates first: the exhaustive search the pruned one is tested
     /// against; default `false`.
     pub exhaustive: bool,
-    /// Search the memo over logical sub-expressions (joint-planning-search
-    /// design, "Memo-group search") instead of whole-workload candidates;
-    /// ignored with `exhaustive`. Default `false` until it selects the
-    /// exhaustive search's price on every equivalence test.
-    pub memo_groups: bool,
+    /// The search algorithm (joint-planning-search design: the legacy
+    /// search, or the memo over logical sub-expressions, "Memo-group
+    /// search"); ignored with `exhaustive`. Default
+    /// [`SearchAlgorithm::Legacy`] until the MILP selects the exhaustive
+    /// search's price on every equivalence test.
+    pub search: SearchAlgorithm,
 }
 
 impl Stage1ToStage3Search {
@@ -173,7 +174,15 @@ impl Stage1ToStage3Search {
         Self {
             keep_every_candidate: true,
             exhaustive: true,
-            memo_groups: false,
+            search: SearchAlgorithm::Legacy,
+        }
+    }
+
+    /// The default search run with `algorithm`.
+    pub fn with_algorithm(algorithm: SearchAlgorithm) -> Self {
+        Self {
+            search: algorithm,
+            ..Self::default()
         }
     }
 }
@@ -234,36 +243,97 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
-    if search.memo_groups && !search.exhaustive {
-        let pruned = per_computation
-            .clone()
-            .without_unsupported_summaries(models.deployment_capabilities);
-        let combinations = pruned.combinations();
-        let found = super::subexpr::search::brute_force(&pruned, entries, data, models);
-        let (selection, selected, logical) = match found {
-            Ok((selection, selected, logical)) => (Ok(selection), Some(selected), Some(logical)),
-            Err(error) => (Err(error), None, None),
-        };
-        let selected_logical = logical
-            .as_ref()
-            .and_then(|roots| selected_logical(roots, entries, data));
-        return Stage1ToStage3Run {
-            stage1_pass1_per_computation: pruned,
-            combinations,
-            stage1_logical_asap_optimization: Vec::new(),
-            stage2_physical_asap_optimization: Vec::new(),
-            stage2_pruned: Vec::new(),
-            stage3_plan_selection: selection,
-            stage3_selected: selected,
-            stage3_selected_logical: selected_logical,
-            stage1_selected: logical.map(|roots| LogicalCandidate {
-                id: "L1".to_string(),
-                choice: Vec::new(),
-                roots: Ok(roots),
-                pass2: None,
-            }),
-        };
+    let routed_to_legacy = match (search.exhaustive, search.search) {
+        (_, SearchAlgorithm::Legacy) => None,
+        (true, _) => Some(RoutedToLegacy::ExhaustiveRequested),
+        (false, SearchAlgorithm::MemoBruteForce) => {
+            let pruned =
+                per_computation.without_unsupported_summaries(models.deployment_capabilities);
+            let found = super::subexpr::search::brute_force(&pruned, entries, data, models);
+            return memo_run(
+                pruned,
+                found,
+                entries,
+                data,
+                SearchAlgorithm::MemoBruteForce,
+            );
+        }
+        (false, SearchAlgorithm::MemoMilp) => {
+            if !matches!(
+                models.plan_selection.cost_model,
+                CostModel::UsageOverTime(_)
+            ) {
+                Some(RoutedToLegacy::CostModelNotSupported)
+            } else {
+                let pruned = per_computation
+                    .clone()
+                    .without_unsupported_summaries(models.deployment_capabilities);
+                match super::subexpr::milp::search(&pruned, entries, data, models) {
+                    Some(found) => {
+                        return memo_run(pruned, found, entries, data, SearchAlgorithm::MemoMilp)
+                    }
+                    None => Some(RoutedToLegacy::MilpNotBuilt),
+                }
+            }
+        }
+    };
+    let mut run = legacy_search(per_computation, entries, data, models, search);
+    if let Ok(selection) = &mut run.stage3_plan_selection {
+        selection.search.algorithm = SearchAlgorithm::Legacy;
+        selection.search.routed_to_legacy = routed_to_legacy;
     }
+    run
+}
+
+/// The run of a memo search (`algorithm`) over `per_computation`, pruned
+/// for the deployment, that `found` the selection, its physical candidate
+/// and its logical roots, or why none is valid.
+fn memo_run<Id: Clone + std::fmt::Debug>(
+    per_computation: PerComputationCandidates<Id>,
+    found: super::subexpr::milp::MemoSearchResult,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    algorithm: SearchAlgorithm,
+) -> Stage1ToStage3Run<Id> {
+    let combinations = per_computation.combinations();
+    let (selection, selected, logical) = match found {
+        Ok((mut selection, selected, logical)) => {
+            selection.search.algorithm = algorithm;
+            (Ok(selection), Some(selected), Some(logical))
+        }
+        Err(error) => (Err(error), None, None),
+    };
+    let selected_logical = logical
+        .as_ref()
+        .and_then(|roots| selected_logical(roots, entries, data));
+    Stage1ToStage3Run {
+        stage1_pass1_per_computation: per_computation,
+        combinations,
+        stage1_logical_asap_optimization: Vec::new(),
+        stage2_physical_asap_optimization: Vec::new(),
+        stage2_pruned: Vec::new(),
+        stage3_plan_selection: selection,
+        stage3_selected: selected,
+        stage3_selected_logical: selected_logical,
+        stage1_selected: logical.map(|roots| LogicalCandidate {
+            id: "L1".to_string(),
+            choice: Vec::new(),
+            roots: Ok(roots),
+            pass2: None,
+        }),
+    }
+}
+
+/// The legacy search ([`SearchAlgorithm::Legacy`]) of
+/// [`run_stage1_to_stage3_from_pass1`]: independent components searched
+/// separately when that is proven exact, else the workload as one.
+fn legacy_search<Id: Clone + std::fmt::Debug>(
+    per_computation: PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    search: Stage1ToStage3Search,
+) -> Stage1ToStage3Run<Id> {
     let components = super::components::sharing_components(&per_computation, entries, &models);
     let searched_as_one = match super::components::searched_as_one(&components, &models, search) {
         Some(reason) => reason,

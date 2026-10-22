@@ -1705,3 +1705,83 @@ fn scans_projecting_different_labels_are_shared() {
         "{rolled_up} vs {without_rollup}"
     );
 }
+
+/// `--search` picks the default search's algorithm. Example 3b's p99 panel
+/// under cost model 1: the memo searched by brute force selects a plan of
+/// the legacy search's price; the MILP, not built yet, runs the legacy
+/// search and says why; under cost model 2 the MILP runs the legacy search
+/// because it prices cost model 1 only.
+#[test]
+fn search_flag_picks_the_search_algorithm() {
+    let run = |extra: &[&str]| {
+        let mut args = vec!["--example", "planner-layering-3b"];
+        args.extend_from_slice(extra);
+        document_of(&args)
+    };
+    let price = |document: &Value| {
+        let selection = &document["stage3_plan_selection"];
+        let selected = selection["selected"].as_str().unwrap();
+        selection["costs"][selected]["cost_per_second"]
+            .as_f64()
+            .unwrap()
+    };
+    let legacy = run(&["--search", "legacy"]);
+    assert_eq!(legacy["search"], "default");
+    let report = &legacy["stage3_plan_selection"]["search"];
+    // The legacy search's report omits the algorithm and the solver's
+    // fields, which only the MILP fills.
+    for field in [
+        "algorithm",
+        "routed_to_legacy",
+        "solver_gap",
+        "solver_iterations",
+        "solver_time_ms",
+    ] {
+        assert!(report.get(field).is_none(), "{field}: {report}");
+    }
+
+    let brute_force = run(&["--search", "memo-brute-force"]);
+    assert_eq!(brute_force["search"], "memo-brute-force");
+    let report = &brute_force["stage3_plan_selection"]["search"];
+    assert_eq!(report["algorithm"], "memo-brute-force");
+    assert!((price(&brute_force) - price(&legacy)).abs() <= 1e-9 * price(&legacy));
+
+    let milp = run(&["--search", "memo-milp"]);
+    assert_eq!(milp["search"], "memo-milp");
+    let report = &milp["stage3_plan_selection"]["search"];
+    assert!(report.get("algorithm").is_none(), "{report}");
+    assert_eq!(report["routed_to_legacy"], "milp_not_built");
+    assert_eq!(price(&milp), price(&legacy));
+
+    let cost_model_2 = run(&[
+        "--search",
+        "memo-milp",
+        "--cost-model",
+        "provisioned-capacity",
+    ]);
+    assert_eq!(
+        cost_model_2["stage3_plan_selection"]["search"]["routed_to_legacy"],
+        "cost_model_not_supported"
+    );
+}
+
+/// `--search` takes one of its three algorithms, and not with
+/// `--exhaustive`, which is its own search.
+#[test]
+fn search_flag_is_checked() {
+    let (status, stderr) = failure(&["--promql", "sum(m)", "--search", "milp"]);
+    assert_eq!(status, Some(2));
+    assert!(
+        stderr.contains("expected legacy, memo-brute-force or memo-milp"),
+        "{stderr}"
+    );
+    let (status, stderr) = failure(&[
+        "--promql",
+        "sum(m)",
+        "--exhaustive",
+        "--search",
+        "memo-milp",
+    ]);
+    assert_eq!(status, Some(2));
+    assert!(stderr.contains("drop it with --exhaustive"), "{stderr}");
+}

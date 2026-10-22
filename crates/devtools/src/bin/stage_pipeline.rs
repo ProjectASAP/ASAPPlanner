@@ -33,6 +33,13 @@
 // `"default"`. `--exhaustive` instead composes and prices every candidate
 // (the search the default one is tested against, for small workloads and
 // comparison) and the document lists them; `search` is `"exhaustive"`.
+// `--search legacy|memo-brute-force|memo-milp` picks the default search's
+// algorithm (`SearchAlgorithm`): `legacy` (the default, `search` is
+// `"default"`), the memo over logical sub-expressions searched by brute
+// force (the reference), or solved as a MILP; `search` names it, and the
+// search report says which ran (`algorithm`, omitted for legacy) and,
+// when the legacy search ran instead, why (`routed_to_legacy`). Not with
+// `--exhaustive`.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.
@@ -188,13 +195,7 @@
 // `PlanSelectionSettings`. The document's top-level `accuracy_guarantees` is
 // `"ignored"` or `"enforced"`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
-// PromQL queries read (default 15000). `--series-count <n>`,
-// `--rows-per-second <f64>` (the data then ingests at that rate) and
-// `--rows-held <n>` declare those facts for every source the queries read
-// (metric or `--table`); nothing else is declared. Plan selection prices
-// only from declared facts: a scan whose source has no arrival rate
-// (`--rows-per-second`, or `--series-count` with the sample interval) and
-// no `--rows-held` fails, naming the source and the missing fact.
+// PromQL queries read (default 15000); the data declares no other facts.
 // `--table '<json>'` (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
 // int64|bigint", "nullable": true}], "time_index": 0}` (`nullable` defaults
@@ -219,8 +220,8 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
-    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection,
-    SelectionError, Stage1ToStage3Search,
+    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
+    SearchAlgorithm, Selection, SelectionError,
 };
 use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -236,10 +237,10 @@ use serde_json::{json, Value};
 
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
-[--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
+[--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force] [--max-displayed <n>] --out <file>";
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
 /// included) an exhaustive run enumerates.
@@ -328,9 +329,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
     let (mut max_error, mut failure_probability, mut sample_interval_ms) = (None, None, 15_000u64);
-    // Facts declared for every source the --promql/--sql queries read.
-    let (mut series_count, mut rows_per_second, mut rows_held) =
-        (None::<u64>, None::<f64>, None::<u64>);
     let mut accuracy_metric: Option<AccuracyMetric> = None;
     let mut max_displayed = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
@@ -343,9 +341,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_selection_settings_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
-    // `--search memo-brute-force`: the reference search over the memo of
-    // sub-expressions instead of the default search.
-    let mut memo_brute_force = false;
+    let mut search_algorithm: Option<SearchAlgorithm> = None;
     let mut max_combinations_given = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -380,9 +376,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--sample-interval-ms" => {
                 sample_interval_ms = value()?.parse().map_err(|e| format!("{e}"))?
             }
-            "--series-count" => series_count = Some(value()?.parse().map_err(|e| format!("{e}"))?),
-            "--rows-per-second" => rows_per_second = Some(number(value()?)?),
-            "--rows-held" => rows_held = Some(value()?.parse().map_err(|e| format!("{e}"))?),
             "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
             "--max-combinations" => {
                 max_combinations = value()?.parse().map_err(|e| format!("{e}"))?;
@@ -409,11 +402,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
             "--search" => {
-                memo_brute_force = match value()?.as_str() {
-                    "legacy" => false,
-                    "memo-brute-force" => true,
-                    other => return Err(format!("unknown search {other}").into()),
-                }
+                search_algorithm = Some(match value()?.as_str() {
+                    "legacy" => SearchAlgorithm::Legacy,
+                    "memo-brute-force" => SearchAlgorithm::MemoBruteForce,
+                    "memo-milp" => SearchAlgorithm::MemoMilp,
+                    other => {
+                        return Err(format!(
+                            "--search {other}: expected legacy, memo-brute-force or memo-milp"
+                        )
+                        .into())
+                    }
+                })
             }
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -425,15 +424,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
-    if (series_count.is_some() || rows_per_second.is_some() || rows_held.is_some())
-        && (workload_path.is_some() || example.is_some())
-    {
+    if exhaustive && search_algorithm.is_some() {
         return Err(
-            "--series-count, --rows-per-second and --rows-held declare facts for --promql/--sql \
-             queries; a --workload or --example declares its own"
-                .into(),
+            "--search picks the default search's algorithm: drop it with --exhaustive".into(),
         );
     }
+    let search_algorithm = search_algorithm.unwrap_or_default();
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
     }
@@ -617,18 +613,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 query["id"] = json!(name);
                 described.push(query);
             }
-            let mut data = DataWorkload::sampled_every(metrics, DurationMs(sample_interval_ms));
-            for table in catalog_table_names(&tables)? {
-                data.sources.entry(table).or_default();
-            }
-            for facts in data.sources.values_mut() {
-                facts.series_count = series_count;
-                facts.rows_held = rows_held;
-            }
-            if let Some(rows_per_second) = rows_per_second {
-                data.arrival = DataArrival::Ingesting { rows_per_second };
-            }
-            data.validate().map_err(|e| e.to_string())?;
+            let data = DataWorkload::sampled_every(metrics, DurationMs(sample_interval_ms));
             (described, roots, entries, data)
         }
         _ => {
@@ -656,16 +641,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             Some(max_combinations),
             models,
         ),
-        false => run_search_over(
-            roots.clone(),
-            &entries,
-            &data,
-            models,
-            Stage1ToStage3Search {
-                memo_groups: memo_brute_force,
-                ..Stage1ToStage3Search::default()
-            },
-        ),
+        false => run_search_over(roots.clone(), &entries, &data, models, search_algorithm),
     };
     // A selected plan's very large peak memory, when the deployment
     // declares no memory capacity to check it against.
@@ -687,10 +663,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     document["workload"]["data_workload"] =
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
-    document["search"] = json!(match (exhaustive, memo_brute_force) {
+    document["search"] = json!(match (exhaustive, search_algorithm) {
         (true, _) => "exhaustive",
-        (false, true) => "memo-brute-force",
-        (false, false) => "default",
+        (false, SearchAlgorithm::Legacy) => "default",
+        (false, SearchAlgorithm::MemoBruteForce) => "memo-brute-force",
+        (false, SearchAlgorithm::MemoMilp) => "memo-milp",
     });
     document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
         "enforced"
@@ -1165,20 +1142,6 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
     queries
 }
 
-/// The names of the tables `--table` declares.
-fn catalog_table_names(tables: &[String]) -> Result<Vec<String>, String> {
-    tables
-        .iter()
-        .map(|raw| {
-            let table: Value = serde_json::from_str(raw).map_err(|e| format!("--table: {e}"))?;
-            table["name"]
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| "--table: name must be a string".to_string())
-        })
-        .collect()
-}
-
 /// The tables `--table` declares.
 fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
     let mut catalog = SqlCatalog::new();
@@ -1321,16 +1284,12 @@ mod tests {
     /// candidate and its cost, chosen among all candidates.
     #[test]
     fn display_cap_keeps_the_selected_candidate() {
-        let mut workload = query_batch(
+        let workload = query_batch(
             QueryLanguage::PromQL,
             &["sum(m)".into()],
             AccuracyTarget::exact(),
             15_000,
         );
-        // `m` holds 1,000 series: pricing uses only declared facts.
-        workload.data_workload = workload
-            .data_workload
-            .map(|data| data.with_series_count(1_000));
         let run =
             run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
         let entries: Vec<_> = workload.query_workload.entries().collect();

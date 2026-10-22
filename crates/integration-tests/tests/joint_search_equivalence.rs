@@ -10,7 +10,8 @@ use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_plan_selection::{
     run_stage1_to_stage3, run_stage1_to_stage3_with, AccuracyModel, BuiltinAccuracyModel,
     ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, PlanningModels,
-    RejectionCause, ResourceUnitCost, SelectionError, Stage1ToStage3Run, Stage1ToStage3Search,
+    RejectionCause, ResourceUnitCost, RoutedToLegacy, SearchAlgorithm, SelectionError,
+    Stage1ToStage3Run, Stage1ToStage3Search,
 };
 use asap_types::ir::flat::flatten;
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
@@ -503,7 +504,7 @@ fn a_known_bound_that_misses_is_not_discarded_before_composition() {
         Stage1ToStage3Search {
             keep_every_candidate: true,
             exhaustive: false,
-            memo_groups: false,
+            search: SearchAlgorithm::Legacy,
         },
     )
     .unwrap();
@@ -1203,10 +1204,7 @@ fn memo_group_search_selects_the_exhaustive_price() {
             &entries,
             &data,
             models,
-            Stage1ToStage3Search {
-                memo_groups: true,
-                ..Stage1ToStage3Search::default()
-            },
+            Stage1ToStage3Search::with_algorithm(SearchAlgorithm::MemoBruteForce),
         )
         .unwrap();
         let price = |run: &Stage1ToStage3Run<usize>| {
@@ -1240,4 +1238,467 @@ fn memo_group_search_selects_the_exhaustive_price() {
         "only {searched} workloads were small enough"
     );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// Debugging aid: the memo's and the exhaustive search's selected roots on
+/// one seed.
+#[test]
+#[ignore = "debugging aid"]
+fn debug_memo_seed() {
+    use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
+    fn show(node: &std::rc::Rc<OperatorNode>, depth: usize, out: &mut String) {
+        let detail = match (node.asap(), node.non_asap()) {
+            (
+                Some(ASAPOp::SummaryAgg {
+                    family, reduction, ..
+                }),
+                _,
+            ) => {
+                format!("{family:?} {reduction:?}")
+            }
+            (
+                Some(ASAPOp::SummaryMerge {
+                    newest_panes,
+                    group_by,
+                    ..
+                }),
+                _,
+            ) => {
+                format!("newest {newest_panes:?} group_by {group_by:?}")
+            }
+            (
+                Some(ASAPOp::PaneChain {
+                    family,
+                    reduction,
+                    pane_width_ms,
+                    pane_count,
+                    ..
+                }),
+                _,
+            ) => {
+                format!("{family:?} {reduction:?} {pane_width_ms}x{pane_count}")
+            }
+            (_, Some(NonASAPOp::TimeRange { range, .. })) => format!("{range:?}"),
+            (
+                _,
+                Some(NonASAPOp::Aggregate {
+                    reduction,
+                    measures,
+                    ..
+                }),
+            ) => {
+                format!("{reduction:?} {measures:?}")
+            }
+            _ => String::new(),
+        };
+        let detail: String = detail.chars().take(160).collect();
+        out.push_str(&format!(
+            "{}{} {:p} {detail}\n",
+            "  ".repeat(depth),
+            node.operator.kind_name(),
+            std::rc::Rc::as_ptr(node)
+        ));
+        for child in node.children() {
+            show(child, depth + 1, out);
+        }
+    }
+    let seed: u64 = std::env::var("SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(59);
+    let gauges: &[&str] = match seed % 3 {
+        0 => &["m", "n"],
+        _ => &["m"],
+    };
+    let workload = random_workload_over(seed, gauges);
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    for e in &entries {
+        eprintln!("{} {:?}", e.query.0, e.recurrence);
+    }
+    let data = workload.data_workload.clone().unwrap();
+    let deployment = match seed % 2 {
+        0 => no_raw_data(),
+        _ => asap_logical_asap_optimization::DeploymentCapabilities::default(),
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+    let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
+    for (name, search) in [
+        ("exhaustive", Stage1ToStage3Search::exhaustive()),
+        (
+            "memo",
+            Stage1ToStage3Search::with_algorithm(SearchAlgorithm::MemoBruteForce),
+        ),
+    ] {
+        let run = run_stage1_to_stage3_with(indexed(), &entries, &data, models, search).unwrap();
+        let s = run.stage3_plan_selection.as_ref().unwrap();
+        eprintln!("== {name}: {:?}", s.costs[&s.selected].cost_per_second);
+        let mut out = String::new();
+        for root in run
+            .stage1_selected
+            .as_ref()
+            .unwrap()
+            .roots
+            .as_ref()
+            .unwrap()
+        {
+            if let QueryRoot::Operator(node) = root {
+                show(node, 0, &mut out);
+            }
+            out.push_str("--\n");
+        }
+        eprintln!("{out}");
+    }
+}
+
+/// What a search's selection is compared by: under cost models 1 and 2
+/// its price per second; under cost model 3 the key its objective ranks
+/// by (worst-query latency in ms, peak memory and disk in bytes, in the
+/// objective's order; the Pareto front selects its lowest-latency
+/// member). `None` when no candidate is valid.
+fn objective_of(run: &Stage1ToStage3Run<usize>, cost_model: &CostModel) -> Option<Vec<f64>> {
+    let selection = run.stage3_plan_selection.as_ref().ok()?;
+    let cost = &selection.costs[&selection.selected];
+    let usage = &cost.usage;
+    let worst_latency_ms = usage
+        .latency_per_query
+        .iter()
+        .map(|l| l.total_ms())
+        .fold(0.0, f64::max);
+    let (memory, disk) = (usage.peak_memory_bytes as f64, usage.disk_bytes as f64);
+    Some(match cost_model {
+        CostModel::ClusterCapacity(limits) => match limits.objective {
+            ClusterObjective::LeastMemory => vec![memory, disk, worst_latency_ms],
+            ClusterObjective::LowestLatency | ClusterObjective::ParetoFront => {
+                vec![worst_latency_ms, memory, disk]
+            }
+        },
+        _ => vec![cost
+            .cost_per_second
+            .expect("cost models 1 and 2 price every valid candidate")],
+    })
+}
+
+/// Whether `a` and `b` are equal within 1e-9, relative (absolute for 0).
+fn same_objective(a: &Option<Vec<f64>>, b: &Option<Vec<f64>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a
+            .iter()
+            .zip(b)
+            .all(|(a, b)| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `roots` planned three ways under `models`: the exhaustive search, the
+/// memo searched by brute force ([`SearchAlgorithm::MemoBruteForce`]) and
+/// the memo solved as a MILP ([`SearchAlgorithm::MemoMilp`]). The
+/// exhaustive search and the brute force select plans of the same price
+/// (within 1e-9; [`objective_of`] under cost model 3), or both find none.
+/// While the MILP runs the legacy search instead (it prices cost model 1
+/// only, and is not built yet), the report says why and only the first two
+/// are compared; once it runs, it selects that price too, with a solver gap
+/// of 0. Returns whether the MILP ran.
+fn assert_three_way(
+    label: &str,
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> bool {
+    three_way(label, roots, entries, data, models).unwrap_or_else(|mismatch| panic!("{mismatch}"))
+}
+
+/// [`assert_three_way`], with a mismatch returned rather than panicking.
+fn three_way(
+    label: &str,
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<bool, String> {
+    let run = |search| {
+        run_stage1_to_stage3_with(
+            roots.iter().cloned().enumerate().collect(),
+            entries,
+            data,
+            models,
+            search,
+        )
+        .unwrap_or_else(|e| panic!("{label}: {e}"))
+    };
+    let cost_model = &models.plan_selection.cost_model;
+    let exhaustive = objective_of(&run(Stage1ToStage3Search::exhaustive()), cost_model);
+    let brute_force_run = run(Stage1ToStage3Search::with_algorithm(
+        SearchAlgorithm::MemoBruteForce,
+    ));
+    if let Ok(selection) = &brute_force_run.stage3_plan_selection {
+        assert_eq!(
+            selection.search.algorithm,
+            SearchAlgorithm::MemoBruteForce,
+            "{label}"
+        );
+    }
+    let brute_force = objective_of(&brute_force_run, cost_model);
+    if !same_objective(&exhaustive, &brute_force) {
+        return Err(format!(
+            "{label}: exhaustive {exhaustive:?}, memo brute force {brute_force:?}"
+        ));
+    }
+    let milp_run = run(Stage1ToStage3Search::with_algorithm(
+        SearchAlgorithm::MemoMilp,
+    ));
+    let Ok(selection) = &milp_run.stage3_plan_selection else {
+        // The legacy search or the MILP found no valid plan.
+        return match exhaustive {
+            None => Ok(false),
+            Some(_) => Err(format!(
+                "{label}: exhaustive {exhaustive:?}, memo MILP {:?}",
+                milp_run.stage3_plan_selection
+            )),
+        };
+    };
+    let report = &selection.search;
+    if report.algorithm == SearchAlgorithm::Legacy {
+        let expected = match cost_model {
+            CostModel::UsageOverTime(_) => RoutedToLegacy::MilpNotBuilt,
+            _ => RoutedToLegacy::CostModelNotSupported,
+        };
+        assert_eq!(report.routed_to_legacy, Some(expected), "{label}");
+        return Ok(false);
+    }
+    assert_eq!(report.algorithm, SearchAlgorithm::MemoMilp, "{label}");
+    assert_eq!(report.routed_to_legacy, None, "{label}");
+    let milp = objective_of(&milp_run, cost_model);
+    if !same_objective(&exhaustive, &milp) {
+        return Err(format!(
+            "{label}: exhaustive {exhaustive:?}, memo MILP {milp:?}"
+        ));
+    }
+    let gap = report.solver_gap.expect("the MILP reports its gap");
+    if gap.abs() > 1e-9 {
+        return Err(format!("{label}: MILP gap {gap}"));
+    }
+    Ok(true)
+}
+
+/// [`assert_three_way`] on seeds 1 to 60 of the random workloads small
+/// enough to search exhaustively, over one or two gauges, with raw data
+/// kept or not, under each of `settings` in turn (every one with `every`).
+fn assert_three_way_on_random_workloads(settings: &[PlanSelectionSettings], every: bool) {
+    let mut searched = 0;
+    let mut mismatches = Vec::new();
+    for seed in 1..=60u64 {
+        let gauges: &[&str] = match seed % 3 {
+            0 => &["m", "n"],
+            _ => &["m"],
+        };
+        let workload = random_workload_over(seed, gauges);
+        let roots = lower_promql_roots(&workload).unwrap();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                roots.iter().cloned().enumerate().collect(),
+            )
+            .unwrap();
+        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
+            continue;
+        }
+        searched += 1;
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap();
+        let deployment = match seed % 2 {
+            0 => no_raw_data(),
+            _ => asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        };
+        let turn = seed as usize % settings.len();
+        let chosen = match every {
+            true => settings,
+            false => &settings[turn..=turn],
+        };
+        for settings in chosen {
+            let models = PlanningModels::builtin()
+                .with_plan_selection(settings)
+                .with_deployment_capabilities(&deployment);
+            if let Err(mismatch) = three_way(
+                &format!("seed {seed} under {:?}", settings.cost_model),
+                &roots,
+                &entries,
+                &data,
+                models,
+            ) {
+                mismatches.push(mismatch);
+            }
+        }
+    }
+    assert!(
+        searched >= 20,
+        "only {searched} workloads were small enough"
+    );
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// The three searches agree on the random workloads under cost model 1.
+#[test]
+#[ignore = "the exhaustive search and the brute force over every seed take minutes in a debug build; run with --release --ignored"]
+fn three_way_random_workloads_under_cost_model_1() {
+    assert_three_way_on_random_workloads(&cost_models(1)[..1], true);
+}
+
+/// The three searches agree on the random workloads under cost model 2.
+#[test]
+#[ignore = "the exhaustive search and the brute force over every seed under cost model 2 take minutes in a debug build; run with --release --ignored"]
+fn three_way_random_workloads_under_cost_model_2() {
+    assert_three_way_on_random_workloads(&cost_models(1)[1..2], true);
+}
+
+/// The three searches agree on the random workloads under cost model 3,
+/// each objective in turn, with 1 GB of cluster memory.
+#[test]
+#[ignore = "the exhaustive search and the brute force over every seed under cost model 3 take minutes in a debug build; run with --release --ignored"]
+fn three_way_random_workloads_under_cost_model_3() {
+    assert_three_way_on_random_workloads(&cost_models(1)[2..], false);
+}
+
+/// `queries`, each repeated every minute within 5% error, over the gauge
+/// `m` with `rows_per_second` series each sampled every second.
+fn workload_at_rate(queries: &[&str], rows_per_second: u64) -> PlanningWorkload {
+    let queries: Vec<(&str, u32)> = queries.iter().map(|&q| (q, 60_000)).collect();
+    let mut workload = workload_of(&queries, AccuracyTarget::max_error(0.05));
+    let data = workload.data_workload.as_mut().unwrap();
+    data.arrival = DataArrival::Ingesting {
+        rows_per_second: rows_per_second as f64,
+    };
+    for facts in data.sources.values_mut() {
+        facts.series_count = Some(rows_per_second);
+        facts.sample_interval = Some(DurationMs(1_000));
+    }
+    workload
+}
+
+/// `settings` with `cost_model`.
+fn under(cost_model: CostModel) -> PlanSelectionSettings {
+    PlanSelectionSettings {
+        cost_model,
+        ..PlanSelectionSettings::default()
+    }
+}
+
+/// The exhaustive search's selected candidate's usage under `settings`.
+fn exhaustive_selection(
+    workload: &PlanningWorkload,
+    settings: &PlanSelectionSettings,
+) -> asap_plan_selection::ResourceUsage {
+    let roots = lower_promql_roots(workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = run_stage1_to_stage3_with(
+        roots.into_iter().enumerate().collect(),
+        &entries,
+        &data,
+        PlanningModels::builtin().with_plan_selection(settings),
+        Stage1ToStage3Search::exhaustive(),
+    )
+    .unwrap();
+    let selection = run.stage3_plan_selection.unwrap();
+    selection.costs[&selection.selected].usage.clone()
+}
+
+/// [`assert_three_way`] on `workload` under `settings`.
+fn assert_three_way_on(label: &str, workload: &PlanningWorkload, settings: &PlanSelectionSettings) {
+    let roots = lower_promql_roots(workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    assert_three_way(
+        label,
+        &roots,
+        &entries,
+        &data,
+        PlanningModels::builtin().with_plan_selection(settings),
+    );
+}
+
+/// A peak case: under cost model 2, a p99 and a sum over 5 minutes of a
+/// million rows per second, raw data on disk priced at 1e-7 per byte-second.
+/// Scanning the raw window at query time needs one core per query and no
+/// ingestion core; maintaining state at ingestion time needs fewer disk
+/// bytes and one more core. At 1,000 per core-second the query-time plan is
+/// selected; with cores free, a plan with an ingestion core is: the peak
+/// cores decide. The three searches agree.
+#[test]
+fn three_way_peak_cores_decide_under_cost_model_2() {
+    let workload = workload_at_rate(
+        &["quantile_over_time(0.99, m[5m])", "sum_over_time(m[5m])"],
+        1_000_000,
+    );
+    let prices = |cost_per_provisioned_cpu_core_second| ResourceUnitCost {
+        cost_per_disk_byte_second: 1e-7,
+        cost_per_provisioned_cpu_core_second,
+        ..ResourceUnitCost::illustrative()
+    };
+    let priced = under(CostModel::ProvisionedCapacity(prices(1_000.0)));
+    let free_cores = under(CostModel::ProvisionedCapacity(prices(0.0)));
+    let (with_core_price, without) = (
+        exhaustive_selection(&workload, &priced),
+        exhaustive_selection(&workload, &free_cores),
+    );
+    assert!(
+        with_core_price.peak_cpu_cores < without.peak_cpu_cores,
+        "{with_core_price:?} {without:?}"
+    );
+    assert_three_way_on("peak cores", &workload, &priced);
+    assert_three_way_on("peak cores, free", &workload, &free_cores);
+}
+
+/// A capacity case: under cost model 3 with the lowest-latency objective,
+/// a p99 and a sum over 5 minutes of a million rows per second. Without a
+/// binding limit the lowest-latency plan holds more than 5 GB; with 5 GB
+/// of memory it is ruled out and another plan is selected. The three
+/// searches agree.
+#[test]
+fn three_way_memory_limit_rules_out_the_best_plan_under_cost_model_3() {
+    let workload = workload_at_rate(
+        &["quantile_over_time(0.99, m[5m])", "sum_over_time(m[5m])"],
+        1_000_000,
+    );
+    let limited = |memory_bytes| {
+        under(CostModel::ClusterCapacity(ClusterLimits {
+            memory_bytes,
+            disk_bytes: 1_000_000_000_000,
+            cpu_cores: None,
+            objective: ClusterObjective::LowestLatency,
+        }))
+    };
+    let (unlimited, five_gb) = (limited(1_000_000_000_000_000), limited(5_000_000_000));
+    let best = exhaustive_selection(&workload, &unlimited);
+    assert!(best.peak_memory_bytes > 5_000_000_000, "{best:?}");
+    let within = exhaustive_selection(&workload, &five_gb);
+    assert!(within.peak_memory_bytes <= 5_000_000_000, "{within:?}");
+    assert_three_way_on("memory limit", &workload, &five_gb);
+}
+
+/// A raw-horizon case: raw data kept, on disk priced at 1e-8 per
+/// byte-second under cost model 1, and a p99 over 5 minutes and a sum over
+/// 10 minutes of one source at 100,000 rows per second. Raw data is kept
+/// for the longest window any query scans at query time, so the queries'
+/// choices are linked through the source's horizon: the selection scans
+/// the 5-minute window and keeps no 10-minute horizon. The three searches
+/// agree.
+#[test]
+fn three_way_raw_horizon_links_two_windows_over_one_source() {
+    let workload = workload_at_rate(
+        &["quantile_over_time(0.99, m[5m])", "sum_over_time(m[10m])"],
+        100_000,
+    );
+    let settings = under(CostModel::UsageOverTime(ResourceUnitCost {
+        cost_per_disk_byte_second: 1e-8,
+        ..ResourceUnitCost::illustrative()
+    }));
+    let selected = exhaustive_selection(&workload, &settings);
+    let ten_minutes_of_raw_bytes = 2 * 960_000_000;
+    assert!(
+        selected.disk_bytes > 0 && selected.disk_bytes < ten_minutes_of_raw_bytes,
+        "{selected:?}"
+    );
+    assert_three_way_on("raw horizon", &workload, &settings);
 }
