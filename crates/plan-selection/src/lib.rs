@@ -5356,6 +5356,50 @@ mod tests {
         assert!(stored.cost_per_second.unwrap() < cost.cost_per_second.unwrap());
     }
 
+    /// A `NotMaterialized` node two queries read is computed for each, so
+    /// its working memory is held once per query, each time for that
+    /// query's latency: `bytes · Σ rate_q · latency_q`, not the longest
+    /// latency at both rates. Query 1 is `sum(...)` over query 2's output,
+    /// so it runs longer; they repeat every 10 s and every 20 s.
+    #[test]
+    fn shared_not_materialized_memory_is_held_for_each_reading_query() {
+        let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::exact());
+        let inner = outer.children()[0].clone();
+        let candidate = optimize_physical_asap(
+            "L",
+            &[QueryRoot::Operator(outer), QueryRoot::Operator(inner)],
+            &[],
+            &data(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap()
+        .remove(0);
+        let recurrence = [repeating(10_000), repeating(20_000)];
+        let cost = |price_per_byte_second| {
+            let settings = unit_costs(|c| c.cost_per_memory_byte_second = price_per_byte_second);
+            price(&candidate.dag, &recurrence, &data(), &settings).unwrap()
+        };
+        let (with, without) = (cost(1.0), cost(0.0));
+        let [outer_ms, inner_ms] = [0, 1].map(|q| with.usage.latency_per_query[q].total_ms());
+        assert!(outer_ms > inner_ms, "{outer_ms} vs {inner_ms}");
+        let mut checked = 0;
+        for (id, node) in &with.per_node {
+            let Some(held) = node.detail.split("; holds ").nth(1) else {
+                continue;
+            };
+            if node.multiplier != 2 {
+                continue;
+            }
+            let bytes: f64 = held.split(' ').next().unwrap().parse().unwrap();
+            let term =
+                node.cost_per_second.unwrap() - without.per_node[id].cost_per_second.unwrap();
+            let expected = bytes * (0.1 * outer_ms + 0.05 * inner_ms) / 1_000.0;
+            assert!(close(term, expected), "node {id}: {term} vs {expected}");
+            checked += 1;
+        }
+        assert!(checked > 0, "a shared node holds memory");
+    }
+
     /// Every combination of Pass 1 candidates of one query, as Stage 2
     /// candidates `P1`, `P2`, ...
     fn all_candidates(query: &str, target: &AccuracyTarget) -> Vec<PhysicalCandidate> {

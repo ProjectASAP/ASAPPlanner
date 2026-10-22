@@ -185,9 +185,11 @@ live across later reads.
 
 Average memory, which cost model 1 prices per byte per second, does follow
 executions: retained state counts for every second it is kept, and transient
-state counts for the time it is held: its bytes times each reading query's
-latency times that query's evaluations per second (state recomputed for each
-consumer counts once per consumer). Memory a query holds only while it runs is
+state counts for the time it is held. State recomputed for each consumer
+counts its bytes times each reading query's latency times that query's
+evaluations per second; state built once per evaluation and shared counts its
+bytes times its longest reader's latency, once per evaluation. Memory a query
+holds only while it runs is
 therefore charged, in proportion to how long and how often it runs.
 
 Execution and retention are independent declarations, with two necessary
