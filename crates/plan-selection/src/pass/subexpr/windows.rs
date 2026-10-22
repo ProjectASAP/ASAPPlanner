@@ -423,6 +423,11 @@ pub(crate) fn resize_state_at(
 /// every reader, and reads the finer group, which must build that chain:
 /// the finer group gets a copy of its own pane candidate with the site
 /// ([`ImplementationCandidate::requires_sites`]).
+///
+/// A window of one pane (it divides every reader's interval) joins a chain
+/// the same way, without a rollup: a candidate of its group that merges the
+/// newest panes of another group's chain of several panes over the same
+/// input (on that group's own grid), never a chain of its own.
 pub(crate) fn add_rollup_windows(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
     let group_of = group_of_node(&memo.groups);
     let grids: Vec<Option<u64>> = memo
@@ -450,6 +455,9 @@ pub(crate) fn add_rollup_windows(memo: &mut Memo, entries: &[QueryWorkloadEntry]
             let [own] = &own[..] else {
                 continue;
             };
+            // A window of one pane joins a chain as it is, on the chain's
+            // own grid.
+            let single = own.pane_count == 1;
             for (finer_group, finer_candidates) in memo.candidates.iter().enumerate() {
                 if finer_group == coarse_group || grids[finer_group].is_none() {
                     continue;
@@ -459,7 +467,11 @@ pub(crate) fn add_rollup_windows(memo: &mut Memo, entries: &[QueryWorkloadEntry]
                         QueryRoot::Operator(Rc::clone(&coarse.node)),
                         QueryRoot::Operator(Rc::clone(&finer.node)),
                     ];
-                    let grids_of_pair = [Some(coarse_grid), Some(own.pane_width_ms)];
+                    let finer_grid = match single {
+                        true => grids[finer_group],
+                        false => Some(own.pane_width_ms),
+                    };
+                    let grids_of_pair = [Some(coarse_grid), finer_grid];
                     let panes = pane_candidates(&roots, &grids_of_pair);
                     if panes.len() != 2 {
                         continue;
@@ -490,7 +502,8 @@ pub(crate) fn add_rollup_windows(memo: &mut Memo, entries: &[QueryWorkloadEntry]
                         let [coarse_read] = &chain_readers(node)[..] else {
                             continue;
                         };
-                        if coarse_read.key != finer_chain.key || !regroups(node, &coarse_read.merge)
+                        if coarse_read.key != finer_chain.key
+                            || !(single || regroups(node, &coarse_read.merge))
                         {
                             continue;
                         }

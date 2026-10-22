@@ -1728,8 +1728,9 @@ fn reads_newest_panes_of_a_shared_chain(roots: &[QueryRoot]) -> bool {
 /// the fifteen 1-min panes a 15-min quantile every minute keeps. With raw
 /// data kept and without, under cost model 1, the default search selects a
 /// plan of the exhaustive search's price, and the exhaustive search lists
-/// that newest-panes read. Without raw data it selects it; with raw data a
-/// query-time scan of the raw 5 minutes is cheaper.
+/// that newest-panes read, as does the memo searched by brute force.
+/// Without raw data it selects it; with raw data a query-time scan of the
+/// raw 5 minutes is cheaper.
 #[test]
 fn a_single_pane_window_reads_a_shared_chain() {
     let workload = workload_of(
@@ -1751,15 +1752,33 @@ fn a_single_pane_window_reads_a_shared_chain() {
     ] {
         let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         assert_same_cost(label, &roots, &entries, &data, models);
-        let indexed = roots.iter().cloned().enumerate().collect::<Vec<_>>();
+        let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
         let exhaustive = run_stage1_to_stage3_with(
-            indexed,
+            indexed(),
             &entries,
             &data,
             models,
             Stage1ToStage3Search::exhaustive(),
         )
         .unwrap();
+        // The memo, searched by brute force, selects the exhaustive price.
+        let memo = run_stage1_to_stage3_with(
+            indexed(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search::with_algorithm(SearchAlgorithm::MemoBruteForce),
+        )
+        .unwrap();
+        let price = |run: &Stage1ToStage3Run<usize>| {
+            let s = run.stage3_plan_selection.as_ref().unwrap();
+            s.costs[&s.selected].cost_per_second.unwrap()
+        };
+        let (all, found) = (price(&exhaustive), price(&memo));
+        assert!(
+            (all - found).abs() <= 1e-9 * all.abs(),
+            "{label}: exhaustive {all}, memo {found}"
+        );
         assert!(
             exhaustive.stage1_logical_asap_optimization.iter().any(|c| c
                 .roots
