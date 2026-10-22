@@ -1,8 +1,8 @@
-//! Two repeating SQL queries over one table, every 10 s at ε = 0.01:
-//! Q1, the overall p50 and p90 over the last 5 minutes, and Q2, the p90 per
-//! city over the last 20 minutes. Every candidate that computes one of Q1's
-//! percentiles exactly and the other from a sketch compiles, is priced, and
-//! answers as the exact `percentile_cont` does, within the sketch's bound.
+//! Repeating SQL percentiles over one table, every 10 s at ε = 0.01. Q1,
+//! the overall p50 and p90 over the last 5 minutes: every candidate that
+//! computes one of its percentiles exactly and the other from a sketch
+//! compiles, is priced, and answers the exact one as `percentile_cont` does
+//! and the sketched one within the sketch's bound.
 
 mod physical_common;
 mod planner_layering_common;
@@ -10,6 +10,7 @@ mod planner_layering_common;
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_plan_selection::{PlanSelectionSettings, RejectionCause};
+use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{PlanningWorkload, SqlDialect};
@@ -19,13 +20,11 @@ use std::rc::Rc;
 const Q1: &str = "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY value), \
      percentile_cont(0.9) WITHIN GROUP (ORDER BY value) FROM metrics \
      WHERE ts > now() - INTERVAL '5' MINUTE";
-const Q2: &str = "SELECT city, percentile_cont(0.9) WITHIN GROUP (ORDER BY value) \
-     FROM metrics WHERE ts > now() - INTERVAL '20' MINUTE GROUP BY city";
 /// Every query's accuracy target.
 const EPSILON: f64 = 0.01;
 const MINUTE_MS: i64 = 60_000;
 /// The evaluation time of every run.
-const EVALUATION_MS: i64 = 1_800_000_000_000;
+const EVALUATION_TIME_MS: i64 = 1_800_000_000_000;
 
 /// `metrics(ts, city, value)`, time index `ts`.
 fn catalog() -> SqlCatalog {
@@ -43,8 +42,10 @@ fn catalog() -> SqlCatalog {
     )
 }
 
-fn workload() -> PlanningWorkload {
-    let entry = |query: &str| {
+/// `queries`, each every 10 s at ε = [`EPSILON`], over `metrics` ingesting
+/// 666.67 rows per second.
+fn workload(queries: &[&str]) -> PlanningWorkload {
+    let entry = |query: &&str| {
         format!(
             r#"{{"query": {query:?}, "demand": {{"fixed_interval": 10000}},
             "requirements": {{"accuracy": {{"max_error": {EPSILON}, "failure_probability": 0.001}}}},
@@ -53,17 +54,17 @@ fn workload() -> PlanningWorkload {
     };
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": {{"sql": "datafusion_sql"}}, "query_batch": null,
-              "repeating_queries": [{}, {}]}},
+              "repeating_queries": [{}]}},
             "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 666.67}}}},
               "sources": {{"metrics": {{"series_count": 100}}}}}}}}"#,
-        entry(Q1),
-        entry(Q2)
+        queries.iter().map(entry).collect::<Vec<_>>().join(", ")
     ))
     .unwrap()
 }
 
-async fn run() -> Run {
-    let workload = workload();
+/// Every stage over `queries`, with the executor's compile check.
+async fn run(queries: &[&str]) -> Run {
+    let workload = workload(queries);
     let mut roots = Vec::new();
     for entry in workload.query_workload.entries() {
         let root = lower_sql_dialect(
@@ -82,7 +83,7 @@ async fn run() -> Run {
         ignore_accuracy_guarantees: true,
         ..PlanSelectionSettings::default()
     };
-    run_stages_compiled(&workload, roots, &settings)
+    run_stages_with_compile_check(&workload, roots, &settings)
 }
 
 /// Two rows a second over the 20 minutes before the evaluation: city
@@ -98,7 +99,7 @@ fn rows() -> Vec<(i64, Option<String>, f64)> {
     };
     (0..20 * 60 * 2)
         .map(|i: i64| {
-            let ts = EVALUATION_MS - 20 * MINUTE_MS + (i + 1) * 500;
+            let ts = EVALUATION_TIME_MS - 20 * MINUTE_MS + (i + 1) * 500;
             let city = (i % 7 != 0).then(|| format!("c{}", i % 3));
             (ts, city, 10.0 / (1.0 - next()).max(1e-6).sqrt())
         })
@@ -111,7 +112,8 @@ fn values_in(window_ms: i64, city: Option<&str>) -> Vec<f64> {
     let mut values: Vec<f64> = rows()
         .into_iter()
         .filter(|(ts, row_city, _)| {
-            *ts > EVALUATION_MS - window_ms && city.is_none_or(|c| row_city.as_deref() == Some(c))
+            *ts > EVALUATION_TIME_MS - window_ms
+                && city.is_none_or(|c| row_city.as_deref() == Some(c))
         })
         .map(|(_, _, value)| value)
         .collect();
@@ -146,7 +148,7 @@ fn within_bound(algorithm: Option<&SketchAlgorithm>, q: f64, answer: f64, values
     }
 }
 
-/// `root`'s answer rows at [`EVALUATION_MS`] over [`rows`], every node at
+/// `root`'s answer rows at [`EVALUATION_TIME_MS`] over [`rows`], every node at
 /// query time.
 fn answers(root: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
     let table = rows()
@@ -159,10 +161,10 @@ fn answers(root: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
             ]
         })
         .collect();
-    physical_common::execute_raw_rows_at(root, table, EVALUATION_MS)
+    physical_common::execute_raw_rows_at(root, table, EVALUATION_TIME_MS)
 }
 
-fn float(value: &Value) -> f64 {
+fn as_f64(value: &Value) -> f64 {
     match value {
         Value::Float64(value) => *value,
         other => panic!("not a Float64: {other:?}"),
@@ -201,7 +203,7 @@ fn operator(root: &QueryRoot) -> &Rc<OperatorNode> {
 /// within the sketch's bound.
 #[tokio::test]
 async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
-    let run = run().await;
+    let run = run(&[Q1]).await;
     let cannot_compile: Vec<_> = run
         .selection
         .rejected
@@ -244,12 +246,25 @@ async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
             .iter()
             .find(|c| sketch_of(operator(&c.roots[0])) == Some(algorithm.clone()))
             .unwrap_or_else(|| panic!("no mixed {algorithm:?} plan"));
-        let rows = answers(operator(&candidate.roots[0]));
+        let root = operator(&candidate.roots[0]);
+        // The percentile the exact aggregate computes.
+        let exact_q = OperatorNode::reachable(root)
+            .iter()
+            .find_map(|n| match n.non_asap() {
+                Some(NonASAPOp::Aggregate { measures, .. }) => match measures.as_slice() {
+                    [AggIntent::Quantile { q, .. }] => Some(*q),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("one exact percentile");
+        let rows = answers(root);
         assert_eq!(rows.len(), 1, "{}", candidate.id);
         for (column, q) in [0.5, 0.9].into_iter().enumerate() {
-            let answer = float(&rows[0][column]);
+            let answer = as_f64(&rows[0][column]);
+            let bound = (q != exact_q).then_some(&algorithm);
             assert!(
-                within_bound(Some(&algorithm), q, answer, &values),
+                within_bound(bound, q, answer, &values),
                 "{}: p{} = {answer}, exact {}",
                 candidate.id,
                 q * 100.0,

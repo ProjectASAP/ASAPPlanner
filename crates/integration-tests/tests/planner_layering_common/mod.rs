@@ -218,7 +218,7 @@ pub fn run_stages_with(
 
 /// [`run_stages_under`], with Stage 3 rejecting every candidate the
 /// executor cannot compile, as `plan_installable` and `stage_pipeline` do.
-pub fn run_stages_compiled(
+pub fn run_stages_with_compile_check(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
     settings: &PlanSelectionSettings,
