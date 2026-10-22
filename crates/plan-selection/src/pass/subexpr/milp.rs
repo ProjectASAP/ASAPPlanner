@@ -171,6 +171,10 @@ pub(crate) struct ModelInput {
     /// Per choice, the memory its parts hold while a query's evaluation
     /// runs ([`HeldAtQueryTime`]).
     pub held: Vec<HeldAtQueryTime>,
+    /// Only plans the model prices below this: the incumbent's price. The
+    /// model is then infeasible exactly when no group choice left can beat
+    /// the incumbent.
+    pub cutoff: Option<f64>,
 }
 
 /// The memory a choice's parts hold while an evaluation runs, priced per
@@ -960,6 +964,9 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             }
         }
     }
+    if let Some(cutoff) = input.cutoff.filter(|_| std::env::var_os("JP_MILP_CUTOFF").is_some()) {
+        constraints.push(constraint!(objective.clone() <= cutoff));
+    }
     let constraint_count = constraints.len() as u64;
     let mut model = model
         .with_all(constraints)
@@ -967,6 +974,20 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         .map_err(|e| format!("MIP gap: {e:?}"))?;
     if std::env::var_os("JP_MILP_VERBOSE").is_some() {
         model.set_verbose(true);
+    }
+    if let Ok(options) = std::env::var("JP_HIGHS_OPTIONS") {
+        for option in options.split(',').filter(|o| !o.is_empty()) {
+            let (key, value) = option.split_once('=').unwrap_or((option, ""));
+            if let Ok(v) = value.parse::<i32>() {
+                model = model.set_option(key, v);
+            } else if let Ok(v) = value.parse::<f64>() {
+                model = model.set_option(key, v);
+            } else if let Ok(v) = value.parse::<bool>() {
+                model = model.set_option(key, v);
+            } else {
+                model = model.set_option(key, value);
+            }
+        }
     }
     let solution = match model.solve() {
         Ok(solution) => solution,
@@ -1181,9 +1202,16 @@ pub(crate) fn search<Id: Clone>(
     loop {
         iterations += 1;
         let solve_started = std::time::Instant::now();
+        input.cutoff = selector
+            .cheapest_price()
+            .map(|incumbent| incumbent - 1e-9 * incumbent.abs());
         let solved = solve(&input).map_err(SelectionError::Solver)?;
         solver_ms += solve_started.elapsed().as_secs_f64() * 1e3;
         let Some(solution) = solved else {
+            // No plan left below the incumbent: it is optimal.
+            if let Some(incumbent) = selector.cheapest_price() {
+                bound = Some(incumbent);
+            }
             break;
         };
         bound = Some(solution.objective);
@@ -1371,6 +1399,7 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         raw_scans: input.raw_scans.clone(),
         raw_data_retained: input.raw_data_retained,
         held: input.held.clone(),
+        cutoff: input.cutoff,
         rollup_rules: input.rollup_rules.clone(),
     }
 }
@@ -1542,6 +1571,7 @@ fn model_input(
         raw_scans: Vec::new(),
         raw_data_retained: true,
         held: Vec::new(),
+        cutoff: None,
     })
 }
 
@@ -1611,6 +1641,7 @@ mod tests {
             raw_scans: Vec::new(),
             raw_data_retained: true,
             held: Vec::new(),
+            cutoff: None,
         };
         let solution = solve(&input).unwrap().unwrap();
         assert_eq!(solution.built_once, [GroupId(0)].into());
