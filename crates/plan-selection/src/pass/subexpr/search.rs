@@ -19,6 +19,8 @@ use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate}
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
+use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
+
 use super::{groups, CouplingKind, GroupId, ImplementationCandidate, Memo};
 use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
 
@@ -246,7 +248,7 @@ fn composed_roots<Id>(
         }
         built_of[g] = Some(node);
     }
-    per_computation
+    let roots: Vec<QueryRoot> = per_computation
         .roots
         .iter()
         .enumerate()
@@ -275,7 +277,11 @@ fn composed_roots<Id>(
                 }
             })
         })
-        .collect()
+        .collect::<Option<_>>()?;
+    // A group's own node carries the frontend's guarantee (none); what it
+    // guarantees depends on the implementations chosen below it, so every
+    // node's guarantee is composed again, as Pass 1 composition does.
+    recompose_guarantees(&roots).ok()
 }
 
 /// `node` with every node `built` maps (by address) replaced by its built
