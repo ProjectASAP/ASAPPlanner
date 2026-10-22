@@ -147,8 +147,10 @@ The header names the search. Under the default search, the list has the
 selected plan and the rejections the search recorded (the first of each
 cause, marked `not kept`, not clickable), and the header says how many
 physical candidates it checked, how many independent components it searched
-separately, and, per query, how many of its own candidates it discarded and
-why. Under `--exhaustive`, the list has every plan:
+separately or why it searched the workload as one (for example `searched as
+one: not in joint space`), which queries were interchangeable and took one
+shared choice (for example `interchangeable queries: (p50, p90, p99)`), and,
+per query, how many of its own candidates it discarded and why. Under `--exhaustive`, the list has every plan:
 the selected plan first, then the other valid plans cheapest first, each
 with its cost per second; then the invalid plans with their reasons, the
 plans Stage 2 pruned, and the Stage 1 candidates that did not compose.
@@ -262,7 +264,10 @@ the queries themselves (open **queries** for each one's text, how often it
 runs and its accuracy target) and the sources they read. Click a row to
 plan the workload: the server runs `stage_pipeline --workload` with the
 default search and the set's deployment capabilities and cost model, and
-the page shows its stages. Planning a 9-query workload takes about 15
+the page shows its stages. A SQL workload also needs the tables it reads,
+which a workload file does not declare: put them in a `tables.json` next to
+the set's workload files, a JSON array of `stage_pipeline --table`
+declarations, and the server passes each one as `--table`. Planning a 9-query workload takes about 15
 seconds.
 
 | Set | Workloads | What it is |

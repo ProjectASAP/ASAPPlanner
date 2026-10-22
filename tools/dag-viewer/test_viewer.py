@@ -730,7 +730,7 @@ class WorkloadSetTests(unittest.TestCase):
                 files.add(path)
                 if "document" in entry:
                     self.assertTrue((HERE / entry["document"]).exists(), entry["document"])
-        self.assertEqual(files, set(WORKLOADS.glob("*/*.json")))
+        self.assertEqual(files, {path for path in WORKLOADS.glob("*/*.json") if path.name != server.TABLES_FILE})
         self.assertEqual(len(files), 30)
 
 
@@ -750,6 +750,21 @@ class PageTests(unittest.TestCase):
             used = set(re.findall(r"\$\('([^']+)'\)", (HERE / script).read_text()))
             with self.subTest(script):
                 self.assertLessEqual(used, ids)
+
+    def test_candidate_ids_do_not_overlap_their_descriptions(self):
+        """The candidate list's id column fits its id: a fixed width let
+        ids such as P18031-m15 run over the description beside them."""
+        page = (HERE / "index.html").read_text()
+        rule = re.search(r"\.rank button \{[^}]*grid-template-columns:\s*([^;]+);", page)
+        self.assertIsNotNone(rule)
+        self.assertRegex(rule.group(1), r"^(max-content|minmax\(\d+px,\s*max-content\))\s")
+        self.assertIn("white-space: nowrap", re.search(r"\.pid \{([^}]*)\}", page).group(1))
+
+    def test_workload_sets_send_the_tables_next_to_a_sql_workload(self):
+        """A SQL workload is planned with the tables.json next to its file,
+        sent as the request's tables (server.py passes one --table each)."""
+        self.assertIn("tables.json", (HERE / "workload-sets.js").read_text())
+        self.assertRegex((HERE / "app.js").read_text(), r"JSON\.stringify\(\{ workload, tables")
 
     def test_the_editor_names_a_target_metric(self):
         """The metric dropdown offers the default (empty) and the three

@@ -29,12 +29,30 @@ def build_planner() -> None:
     )
 
 
+# The file next to a SQL workload that declares the tables it reads: a JSON
+# array of `--table` declarations. A PlanningWorkload declares no tables.
+TABLES_FILE = "tables.json"
+
+
+def sidecar_tables(workload: Path) -> list:
+    """The SQL tables declared in the `tables.json` next to `workload`;
+    empty when there is none."""
+    path = workload.parent / TABLES_FILE
+    if not path.exists():
+        return []
+    tables = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(tables, list):
+        raise ValueError(f"{path}: must be an array of table declarations")
+    return tables
+
+
 def example_args(example: dict, out: str) -> list[str]:
     """The `stage_pipeline` arguments that write one examples.json entry: a
     built-in example (`example`, with the exhaustive search its story
     describes) or a PlanningWorkload file (`workload`, relative to this
-    directory, with the default search and the entry's
-    `deployment_capabilities`). Accuracy guarantees are ignored, as
+    directory, with the default search, the entry's
+    `deployment_capabilities` and the SQL tables in the `tables.json` next to
+    the file, if any). Accuracy guarantees are ignored, as
     `stage_pipeline` does by default, unless the entry's
     `accuracy_guarantees` is `"enforced"`."""
     mode = example.get("accuracy_guarantees", "ignored")
@@ -42,7 +60,8 @@ def example_args(example: dict, out: str) -> list[str]:
         raise ValueError(f"{example.get('id')}: accuracy_guarantees must be ignored or enforced")
     enforce = ["--enforce-accuracy-guarantees"] if mode == "enforced" else []
     if "workload" in example:
-        args = [str(BINARY), "--workload", str(HERE / example["workload"])]
+        workload = HERE / example["workload"]
+        args = [str(BINARY), "--workload", str(workload), *table_args(sidecar_tables(workload), "table")]
         if example.get("deployment_capabilities") is not None:
             args.extend(["--deployment-capabilities", json.dumps(example["deployment_capabilities"], separators=(",", ":"))])
         if example.get("cost_model") is not None:
@@ -69,6 +88,44 @@ class PlanRejected(ValueError):
     than it enumerates (exit status 3)."""
 
 
+def table_args(tables: list, label: str) -> list[str]:
+    """One `--table <json>` per declared SQL table, after checking each
+    declaration (`{"name", "columns": [{"name", "type", "nullable"}],
+    "time_index"}`); errors name the table as `<label> #<n>`. Raises
+    ValueError for a malformed declaration."""
+    args: list[str] = []
+    names: set[str] = set()
+    for index, table in enumerate(tables, 1):
+        if not isinstance(table, dict):
+            raise ValueError(f"{label} #{index} must be an object")
+        name = table.get("name")
+        columns = table.get("columns")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{label} #{index}: name must be a non-empty string")
+        if name in names:
+            raise ValueError(f"{label} #{index}: table {name} is declared twice")
+        names.add(name)
+        if not isinstance(columns, list) or not columns or len(columns) > 500:
+            raise ValueError(f"{label} #{index}: columns must contain 1–500 entries")
+        for number, column in enumerate(columns, 1):
+            where = f"{label} #{index}: column #{number}"
+            if not isinstance(column, dict):
+                raise ValueError(f"{where} must be an object")
+            if not isinstance(column.get("name"), str) or not column["name"].strip():
+                raise ValueError(f"{where}: name must be a non-empty string")
+            if not isinstance(column.get("type"), str):
+                raise ValueError(f"{where}: type must be a string")
+            if not isinstance(column.get("nullable", True), bool):
+                raise ValueError(f"{where}: nullable must be a boolean")
+        time_index = table.get("time_index")
+        if time_index is not None and (
+            isinstance(time_index, bool) or not isinstance(time_index, int) or not 0 <= time_index < len(columns)
+        ):
+            raise ValueError(f"{label} #{index}: time_index must be the index of one of its {len(columns)} columns")
+        args.extend(["--table", json.dumps(table, separators=(",", ":"))])
+    return args
+
+
 def plan_args(payload: object, out: str) -> list[str]:
     """The `stage_pipeline` arguments for a Query planner request: SQL and
     PromQL queries in order, each with its name; SQL tables declared with
@@ -86,36 +143,10 @@ def plan_args(payload: object, out: str) -> list[str]:
         raise ValueError("schemas must be an array with at most 50 tables")
     args = [str(BINARY)]
     has_sql = any(query.get("language", "sql") == "sql" for query in queries)
-    schema_names: set[str] = set()
-    for index, schema in enumerate(schemas, 1):
-        if not isinstance(schema, dict):
-            raise ValueError(f"schema #{index} must be an object")
-        name = schema.get("name")
-        columns = schema.get("columns")
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError(f"schema #{index}: name must be a non-empty string")
-        if name in schema_names:
-            raise ValueError(f"schema #{index}: table {name} is declared twice")
-        schema_names.add(name)
-        if not isinstance(columns, list) or not columns or len(columns) > 500:
-            raise ValueError(f"schema #{index}: columns must contain 1–500 entries")
-        for number, column in enumerate(columns, 1):
-            where = f"schema #{index}: column #{number}"
-            if not isinstance(column, dict):
-                raise ValueError(f"{where} must be an object")
-            if not isinstance(column.get("name"), str) or not column["name"].strip():
-                raise ValueError(f"{where}: name must be a non-empty string")
-            if not isinstance(column.get("type"), str):
-                raise ValueError(f"{where}: type must be a string")
-            if not isinstance(column.get("nullable", True), bool):
-                raise ValueError(f"{where}: nullable must be a boolean")
-        time_index = schema.get("time_index")
-        if time_index is not None and (
-            isinstance(time_index, bool) or not isinstance(time_index, int) or not 0 <= time_index < len(columns)
-        ):
-            raise ValueError(f"schema #{index}: time_index must be the index of one of its {len(columns)} columns")
-        if has_sql:
-            args.extend(["--table", json.dumps(schema, separators=(",", ":"))])
+    table_flags = table_args(schemas, "schema")
+    schema_names = {schema["name"] for schema in schemas}
+    if has_sql:
+        args.extend(table_flags)
     first_use: dict[str, int] = {}
     for index, query in enumerate(queries, 1):
         language = query.get("language", "sql")
@@ -197,8 +228,10 @@ def workload_args(payload: object, workload_path: str, out: str) -> list[str]:
     """The `stage_pipeline` arguments that plan a PlanningWorkload request:
     `{"workload": <PlanningWorkload JSON>, "deployment_capabilities": <JSON or
     null>, "cost_model": <a COST_MODELS name or null>, "accuracy_guarantees":
-    <"ignored", "enforced" or null (ignored, stage_pipeline's default)>}`,
-    the workload written to `workload_path`. `stage_pipeline`
+    <"ignored", "enforced" or null (ignored, stage_pipeline's default)>,
+    "tables": <the SQL tables the workload reads, as `--table` declarations,
+    or null>}`, the workload written to `workload_path`. A PlanningWorkload
+    declares no tables, so a SQL workload plans only with `tables`. `stage_pipeline`
     validates the workload itself. Raises ValueError for a malformed
     request."""
     if not isinstance(payload, dict):
@@ -215,8 +248,12 @@ def workload_args(payload: object, workload_path: str, out: str) -> list[str]:
     mode = payload.get("accuracy_guarantees")
     if mode not in (None, "ignored", "enforced"):
         raise ValueError("accuracy_guarantees must be ignored, enforced or null")
+    tables = payload.get("tables")
+    if tables is not None and (not isinstance(tables, list) or len(tables) > 50):
+        raise ValueError("tables must be an array with at most 50 tables, or null")
+    table_flags = table_args(tables or [], "table")
     Path(workload_path).write_text(json.dumps(workload), encoding="utf-8")
-    args = [str(BINARY), "--workload", workload_path]
+    args = [str(BINARY), "--workload", workload_path, *table_flags]
     if capabilities is not None:
         args.extend(["--deployment-capabilities", json.dumps(capabilities, separators=(",", ":"))])
     if cost_model is not None:

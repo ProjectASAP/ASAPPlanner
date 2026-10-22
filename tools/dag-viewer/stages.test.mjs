@@ -120,3 +120,25 @@ test('the physical candidate list is in plan-number order', () => {
   const ids = ['P10', 'P2-m1', 'P1', 'P3', 'P2'];
   assert.deepEqual(ids.sort((a, b) => call('byPlanNumber', a, b)), ['P1', 'P2', 'P2-m1', 'P3', 'P10']);
 });
+
+test('the search header says why the search ran as one and which queries were interchangeable', () => {
+  const searched = {
+    search: 'default',
+    workload: { queries: [{ id: 'p50' }, { id: 'p90' }, { id: 'p99' }, { id: 'total' }] },
+    stage3_plan_selection: {
+      search: {
+        candidates_checked: 12, queries: [], components: [], raw_scan_candidates_skipped: 0, raw_scan_assignments_skipped: 0,
+        searched_as_one: 'not_in_joint_space',
+        interchangeable_queries: [[0, 1, 2]],
+      },
+    },
+  };
+  assert.equal(
+    call('searchText', searched),
+    'default search · 12 physical candidates checked · searched as one: not in joint space · interchangeable queries: (p50, p90, p99)',
+  );
+  // Components searched separately carry no reason; no classes, no text.
+  searched.stage3_plan_selection.search.searched_as_one = null;
+  searched.stage3_plan_selection.search.interchangeable_queries = undefined;
+  assert.equal(call('searchText', searched), 'default search · 12 physical candidates checked');
+});
