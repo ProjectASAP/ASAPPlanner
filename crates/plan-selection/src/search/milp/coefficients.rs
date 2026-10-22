@@ -400,7 +400,7 @@ pub(crate) fn choice_parts(
 /// candidates, with the index of each threshold. A raw-horizon site has
 /// no threshold here: scan sharing is part of each choice
 /// ([`Choice::scan_children`]). A candidate without sites is itself.
-fn at_site_thresholds(
+pub(super) fn at_site_thresholds(
     memo: &Memo,
     candidate: &ImplementationCandidate,
 ) -> Vec<(ImplementationCandidate, Vec<(CouplingSite, usize)>)> {

@@ -2093,7 +2093,7 @@ pub(crate) fn model_input_of(
             choices.push(choice);
         }
     }
-    let mut input = model_input(memo, choices, entries, models)?;
+    let mut input = model_input(memo, choices, entries, data, models)?;
     let mut sources: Vec<String> = Vec::new();
     for (c, source, bytes, via) in raw_scans {
         let index = match sources.iter().position(|s| *s == source) {
@@ -2245,11 +2245,159 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
     }
 }
 
+/// Which choices keep their queries' accuracy targets reachable, as
+/// requirements on child groups' choices ([`ModelInput::requires`]). A
+/// plan's failure probability only grows up the plan (composition adds
+/// its inputs' failure probabilities, and a root's guarantee over a whole
+/// result is at least its per-value one), so a group's node composed over
+/// its candidate and one child candidate, every other child exact, bounds
+/// it from below. With its data-workload statistics bound and every other
+/// unknown term at zero (the optimistic floor), its failure probability
+/// above the largest target of the queries a plan may lead to the group
+/// rules the pair out: under every size threshold of the candidate's and the child's
+/// coupling sites, as a shared size may lower it. No guarantee at all (an
+/// approximate input that no rule composes) counts as failing surely. A
+/// candidate that fails
+/// with every child exact is ruled out alone. Nothing is ruled out when
+/// guarantees are not enforced or the deployment may supply evidence for
+/// an output without one. A failure only deeper compositions show is left
+/// to the exact pricing (the no-good cut of its group choice).
+fn guarantee_requirements(
+    memo: &Memo,
+    choices: &[Choice],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Vec<(usize, Vec<usize>)> {
+    use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
+    use asap_types::ir::OperatorNode;
+    use std::rc::Rc;
+    if models.plan_selection.ignore_accuracy_guarantees || models.evidence.may_provide_evidence() {
+        return Vec::new();
+    }
+    // The optimistic floor of the failure probability of `node`'s
+    // guarantee; `Some(1.0)` for no guarantee, which no node above repairs
+    // (an approximate input no rule composes); `None` when unknown.
+    let floor = |node: &Rc<OperatorNode>| -> Option<f64> {
+        let roots = recompose_guarantees(&[QueryRoot::Operator(Rc::clone(node))]).ok()?;
+        let QueryRoot::Operator(root) = &roots[0] else {
+            return None;
+        };
+        let Some(guarantee) = root.guarantee.as_ref() else {
+            return Some(1.0);
+        };
+        crate::bind_statistics(guarantee, &|statistic| {
+            crate::workload_statistic(statistic, None, data)
+        })
+        .optimistic_floor()
+        .spec
+        .failure_probability
+        .evaluate()
+    };
+    // The queries a plan may lead to each group: its roots' queries, and
+    // those of every group with a candidate reading it.
+    let mut reaching: Vec<BTreeSet<usize>> = memo
+        .groups
+        .iter()
+        .map(|group| group.roots_of.iter().copied().collect())
+        .collect();
+    loop {
+        let mut changed = false;
+        for (g, candidates) in memo.candidates.iter().enumerate() {
+            let above = reaching[g].clone();
+            let children = candidates
+                .iter()
+                .flat_map(|c| c.children.iter())
+                .chain(&memo.groups[g].children);
+            for child in children {
+                let before = reaching[child.0 as usize].len();
+                reaching[child.0 as usize].extend(&above);
+                changed |= reaching[child.0 as usize].len() != before;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // The largest target of those queries: a plan needing the group meets
+    // at least one of them through it. None when one has no target.
+    let target = |g: usize| -> Option<f64> {
+        let targets: Option<Vec<f64>> = reaching[g]
+            .iter()
+            .map(|&q| entries[q].requirements.accuracy.failure_probability)
+            .collect();
+        targets?.into_iter().max_by(f64::total_cmp)
+    };
+    let misses = |fp: Option<f64>, target: f64| fp.is_some_and(|fp| fp > target * (1.0 + 1e-9));
+    // Each candidate with a choice, at each threshold of its sites.
+    let mut choices_of: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for (c, choice) in choices.iter().enumerate() {
+        choices_of
+            .entry((choice.group.0 as usize, choice.candidate))
+            .or_default()
+            .push(c);
+    }
+    let versions: HashMap<(usize, usize), Vec<Rc<OperatorNode>>> = choices_of
+        .keys()
+        .map(|&(g, c)| {
+            let nodes = crate::search::milp::coefficients::at_site_thresholds(memo, &memo.candidates[g][c])
+                .into_iter()
+                .map(|(version, _)| version.node)
+                .collect();
+            ((g, c), nodes)
+        })
+        .collect();
+    let mut requires = Vec::new();
+    for (&(g, c), own) in &choices_of {
+        let Some(target) = target(g) else {
+            continue;
+        };
+        let nodes = &versions[&(g, c)];
+        if nodes.iter().all(|node| misses(floor(node), target)) {
+            requires.extend(own.iter().map(|&choice| (choice, Vec::new())));
+            continue;
+        }
+        for child in &memo.candidates[g][c].children {
+            let h = child.0 as usize;
+            let child_node = Rc::as_ptr(&memo.groups[h].node);
+            let of_child: Vec<(usize, usize)> = choices_of
+                .keys()
+                .copied()
+                .filter(|&(k, _)| k == h)
+                .collect();
+            let allowed: Vec<(usize, usize)> = of_child
+                .iter()
+                .copied()
+                .filter(|d| {
+                    nodes.iter().any(|node| {
+                        versions[d].iter().any(|child_version| {
+                            let replaced = HashMap::from([(child_node, Rc::clone(child_version))]);
+                            let composed =
+                                crate::search::memo::brute_force::substituted(node, &replaced, &mut HashMap::new());
+                            !misses(floor(&composed), target)
+                        })
+                    })
+                })
+                .collect();
+            if allowed.len() == of_child.len() {
+                continue;
+            }
+            let allowed: Vec<usize> = allowed
+                .iter()
+                .flat_map(|d| choices_of[d].iter().copied())
+                .collect();
+            requires.extend(own.iter().map(|&choice| (choice, allowed.clone())));
+        }
+    }
+    requires
+}
+
 /// The model's input for `memo`'s `choices`.
 fn model_input(
     memo: &Memo,
     choices: Vec<Choice>,
     entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<ModelInput, SelectionError> {
     let settings = models.plan_selection;
@@ -2341,6 +2489,9 @@ fn model_input(
             requires.push((c, allowed));
         }
     }
+    requires.extend(guarantee_requirements(
+        memo, &choices, entries, data, models,
+    ));
     // A reader of a scan shared at horizon `h` reads the scan group's
     // choice at that horizon, so every reader of one scan agrees on it.
     for (c, choice) in choices.iter().enumerate() {
@@ -2516,16 +2667,10 @@ mod tests {
     /// A group choice: per group, its candidate.
     type Plan = Vec<Option<usize>>;
 
-    /// The plans of `queries`' memo (each query every minute, at `targets`)
-    /// the model may return, as group choices: the model of every choice
-    /// with no latency bound, solved with a no-good cut on each group
-    /// choice it returns until it is infeasible; and the group choices of
-    /// the same candidates the reference search accepts
-    /// ([`crate::search::memo::rules::windows::requirements_met`]).
-    fn model_and_reference_plans(
-        queries: &[&str],
-        targets: &[AccuracyTarget],
-    ) -> (BTreeSet<Plan>, BTreeSet<Plan>) {
+    /// `queries`' memo (each query every minute, at `targets`, over a
+    /// gauge `m` of 10,000 series) and its model's input: every choice
+    /// but copies and widened scans.
+    fn memo_and_input(queries: &[&str], targets: &[AccuracyTarget]) -> (Memo, ModelInput) {
         use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
         use asap_types::ir::schema::schema_support::with_promql_series_identity;
@@ -2592,7 +2737,21 @@ mod tests {
                         != crate::search::memo::CandidateOrigin::WidenedScans
             }));
         }
-        let mut input = model_input(&memo, choices, &entries, models).unwrap();
+        let input = model_input(&memo, choices, &entries, &data, models).unwrap();
+        (memo, input)
+    }
+
+    /// The plans of `queries`' memo ([`memo_and_input`]) the model may
+    /// return, as group choices: the model of every choice with no latency
+    /// bound, solved with a no-good cut on each group choice it returns
+    /// until it is infeasible; and the group choices of the same
+    /// candidates the reference search accepts
+    /// ([`crate::search::memo::rules::windows::requirements_met`]).
+    fn model_and_reference_plans(
+        queries: &[&str],
+        targets: &[AccuracyTarget],
+    ) -> (BTreeSet<Plan>, BTreeSet<Plan>) {
+        let (memo, mut input) = memo_and_input(queries, targets);
         assert!(
             input
                 .choices
@@ -2697,5 +2856,74 @@ mod tests {
             "model only {only_model:?}, reference only {only_reference:?} ({} plans)",
             reference.len()
         );
+    }
+
+    /// The average of per-series medians over 10 minutes, within 1%: the
+    /// average's exact sum and count over the medians have a guarantee only
+    /// when a rule composes the medians' error: an exact median, or a
+    /// relative error (DDSketch), but not a KLL's rank error. So the model
+    /// requires the average's choices that read the medians' group to read
+    /// one of those, never a KLL one.
+    #[test]
+    fn a_choice_requires_child_choices_that_keep_its_guarantee() {
+        let (memo, input) = memo_and_input(
+            &["avg by (instance) (quantile_over_time(0.5, m[10m]))"],
+            &[AccuracyTarget::max_error(0.01).failure_probability(0.01)],
+        );
+        let candidate = |c: usize| {
+            &memo.candidates[input.choices[c].group.0 as usize][input.choices[c].candidate]
+        };
+        let builds = |c: usize, algorithm: &str| {
+            asap_types::ir::OperatorNode::reachable(&candidate(c).node)
+                .iter()
+                .any(|n| {
+                    matches!(n.asap(), Some(asap_types::ir::ASAPOp::SummaryAgg { family, .. })
+                        if format!("{family:?}").contains(algorithm))
+                })
+        };
+        let exact = |c: usize| crate::search::memo::rules::windows::is_exact(candidate(c));
+        let mut checked = 0;
+        for (c, allowed) in &input.requires {
+            let child_group = |d: usize| candidate(*c).children.contains(&input.choices[d].group);
+            let kll_children: Vec<usize> = (0..input.choices.len())
+                .filter(|&d| child_group(d) && builds(d, "Kll"))
+                .collect();
+            if kll_children.is_empty() || !exact(*c) {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                allowed.iter().all(|d| !kll_children.contains(d)),
+                "{allowed:?}"
+            );
+            assert!(allowed.iter().any(|&d| exact(d)), "{allowed:?}");
+        }
+        assert!(
+            checked > 0,
+            "the average's choices require a composable median"
+        );
+        // Solved, no exact average reads a KLL median.
+        let solution = solve(&input).unwrap().unwrap();
+        for &c in &solution.chosen {
+            for &d in &solution.chosen {
+                let reads = candidate(c).children.contains(&input.choices[d].group);
+                assert!(!(reads && exact(c) && builds(d, "Kll")), "{c} reads {d}");
+            }
+        }
+    }
+
+    /// Classic HLL's failure probability over more distinct items than its
+    /// contract covers is 1 at every precision: no size threshold (a larger
+    /// shared precision) repairs it, so ruling such a candidate out under
+    /// every threshold of its sites is ruling it out for good.
+    #[test]
+    fn an_uncertified_distinct_count_fails_at_every_precision() {
+        use asap_logical_asap_optimization::accuracy::estimators::hll::classic_failure_probability;
+        for precision in 4..=18 {
+            assert_eq!(classic_failure_probability(precision, 0.05, 1_000_000), 1.0);
+        }
+        // Within the contract, a precision large enough certifies it.
+        assert_eq!(classic_failure_probability(4, 0.05, 1_000), 1.0);
+        assert!(classic_failure_probability(18, 0.05, 1_000) < 1.0);
     }
 }
