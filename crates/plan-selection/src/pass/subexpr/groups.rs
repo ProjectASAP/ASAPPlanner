@@ -15,7 +15,8 @@
 //! equal to one of the group's descendant groups, which are its children.
 //! The private nodes read each child group through its node (the same
 //! `Rc`), and the candidate outputs the group's schema, so a parent reads
-//! it in the group's place.
+//! it in the group's place (a query's top-k root, which no parent reads,
+//! may output the ranked value beside the key).
 //!
 //! A query whose value combines `n` approximate inputs splits its budget
 //! into `n` equal shares, so a summary's size depends on its readers: each
@@ -309,16 +310,15 @@ fn target_candidates<Id: Clone>(
                     &mut HashMap::new(),
                 );
                 // A parent reads the candidate in the group's place, so it
-                // outputs the group's schema: the same columns, with the
-                // group's metadata (composition may derive a closed label
-                // set where the frontend's node leaves it open).
+                // outputs the group's schema when it has the same columns,
+                // with the group's metadata (composition may derive a closed
+                // label set where the frontend's node leaves it open). A
+                // query's top-k root may output other columns (the ranked
+                // value beside the key): it keeps its own.
                 let group_node = &groups[g.0 as usize].node;
-                if node.schema.fields != group_node.schema.fields
-                    || node.schema.time_index != group_node.schema.time_index
-                {
-                    continue;
-                }
-                let node = if node.schema == group_node.schema {
+                let same_columns = node.schema.fields == group_node.schema.fields
+                    && node.schema.time_index == group_node.schema.time_index;
+                let node = if !same_columns || node.schema == group_node.schema {
                     node
                 } else {
                     Rc::new(OperatorNode {
@@ -853,5 +853,286 @@ mod tests {
             .children
             .push(GroupId(quantile as u32));
         assert_eq!(memo.topological_order(), None);
+    }
+
+    /// The workload generator of `joint_search_equivalence`: a seeded
+    /// xorshift generator.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+
+        fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+            &items[self.below(items.len())]
+        }
+    }
+
+    /// One random PromQL query of `joint_search_equivalence`.
+    fn random_query(rng: &mut Rng, gauges: &[&str]) -> String {
+        let m = rng.pick(gauges);
+        let group = rng.pick(&["job", "job, instance", "instance"]);
+        let window = rng.pick(&["1m", "5m", "10m"]);
+        let phi = rng.pick(&["0.5", "0.9", "0.99"]);
+        let k = rng.pick(&["3", "5"]);
+        match rng.below(10) {
+            0 => format!("sum by ({group}) (sum_over_time({m}[{window}]))"),
+            1 => format!("avg by ({group}) (quantile_over_time({phi}, {m}[{window}]))"),
+            2 => format!("quantile_over_time({phi}, {m}[{window}])"),
+            3 => format!("topk by ({group}) ({k}, sum_over_time({m}[{window}]))"),
+            4 => format!("sum by ({group}) (rate(c_total[{window}]))"),
+            5 => format!("max by ({group}) (max_over_time({m}[{window}]))"),
+            6 => format!("count_over_time({m}[{window}])"),
+            7 => format!("sum by ({group}) (increase(c_total[{window}]))"),
+            8 => format!("stddev_over_time({m}[{window}])"),
+            _ => format!("topk({k}, sum by ({group}) (rate(c_total[{window}])))"),
+        }
+    }
+
+    /// The roots of `joint_search_equivalence`'s random workload `seed`
+    /// over `gauges`, lowered as the planner lowers PromQL (with series
+    /// identity).
+    fn random_roots(seed: u64, gauges: &[&str]) -> Vec<QueryRoot> {
+        use asap_types::ir::properties::AccuracyMetric;
+        use asap_types::workload::{
+            DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload, Predictability,
+            Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
+            RepetitionInterval, SourceFacts,
+        };
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let queries = 2 + rng.below(3);
+        let entries = (0..queries)
+            .map(|_| RepeatingEntry {
+                query: Query(random_query(&mut rng, gauges)),
+                demand: RepeatedDemand::FixedInterval(RepetitionInterval(
+                    *rng.pick(&[60_000u32, 300_000]),
+                )),
+                requirements: QueryRequirements {
+                    accuracy: rng
+                        .pick(&[
+                            AccuracyTarget::exact(),
+                            AccuracyTarget::max_error(0.05),
+                            AccuracyTarget::max_error(0.01).failure_probability(0.01),
+                            AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Rank),
+                        ])
+                        .clone(),
+                    max_latency_ms: None,
+                },
+                predictability: Predictability::Predictable { known_at: None },
+                range_evaluation: None,
+            })
+            .collect();
+        let source = |metric_type| SourceFacts {
+            series_count: Some(1_000),
+            metric_type: Some(metric_type),
+            sample_interval: Some(DurationMs(15_000)),
+            ..SourceFacts::default()
+        };
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: None,
+                repeating_queries: Some(entries),
+            },
+            data_workload: Some(DataWorkload {
+                arrival: DataArrival::Ingesting {
+                    rows_per_second: 2_000.0 / 15.0,
+                },
+                sources: gauges
+                    .iter()
+                    .map(|g| (g.to_string(), source(MetricType::Gauge)))
+                    .chain([("c_total".to_string(), source(MetricType::Counter))])
+                    .collect(),
+            }),
+        };
+        asap_frontend_promql::lower_promql_query_workload(&workload)
+            .unwrap()
+            .into_iter()
+            .map(|root| match root {
+                QueryRoot::Operator(node) => QueryRoot::Operator(
+                    asap_types::ir::schema::schema_support::with_promql_series_identity(&node)
+                        .unwrap(),
+                ),
+                scalar => scalar,
+            })
+            .collect()
+    }
+
+    /// Whether a composed sub-DAG is some combination of the memo's
+    /// per-group candidates: a candidate's private nodes equal the composed
+    /// nodes operator by operator (schemas and guarantees aside, which
+    /// composition derives), and each child group's node is matched by a
+    /// candidate of that group in turn.
+    struct Combination<'a> {
+        memo: &'a Memo,
+        matched: HashMap<(usize, *const OperatorNode), bool>,
+        own: HashMap<*const OperatorNode, (Rc<OperatorNode>, serde_json::Value)>,
+    }
+
+    impl Combination<'_> {
+        fn own_fields(&mut self, node: &Rc<OperatorNode>) -> serde_json::Value {
+            self.own
+                .entry(Rc::as_ptr(node))
+                .or_insert_with(|| {
+                    let operator = node.operator.map_children(|_| ());
+                    (Rc::clone(node), serde_json::to_value(&operator).unwrap())
+                })
+                .1
+                .clone()
+        }
+
+        fn group(&mut self, g: usize, composed: &Rc<OperatorNode>) -> bool {
+            let key = (g, Rc::as_ptr(composed));
+            if let Some(&done) = self.matched.get(&key) {
+                return done;
+            }
+            self.matched.insert(key, false);
+            let memo = self.memo;
+            let found = memo.candidates[g]
+                .iter()
+                .any(|c| self.private(&c.node, composed, &c.children));
+            self.matched.insert(key, found);
+            found
+        }
+
+        fn private(
+            &mut self,
+            node: &Rc<OperatorNode>,
+            composed: &Rc<OperatorNode>,
+            children: &[GroupId],
+        ) -> bool {
+            let memo = self.memo;
+            if let Some(child) = children
+                .iter()
+                .find(|c| Rc::ptr_eq(&memo.groups[c.0 as usize].node, node))
+            {
+                return self.group(child.0 as usize, composed);
+            }
+            let (ours, theirs) = (node.children(), composed.children());
+            ours.len() == theirs.len()
+                && self.own_fields(node) == self.own_fields(composed)
+                && ours
+                    .iter()
+                    .zip(&theirs)
+                    .all(|(a, b)| self.private(a, b, children))
+        }
+    }
+
+    /// For the random workloads of `joint_search_equivalence` (over one
+    /// gauge and over two), every whole-workload Pass 1 choice composes,
+    /// for each query, a plan that is a combination of the memo's per-group
+    /// candidates: the memo misses no Pass 1 candidate. Every candidate of
+    /// a group a parent reads outputs the group's schema.
+    #[test]
+    fn every_composed_pass1_candidate_is_a_combination_of_group_candidates() {
+        let mut checked = 0;
+        let mut missing = Vec::new();
+        let mut other_schema = Vec::new();
+        for gauges in [&["m"][..], &["m", "n"]] {
+            for seed in 1..=60u64 {
+                let roots = random_roots(seed, gauges);
+                let inventory = generate_per_computation_candidates(
+                    roots.iter().cloned().enumerate().collect(),
+                )
+                .unwrap();
+                if inventory.combinations() > 400 {
+                    continue;
+                }
+                let memo = memo_of(&inventory);
+                for (g, group) in memo.groups.iter().enumerate() {
+                    for candidate in &memo.candidates[g] {
+                        if !group.parents.is_empty() && candidate.node.schema != group.node.schema {
+                            other_schema.push(format!("{gauges:?} seed {seed} g{g}"));
+                        }
+                    }
+                }
+                let root_group = |q: usize| {
+                    memo.groups
+                        .iter()
+                        .position(|group| group.roots_of.contains(&q))
+                        .unwrap()
+                };
+                let mut combination = Combination {
+                    memo: &memo,
+                    matched: HashMap::new(),
+                    own: HashMap::new(),
+                };
+                let mut choice = vec![0; inventory.targets.len()];
+                loop {
+                    if !inventory.absorbed_choice_varies(&choice) {
+                        if let Ok(composed) = compose_logical_candidate(&inventory, &choice) {
+                            for (q, (_, root)) in composed.iter().enumerate() {
+                                let QueryRoot::Operator(node) = root else {
+                                    continue;
+                                };
+                                checked += 1;
+                                if !combination.group(root_group(q), node) {
+                                    missing.push(format!("{gauges:?} seed {seed} q{q} {choice:?}"));
+                                }
+                            }
+                        }
+                    }
+                    let mut advanced = false;
+                    for t in (0..choice.len()).rev() {
+                        choice[t] += 1;
+                        if choice[t] < inventory.targets[t].choice_count() {
+                            advanced = true;
+                            break;
+                        }
+                        choice[t] = 0;
+                    }
+                    if !advanced {
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "{checked} plans checked");
+        assert!(
+            missing.is_empty(),
+            "{} of {checked} missing: {missing:#?}",
+            missing.len()
+        );
+    }
+
+    /// Two SQL queries over one table, each lowered with its own scan, read
+    /// one scan group: equal scans are shared, a table's keyless rows
+    /// included. Their aggregates, grouped differently, stay two groups.
+    #[test]
+    fn equal_sql_table_scans_are_one_group() {
+        use asap_logical_asap_optimization::test_support::{agg, scan_from};
+        use asap_types::ir::operator::{AggIntent, Source};
+        use asap_types::ir::schema::{DataType, Field, Schema};
+        let table = || {
+            scan_from(
+                Source::Table {
+                    table_ref: "t".into(),
+                },
+                Schema::with_time_index(
+                    vec![
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("value", DataType::Float64, false),
+                        Field::plain("a", DataType::Utf8, true),
+                        Field::plain("b", DataType::Utf8, true),
+                    ],
+                    0,
+                    vec![],
+                ),
+            )
+        };
+        let sum = || AggIntent::Sum { col: Some(1) };
+        let roots = vec![
+            (0, QueryRoot::Operator(agg(vec![2], sum(), table()))),
+            (1, QueryRoot::Operator(agg(vec![3], sum(), table()))),
+        ];
+        let memo = memo_of(&generate_per_computation_candidates(roots).unwrap());
+        assert_eq!(memo.groups.len(), 3);
+        assert_eq!(memo.groups[0].node.operator.kind_name(), "Scan");
+        assert_eq!(memo.groups[0].queries, vec![0, 1]);
+        assert_eq!(memo.groups[0].parents, vec![GroupId(1), GroupId(2)]);
     }
 }
