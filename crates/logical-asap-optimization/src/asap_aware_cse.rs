@@ -25,6 +25,11 @@
 //! gives the same Pass 2 candidate as the subset with it; such a Pass 2
 //! candidate is returned once, under the subset it actually shares.
 //!
+//! Scans of one metric that project different labels read the same rows.
+//! [`with_union_scan_labels`] widens them to the union of their labels, so
+//! interning finds them identical; the caller also lists the Pass 2
+//! candidates of the widened roots that share a scan.
+//!
 //! # Summary-capability rule
 //!
 //! Composition sizes each consumer's summary build alone, for its own
@@ -117,7 +122,6 @@
 //! reused; a sketch's heap is not, as its membership has no guarantee yet.
 
 use std::collections::HashMap;
-#[cfg(test)]
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -125,7 +129,8 @@ use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{
-    ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergeInputRule, SketchKind,
+    ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergeInputRule, Schema,
+    SketchKind, PROMQL_SERIES_IDENTITY,
 };
 use asap_types::ir::SortKey;
 use asap_types::ir::{
@@ -202,6 +207,226 @@ fn pair(
         pair(child, merged_child, representative, order);
     }
     order.push(Rc::clone(original));
+}
+
+/// `roots` with the time-series scans of one metric made identical when
+/// they project different labels, so that [`sharing_candidates`] finds
+/// them: the PromQL frontend projects only the labels each query uses
+/// (`ts, value, job, …` for `quantile by (job) (0.5, data)`), and
+/// structural CSE shares only nodes with equal schemas. Every scan of a
+/// metric without predicates projects the union of the labels its scans
+/// project, in the order the walk meets them (before the series identity,
+/// with the unique keys moved along).
+/// The nodes that pass the labels on ([`passes_labels_on`]) keep the wider
+/// rows above a widened scan; any other consumer reads them through a
+/// `Project` that keeps the columns it read, by name, as
+/// `relabeled_estimate` does. `None` when every metric's scans already
+/// agree, when two of them give one label different types or one is closed
+/// and the other not, when a node would change arity, or when a consumer
+/// would have to narrow a summary state or a grouped or filtered pane chain
+/// would read a `Project`.
+pub fn with_union_scan_labels(
+    roots: &[QueryRoot],
+) -> Result<Option<Vec<QueryRoot>>, PerComputationCandidateError> {
+    let mut nodes = Vec::new();
+    let mut seen = HashSet::new();
+    for node in roots.iter().flat_map(root_operators) {
+        collect_children_first(node, &mut seen, &mut nodes);
+    }
+    // Each metric's union schema, `None` once two of its scans conflict.
+    let mut unions: Vec<(&Source, Option<Schema>)> = Vec::new();
+    for node in &nodes {
+        let Some((source, schema)) = unfiltered_series_scan(node) else {
+            continue;
+        };
+        let Some(i) = unions.iter().position(|(s, _)| *s == source) else {
+            unions.push((source, Some(schema.clone())));
+            continue;
+        };
+        let Some(union) = unions[i].1.as_mut() else {
+            continue;
+        };
+        // A scan known to hold every label and one that is not cannot share.
+        if union.closed != schema.closed {
+            unions[i].1 = None;
+            continue;
+        }
+        for field in &schema.fields {
+            match union.fields.iter().find(|f| f.name == field.name) {
+                Some(known) if known == field => {}
+                Some(_) => {
+                    unions[i].1 = None;
+                    break;
+                }
+                None => {
+                    let at = union
+                        .fields
+                        .iter()
+                        .position(|f| f.name == PROMQL_SERIES_IDENTITY)
+                        .unwrap_or(union.fields.len());
+                    union.fields.insert(at, field.clone());
+                    // Unique keys (the series identity and ts) name columns
+                    // by position.
+                    for column in union.unique_keys.iter_mut().flatten() {
+                        if *column >= at {
+                            *column += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let union_of = |node: &OperatorNode| {
+        let (source, schema) = unfiltered_series_scan(node)?;
+        let (_, union) = unions.iter().find(|(s, _)| *s == source)?;
+        union.as_ref().filter(|union| *union != schema)
+    };
+    if !nodes.iter().any(|node| union_of(node).is_some()) {
+        return Ok(None);
+    }
+    let mut widened: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    for node in &nodes {
+        let out = match (union_of(node), node.non_asap()) {
+            (Some(union), Some(NonASAPOp::Scan { source, .. })) => {
+                let mut schema = union.clone();
+                schema.time_index = schema.fields.iter().position(|f| f.name == "ts");
+                OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+                    source: source.clone(),
+                    predicates: Vec::new(),
+                    schema,
+                }))?
+            }
+            _ if node
+                .children()
+                .iter()
+                .all(|c| Rc::ptr_eq(c, &widened[&Rc::as_ptr(c)])) =>
+            {
+                Rc::clone(node)
+            }
+            // A node whose renamed outputs would change arity is not widened.
+            _ if passes_labels_on(node) => {
+                match node.with_new_children(|c| Rc::clone(&widened[&Rc::as_ptr(c)])) {
+                    Ok(rebuilt) => Rc::new(rebuilt),
+                    Err(_) => return Ok(None),
+                }
+            }
+            // A grouped or filtered pane chain over a `Project` would hide
+            // its window from plan selection.
+            _ if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) => {
+                return Ok(None);
+            }
+            _ => {
+                let mut children = HashMap::new();
+                for child in node.children() {
+                    let wide = &widened[&Rc::as_ptr(child)];
+                    let Some(narrow) = narrowed(wide, &child.schema)? else {
+                        return Ok(None);
+                    };
+                    children.insert(Rc::as_ptr(child), narrow);
+                }
+                Rc::new(node.with_new_children(|c| Rc::clone(&children[&Rc::as_ptr(c)]))?)
+            }
+        };
+        widened.insert(Rc::as_ptr(node), out);
+    }
+    let mut out = Vec::with_capacity(roots.len());
+    for query_root in roots {
+        let mut mapped = HashMap::new();
+        for node in root_operators(query_root) {
+            let Some(narrow) = narrowed(&widened[&Rc::as_ptr(node)], &node.schema)? else {
+                return Ok(None);
+            };
+            mapped.insert(Rc::as_ptr(node), narrow);
+        }
+        out.push(match query_root {
+            QueryRoot::Operator(node) => QueryRoot::Operator(Rc::clone(&mapped[&Rc::as_ptr(node)])),
+            QueryRoot::Scalar(expr) => QueryRoot::Scalar(
+                expr.map_operator_refs(&mut |node| Rc::clone(&mapped[&Rc::as_ptr(node)])),
+            ),
+        });
+    }
+    recompose_guarantees(&out).map(Some)
+}
+
+/// The source and schema of a time-series `Scan` without predicates.
+fn unfiltered_series_scan(node: &OperatorNode) -> Option<(&Source, &Schema)> {
+    match node.non_asap() {
+        Some(NonASAPOp::Scan {
+            source: source @ Source::TimeSeries { .. },
+            predicates,
+            schema,
+        }) if predicates.is_empty() => Some((source, schema)),
+        _ => None,
+    }
+}
+
+/// Whether `node`, over a child with more labels, keeps them in its own
+/// output: a time range or shift of the rows, and a per-series build or
+/// pane chain without a filter (keyed by the series identity, which
+/// determines every label) with its merges, estimates and finalizations.
+/// The executor reads a per-series build's raw rows from its `TimeRange`
+/// directly, and plan selection reads a pane chain's window from the rows
+/// below it, so nothing may sit between them.
+fn passes_labels_on(node: &OperatorNode) -> bool {
+    matches!(
+        node.non_asap(),
+        Some(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. })
+    ) || matches!(
+        node.asap(),
+        Some(
+            ASAPOp::SummaryAgg {
+                reduction: Reduction::PerEntity,
+                filter: None,
+                ..
+            } | ASAPOp::PaneChain {
+                reduction: Reduction::PerEntity,
+                filter: None,
+                ..
+            } | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+        )
+    )
+}
+
+/// `wide`, which holds every column of `schema` and perhaps more, with
+/// only `schema`'s columns, by name: `wide` itself when it has exactly
+/// them; `None` when `wide` is a summary state, which has no columns to
+/// project.
+fn narrowed(
+    wide: &Rc<OperatorNode>,
+    schema: &Schema,
+) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+    use asap_types::ir::ProjectItem;
+    if wide.schema.fields == schema.fields {
+        return Ok(Some(Rc::clone(wide)));
+    }
+    if wide.asap().is_some_and(|op| op.produced_state().is_some()) {
+        return Ok(None);
+    }
+    let cols = schema
+        .fields
+        .iter()
+        .map(|field| {
+            let column = wide
+                .schema
+                .fields
+                .iter()
+                .position(|f| f.name == field.name && f.table == field.table)
+                .expect("a widened node keeps every column it had");
+            ProjectItem {
+                alias: Some(field.name.clone()),
+                expr: ScalarExpr::Column(column),
+            }
+        })
+        .collect();
+    Ok(Some(OperatorNode::new_shared(Operator::NonASAP(
+        NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: Rc::clone(wide),
+        },
+    ))?))
 }
 
 /// Every Pass 2 candidate of the identical-expression rule for the
@@ -1943,6 +2168,59 @@ mod tests {
                     .expect("a chosen item is listed")
             })
             .collect()
+    }
+
+    /// `sum by (job) (m)` and `max by (host, job) (m)` scan `m` with other
+    /// labels, so nothing is shared until the scans are widened to
+    /// `job, host`: then the scans and the instant time ranges above them
+    /// are sharing candidates, and each root keeps its columns.
+    #[test]
+    fn scans_of_one_metric_with_other_labels_share_once_widened() {
+        let roots = roots(&["sum by (job) (m)", "max by (host, job) (m)"]);
+        assert!(sharing_candidates(&roots).is_empty());
+        let widened = with_union_scan_labels(&roots).unwrap().unwrap();
+        let scan_labels = |root: &QueryRoot| {
+            let QueryRoot::Operator(node) = root else {
+                unreachable!()
+            };
+            OperatorNode::reachable(node)
+                .iter()
+                .find_map(|n| match n.non_asap() {
+                    Some(NonASAPOp::Scan { schema, .. }) => Some(
+                        schema
+                            .fields
+                            .iter()
+                            .map(|f| f.name.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            scan_labels(&widened[0]),
+            ["ts", "value", "job", "host", PROMQL_SERIES_IDENTITY]
+        );
+        assert_eq!(scan_labels(&widened[0]), scan_labels(&widened[1]));
+        // The unique key still names the series identity and ts.
+        let QueryRoot::Operator(node) = &widened[0] else {
+            unreachable!()
+        };
+        let scan = OperatorNode::reachable(node)
+            .into_iter()
+            .find(|n| matches!(n.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .unwrap();
+        assert_eq!(scan.schema.unique_keys, [vec![4, 0]]);
+        let kinds: Vec<_> = sharing_candidates(&widened).iter().map(kinds).collect();
+        assert_eq!(kinds, ["Scan", "TimeRange"]);
+        for (root, wide) in roots.iter().zip(&widened) {
+            let (QueryRoot::Operator(root), QueryRoot::Operator(wide)) = (root, wide) else {
+                unreachable!()
+            };
+            assert_eq!(root.schema, wide.schema);
+        }
+        // Scans that already agree are left alone.
+        assert!(with_union_scan_labels(&widened).unwrap().is_none());
     }
 
     /// Two queries over the same range selector have two sharing candidates,

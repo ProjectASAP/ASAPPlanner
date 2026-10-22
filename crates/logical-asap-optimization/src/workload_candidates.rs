@@ -7,15 +7,15 @@
 use std::rc::Rc;
 
 use asap_types::ir::flat::flatten;
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::QueryWorkloadEntry;
 
 use crate::asap_aware_cse::{
     capability_sharing_candidates, identical_expression_pass2_candidates, pane_candidates,
     rollup_candidates, rollup_pass2_candidates, sharing_candidates,
     summary_capability_pass2_candidates, topk_reuse_candidates, topk_reuse_pass2_candidates,
-    window_composition_pass2_candidates, PaneCandidate, RollupCandidate, SharedPaneChain,
-    SharingCandidate, TopKReuseCandidate, MAX_REUSE_CANDIDATES,
+    window_composition_pass2_candidates, with_union_scan_labels, PaneCandidate, RollupCandidate,
+    SharedPaneChain, SharingCandidate, TopKReuseCandidate, MAX_REUSE_CANDIDATES,
 };
 use crate::per_computation_candidates::{
     compose_logical_candidate, PerComputationCandidateError, PerComputationCandidates,
@@ -254,6 +254,7 @@ fn pass2_candidates(
     let mut found = Pass2List {
         seen: vec![flatten(roots).0],
         out: Vec::new(),
+        widened: Vec::new(),
         viable,
     };
     let none = Rules::default();
@@ -267,6 +268,7 @@ fn pass2_candidates(
         Ok(pass2_candidates) => pass2_candidates,
         Err(error) => {
             found.out.push(Pass2::failed(&none, error));
+            found.out.append(&mut found.widened);
             return found.out;
         }
     };
@@ -288,6 +290,7 @@ fn pass2_candidates(
             Err(error) => found.out.push(Pass2::failed(&rules, error)),
         }
     }
+    found.out.append(&mut found.widened);
     found.out
 }
 
@@ -296,6 +299,11 @@ fn pass2_candidates(
 struct Pass2List<'v> {
     seen: Vec<asap_types::ir::flat::FlatDag>,
     out: Vec<Pass2>,
+    /// The identical-expression candidates over widened scans
+    /// ([`with_union_scan_labels`]), listed after `out`: a plan both lists
+    /// reach the same way (e.g. one per-series build shared by either rule)
+    /// ties, and plan selection keeps the earlier one.
+    widened: Vec<Pass2>,
     /// Whether a candidate, or any of its identical-expression candidates,
     /// can have a valid implementation; always `true` for the exhaustive
     /// search.
@@ -333,6 +341,11 @@ impl Pass2List<'_> {
 
     /// The identical-expression Pass 2 candidates of `roots`, which the
     /// other rules changed as `rules` says.
+    /// When a metric's scans project different labels, also those of
+    /// `roots` with the scans widened to every label
+    /// ([`with_union_scan_labels`]) that share a scan: the others only read
+    /// wider scans than their counterparts over `roots`. They are listed
+    /// last (`widened`).
     fn identical_expression(&mut self, rules: &Rules, roots: &[QueryRoot]) {
         let candidates = sharing_candidates(roots);
         for pass2_candidate in identical_expression_pass2_candidates(roots, &candidates) {
@@ -342,6 +355,31 @@ impl Pass2List<'_> {
                 &pass2_candidate.roots,
             );
         }
+        let widened = match with_union_scan_labels(roots) {
+            Ok(Some(widened)) => widened,
+            Ok(None) => return,
+            Err(error) => {
+                self.out.push(Pass2::failed(rules, error));
+                return;
+            }
+        };
+        let start = self.out.len();
+        let candidates = sharing_candidates(&widened);
+        for pass2_candidate in identical_expression_pass2_candidates(&widened, &candidates) {
+            let shares_a_scan = pass2_candidate
+                .sharing_candidates
+                .iter()
+                .any(|c| matches!(c.nodes[0].non_asap(), Some(NonASAPOp::Scan { .. })));
+            if shares_a_scan {
+                self.push(
+                    rules,
+                    pass2_candidate.sharing_candidates,
+                    &pass2_candidate.roots,
+                );
+            }
+        }
+        let widened = self.out.split_off(start);
+        self.widened.extend(widened);
     }
 
     /// The window-composition Pass 2 candidates of `roots`, which the other
@@ -626,6 +664,7 @@ mod tests {
         let mut found = Pass2List {
             seen: vec![flatten(&roots).0],
             out: Vec::new(),
+            widened: Vec::new(),
             viable: &|_| true,
         };
         found.reuse(&Rules::default(), &roots, &[]);
