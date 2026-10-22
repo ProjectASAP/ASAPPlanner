@@ -190,7 +190,7 @@ pub(crate) struct Context {
 }
 
 /// One candidate's usage priced in a context: Stage 3's per-node pricing of
-/// its private nodes ([`pricing::local_price`]). The charges Stage 3 makes
+/// its private nodes ([`pricing::private_usage`]). The charges Stage 3 makes
 /// only once the whole plan is known are kept apart and added by
 /// [`pricing::plan_cost`]: memory held for an evaluation (which needs the
 /// readers' whole latency) and the raw data query-time scans keep on disk
