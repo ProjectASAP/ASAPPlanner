@@ -443,10 +443,12 @@ impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
 impl InstallablePlan {
     /// Whether the Planner's executor compiles this plan as a runtime runs
     /// it: each stored output's build over its raw-data-sample windows and stored
-    /// inputs, then the query run over the stored outputs it reads and the
-    /// query-time raw-data-sample windows. `Err` holds the executor's error.
+    /// inputs, then the query run over the stored outputs it reads, the
+    /// query-time raw-data-sample windows and the table `Scan`s it reads
+    /// outside them (bound to the runtime's data sources). `Err` holds the
+    /// executor's error.
     pub fn check_compiles(&self) -> Result<(), String> {
-        use asap_executor::physical_planner::{compile, InputContract};
+        use asap_executor::physical_planner::{compile, scan_contract, InputContract};
         use std::collections::BTreeMap;
         let dag = &self.dag.dag;
         let indexed = IndexedDag::new(dag);
@@ -487,30 +489,42 @@ impl InstallablePlan {
                 .map_err(|error| format!("stored output {}: {error}", output.node_id))?;
         }
         // The query run reads the stored outputs it reaches from the roots
-        // without passing another, and the query-time windows.
+        // without passing another, the query-time windows, and the table
+        // `Scan`s it reaches outside them, which the runtime binds to its
+        // data sources (a SQL table read whole or through a filter).
         let roots: Vec<PhysicalASAPNodeId> = self.queries.iter().map(|q| q.root_node_id).collect();
+        let windows: HashSet<PhysicalASAPNodeId> = self
+            .query_time_raw_windows
+            .iter()
+            .map(|window| window.time_range_node_id)
+            .collect();
         let mut read = Vec::new();
+        let mut scans = BTreeMap::new();
         let mut pending = roots.clone();
         let mut seen = HashSet::new();
         while let Some(id) = pending.pop() {
             if !seen.insert(id) {
                 continue;
             }
-            if stored.contains(&id) {
+            if stored.contains(&id) || windows.contains(&id) {
                 read.push(id);
+            } else if let Some(NonASAPOp::Scan {
+                source: asap_types::ir::operator::Source::Table { .. },
+                ..
+            }) = indexed.relational(id)
+            {
+                let scan = scan_contract(indexed.nodes[&id])
+                    .map_err(|error| format!("query run: scan {id}: {error}"))?;
+                scans.insert(id as u64, scan);
             } else {
                 pending.extend(indexed.inputs.get(&id).into_iter().flatten().copied());
             }
         }
-        let inputs = read
+        let mut inputs = read
             .into_iter()
-            .chain(
-                self.query_time_raw_windows
-                    .iter()
-                    .map(|window| window.time_range_node_id),
-            )
             .map(contract)
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        inputs.extend(scans);
         let roots: Vec<u64> = roots.into_iter().map(|id| id as u64).collect();
         compile(dag, inputs, &roots).map_err(|error| format!("query run: {error}"))?;
         Ok(())

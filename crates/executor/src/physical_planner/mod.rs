@@ -87,6 +87,26 @@ pub fn bind<'a>(
     compile(dag, inputs, roots)?.instantiate(sources)
 }
 
+/// The input contract of a raw-data `Scan` node, which a deployment binds to
+/// a data source at run time ([`bind_with_data_sources`]): its rows'
+/// schema, once its predicates compile over it as the bound scan compiles
+/// them. A compile check cuts a plan at its scans with these, to compile it
+/// without a reader.
+pub fn scan_contract(node: &PhysicalASAPDAGNode) -> Result<InputContract, Error> {
+    let Payload::NonASAP(NonASAPOp::Scan {
+        predicates, schema, ..
+    }) = &node.payload
+    else {
+        return Err(invalid(format!("node {} is not a Scan", node.id)));
+    };
+    let output = Arc::new(schema.clone());
+    crate::values::validate_schema(&output)?;
+    for predicate in predicates {
+        crate::sources::compile_scan_predicate(&local_scalar(&predicate.0)?, &output)?;
+    }
+    Ok(InputContract::bounded(output))
+}
+
 /// Resolve raw scan connectors before invoking the reader-independent compiler.
 pub fn bind_with_data_sources<'a>(
     dag: &PhysicalASAPDAG,
@@ -972,16 +992,26 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                             AggIntent::Min { col } => Reduction::Min(column(*col)?),
                             AggIntent::Max { col } => Reduction::Max(column(*col)?),
                             // PromQL `quantile by (G) (φ, v)` exactly: the
-                            // group's values, interpolated as Prometheus does.
-                            // SQL percentiles order NaN and NULL differently,
-                            // so a relation's quantile has no exact kernel; nor
-                            // has a filtered one, NULL for a group with no
-                            // matching row where the kernel gives NaN.
+                            // group's values, interpolated as Prometheus does
+                            // (NaN first). A filtered one has no kernel: the IR
+                            // declares it NULL for a group with no matching
+                            // row, where Prometheus gives NaN.
                             AggIntent::Quantile { col, q, .. }
                                 if input.has_promql_series_identity()
                                     && filters.get(index).is_none_or(Option::is_none) =>
                             {
                                 Reduction::Quantile {
+                                    column: column(*col)?,
+                                    q: *q,
+                                }
+                            }
+                            // A SQL percentile (`approx_percentile_cont`)
+                            // exactly: `percentile_cont`, NULL for a group
+                            // with no (matching) value.
+                            AggIntent::Quantile { col, q, .. }
+                                if !input.has_promql_series_identity() =>
+                            {
+                                Reduction::Percentile {
                                     column: column(*col)?,
                                     q: *q,
                                 }
@@ -1056,11 +1086,24 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                     Arc::new(node.output_schema.clone()),
                 );
             }
-            Operator::evaluation(
+            let state = summary_column(input)?;
+            let evaluation = Operator::evaluation(
                 input.clone(),
-                summary_column(input)?,
+                state,
                 SummaryEvaluation::Sketch(query.clone()),
-            )
+            )?;
+            // A distinct count is Int64 where the Planner types it so (SQL
+            // `COUNT(DISTINCT)`), Float64 as a PromQL sample value. The
+            // evaluation's value replaces the state column in place, so the
+            // declared value is at the state's index.
+            let declared_whole = node.output_schema.fields.get(state).map(|f| &f.dtype)
+                == Some(&FieldDataType::Plain(DataType::Int64));
+            match query {
+                SketchStatistic::Cardinality if declared_whole => {
+                    evaluation.with_whole_distinct_count()
+                }
+                _ => Ok(evaluation),
+            }
         }
         _ => Err(invalid(
             "physical operation has no native binding; the deployment runtime must execute it",

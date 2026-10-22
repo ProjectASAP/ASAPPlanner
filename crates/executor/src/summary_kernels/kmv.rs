@@ -79,6 +79,15 @@ impl AggregateCore for KmvAccumulator {
 
 /// A KMV state is its own updater: it observes unkeyed sample values.
 impl AccumulatorUpdater for KmvAccumulator {
+    fn update_value(&mut self, value: &crate::values::Value, _: i64) -> Result<(), String> {
+        use crate::summary_kernels::factory::{distinct_item, DistinctItem};
+        match distinct_item(value)? {
+            DistinctItem::Sample(value) => self.insert_sample(value),
+            DistinctItem::Item(item) => self.inner.update(&item),
+            DistinctItem::Skipped => {}
+        }
+        Ok(())
+    }
     fn is_keyed(&self) -> bool {
         false
     }
@@ -231,5 +240,29 @@ mod tests {
         assert_eq!(full.inner.retained_hashes.len(), k as usize);
         assert!(full.approx_memory_bytes() >= k as usize * 8);
         assert!(full.approx_memory_bytes() > empty.approx_memory_bytes());
+    }
+
+    // An Int64 id and a Utf8 name are items as asap_sketchlib hashes them,
+    // so distinct counts of ids need no Float64 column; NULL is no item.
+    #[test]
+    fn int64_and_utf8_values_are_items() {
+        use crate::values::Value;
+        let mut ids = KmvAccumulator::new(16);
+        for id in [7, 7, -3, 1 << 60, (1 << 60) + 1] {
+            ids.update_value(&Value::Int64(id), 0).unwrap();
+        }
+        ids.update_value(&Value::Null, 0).unwrap();
+        assert_eq!(cardinality(&ids), 4.0);
+        let mut names = KmvAccumulator::new(16);
+        for name in ["a", "b", "a"] {
+            names.update_value(&Value::Utf8(name.into()), 0).unwrap();
+        }
+        assert_eq!(cardinality(&names), 2.0);
+        assert!(names.update_value(&Value::Bool(true), 0).is_err());
+        // A non-finite sample is refused, as by every numeric kernel.
+        assert!(names.update_value(&Value::Float64(f64::NAN), 0).is_err());
+        assert!(names
+            .update_value(&Value::Float64(f64::INFINITY), 0)
+            .is_err());
     }
 }

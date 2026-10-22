@@ -214,13 +214,7 @@ impl Operator {
     ) -> Result<Self, Error> {
         crate::values::validate_family(&family)?;
         validate_groups(&input, &groups)?;
-        let dtype = plain(&input, value)?.0;
-        let typed_frequency = matches!(&family, SummaryFamilyType::Sketch(kind, _)
-            if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::UnivMon);
-        if *dtype != DataType::Float64
-            && !(typed_frequency
-                && matches!(dtype, DataType::Utf8 | DataType::Int64 | DataType::Bool))
-        {
+        if !accepts_update_type(&family, plain(&input, value)?.0) {
             return Err(invalid("summary update type is unsupported by its family"));
         }
         if let Some(time) = time {
@@ -333,6 +327,52 @@ impl Operator {
         })
     }
 }
+/// Whether a per-group build of `family` takes values of `dtype`: every
+/// family takes Float64; an exact count any type (it counts values); a
+/// sketch also takes Int64 (a numeric sketch as its exact Float64, a
+/// distinct count as an integer item); a distinct count (KMV, HLL) also
+/// takes Utf8, and UnivMon Utf8 and Bool.
+fn accepts_update_type(family: &SummaryFamilyType, dtype: &DataType) -> bool {
+    use planner_types::ir::schema::{ExactKind, SketchAlgorithm as A};
+    let SummaryFamilyType::Sketch(kind, _) = family else {
+        return *dtype == DataType::Float64
+            || matches!(
+                family,
+                SummaryFamilyType::ExactAggregate(ExactKind::Count, _)
+            );
+    };
+    match dtype {
+        DataType::Float64 | DataType::Int64 => true,
+        DataType::Utf8 => matches!(kind.algorithm(), A::Kmv | A::Hll | A::UnivMon),
+        DataType::Bool => kind.algorithm() == &A::UnivMon,
+        _ => false,
+    }
+}
+
+impl Operator {
+    /// This distinct-count evaluation ([`Self::evaluation`] of
+    /// `Cardinality`) with an Int64 value, its estimate rounded to the
+    /// nearest whole number: SQL `COUNT(DISTINCT)` is Int64, while a PromQL
+    /// sample value stays Float64.
+    pub fn with_whole_distinct_count(mut self) -> Result<Self, Error> {
+        let Kind::Evaluation {
+            state,
+            query:
+                SummaryEvaluation::Sketch(planner_types::ir::schema::SketchStatistic::Cardinality),
+        } = &self.kind
+        else {
+            return Err(invalid(
+                "a whole distinct count requires a cardinality evaluation",
+            ));
+        };
+        let mut fields = self.output.fields.clone();
+        let nullable = fields[*state].nullable;
+        fields[*state] = result_field("value", DataType::Int64, nullable);
+        self.output = schema(fields);
+        Ok(self)
+    }
+}
+
 /// The Planner reads a Count-Min bare count only for count intents, whose
 /// output is Int64 and whose updates have unit weight; execution rejects a
 /// non-integral total rather than rounding it.
@@ -508,6 +548,10 @@ async fn build_per_group_summary(
     output: &SchemaRef,
     context: &RunContext,
 ) -> Result<Batch, Error> {
+    // `now()` in the filter is this run's evaluation time.
+    let filter = build
+        .filter
+        .map(|filter| filter.at_evaluation_time(context));
     let mut table = GroupTable::new(build.groups.to_vec());
     let mut updater = StateColumnUpdater::new(build.family)?;
     let mut work = Cooperative::new(context);
@@ -527,7 +571,7 @@ async fn build_per_group_summary(
             let groups = table.group_ids(&batch)?;
             updater.ensure_groups(table.len())?;
             workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
-            let mask = filter_mask(build.filter, &batch)?;
+            let mask = filter_mask(filter.as_deref(), &batch)?;
             let times = build.time.map(|time| {
                 batch
                     .column(time)
@@ -546,8 +590,18 @@ async fn build_per_group_summary(
                     }
                     updater.update(group, values.value(row), time_at(row))?;
                 }
+            } else if let Some(values) = values.as_any().downcast_ref::<arrow::array::Int64Array>()
+            {
+                // Int64 ids or numbers, without decoding the column.
+                for (row, &group) in groups.iter().enumerate() {
+                    if !kept(&mask, row) || values.is_null(row) {
+                        continue;
+                    }
+                    updater.update_value(group, &Value::Int64(values.value(row)), time_at(row))?;
+                }
             } else {
-                // A frequency sketch over item values (UnivMon).
+                // Typed values: Utf8 items of a distinct count (KMV, HLL)
+                // or of UnivMon, and Bool items of UnivMon.
                 let SummaryFamilyType::Plain(dtype) = &input_schema.fields[build.value].dtype
                 else {
                     return Err(invalid("summary values are plain"));
@@ -632,6 +686,10 @@ async fn build_per_group_keyed_summary(
     output: &SchemaRef,
     context: &RunContext,
 ) -> Result<Batch, Error> {
+    // `now()` in the filter is this run's evaluation time.
+    let filter = build
+        .filter
+        .map(|filter| filter.at_evaluation_time(context));
     let mut table = GroupTable::new(build.groups.to_vec());
     let mut updater = StateColumnUpdater::new(build.family)?;
     let mut work = Cooperative::new(context);
@@ -643,7 +701,7 @@ async fn build_per_group_keyed_summary(
             let groups = table.group_ids(&batch)?;
             updater.ensure_groups(table.len())?;
             workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
-            let mask = filter_mask(build.filter, &batch)?;
+            let mask = filter_mask(filter.as_deref(), &batch)?;
             let weights = RowWeights::of(&batch, build.row_weight);
             let columns = decoded_columns(&batch, build.items);
             for (row, &group) in groups.iter().enumerate() {
@@ -690,6 +748,10 @@ async fn build_all_groups_summary(
     output: &SchemaRef,
     context: &RunContext,
 ) -> Result<Batch, Error> {
+    // `now()` in the filter is this run's evaluation time.
+    let filter = build
+        .filter
+        .map(|filter| filter.at_evaluation_time(context));
     use crate::summary_kernels::HydraCmsGroup;
     use crate::AggregateCore;
     let mut grid = crate::factory::create_hydra_cms(build.family).map_err(Error::Invalid)?;
@@ -714,7 +776,7 @@ async fn build_all_groups_summary(
                 names.push(name);
             }
             workspace.set_bytes(grid_bytes + table.memory_bytes() + name_bytes)?;
-            let mask = filter_mask(build.filter, &batch)?;
+            let mask = filter_mask(filter.as_deref(), &batch)?;
             let weights = RowWeights::of(&batch, build.row_weight);
             let items = decoded_columns(&batch, &[build.item]).remove(0);
             for (row, &group) in groups.iter().enumerate() {
@@ -1097,7 +1159,18 @@ fn evaluate_states(
                     let value = summary
                         .estimate(query)
                         .map_err(|e| Error::Operator(e.to_string()))?;
-                    if integral {
+                    if integral && *query == planner_types::ir::schema::SketchStatistic::Cardinality
+                    {
+                        // A distinct count is a whole number: the estimate
+                        // rounded to the nearest one.
+                        let rounded = value.round();
+                        if !(0.0..9.223_372_036_854_775e18).contains(&rounded) {
+                            return Err(Error::Operator(format!(
+                                "distinct count estimate {value} is not an Int64"
+                            )));
+                        }
+                        Some(Value::Int64(rounded as i64))
+                    } else if integral {
                         // Below 2^53 an f64 sum of unit updates is exact.
                         if value.fract() != 0.0 || !(0.0..9.007_199_254_740_992e15).contains(&value)
                         {

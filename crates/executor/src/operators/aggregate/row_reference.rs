@@ -133,7 +133,7 @@ async fn reduce_one(
             }
             return Ok(Value::Float64(result));
         }
-        Reduction::Quantile { column, q } => {
+        Reduction::Quantile { column, .. } | Reduction::Percentile { column, .. } => {
             let mut values = Vec::with_capacity(rows.len());
             for row in rows {
                 work.checkpoint().await?;
@@ -143,7 +143,13 @@ async fn reduce_one(
                     _ => return Err(invalid("floating quantile value required")),
                 }
             }
-            return Ok(Value::Float64(quantile(*q, values)));
+            return Ok(match measure {
+                Reduction::Percentile { q, .. } => {
+                    super::percentile_cont(*q, values).map_or(Value::Null, Value::Float64)
+                }
+                Reduction::Quantile { q, .. } => Value::Float64(quantile(*q, values)),
+                _ => unreachable!(),
+            });
         }
     };
     let values = rows

@@ -2,7 +2,7 @@
 //! numbers each row's group, and each measure keeps one running state per
 //! group, updated in row order. The result equals reducing each group's
 //! rows in input order (the row-at-a-time operator).
-use super::{kahan_inc, quantile, Reduction};
+use super::{kahan_inc, percentile_cont, quantile, Reduction};
 use crate::operators::common::{row_chunks, Workspace};
 use crate::operators::group_table::GroupTable;
 use crate::runtime::{Cooperative, Input, RunContext};
@@ -97,8 +97,8 @@ enum MeasureStates {
         counts: HashMap<(u32, u32), u64>,
         totals: Vec<u64>,
     },
-    /// The non-NULL values per group.
-    Quantile(Vec<Vec<f64>>),
+    /// The non-NULL values per group (a quantile or percentile).
+    CollectedValues(Vec<Vec<f64>>),
 }
 
 impl MeasureStates {
@@ -135,7 +135,9 @@ impl MeasureStates {
                     totals: Vec::new(),
                 }
             }
-            Reduction::Quantile { .. } => Self::Quantile(Vec::new()),
+            Reduction::Quantile { .. } | Reduction::Percentile { .. } => {
+                Self::CollectedValues(Vec::new())
+            }
         })
     }
 
@@ -156,7 +158,7 @@ impl MeasureStates {
             Self::ValueExtremum(v) => grow(v, groups, None),
             Self::Cardinality { distinct, .. } => grow(distinct, groups, 0),
             Self::Frequency { totals, .. } => grow(totals, groups, 0),
-            Self::Quantile(v) => grow(v, groups, Vec::new()),
+            Self::CollectedValues(v) => grow(v, groups, Vec::new()),
         }
     }
 }
@@ -345,7 +347,10 @@ fn update_measure(
                 totals[group as usize] += 1;
             }
         }
-        (MeasureStates::Quantile(values), Reduction::Quantile { column, .. }) => {
+        (
+            MeasureStates::CollectedValues(values),
+            Reduction::Quantile { column, .. } | Reduction::Percentile { column, .. },
+        ) => {
             let floats = floats(*column)?;
             for (row, &group) in groups.iter().enumerate() {
                 if selected(row) && floats.is_valid(row) {
@@ -458,15 +463,20 @@ fn finish_measure(
                 })
                 .collect()
         }
-        MeasureStates::Quantile(mut values) => {
-            let Reduction::Quantile { q, .. } = measure else {
-                unreachable!()
-            };
-            order
+        MeasureStates::CollectedValues(mut values) => match measure {
+            Reduction::Quantile { q, .. } => order
                 .iter()
                 .map(|&g| Value::Float64(quantile(*q, std::mem::take(&mut values[g as usize]))))
-                .collect()
-        }
+                .collect(),
+            Reduction::Percentile { q, .. } => order
+                .iter()
+                .map(|&g| {
+                    percentile_cont(*q, std::mem::take(&mut values[g as usize]))
+                        .map_or(Value::Null, Value::Float64)
+                })
+                .collect(),
+            _ => unreachable!("quantile states answer a quantile or percentile"),
+        },
     };
     arrow_columns::encode(
         dtype,
@@ -487,6 +497,15 @@ pub(super) async fn aggregate(
     context: &RunContext,
 ) -> Result<Batch, Error> {
     let promql = input_schema.has_promql_series_identity();
+    // `now()` in a filter is this run's evaluation time.
+    let filters: Vec<Option<_>> = filters
+        .iter()
+        .map(|filter| {
+            filter
+                .as_ref()
+                .map(|filter| filter.at_evaluation_time(context))
+        })
+        .collect();
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     let mut workspace_bytes = 0usize;

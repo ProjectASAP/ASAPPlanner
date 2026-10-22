@@ -49,6 +49,31 @@ macro_rules! impl_clone_accumulator_methods {
     };
 }
 
+/// One row value as a distinct-count item (KMV, HLL), hashed as
+/// `asap_sketchlib` hashes its input: a finite Float64 is a sample (hashed
+/// by its bits, `-0.0` as `0.0`), an Int64 an integer item, a Utf8 a string
+/// item. NULL is skipped; a non-finite Float64 is refused.
+pub(crate) enum DistinctItem<'a> {
+    Sample(f64),
+    Item(asap_sketchlib::DataInput<'a>),
+    Skipped,
+}
+
+pub(crate) fn distinct_item(value: &crate::values::Value) -> Result<DistinctItem<'_>, String> {
+    use crate::values::Value;
+    Ok(match value {
+        Value::Null => DistinctItem::Skipped,
+        // A sample must be finite, as every numeric kernel requires.
+        Value::Float64(value) => {
+            finite_input(*value)?;
+            DistinctItem::Sample(*value)
+        }
+        Value::Int64(value) => DistinctItem::Item(asap_sketchlib::DataInput::I64(*value)),
+        Value::Utf8(value) => DistinctItem::Item(asap_sketchlib::DataInput::Str(value)),
+        _ => return Err("a distinct count takes Float64, Int64 or Utf8 values".into()),
+    })
+}
+
 /// The default input rule of a numeric kernel: the value must be finite.
 pub(crate) fn finite_input(value: f64) -> Result<(), String> {
     if value.is_finite() {
@@ -69,18 +94,24 @@ pub trait AccumulatorUpdater: Send {
         finite_input(value)
     }
 
-    /// Update from one typed row value. Numeric kernels keep their Float64
-    /// contract; a frequency kernel may also take non-numeric identities.
+    /// Update from one typed row value. Numeric kernels take a Float64, or
+    /// an Int64 within ±2^53 as its exact Float64; a distinct-count or
+    /// frequency kernel may also take non-numeric identities.
     fn update_value(
         &mut self,
         value: &crate::values::Value,
         timestamp_ms: i64,
     ) -> Result<(), String> {
-        let crate::values::Value::Float64(value) = value else {
-            return Err("summary update requires Float64".into());
+        let value = match value {
+            crate::values::Value::Float64(value) => *value,
+            crate::values::Value::Int64(value) if value.unsigned_abs() <= 1 << 53 => *value as f64,
+            crate::values::Value::Int64(_) => {
+                return Err("an Int64 summary update beyond 2^53 has no exact Float64".into())
+            }
+            _ => return Err("summary update requires Float64 or Int64".into()),
         };
-        self.validate_single_input(*value)?;
-        self.update_single(*value, timestamp_ms)
+        self.validate_single_input(value)?;
+        self.update_single(value, timestamp_ms)
     }
 
     /// Feed a single (value, timestamp_ms) pair — for SingleSubpopulation
@@ -596,6 +627,16 @@ struct HllUpdater {
 }
 
 impl AccumulatorUpdater for HllUpdater {
+    fn update_value(&mut self, value: &crate::values::Value, _: i64) -> Result<(), String> {
+        match distinct_item(value)? {
+            DistinctItem::Sample(value) => self.update_single(value, 0),
+            DistinctItem::Item(item) => {
+                self.acc.update_item(&item);
+                Ok(())
+            }
+            DistinctItem::Skipped => Ok(()),
+        }
+    }
     fn is_keyed(&self) -> bool {
         false
     }
@@ -862,5 +903,45 @@ mod tests {
             updater.update_single(value, 0).unwrap();
         }
         assert_eq!(updater.memory_usage_bytes(), empty + 128 * 8);
+    }
+
+    /// A numeric sketch takes an Int64 as its exact Float64, and refuses
+    /// one beyond 2^53, which no Float64 holds exactly.
+    #[test]
+    fn a_numeric_sketch_takes_exact_int64_values() {
+        use crate::values::Value;
+        let mut updater = KllAccumulatorUpdater::new(200);
+        for value in 1..=5i64 {
+            updater.update_value(&Value::Int64(value), 0).unwrap();
+        }
+        assert!(updater
+            .update_value(&Value::Int64((1 << 53) + 1), 0)
+            .is_err());
+        assert!(updater.update_value(&Value::Utf8("x".into()), 0).is_err());
+        let median = updater
+            .take_accumulator()
+            .estimate(&planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 })
+            .unwrap();
+        assert_eq!(median, 3.0);
+    }
+
+    // An HLL build takes Int64 ids and Utf8 names as items.
+    #[test]
+    fn an_hll_takes_int64_and_utf8_items() {
+        use crate::values::Value;
+        let mut updater = HllUpdater {
+            acc: HllSketchAccumulator::new(12).unwrap(),
+        };
+        for id in 0..100i64 {
+            updater.update_value(&Value::Int64(id % 50), 0).unwrap();
+            updater
+                .update_value(&Value::Utf8(format!("n{}", id % 10).into()), 0)
+                .unwrap();
+        }
+        let estimate = updater
+            .take_accumulator()
+            .estimate(&planner_types::ir::schema::SketchStatistic::Cardinality)
+            .unwrap();
+        assert_eq!(estimate, 60.0);
     }
 }

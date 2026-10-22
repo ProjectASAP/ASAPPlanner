@@ -57,6 +57,19 @@ impl Operator {
                     }
                     (DataType::Float64, false)
                 }
+                Reduction::Percentile { column, q } => {
+                    if plain(&input, *column)?.0 != &DataType::Float64 || !(0.0..=1.0).contains(q) {
+                        return Err(invalid(
+                            "a percentile requires Float64 input and a fraction in [0, 1]",
+                        ));
+                    }
+                    // NULL for a group with no value, as SQL `SUM`: a global
+                    // one over no row, or a group of NULLs.
+                    (
+                        DataType::Float64,
+                        groups.is_empty() || plain(&input, *column)?.1,
+                    )
+                }
                 Reduction::Min(i) | Reduction::Max(i) => {
                     let (t, nullable) = plain(&input, *i)?;
                     if !ordered(t) {
@@ -112,7 +125,11 @@ impl Operator {
             }
             if matches!(
                 measures[index],
-                Reduction::Sum(_) | Reduction::Avg(_) | Reduction::Min(_) | Reduction::Max(_)
+                Reduction::Sum(_)
+                    | Reduction::Avg(_)
+                    | Reduction::Min(_)
+                    | Reduction::Max(_)
+                    | Reduction::Percentile { .. }
             ) {
                 output.fields[groups.len() + index].nullable = true;
             }
@@ -212,6 +229,14 @@ pub enum Reduction {
         #[serde(with = "planner_types::serde_f64")]
         q: f64,
     },
+    /// SQL `percentile_cont` (the exact form of `approx_percentile_cont`):
+    /// NULLs ignored, NaN ordered after every number, linear interpolation
+    /// between closest ranks, NULL for a group with no value.
+    Percentile {
+        column: usize,
+        /// The fraction, in [0, 1].
+        q: f64,
+    },
 }
 pub(super) fn execute<'a>(
     operator: &'a Operator,
@@ -297,6 +322,28 @@ pub(super) fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
         (false, true) => std::cmp::Ordering::Greater,
         _ => a.total_cmp(b),
     });
+    interpolated(q, &values)
+}
+
+/// SQL `percentile_cont` of a group's non-NULL `values` at `q` in [0, 1]:
+/// NaN ordered after every number (DataFusion's order), `None` when empty.
+pub(super) fn percentile_cont(q: f64, mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => a.total_cmp(b),
+    });
+    Some(interpolated(q, &values))
+}
+
+/// Linear interpolation between the closest ranks of nonempty, sorted
+/// `values` at rank `q * (n - 1)`, as Prometheus `quantile` and SQL
+/// `percentile_cont` both define it.
+fn interpolated(q: f64, values: &[f64]) -> f64 {
     let rank = q * (values.len() - 1) as f64;
     let low = rank.floor() as usize;
     let high = (low + 1).min(values.len() - 1);
@@ -373,5 +420,23 @@ mod tests {
         assert_eq!(super::quantile(1.1, vec![1.]), f64::INFINITY);
         assert_eq!(super::quantile(1., vec![2., f64::NAN, 1.]), 2.);
         assert!(super::quantile(f64::NAN, vec![1., 2.]).is_nan());
+    }
+
+    // SQL `percentile_cont`: NaN after every number, interpolation between
+    // closest ranks, no value for an empty group.
+    #[test]
+    fn percentile_cont_orders_nan_last() {
+        assert_eq!(super::percentile_cont(0.5, vec![]), None);
+        assert_eq!(super::percentile_cont(0.5, vec![3., 1., 2.]), Some(2.));
+        assert_eq!(super::percentile_cont(0.25, vec![4., 1.]), Some(1.75));
+        // [1, 2, NaN]: rank 0.5 is between 1 and 2; the largest is NaN.
+        assert_eq!(
+            super::percentile_cont(0.25, vec![f64::NAN, 2., 1.]),
+            Some(1.5)
+        );
+        assert!(super::percentile_cont(1., vec![f64::NAN, 2., 1.])
+            .unwrap()
+            .is_nan());
+        assert_eq!(super::quantile(0.5, vec![f64::NAN, 2., 1.]), 1.);
     }
 }

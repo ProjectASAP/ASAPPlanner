@@ -271,8 +271,9 @@ impl StateColumnUpdater {
         self.update_value(group, &Value::Float64(value), timestamp_ms)
     }
 
-    /// [`Self::update`] for a typed value: a value sketch over item values
-    /// (UnivMon) also takes Utf8, Int64 and Bool values.
+    /// [`Self::update`] for a typed value: a sketch also takes Int64 values,
+    /// a distinct count (KMV, HLL) Utf8 values, and UnivMon Utf8 and Bool
+    /// values.
     pub(crate) fn update_value(
         &mut self,
         group: u32,
@@ -289,12 +290,17 @@ impl StateColumnUpdater {
         }
         match &mut self.states {
             GroupStates::Exact { states, .. } => {
-                // The exact kernel's input contract (`AccumulatorUpdater`).
-                let Value::Float64(value) = value else {
-                    return Err(operator_error("summary update requires Float64"));
-                };
-                super::factory::finite_input(*value).map_err(operator_error)?;
-                states[index].update(*value, timestamp_ms);
+                // The exact kernel's input contract (`AccumulatorUpdater`); a
+                // count counts every non-NULL value of any type, NaN included
+                // (SQL `COUNT(col)`).
+                match (&states[index], value) {
+                    (ScalarState::Count(_), _) => states[index].update(0.0, timestamp_ms),
+                    (_, Value::Float64(value)) => {
+                        super::factory::finite_input(*value).map_err(operator_error)?;
+                        states[index].update(*value, timestamp_ms);
+                    }
+                    _ => return Err(operator_error("summary update requires Float64")),
+                }
             }
             GroupStates::Sketches(states) => {
                 let state = &mut states[index];

@@ -14,7 +14,7 @@ pub(crate) type ScalarExpr = PlannedExpr<()>;
 
 /// Planner typing for a reference-free expression: the Planner types a
 /// planned expression, which this one is with its (absent) references.
-trait LocalTyping {
+pub(super) trait LocalTyping {
     fn scalar_type(
         &self,
         schema: &planner_types::ir::schema::Schema,
@@ -38,12 +38,18 @@ fn planned(expression: &ScalarExpr) -> PlannedExpr {
 }
 use std::{cmp::Ordering, sync::Arc};
 
+/// `expr`'s value over `row`. `evaluation_time_ms` is SQL `now()`: the
+/// query's evaluation time, `None` outside a query run.
 pub(super) fn evaluate(
     expr: &ScalarExpr,
     row: &[Value],
     schema: &planner_types::ir::schema::Schema,
+    evaluation_time_ms: Option<i64>,
 ) -> Result<Value, Error> {
     match expr {
+        ScalarExpr::CurrentTimestamp => evaluation_time_ms.map(Value::Timestamp).ok_or_else(|| {
+            Error::Invalid("now() has a value only in a query run, at its evaluation time".into())
+        }),
         ScalarExpr::Column(index) => row.get(*index).cloned().ok_or(Error::Invalid(format!(
             "column {index} outside row width {}",
             row.len()
@@ -65,7 +71,7 @@ pub(super) fn evaluate(
             ScalarValue::Null => Value::Null,
         }),
         ScalarExpr::Cast { expr, to, .. } => {
-            let value = evaluate(expr, row, schema)?;
+            let value = evaluate(expr, row, schema, evaluation_time_ms)?;
             match (value, to) {
                 (Value::Null, _) => Ok(Value::Null),
                 (Value::Int64(value), DataType::Float64) => Ok(Value::Float64(value as f64)),
@@ -81,7 +87,8 @@ pub(super) fn evaluate(
                 _ => Err(Error::Invalid("unsupported cast".into())),
             }
         }
-        ScalarExpr::Negative { expr, .. } => match evaluate(expr, row, schema)? {
+        ScalarExpr::Negative { expr, .. } => match evaluate(expr, row, schema, evaluation_time_ms)?
+        {
             Value::Float64(v) => Ok(Value::Float64(-v)),
             Value::Int64(v) => v
                 .checked_neg()
@@ -93,16 +100,16 @@ pub(super) fn evaluate(
         ScalarExpr::Compare {
             left, op, right, ..
         } => {
-            let left = evaluate(left, row, schema)?;
-            let right = evaluate(right, row, schema)?;
+            let left = evaluate(left, row, schema, evaluation_time_ms)?;
+            let right = evaluate(right, row, schema, evaluation_time_ms)?;
             compare(op, left, right)
         }
         ScalarExpr::Arithmetic {
             op, left, right, ..
         } => arithmetic(
             op,
-            evaluate(left, row, schema)?,
-            evaluate(right, row, schema)?,
+            evaluate(left, row, schema, evaluation_time_ms)?,
+            evaluate(right, row, schema, evaluation_time_ms)?,
         ),
         ScalarExpr::Case {
             operand: None,
@@ -110,19 +117,22 @@ pub(super) fn evaluate(
             else_expr,
         } => {
             for (condition, value) in branches {
-                if matches!(evaluate(condition, row, schema)?, Value::Bool(true)) {
-                    return evaluate(value, row, schema);
+                if matches!(
+                    evaluate(condition, row, schema, evaluation_time_ms)?,
+                    Value::Bool(true)
+                ) {
+                    return evaluate(value, row, schema, evaluation_time_ms);
                 }
             }
-            else_expr
-                .as_ref()
-                .map_or(Ok(Value::Null), |e| evaluate(e, row, schema))
+            else_expr.as_ref().map_or(Ok(Value::Null), |e| {
+                evaluate(e, row, schema, evaluation_time_ms)
+            })
         }
         ScalarExpr::BoolAnd(parts) | ScalarExpr::BoolOr(parts) => {
             let and = matches!(expr, ScalarExpr::BoolAnd(_));
             let mut null = false;
             for part in parts {
-                match evaluate(part, row, schema)? {
+                match evaluate(part, row, schema, evaluation_time_ms)? {
                     Value::Bool(value) if value != and => return Ok(Value::Bool(value)),
                     Value::Bool(_) => {}
                     Value::Null => null = true,
@@ -131,17 +141,17 @@ pub(super) fn evaluate(
             }
             Ok(if null { Value::Null } else { Value::Bool(and) })
         }
-        ScalarExpr::Not(value) => match evaluate(value, row, schema)? {
+        ScalarExpr::Not(value) => match evaluate(value, row, schema, evaluation_time_ms)? {
             Value::Bool(value) => Ok(Value::Bool(!value)),
             Value::Null => Ok(Value::Null),
             _ => Err(Error::Invalid("boolean predicate required".into())),
         },
         ScalarExpr::IsNull(value) => Ok(Value::Bool(matches!(
-            evaluate(value, row, schema)?,
+            evaluate(value, row, schema, evaluation_time_ms)?,
             Value::Null
         ))),
         ScalarExpr::IsNotNull(value) => Ok(Value::Bool(!matches!(
-            evaluate(value, row, schema)?,
+            evaluate(value, row, schema, evaluation_time_ms)?,
             Value::Null
         ))),
         ScalarExpr::FunctionCall { name, args } => {
@@ -149,15 +159,18 @@ pub(super) fn evaluate(
             if planner_types::ir::scalar::scalar_type_rules::promql_function_arity(name).is_some() {
                 let values = args
                     .iter()
-                    .map(|arg| match evaluate(arg, row, schema)? {
-                        Value::Float64(v) => Ok(v),
-                        _ => Err(Error::Invalid("PromQL function requires floats".into())),
-                    })
+                    .map(
+                        |arg| match evaluate(arg, row, schema, evaluation_time_ms)? {
+                            Value::Float64(v) => Ok(v),
+                            _ => Err(Error::Invalid("PromQL function requires floats".into())),
+                        },
+                    )
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Value::Float64(promql_function(name, &values)?));
             }
             if name == "promql_drop_metric_name" {
-                let Value::Utf8(encoded) = evaluate(&args[0], row, schema)? else {
+                let Value::Utf8(encoded) = evaluate(&args[0], row, schema, evaluation_time_ms)?
+                else {
                     return Err(Error::Invalid("series identity must be Utf8".into()));
                 };
                 let mut labels: std::collections::BTreeMap<String, String> =
@@ -189,7 +202,8 @@ pub(super) fn evaluate(
                     _ => None,
                 }
                 .ok_or_else(|| Error::Invalid("struct field selector".into()))?;
-                let Value::Struct(values) = evaluate(&args[0], row, schema)? else {
+                let Value::Struct(values) = evaluate(&args[0], row, schema, evaluation_time_ms)?
+                else {
                     return Err(Error::Invalid("struct field input".into()));
                 };
                 return values
@@ -206,10 +220,11 @@ pub(super) fn evaluate(
                     .map_err(|error| Error::Invalid(error.to_string()))?
                     .0
                 {
-                    let Value::List(values) = evaluate(&args[0], row, schema)? else {
+                    let Value::List(values) = evaluate(&args[0], row, schema, evaluation_time_ms)?
+                    else {
                         return Err(Error::Invalid("array access input".into()));
                     };
-                    let index = match evaluate(&args[1], row, schema)? {
+                    let index = match evaluate(&args[1], row, schema, evaluation_time_ms)? {
                         Value::Null => return Ok(Value::Null),
                         Value::Int64(index) => index,
                         _ => return Err(Error::Invalid("array access index".into())),
@@ -239,7 +254,7 @@ pub(super) fn evaluate(
                 .map_err(|error| Error::Invalid(error.to_string()))?;
             let values = args
                 .iter()
-                .map(|arg| evaluate(arg, row, schema))
+                .map(|arg| evaluate(arg, row, schema, evaluation_time_ms))
                 .collect::<Result<Vec<_>, _>>()?;
             match function {
                 MapScalarFunction::Construct => {
@@ -368,12 +383,63 @@ fn compare(op: &CompareOpKind, left: Value, right: Value) -> Result<Value, Error
 }
 
 fn arithmetic(op: &ArithmeticOpKind, left: Value, right: Value) -> Result<Value, Error> {
+    match (op, &left, &right) {
+        (ArithmeticOpKind::Add | ArithmeticOpKind::Sub, Value::Timestamp(at_ms), interval)
+            if matches!(interval, Value::Interval { .. }) =>
+        {
+            return shifted_timestamp(*at_ms, interval, *op == ArithmeticOpKind::Sub)
+        }
+        (ArithmeticOpKind::Add, interval @ Value::Interval { .. }, Value::Timestamp(at_ms)) => {
+            return shifted_timestamp(*at_ms, interval, false)
+        }
+        _ => {}
+    }
     let (left, right) = match (left, right) {
         (Value::Int64(a), Value::Float64(b)) => (Value::Float64(a as f64), Value::Float64(b)),
         (Value::Float64(a), Value::Int64(b)) => (Value::Float64(a), Value::Float64(b as f64)),
         pair => pair,
     };
     super::numeric(op, left, right)
+}
+
+/// The timestamp `at_ms` (milliseconds since the epoch) plus `interval`, or
+/// minus it when `subtract`: its months by the calendar (UTC), then its
+/// days and nanoseconds as fixed durations. Bad input when the interval has
+/// a fraction of a millisecond or the result leaves the timestamp range.
+fn shifted_timestamp(at_ms: i64, interval: &Value, subtract: bool) -> Result<Value, Error> {
+    let Value::Interval {
+        months,
+        days,
+        nanos,
+    } = *interval
+    else {
+        unreachable!("an interval operand")
+    };
+    let out_of_range = || Error::Invalid("timestamp arithmetic leaves the timestamp range".into());
+    if nanos % 1_000_000 != 0 {
+        return Err(Error::Invalid(
+            "an interval with a fraction of a millisecond has no millisecond timestamp".into(),
+        ));
+    }
+    let sign: i64 = if subtract { -1 } else { 1 };
+    let mut at = chrono::DateTime::from_timestamp_millis(at_ms).ok_or_else(out_of_range)?;
+    let months = i64::from(months) * sign;
+    let calendar_months = chrono::Months::new(months.unsigned_abs() as u32);
+    at = if months >= 0 {
+        at.checked_add_months(calendar_months)
+    } else {
+        at.checked_sub_months(calendar_months)
+    }
+    .ok_or_else(out_of_range)?;
+    let fixed_ms = i64::from(days)
+        .checked_mul(86_400_000)
+        .and_then(|days_ms| days_ms.checked_add(nanos / 1_000_000))
+        .and_then(|ms| ms.checked_mul(sign))
+        .ok_or_else(out_of_range)?;
+    at.timestamp_millis()
+        .checked_add(fixed_ms)
+        .map(Value::Timestamp)
+        .ok_or_else(out_of_range)
 }
 
 fn integer_float_cmp(integer: i64, float: f64) -> Option<Ordering> {
@@ -529,10 +595,36 @@ pub struct CompiledExpression {
     expression: ScalarExpr,
     schema: planner_types::ir::schema::Schema,
     output: (DataType, bool),
+    /// SQL `now()` in this run: the query's evaluation time
+    /// ([`Self::at_evaluation_time`]); `None` in a compiled plan and
+    /// outside a query run.
+    #[serde(skip)]
+    evaluation_time_ms: Option<i64>,
 }
 impl CompiledExpression {
     pub(crate) fn expression(&self) -> &ScalarExpr {
         &self.expression
+    }
+
+    pub(crate) fn evaluation_time_ms(&self) -> Option<i64> {
+        self.evaluation_time_ms
+    }
+
+    /// Whether this expression reads SQL `now()`.
+    pub(crate) fn reads_current_timestamp(&self) -> bool {
+        fn reads(expr: &ScalarExpr) -> bool {
+            matches!(expr, ScalarExpr::CurrentTimestamp) || expr.children().into_iter().any(reads)
+        }
+        reads(&self.expression)
+    }
+
+    /// This expression with `now()` the evaluation time of `context`'s
+    /// query run (no value outside one).
+    pub fn at_evaluation_time(&self, context: &crate::runtime::RunContext) -> Self {
+        Self {
+            evaluation_time_ms: context.evaluation_time_ms(),
+            ..self.clone()
+        }
     }
 
     /// `expression` compiled over `input`. Bad input when it reads another
@@ -563,6 +655,7 @@ impl CompiledExpression {
             expression: expression.clone(),
             schema,
             output,
+            evaluation_time_ms: None,
         })
     }
     pub(crate) fn dtype(&self) -> (DataType, bool) {
@@ -603,7 +696,7 @@ impl CompiledExpression {
                 "expression input differs from its bound schema".into(),
             ));
         }
-        evaluate(&self.expression, row, &self.schema)
+        evaluate(&self.expression, row, &self.schema, self.evaluation_time_ms)
     }
 }
 fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Result<(), Error> {
@@ -611,7 +704,7 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
     expr.scalar_type(schema)
         .map_err(|e| Error::Invalid(e.to_string()))?;
     match expr {
-        ScalarExpr::Column(_) | ScalarExpr::Literal(_) => Ok(()),
+        ScalarExpr::Column(_) | ScalarExpr::Literal(_) | ScalarExpr::CurrentTimestamp => Ok(()),
         ScalarExpr::Cast { expr, to, .. } => {
             let source = expr
                 .scalar_type(schema)
@@ -626,7 +719,31 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
             validate(expr, schema)
         }
         ScalarExpr::Negative { expr, .. } => validate(expr, schema),
-        ScalarExpr::Arithmetic { left, right, .. } => {
+        ScalarExpr::Arithmetic {
+            left, right, op, ..
+        } => {
+            let operand_type = |value: &ScalarExpr| {
+                value
+                    .scalar_type(schema)
+                    .map(|(dtype, _)| dtype)
+                    .map_err(|e| Error::Invalid(e.to_string()))
+            };
+            // A timestamp shifted by an interval.
+            if matches!(
+                (op, operand_type(left)?, operand_type(right)?),
+                (
+                    ArithmeticOpKind::Add | ArithmeticOpKind::Sub,
+                    DataType::Timestamp,
+                    DataType::Interval
+                ) | (
+                    ArithmeticOpKind::Add,
+                    DataType::Interval,
+                    DataType::Timestamp
+                )
+            ) {
+                validate(left, schema)?;
+                return validate(right, schema);
+            }
             for value in [left, right] {
                 validate(value, schema)?;
                 if !matches!(
@@ -782,5 +899,71 @@ mod tests {
             Some(Ordering::Greater)
         );
         assert_eq!(integer_float_cmp(0, f64::NAN), None);
+    }
+
+    fn interval(months: i32, days: i32, nanos: i64) -> Value {
+        Value::Interval {
+            months,
+            days,
+            nanos,
+        }
+    }
+
+    fn at(text: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    // An interval's months move by the calendar, then its days and
+    // nanoseconds as fixed durations; a fraction of a millisecond has no
+    // millisecond timestamp.
+    #[test]
+    fn a_timestamp_shifts_by_an_interval() {
+        let shifted = |from: &str, by: Value, subtract: bool| match shifted_timestamp(
+            at(from),
+            &by,
+            subtract,
+        ) {
+            Ok(Value::Timestamp(ms)) => ms,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            shifted("2026-01-31T10:00:00Z", interval(1, 0, 0), false),
+            at("2026-02-28T10:00:00Z")
+        );
+        assert_eq!(
+            shifted(
+                "2026-03-01T00:00:00Z",
+                interval(0, 1, 5 * 60 * 1_000_000_000),
+                true
+            ),
+            at("2026-02-27T23:55:00Z")
+        );
+        assert!(shifted_timestamp(0, &interval(0, 0, 1), false).is_err());
+        assert!(shifted_timestamp(i64::MAX, &interval(0, 1, 0), false).is_err());
+    }
+
+    // `now()` is the evaluation time the expression is bound to, and has no
+    // value without one.
+    #[test]
+    fn now_reads_the_evaluation_time() {
+        let schema = planner_types::ir::schema::Schema::new(vec![]);
+        let now_minus_a_second = ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Sub,
+            left: Box::new(ScalarExpr::CurrentTimestamp),
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Interval {
+                months: 0,
+                days: 0,
+                nanos: 1_000_000_000,
+            })),
+            semantics: planner_types::ir::scalar::ExprSemantics::Sql,
+        };
+        validate(&now_minus_a_second, &schema).unwrap();
+        assert!(matches!(
+            evaluate(&now_minus_a_second, &[], &schema, Some(5_000)),
+            Ok(Value::Timestamp(4_000))
+        ));
+        assert!(evaluate(&now_minus_a_second, &[], &schema, None).is_err());
     }
 }

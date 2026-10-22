@@ -34,29 +34,35 @@ pub(super) fn execute<'a>(
     match &operator.kind {
         // One column per expression per batch. A column reference shares the
         // input column (and its states) without copying.
-        Kind::Project(expressions) => Ok(input
-            .map(move |batch| {
-                if context.is_cancelled() {
-                    return Err(Error::Cancelled);
-                }
-                let batch = batch?;
-                let mut arrays = Vec::with_capacity(expressions.len());
-                let mut states = Vec::with_capacity(expressions.len());
-                for (expression, field) in expressions.iter().zip(&output.fields) {
-                    if let Expression::Column(column) = expression {
-                        arrays.push(batch.column(*column).clone());
-                        states.push(batch.state_column(*column).cloned());
-                        continue;
+        Kind::Project(expressions) => {
+            let expressions: Vec<_> = expressions
+                .iter()
+                .map(|expression| expression.at_evaluation_time(&context))
+                .collect();
+            Ok(input
+                .map(move |batch| {
+                    if context.is_cancelled() {
+                        return Err(Error::Cancelled);
                     }
-                    let SummaryFamilyType::Plain(dtype) = &field.dtype else {
-                        return Err(invalid("computed projection must be plain"));
-                    };
-                    arrays.push(expression.evaluate_batch(&batch, dtype)?);
-                    states.push(None);
-                }
-                Batch::from_parts(output.clone(), arrays, states, batch.num_rows())
-            })
-            .boxed_local()),
+                    let batch = batch?;
+                    let mut arrays = Vec::with_capacity(expressions.len());
+                    let mut states = Vec::with_capacity(expressions.len());
+                    for (expression, field) in expressions.iter().zip(&output.fields) {
+                        if let Expression::Column(column) = expression.as_ref() {
+                            arrays.push(batch.column(*column).clone());
+                            states.push(batch.state_column(*column).cloned());
+                            continue;
+                        }
+                        let SummaryFamilyType::Plain(dtype) = &field.dtype else {
+                            return Err(invalid("computed projection must be plain"));
+                        };
+                        arrays.push(expression.evaluate_batch(&batch, dtype)?);
+                        states.push(None);
+                    }
+                    Batch::from_parts(output.clone(), arrays, states, batch.num_rows())
+                })
+                .boxed_local())
+        }
         _ => unreachable!(),
     }
 }
