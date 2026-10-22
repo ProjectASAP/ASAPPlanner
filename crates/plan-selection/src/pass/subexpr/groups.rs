@@ -1029,8 +1029,10 @@ mod tests {
     /// For the random workloads of `joint_search_equivalence` (over one
     /// gauge and over two), every whole-workload Pass 1 choice composes,
     /// for each query, a plan that is a combination of the memo's per-group
-    /// candidates: the memo misses no Pass 1 candidate. Every candidate of
-    /// a group a parent reads outputs the group's schema.
+    /// candidates: the memo misses no Pass 1 candidate. Every target's
+    /// group has the target's own and fused candidates, also a target a
+    /// fused computation absorbs; every candidate of a group a parent reads
+    /// outputs the group's schema.
     #[test]
     fn every_composed_pass1_candidate_is_a_combination_of_group_candidates() {
         let mut checked = 0;
@@ -1047,6 +1049,33 @@ mod tests {
                     continue;
                 }
                 let memo = memo_of(&inventory);
+                // Each target's own and fused candidates, absorbed or not.
+                let group_of = |t: usize| {
+                    memo.groups
+                        .iter()
+                        .position(|group| *group.node == *inventory.targets[t].aggregate)
+                        .unwrap()
+                };
+                for (t, target) in inventory.targets.iter().enumerate() {
+                    let g = group_of(t);
+                    if inventory.targets.iter().enumerate().any(|(u, other)| {
+                        u != t && group_of(u) == g && other.measure != target.measure
+                    }) {
+                        continue;
+                    }
+                    let whole_budget = |fused: bool| {
+                        memo.candidates[g]
+                            .iter()
+                            .filter(|c| c.budget_share == 1 && (c.implements.len() > 1) == fused)
+                            .count()
+                    };
+                    let fused = target.fused.as_ref().map_or(0, |f| f.candidates.len());
+                    if whole_budget(false) != target.choices.candidates.len()
+                        || whole_budget(true) != fused
+                    {
+                        missing.push(format!("{gauges:?} seed {seed} target {t} candidates"));
+                    }
+                }
                 for (g, group) in memo.groups.iter().enumerate() {
                     for candidate in &memo.candidates[g] {
                         if !group.parents.is_empty() && candidate.node.schema != group.node.schema {
