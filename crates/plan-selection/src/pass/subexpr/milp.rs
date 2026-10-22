@@ -65,6 +65,23 @@ pub(crate) struct ChoiceCoefficients {
     pub slots: Vec<SlotCoefficients>,
     /// Per child group of the candidate, in order.
     pub child_via: Vec<Via>,
+    /// The shareable nodes of the direct part (an ASAP node, or one whose
+    /// schema has a unique key) of a group two or more queries read, other
+    /// than its own node: each may be one node for every copy of the group
+    /// (the identical-expression rule), and then built once at query time.
+    pub shared_nodes: Vec<SharedNodeCoefficients>,
+}
+
+/// A shareable node of a choice's direct part ([`ChoiceCoefficients::shared_nodes`]).
+/// Its price is in `direct.cost_per_unit_rate`, charged per consumer; built
+/// once at query time it costs `cost_per_unit_rate` per unit of the union
+/// rate of the queries reaching it instead, and holds `state_bytes` while
+/// its longest reader runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SharedNodeCoefficients {
+    pub cost_per_unit_rate: f64,
+    pub work_ms: f64,
+    pub state_bytes: u64,
 }
 
 /// One choice of a group: a candidate and an option per private slot.
@@ -78,6 +95,17 @@ pub(crate) struct Choice {
     pub children: Vec<GroupId>,
     pub assignment: Vec<Materialization>,
     pub coefficients: ChoiceCoefficients,
+    /// `None`: the group's one node, shared by every query reading it.
+    /// `Some(q)`: query `q`'s own copy of it (the group apart); a group's
+    /// copies are all apart or all shared.
+    pub copy_of: Option<usize>,
+    /// Each child group that is a scan: `None` when it is apart and its
+    /// copy is this choice's own (not in `children`); `Some(h)` when it is
+    /// the scan shared at horizon `h` ms (its choice's `scan_horizon_ms`).
+    pub scan_children: Vec<(GroupId, Option<u64>)>,
+    /// For a scan group's choice: the horizon it reads, the longest window
+    /// among its readers.
+    pub scan_horizon_ms: Option<u64>,
 }
 
 /// A shared group's own node, built once per evaluation when chosen.
@@ -787,7 +815,11 @@ mod tests {
                 },
                 slots: Vec::new(),
                 child_via: children.iter().map(|_| Via::Direct).collect(),
+                shared_nodes: Vec::new(),
             },
+            copy_of: None,
+            scan_children: Vec::new(),
+            scan_horizon_ms: None,
         }
     }
 
