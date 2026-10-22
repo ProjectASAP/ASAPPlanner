@@ -2073,7 +2073,13 @@ fn finer_keys(coarse: &OperatorNode, fine: &OperatorNode) -> Option<usize> {
         && same_filter
         && fine_keys.len() > coarse_keys.len()
         && coarse_keys.iter().all(|key| fine_keys.contains(key))
-        && same_rows(child, fine_child))
+        && same_rows(child, fine_child)
+        // A global SQL count over no rows is 0, but an exact rollup sums no
+        // finer value into NULL. A sketch rollup to no keys has one empty
+        // state over no rows, as the global build has.
+        && !(coarse_keys.is_empty()
+            && child.result_kind == OperatorResultKind::Relation
+            && matches!(family, FieldDataType::ExactAggregate(..))))
     .then_some(fine_keys.len())
 }
 
