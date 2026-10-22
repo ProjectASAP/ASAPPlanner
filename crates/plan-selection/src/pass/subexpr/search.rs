@@ -459,11 +459,83 @@ pub(super) fn resized_builds(
         .collect()
 }
 
+/// Offer `selector` every plan of the group choice `choice`: each
+/// combination of its sites' thresholds, composed, its guarantees
+/// recomposed, with each identical-expression and scan-widening variant
+/// the exhaustive search lists, in every Stage 2 materialization. Logical
+/// roots of the plans `selector` keeps are kept in `logical`, by id
+/// (`L<number>`). `false` when the choice breaks a joint rule (nothing
+/// offered).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn offer_group_choice<Id: Clone>(
+    memo: &Memo,
+    per_computation: &PerComputationCandidates<Id>,
+    choice: &GroupChoice,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    selector: &mut PlanSelector<'_>,
+    logical: &mut HashMap<String, Vec<QueryRoot>>,
+    number: &mut usize,
+) -> Result<bool, SelectionError> {
+    let chosen: Vec<(GroupId, &ImplementationCandidate)> = choice
+        .iter()
+        .enumerate()
+        .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
+        .collect();
+    if !super::windows::requirements_met(&chosen) {
+        return Ok(false);
+    }
+    // Scans are widened as the identical-expression rule widens them,
+    // every metric's at once ([`identical_expression_variants`]).
+    if chosen
+        .iter()
+        .any(|(_, c)| c.origin == super::CandidateOrigin::WidenedScans)
+    {
+        return Ok(false);
+    }
+    for plan in at_thresholds(memo, choice) {
+        let Some(roots) = composed_roots(memo, per_computation, &plan) else {
+            continue;
+        };
+        // Each candidate's guarantees were composed over its own
+        // children's Pass 1 choice: compose them again over the chosen
+        // implementations.
+        let Ok(roots) = recompose_guarantees(&roots) else {
+            continue;
+        };
+        // Shared builds are one build (the summary-capability rule),
+        // then identical nodes shared or not, as the exhaustive search
+        // lists them.
+        let roots =
+            super::capability::share_equal_builds(&roots, &resized_builds(memo, choice, &plan));
+        for roots in identical_expression_variants(roots) {
+            *number += 1;
+            let id = format!("L{number}");
+            let Ok(implemented) =
+                optimize_physical_asap(&id, &roots, entries, data, models.deployment_capabilities)
+            else {
+                continue;
+            };
+            for (k, mut physical) in implemented.into_iter().enumerate() {
+                physical.id = match k {
+                    0 => format!("P{number}"),
+                    k => format!("P{number}-m{k}"),
+                };
+                selector.offer(&physical)?;
+            }
+            if selector.keeps_from_logical(&id) {
+                logical.insert(id, roots);
+            }
+            logical.retain(|id, _| selector.keeps_from_logical(id));
+        }
+    }
+    Ok(true)
+}
+
 /// The reference search: every plan of the memo ([`group_choices`] ×
-/// [`at_thresholds`]), its identical nodes made one node, implemented in
-/// every Stage 2 materialization and priced by Stage 3; the cheapest
-/// valid one, with its logical roots and the number of physical candidates
-/// checked.
+/// [`at_thresholds`]), each offered as [`offer_group_choice`] offers it;
+/// the cheapest valid one, with its logical roots.
 pub(crate) fn brute_force<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
@@ -478,64 +550,17 @@ pub(crate) fn brute_force<Id: Clone>(
     let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
     let mut number = 0usize;
     for choice in &choices {
-        let chosen: Vec<(GroupId, &ImplementationCandidate)> = choice
-            .iter()
-            .enumerate()
-            .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
-            .collect();
-        if !super::windows::requirements_met(&chosen) {
-            continue;
-        }
-        // Scans are widened as the identical-expression rule widens them,
-        // every metric's at once ([`identical_expression_variants`]).
-        if chosen
-            .iter()
-            .any(|(_, c)| c.origin == super::CandidateOrigin::WidenedScans)
-        {
-            continue;
-        }
-        for plan in at_thresholds(&memo, choice) {
-            let Some(roots) = composed_roots(&memo, per_computation, &plan) else {
-                continue;
-            };
-            // Each candidate's guarantees were composed over its own
-            // children's Pass 1 choice: compose them again over the chosen
-            // implementations.
-            let Ok(roots) = recompose_guarantees(&roots) else {
-                continue;
-            };
-            // Shared builds are one build (the summary-capability rule),
-            // then identical nodes shared or not, as the exhaustive search
-            // lists them.
-            let roots = super::capability::share_equal_builds(
-                &roots,
-                &resized_builds(&memo, choice, &plan),
-            );
-            for roots in identical_expression_variants(roots) {
-                number += 1;
-                let id = format!("L{number}");
-                let Ok(implemented) = optimize_physical_asap(
-                    &id,
-                    &roots,
-                    entries,
-                    data,
-                    models.deployment_capabilities,
-                ) else {
-                    continue;
-                };
-                for (k, mut physical) in implemented.into_iter().enumerate() {
-                    physical.id = match k {
-                        0 => format!("P{number}"),
-                        k => format!("P{number}-m{k}"),
-                    };
-                    selector.offer(&physical)?;
-                }
-                if selector.keeps_from_logical(&id) {
-                    logical.insert(id, roots);
-                }
-                logical.retain(|id, _| selector.keeps_from_logical(id));
-            }
-        }
+        offer_group_choice(
+            &memo,
+            per_computation,
+            choice,
+            entries,
+            data,
+            models,
+            &mut selector,
+            &mut logical,
+            &mut number,
+        )?;
     }
     let (mut selection, selected) = selector.finish()?;
     selection.search.memo = Some(memo_stats);

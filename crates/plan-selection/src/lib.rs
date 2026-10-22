@@ -1207,6 +1207,9 @@ pub enum SelectionError {
     },
     #[error("no valid candidate: {0:?}")]
     NoValidCandidate(Vec<Rejection>),
+    /// The memo search's MILP solver failed.
+    #[error("MILP solver: {0}")]
+    Solver(String),
 }
 
 /// Stage 3 (plan selection): reject candidates that the executor cannot
@@ -2068,6 +2071,12 @@ impl<'a> PlanSelector<'a> {
 
     /// Under a price ranking, fold the price of valid candidate `cost`
     /// into the cheapest price and the runner-up ([`ROUNDING`]).
+    /// Under a price ranking, the cheapest price of the valid candidates
+    /// offered so far.
+    pub(crate) fn cheapest_price(&self) -> Option<f64> {
+        self.cheapest
+    }
+
     fn track_runner_up(&mut self, cost: &CandidateCost) {
         let (Ranking::Price, Some(price)) = (self.ranking, cost.cost_per_second) else {
             return;

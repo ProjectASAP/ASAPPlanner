@@ -18,8 +18,13 @@ use good_lp::{
     constraint, variable, Expression, ProblemVariables, Solution, SolverModel, Variable, WithMipGap,
 };
 
-use super::GroupId;
+use super::{GroupId, Memo};
+use crate::{CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
+use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
+use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_types::ir::QueryRoot;
 use asap_types::physical::Materialization;
+use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 /// How a child group of a choice is reached: by the consumers reaching the
 /// choice's own node, or by one of its materialized private slots.
@@ -109,8 +114,9 @@ pub(crate) struct ModelInput {
     /// The union rate of the classes in each set, by sorted class set: how
     /// often a node built once for queries of those classes is computed.
     pub union_rate: HashMap<Vec<usize>, f64>,
-    /// Choice sets excluded by earlier cuts (no-good cuts).
-    pub excluded: Vec<Vec<usize>>,
+    /// No-good cuts from earlier iterations: at most `bound` of these
+    /// choices together (a plan whose every group took one of them).
+    pub excluded: Vec<(Vec<usize>, f64)>,
     /// Lower bounds on the omitted cost, added as `extra ≥ bound` when all
     /// of a choice set is chosen (local cuts).
     pub extra_bounds: Vec<(Vec<usize>, f64)>,
@@ -172,10 +178,10 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
     // it reaches the group and the group is not built once (or it is the
     // group's own built-once consumer).
     let mut passes: HashMap<(Consumer, usize), Variable> = HashMap::new();
-    for (&(k, g), _) in &reach {
+    for &(k, g) in reach.keys() {
         passes.insert((k, g), vars.add(variable().min(0).max(1)));
     }
-    for (&g, _) in &once {
+    for &g in once.keys() {
         let k = Consumer::Group(g);
         passes
             .entry((k, g.0 as usize))
@@ -185,7 +191,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
     let mut y: HashMap<(Consumer, usize), Variable> = HashMap::new();
     for (c, choice) in input.choices.iter().enumerate() {
         let g = choice.group.0 as usize;
-        for (&(k, h), _) in &passes {
+        for &(k, h) in passes.keys() {
             if h == g {
                 y.insert((k, c), vars.add(variable().min(0).max(1)));
             }
@@ -308,7 +314,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             model = model.with(constraint!(need[root.0 as usize] == 1));
         }
     }
-    for g in 0..n {
+    for (g, &needed) in need.iter().enumerate() {
         // One choice implementing it (its own, or a fused one covering
         // it) when needed, none otherwise.
         let mut implementing = Expression::from(0.0);
@@ -317,7 +323,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                 implementing += x[c];
             }
         }
-        model = model.with(constraint!(implementing == need[g]));
+        model = model.with(constraint!(implementing == needed));
     }
     for (c, choice) in input.choices.iter().enumerate() {
         for child in &choice.children {
@@ -414,7 +420,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             let h = child.0 as usize;
             match via {
                 Via::Direct => {
-                    for (&(k, g), _) in &passes {
+                    for &(k, g) in passes.keys() {
                         if g != choice.group.0 as usize {
                             continue;
                         }
@@ -452,12 +458,12 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         model = model.with(constraint!(latency <= bound));
     }
     // Cuts.
-    for set in &input.excluded {
+    for (set, bound) in &input.excluded {
         let mut chosen = Expression::from(0.0);
         for &c in set {
             chosen += x[c];
         }
-        model = model.with(constraint!(chosen <= set.len() as f64 - 1.0));
+        model = model.with(constraint!(chosen <= *bound));
     }
     for ((set, bound), &e) in input.extra_bounds.iter().zip(&extra) {
         let mut chosen = Expression::from(0.0);
@@ -542,6 +548,221 @@ fn possible_consumers(input: &ModelInput) -> BTreeMap<usize, BTreeSet<Consumer>>
     consumers
 }
 
+/// A memo search's result: the selection, its physical candidate and its
+/// logical roots, or why no plan is valid.
+pub(crate) type MemoSearchResult =
+    Result<(Selection, PhysicalCandidate, Vec<QueryRoot>), SelectionError>;
+
+/// The cheapest valid plan of `per_computation`'s memo under cost model 1
+/// (`None` under cost models 2 and 3, which the caller routes to the
+/// legacy search).
+///
+/// Lazy loop: solve the model (a lower bound: it omits memory held while a
+/// query runs, and checks composed guarantees only on its incumbents);
+/// price the solution's group choice exactly, as the reference search
+/// prices one ([`offer_group_choice`]: every threshold, identical-expression
+/// variant and Stage 2 materialization), which updates the incumbent; add
+/// a no-good cut excluding that group choice; stop when the model's bound
+/// reaches the incumbent. Each group choice is priced at most once, so the
+/// loop ends, and the incumbent is the reference search's optimum.
+pub(crate) fn search<Id: Clone>(
+    per_computation: &PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Option<MemoSearchResult> {
+    if !matches!(
+        models.plan_selection.cost_model,
+        CostModel::UsageOverTime(_)
+    ) {
+        return None;
+    }
+    Some(solve_memo(per_computation, entries, data, models))
+}
+
+fn solve_memo<Id: Clone>(
+    per_computation: &PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> MemoSearchResult {
+    let started = std::time::Instant::now();
+    let memo = super::search::memo(per_computation, entries);
+    let memo_stats = super::search::stats(&memo, started.elapsed().as_secs_f64() * 1e3);
+    let scale = super::pricing::frozen_calibration(&memo, entries, data, models)?;
+    let mut cache = super::pricing::PriceCache::new(scale);
+    let mut choices: Vec<Choice> = Vec::new();
+    for g in 0..memo.groups.len() {
+        let (group_choices, _lazy) = super::coefficients::choices(
+            &memo,
+            GroupId(g as u32),
+            entries,
+            data,
+            models,
+            &mut cache,
+        )?;
+        choices.extend(group_choices);
+    }
+    let input = model_input(&memo, choices, entries, models)?;
+    let mut input = input;
+    let mut selector = PlanSelector::new(entries, data, models, false)?;
+    let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
+    let mut number = 0usize;
+    let mut iterations = 0u32;
+    let mut bound = None;
+    loop {
+        iterations += 1;
+        let Some(solution) = solve(&input).map_err(SelectionError::Solver)? else {
+            break;
+        };
+        bound = Some(solution.objective);
+        if let Some(incumbent) = selector.cheapest_price() {
+            if solution.objective >= incumbent - 1e-9 * incumbent.abs() {
+                break;
+            }
+        }
+        // The solution's group choice: the candidate each chosen choice
+        // takes for its group.
+        let mut group_choice: super::search::GroupChoice = vec![None; memo.groups.len()];
+        for &c in &solution.chosen {
+            group_choice[input.choices[c].group.0 as usize] = Some(input.choices[c].candidate);
+        }
+        super::search::offer_group_choice(
+            &memo,
+            per_computation,
+            &group_choice,
+            entries,
+            data,
+            models,
+            &mut selector,
+            &mut logical,
+            &mut number,
+        )?;
+        // Exclude it: every choice of each chosen (group, candidate).
+        let groups = group_choice.iter().flatten().count();
+        let excluded: Vec<usize> = input
+            .choices
+            .iter()
+            .enumerate()
+            .filter(|(_, choice)| group_choice[choice.group.0 as usize] == Some(choice.candidate))
+            .map(|(c, _)| c)
+            .collect();
+        input.excluded.push((excluded, groups as f64 - 1.0));
+    }
+    let (mut selection, selected) = selector.finish()?;
+    let price = selection.costs[&selection.selected].cost_per_second;
+    selection.search.memo = Some(memo_stats);
+    selection.search.solver_iterations = iterations;
+    selection.search.solver_time_ms = started.elapsed().as_millis() as u64;
+    selection.search.solver_gap = match (price, bound) {
+        (Some(price), Some(bound)) if price > 0.0 => Some(((price - bound) / price).max(0.0)),
+        (Some(_), Some(_)) => Some(0.0),
+        _ => None,
+    };
+    let roots = logical
+        .remove(&selected.from_logical)
+        .expect("the selection's logical roots are kept");
+    Ok((selection, selected, roots))
+}
+
+/// The model's input for `memo`'s `choices`.
+fn model_input(
+    memo: &Memo,
+    choices: Vec<Choice>,
+    entries: &[QueryWorkloadEntry],
+    models: PlanningModels<'_>,
+) -> Result<ModelInput, SelectionError> {
+    let settings = models.plan_selection;
+    let rate = |entries: &[&QueryWorkloadEntry]| {
+        crate::shared_evaluation_rate(entries, settings).map_err(|error| SelectionError::Cost {
+            candidate: "memo".to_string(),
+            node: Default::default(),
+            error,
+        })
+    };
+    // Schedule classes: queries with one recurrence and range evaluation.
+    let mut classes: Vec<&QueryWorkloadEntry> = Vec::new();
+    let schedule: Vec<usize> = entries
+        .iter()
+        .map(|entry| {
+            match classes.iter().position(|c| {
+                c.recurrence == entry.recurrence && c.range_evaluation == entry.range_evaluation
+            }) {
+                Some(class) => class,
+                None => {
+                    classes.push(entry);
+                    classes.len() - 1
+                }
+            }
+        })
+        .collect();
+    let mut union_rate = HashMap::new();
+    let mut queries = Vec::with_capacity(entries.len());
+    for (q, entry) in entries.iter().enumerate() {
+        let roots = memo
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.roots_of.contains(&q))
+            .map(|(g, _)| GroupId(g as u32))
+            .collect();
+        // A query's evaluation must fit its latency bound and its repeat
+        // interval.
+        let interval = entry.recurrence.fixed_interval_ms().map(|ms| ms as f64);
+        let max_latency_ms = match (entry.requirements.max_latency_ms, interval) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        queries.push(ModelQuery {
+            rate: rate(&[entry])?,
+            roots,
+            max_latency_ms,
+        });
+    }
+    let group_queries: Vec<Vec<usize>> = memo.groups.iter().map(|g| g.queries.clone()).collect();
+    for queries_of in &group_queries {
+        let mut present: Vec<usize> = queries_of.iter().map(|&q| schedule[q]).collect();
+        present.sort_unstable();
+        present.dedup();
+        for mask in 1u64..(1 << present.len()) {
+            let set: Vec<usize> = (0..present.len())
+                .filter(|i| mask >> i & 1 == 1)
+                .map(|i| present[i])
+                .collect();
+            if let std::collections::hash_map::Entry::Vacant(slot) = union_rate.entry(set) {
+                let members: Vec<&QueryWorkloadEntry> =
+                    slot.key().iter().map(|&c| classes[c]).collect();
+                slot.insert(rate(&members)?);
+            }
+        }
+    }
+    let group_slots = memo
+        .groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| group.parents.len() > 1 || group.roots_of.len() > 1)
+        .map(|(g, _)| {
+            let allowed = &memo.candidates[g][0].materializations;
+            GroupSlot {
+                group: GroupId(g as u32),
+                may_recompute: allowed.is_empty()
+                    || allowed.contains(&Materialization::NotMaterialized),
+            }
+        })
+        .collect();
+    Ok(ModelInput {
+        group_count: memo.groups.len(),
+        group_queries,
+        choices,
+        group_slots,
+        queries,
+        schedule,
+        union_rate,
+        excluded: Vec::new(),
+        extra_bounds: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,32 +838,4 @@ mod tests {
             solution.objective
         );
     }
-}
-
-use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
-use asap_physical_asap_optimization::PhysicalCandidate;
-use asap_types::ir::QueryRoot;
-use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
-
-use crate::{PlanningModels, Selection, SelectionError};
-
-/// A memo search's result: the selection, its physical candidate and its
-/// logical roots, or why no plan is valid.
-pub(crate) type MemoSearchResult =
-    Result<(Selection, PhysicalCandidate, Vec<QueryRoot>), SelectionError>;
-
-/// The cheapest valid plan of `per_computation`'s memo under cost model 1,
-/// as [`super::search::brute_force`] returns it, with the solver's gap,
-/// iterations and time in the selection's report
-/// ([`crate::SearchReport::solver_gap`]). `None` while the model is not
-/// built: the caller runs the legacy search and reports
-/// [`crate::RoutedToLegacy::MilpNotBuilt`].
-pub(crate) fn search<Id: Clone>(
-    per_computation: &PerComputationCandidates<Id>,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    models: PlanningModels<'_>,
-) -> Option<MemoSearchResult> {
-    let _ = (per_computation, entries, data, models);
-    None
 }
