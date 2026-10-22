@@ -1673,8 +1673,21 @@ fn scans_projecting_different_labels_are_shared() {
     let selected_label = physical.iter().find(|c| c["id"] == selected).unwrap()["display_name"]
         .as_str()
         .unwrap();
+    // Q4's KLL by job rolls up from Q3's KLL by (host, job), built once per
+    // evaluation for both.
     assert_eq!(
         selected_label,
-        "Q1 Kll · Q2 Kll · Q3 Kll · Q4 Kll · shared Scan (Q1, Q2) · query time, shared: Scan"
+        "Q1 Kll · Q2 Kll · Q3 Kll · Q4 Kll · Kll for Q4 rolled up from Q3 · shared Scan (Q1, Q2) \
+         · query time, shared: Scan, Kll"
+    );
+    let rolled_up = selection["costs"][selected]["cost_per_second"]
+        .as_f64()
+        .unwrap();
+    let without_rollup = cost_of(
+        "Q1 Kll · Q2 Kll · Q3 Kll · Q4 Kll · shared Scan (Q1, Q2) · query time, shared: Scan",
+    );
+    assert!(
+        rolled_up < without_rollup,
+        "{rolled_up} vs {without_rollup}"
     );
 }
