@@ -779,7 +779,14 @@ state, empty over no rows. A family that merges exactly keeps each query's
 guarantee, since a merge of fewer panes is one build over the shorter
 window, and each query fails with at most the shared state's failure
 probability. Stage 3 prices each merge by the panes it reads, at its
-query's rate. The per-query chains stay candidates too. A chain read at different intervals is not kept across
+query's rate. The per-query chains stay candidates too. A query whose
+window divides its interval is one pane (`L = W`): it never gets a chain
+of its own, but it may read the newest `W / L'` panes of a chain of `L'`-wide
+panes another query keeps, when `L'` divides `W`. For example,
+`quantile_over_time(0.9, m[5m])` every 5 min reads the newest 5 panes of
+the chain of fifteen 1-min panes `quantile_over_time(0.9, m[15m])` every
+1 min keeps, besides its own whole-window build. A one-pane query no chain
+could take is not a pane candidate. A chain read at different intervals is not kept across
 evaluations from query time: that option needs every reader to build one
 new pane per evaluation. Long-window segments, sliding windows and
 Exponential Histograms are not implemented yet.

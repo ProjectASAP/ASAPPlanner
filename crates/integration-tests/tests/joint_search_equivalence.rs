@@ -1157,3 +1157,74 @@ fn queries_over_other_windows_or_with_a_latency_bound_are_in_no_class() {
     let search = &run.stage3_plan_selection.as_ref().unwrap().search;
     assert!(search.interchangeable_queries.is_empty());
 }
+
+/// Whether `roots[0]` merges the newest panes of a pane chain `roots[1]`
+/// also reads.
+fn reads_newest_panes_of_a_shared_chain(roots: &[QueryRoot]) -> bool {
+    use asap_types::ir::{ASAPOp, OperatorNode};
+    let reached = |root: &QueryRoot| match root {
+        QueryRoot::Operator(node) => OperatorNode::reachable(node),
+        QueryRoot::Scalar(_) => Vec::new(),
+    };
+    let second: std::collections::HashSet<_> =
+        reached(&roots[1]).iter().map(std::rc::Rc::as_ptr).collect();
+    reached(&roots[0]).iter().any(|node| {
+        matches!(node.asap(), Some(ASAPOp::SummaryMerge { children, newest_panes: Some(_), .. })
+            if matches!(children[0].asap(), Some(ASAPOp::PaneChain { .. }))
+                && second.contains(&std::rc::Rc::as_ptr(&children[0])))
+    })
+}
+
+/// A 5-min quantile every 5 min is one pane; it may read the newest 5 of
+/// the fifteen 1-min panes a 15-min quantile every minute keeps. With raw
+/// data kept and without, under cost model 1, the default search selects a
+/// plan of the exhaustive search's price, and the exhaustive search lists
+/// that newest-panes read. Without raw data it selects it; with raw data a
+/// query-time scan of the raw 5 minutes is cheaper.
+#[test]
+fn a_single_pane_window_reads_a_shared_chain() {
+    let workload = workload_of(
+        &[
+            ("quantile_over_time(0.9, m[5m])", 300_000),
+            ("quantile_over_time(0.9, m[15m])", 60_000),
+        ],
+        AccuracyTarget::max_error(0.01),
+    );
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    for (label, deployment) in [
+        (
+            "raw data kept",
+            asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        ),
+        ("no raw data", no_raw_data()),
+    ] {
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        assert_same_cost(label, &roots, &entries, &data, models);
+        let indexed = roots.iter().cloned().enumerate().collect::<Vec<_>>();
+        let exhaustive = run_stage1_to_stage3_with(
+            indexed,
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search::exhaustive(),
+        )
+        .unwrap();
+        assert!(
+            exhaustive.stage1_logical_asap_optimization.iter().any(|c| c
+                .roots
+                .as_ref()
+                .is_ok_and(|r| reads_newest_panes_of_a_shared_chain(r))),
+            "{label}: the newest-panes read is a candidate"
+        );
+        let selected = exhaustive.stage1_selected.unwrap().roots.unwrap();
+        // With raw data kept, scanning the raw 5 minutes at query time is
+        // cheaper; without, the chain's newest panes are.
+        assert_eq!(
+            reads_newest_panes_of_a_shared_chain(&selected),
+            label == "no raw data",
+            "{label}: the newest-panes read is selected"
+        );
+    }
+}
