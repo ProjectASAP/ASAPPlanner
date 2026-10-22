@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod clusters;
+pub(crate) mod derivations;
 pub(crate) mod groups;
 pub(crate) mod pricing;
 
