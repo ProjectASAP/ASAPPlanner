@@ -12,6 +12,8 @@
 //!   implementation candidates per group;
 //! - [`capability`] (W3): identical-expression and summary-capability
 //!   transformations;
+//! - [`scans`] (W3): scan widening to a metric's shared label set, and
+//!   each source's raw-data horizon;
 //! - [`windows`] (W4): window-composition, rollup and top-k reuse
 //!   transformations;
 //! - [`pricing`] (W2): local prices per (group, candidate, context),
@@ -23,6 +25,7 @@
 pub(crate) mod capability;
 pub(crate) mod groups;
 pub(crate) mod pricing;
+pub(crate) mod scans;
 pub(crate) mod search;
 pub(crate) mod windows;
 
@@ -120,6 +123,9 @@ pub(crate) enum CandidateOrigin {
     Rollup,
     /// A top-k read from another group's ranking.
     TopKReuse,
+    /// Its metric's scans widened to a shared label set, read through a
+    /// `Project` (scan widening).
+    WidenedScans,
 }
 
 /// A choice several groups' costs depend on; equal keys are one site.
