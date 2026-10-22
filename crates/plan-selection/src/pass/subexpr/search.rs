@@ -6,7 +6,7 @@
 //! one threshold per coupling site, composed into a plan and priced by
 //! Stage 2 and Stage 3 in every materialization.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::asap_aware_cse::{
@@ -20,7 +20,7 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use super::{groups, CouplingKind, GroupId, ImplementationCandidate, Memo};
-use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
+use crate::{MemoStats, PlanSelector, PlanningModels, Selection, SelectionError};
 
 /// The workload's memo: groups, Pass 1 candidates and the Pass 2
 /// transformations' candidates.
@@ -37,32 +37,38 @@ pub(crate) fn memo<Id: Clone>(
     memo
 }
 
-/// A one-line summary of `memo` for logs: groups, shared groups (two or
-/// more parents or queries), candidates, distinct coupling sites.
-pub(crate) fn stats(memo: &Memo) -> String {
-    let shared = memo
+/// The size of `memo`, built in `build_ms` milliseconds, for the
+/// selection report: groups, shared groups (read by two or more parents,
+/// or the root of two or more queries), candidates by origin and distinct
+/// coupling sites by kind.
+pub(crate) fn stats(memo: &Memo, build_ms: f64) -> MemoStats {
+    let shared_groups = memo
         .groups
         .iter()
         .filter(|g| g.parents.len() > 1 || (g.parents.is_empty() && g.roots_of.len() > 1))
         .count();
-    let candidates: usize = memo.candidates.iter().map(Vec::len).sum();
-    let mut sites: Vec<u64> = memo
-        .candidates
-        .iter()
-        .flatten()
-        .flat_map(|c| c.coupling_sites.iter().map(|s| s.key))
-        .collect();
-    sites.sort_unstable();
-    sites.dedup();
-    let most = memo.candidates.iter().map(Vec::len).max().unwrap_or(0);
-    format!(
-        "groups {} shared {} candidates {} (most in one group {}) coupling sites {}",
-        memo.groups.len(),
-        shared,
-        candidates,
-        most,
-        sites.len()
-    )
+    let mut candidates_by_origin: BTreeMap<String, usize> = BTreeMap::new();
+    let mut sites = BTreeSet::new();
+    for candidate in memo.candidates.iter().flatten() {
+        *candidates_by_origin
+            .entry(format!("{:?}", candidate.origin))
+            .or_default() += 1;
+        sites.extend(candidate.coupling_sites.iter().copied());
+    }
+    let mut coupling_sites_by_kind: BTreeMap<String, usize> = BTreeMap::new();
+    for site in sites {
+        *coupling_sites_by_kind
+            .entry(format!("{:?}", site.kind))
+            .or_default() += 1;
+    }
+    MemoStats {
+        groups: memo.groups.len(),
+        shared_groups,
+        candidates: memo.candidates.iter().map(Vec::len).sum(),
+        candidates_by_origin,
+        coupling_sites_by_kind,
+        build_ms,
+    }
 }
 
 /// One plan of the memo: a candidate per needed group (`None` for a group
@@ -388,7 +394,9 @@ pub(crate) fn brute_force<Id: Clone>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<(Selection, PhysicalCandidate, Vec<QueryRoot>), SelectionError> {
+    let started = std::time::Instant::now();
     let memo = memo(per_computation, entries);
+    let memo_stats = stats(&memo, started.elapsed().as_secs_f64() * 1e3);
     let choices = group_choices(&memo).unwrap_or_default();
     let mut selector = PlanSelector::new(entries, data, models, false)?;
     let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
@@ -433,7 +441,8 @@ pub(crate) fn brute_force<Id: Clone>(
             logical.retain(|id, _| selector.keeps_from_logical(id));
         }
     }
-    let (selection, selected) = selector.finish()?;
+    let (mut selection, selected) = selector.finish()?;
+    selection.search.memo = Some(memo_stats);
     let roots = logical
         .remove(&selected.from_logical)
         .expect("the selection's logical roots are kept");
@@ -512,6 +521,107 @@ mod tests {
         assert_eq!(builds.len(), 1);
     }
 
+    /// A quantile's memo, Pass 1 only, has three groups (scan, window,
+    /// quantile) and five candidates (the quantile's exact, KLL and
+    /// DDSketch); with one candidate made a pane candidate and coupling
+    /// sites added, the stats count candidates by origin and distinct sites
+    /// by kind, a site two candidates share once.
+    #[test]
+    fn stats_count_candidates_by_origin_and_sites_by_kind() {
+        use super::super::{CandidateOrigin, CouplingSite};
+        let roots = vec![(
+            0usize,
+            QueryRoot::Operator(lower_promql(
+                "quantile_over_time(0.9, m[5m])",
+                AccuracyTarget::max_error(0.01),
+            )),
+        )];
+        let mut memo = groups::memo_of(&generate_per_computation_candidates(roots).unwrap());
+        let shared = CouplingSite {
+            key: 1,
+            kind: CouplingKind::SharedBuildSize,
+        };
+        let chain = CouplingSite {
+            key: 2,
+            kind: CouplingKind::PaneChain,
+        };
+        memo.candidates[2][1].coupling_sites = vec![shared];
+        memo.candidates[2][2].coupling_sites = vec![shared, chain];
+        memo.candidates[2][2].origin = CandidateOrigin::Panes;
+        let stats = stats(&memo, 1.5);
+        assert_eq!(
+            stats,
+            MemoStats {
+                groups: 3,
+                shared_groups: 0,
+                candidates: 5,
+                candidates_by_origin: [("Pass1".to_string(), 4), ("Panes".to_string(), 1)].into(),
+                coupling_sites_by_kind: [
+                    ("SharedBuildSize".to_string(), 1),
+                    ("PaneChain".to_string(), 1)
+                ]
+                .into(),
+                build_ms: 1.5,
+            }
+        );
+    }
+
+    /// The reference search reports the memo it built.
+    #[test]
+    fn the_brute_force_selection_reports_its_memo() {
+        let query = "quantile_over_time(0.9, m[5m])";
+        let target = AccuracyTarget::max_error(0.01);
+        let roots = vec![(
+            0usize,
+            QueryRoot::Operator(lower_promql(query, target.clone())),
+        )];
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let entries = vec![QueryWorkloadEntry {
+            query: asap_types::workload::Query(query.into()),
+            requirements: QueryRequirements {
+                accuracy: target,
+                max_latency_ms: None,
+            },
+            predictability: Predictability::Predictable { known_at: None },
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                RepetitionInterval(60_000),
+            )),
+            range_evaluation: None,
+        }];
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 2_000.0 / 15.0,
+            },
+            sources: [(
+                "m".to_string(),
+                SourceFacts {
+                    series_count: Some(1_000),
+                    metric_type: Some(MetricType::Gauge),
+                    sample_interval: Some(DurationMs(15_000)),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into(),
+        };
+        let (selection, _, _) = brute_force(
+            &per_computation,
+            &entries,
+            &data,
+            crate::PlanningModels::builtin(),
+        )
+        .unwrap();
+        let reported = selection.search.memo.clone().expect("the memo's stats");
+        let built = memo(&per_computation, &entries);
+        assert_eq!(reported.groups, built.groups.len());
+        assert_eq!(
+            reported.candidates,
+            built.candidates.iter().map(Vec::len).sum::<usize>()
+        );
+        assert!(reported.build_ms >= 0.0);
+        let json = serde_json::to_value(&selection.search).unwrap();
+        assert_eq!(json["memo"]["groups"], reported.groups);
+    }
+
     #[test]
     #[ignore = "debugging aid"]
     fn debug_topk_memo() {
@@ -556,7 +666,7 @@ mod tests {
             .into(),
         };
         let memo = memo(&pc, &entries);
-        eprintln!("{}", stats(&memo));
+        eprintln!("{:?}", stats(&memo, 0.0));
         for (g, group) in memo.groups.iter().enumerate() {
             eprintln!(
                 "G{g} {:?} children {:?} roots_of {:?} candidates {}",
