@@ -345,6 +345,13 @@ pub(super) fn choice_parts(
                                     .map(|((i, _, _), v)| (child_groups[*i], *v))
                                     .collect(),
                                 scan_horizon_ms: *own_horizon,
+                                scan_source: match node.non_asap() {
+                                    Some(NonASAPOp::Scan { source, .. }) => {
+                                        Some(super::scans::raw_horizon_key(source))
+                                    }
+                                    _ => None,
+                                },
+                                scan_project_cost_per_unit_rate: parts.scan_project_cost,
                             },
                             lazy: LazyTerms {
                                 thresholds: thresholds.clone(),
@@ -557,6 +564,8 @@ fn is_build(payload: &Operator<PhysicalASAPNodeId>) -> bool {
 
 struct Coefficients {
     coefficients: ChoiceCoefficients,
+    /// For a scan: what a pass over its output costs per computation.
+    scan_project_cost: f64,
     lazy: LazyTerms,
     root_key: u32,
     root_producer_keys: Vec<u32>,
@@ -839,6 +848,9 @@ fn coefficients_of(
                 false => rate_cost,
             },
             work_ms: work(&part),
+            // Equal builds over equal inputs are one node when shared (a
+            // site's build at one threshold, or identical expressions).
+            shared_site: Some((u64::from(keys[position[&node.id]]), 0)),
         });
         slot_keys.push(shallow[position[&node.id]]);
         part_keys.push(part.iter().map(|id| keys[position[id]]).collect());
@@ -911,6 +923,12 @@ fn coefficients_of(
             direct_at_ingestion,
             built_once_state_bytes,
             thresholds: Vec::new(),
+        },
+        scan_project_cost: match dag.nodes[position[&root]].payload {
+            Operator::NonASAP(NonASAPOp::Scan { .. }) => {
+                prices.cost_per_cpu_op * priced[&root].output.rows as f64
+            }
+            _ => 0.0,
         },
         root_key: shallow[position[&root]],
         shared_node_keys,
@@ -1650,6 +1668,99 @@ mod tests {
             &[60_000, 60_000],
         )
         .is_empty());
+    }
+
+    /// The model restricted to each group choice ([`super::super::milp::lower_bound_check`])
+    /// is a lower bound of the group choice's exact price.
+    fn assert_model_is_a_lower_bound(
+        queries: &[&str],
+        intervals_ms: &[u32],
+        targets: &[AccuracyTarget],
+    ) {
+        let roots: Vec<(usize, QueryRoot)> = queries
+            .iter()
+            .zip(targets)
+            .map(|(q, target)| {
+                let root = lower_promql(q, target.clone());
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
+            })
+            .enumerate()
+            .collect();
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let entries = entries(intervals_ms, targets);
+        let data = data();
+        let models = PlanningModels::builtin();
+        let memo = memo(&per_computation, &entries);
+        let input = super::super::milp::model_input_of(
+            &memo,
+            &entries,
+            &data,
+            models,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        let checked = super::super::milp::lower_bound_check(
+            &memo,
+            &per_computation,
+            &input,
+            &entries,
+            &data,
+            models,
+        )
+        .unwrap();
+        assert!(!checked.is_empty());
+        for (group_choice, exact, value) in checked {
+            let value = value.unwrap_or_else(|| panic!("{queries:?} {group_choice:?}: infeasible"));
+            assert!(
+                value <= exact * (1.0 + 1e-9),
+                "{queries:?} {group_choice:?}: model {value} over exact {exact}"
+            );
+        }
+    }
+
+    /// Three quantiles of one metric over a 1-minute, a 5-minute and an
+    /// instant window (#840's shape), every 10 s; and a shared group with
+    /// a rollup.
+    #[test]
+    fn the_model_is_a_lower_bound_of_every_group_choice() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        assert_model_is_a_lower_bound(
+            &[
+                "quantile_over_time(0.5, m[1m])",
+                "quantile_over_time(0.9, m[5m])",
+                "quantile by (job) (0.5, m)",
+            ],
+            &[10_000, 10_000, 10_000],
+            &[target.clone(), target.clone(), target],
+        );
+        let exact = AccuracyTarget::exact();
+        assert_model_is_a_lower_bound(
+            &[
+                "sum by (job) (rate(m[5m]))",
+                "sum(rate(m[5m]))",
+                "sum_over_time(m[10m])",
+            ],
+            &[60_000, 30_000, 60_000],
+            &[exact.clone(), exact.clone(), exact],
+        );
+    }
+
+    /// #839's shape: sums over 10 minutes by job and in total (a rollup),
+    /// and two 100-second quantiles over scans of one metric projecting
+    /// different labels (a widened scan shares them).
+    #[test]
+    fn the_model_is_a_lower_bound_with_rollups_and_widened_scans() {
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
+        assert_model_is_a_lower_bound(
+            &[
+                "sum by (job) (sum_over_time(m[10m]))",
+                "sum(sum_over_time(m[10m]))",
+                "avg by (job) (quantile_over_time(0.99, m[100s]))",
+                "avg(quantile_over_time(0.95, m[100s]))",
+            ],
+            &[20_000, 20_000, 1_000, 1_000],
+            &[target.clone(), target.clone(), target.clone(), target],
+        );
     }
 
     /// Two quantiles within 1% and 2% sharing one KLL build at a size
