@@ -135,7 +135,7 @@ Invariants:
 
 | Id | Outcome | Reason |
 |---|---|---|
-| P3-m1 | selected | all exact over one time range built once per evaluation for both queries, at 5.39 per second (cost model 1) |
+| P3-m1 | selected | all exact over one time range built once per evaluation for both queries, at 4.38 per second (cost model 1) |
 | P2-m1 | valid · costlier | all exact over one scan built once per evaluation, at 5.79 per second: each query still reads its own 1 m time range |
 | P1, P2, P3 | valid · costlier | all exact at 8.00 per second, with separate inputs (P1) or a `NotMaterialized` shared scan (P2) or scan and range (P3), charged once per query; they tie with each other up to rounding |
 | P10 | invalid | Count-Min + heap: a top-*k* output has no guarantee (a heap's bound is per item frequency, not top-*k* membership), and the deployment has no evidence that it meets the target |

@@ -65,12 +65,17 @@ fn exact(recurrence: QueryRecurrence) -> QueryWorkloadEntry {
 
 /// The #509 shared data workload: 1,000,000 series sampled every 15 s.
 fn data() -> DataWorkload {
-    shared_data_workload(
+    let mut data = shared_data_workload(
         DataArrival::Ingesting {
             rows_per_second: SHARED_ROWS_PER_SECOND,
         },
         "m",
-    )
+    );
+    // 100 jobs: each `by (job)` group holds many series, so a ranking
+    // shared between two top-k saves work.
+    data.sources.get_mut("m").unwrap().distinct_values_per_label =
+        [("job".to_string(), 100)].into();
+    data
 }
 
 /// Every minute.
