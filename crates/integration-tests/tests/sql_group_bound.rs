@@ -136,3 +136,48 @@ fn a_computed_grouping_column_leaves_only_the_exact_plan() {
     let sketches = selected_sketches(query, "relative", every_column());
     assert!(sketches.is_empty(), "{sketches:?}");
 }
+
+/// The groups every priced plan's grouped builds and aggregates are priced
+/// at (`... into N states`, `... into N groups`), and the rows its scans read.
+fn priced_groups_and_scan_rows(
+    query: &str,
+    metric: &str,
+    declared: serde_json::Value,
+) -> (
+    std::collections::BTreeSet<u64>,
+    std::collections::BTreeSet<u64>,
+) {
+    let workload = workload(query, metric, declared);
+    let roots = lower_sql_roots(&workload, &http_catalog()).expect("lowers");
+    let run = run_stages(&workload, roots);
+    let (mut groups, mut scanned) = (
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+    );
+    for cost in run.selection.costs.values() {
+        for node in cost.per_node.values() {
+            let words: Vec<&str> = node.detail.split([' ', ':', ';']).collect();
+            for window in words.windows(3) {
+                if window[0] == "into" && matches!(window[2], "states" | "groups") {
+                    groups.insert(window[1].parse().expect("a group count"));
+                }
+                if window[0] == "scan" && window[2] == "samples" {
+                    scanned.insert(window[1].parse().expect("a row count"));
+                }
+            }
+        }
+    }
+    (groups, scanned)
+}
+
+/// A SQL grouping with an undeclared column gets no invented count: each
+/// row read is in at most one group, so its builds are priced at the rows
+/// the scan reads. Declared, `GROUP BY service, endpoint` is 25 x 25.
+#[test]
+fn an_undeclared_sql_grouping_is_priced_at_the_rows_it_reads() {
+    let (groups, scanned) =
+        priced_groups_and_scan_rows(DISTINCT_USERS, "relative", serde_json::json!({}));
+    assert_eq!(groups, scanned);
+    let (groups, _) = priced_groups_and_scan_rows(DISTINCT_USERS, "relative", every_column());
+    assert_eq!(groups, std::collections::BTreeSet::from([625]));
+}

@@ -231,7 +231,7 @@ normalized workload, lowered query IR, and declared statistics:
 | Cost concept | Canonical source |
 |---|---|
 | Source row cardinality | `DataWorkload.sources[source].series_count`. |
-| Groups of a `by (...)` grouping or partition | The product of `DataWorkload.sources[source].distinct_values_per_label` over its keys, at most `series_count`; 100 (at most `series_count`) when a key is undeclared. |
+| Groups of a `by (...)` grouping or partition | The smallest fact-based bound: the product of `DataWorkload.sources[source].distinct_values_per_label` over its keys (all declared), the declared `series_count` of the PromQL metrics it reads, and the rows it reads per evaluation. No count is assumed for an undeclared key. |
 | Arrival and update rate | `DataWorkload.arrival` and its `rows_per_second`. |
 | Query demand | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. |
 | Event-time range | The query text (its range and offset). |
