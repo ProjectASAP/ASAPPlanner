@@ -211,14 +211,18 @@
 //! query repeating every `I` ms whose latency is above `I` makes the
 //! candidate invalid too ([`RejectionCause::LatencyOverRepeatInterval`]):
 //! each evaluation starts before the last one ends, so it falls further
-//! behind with every evaluation. A range evaluation is checked by its
-//! latency per step, as priced.
+//! behind with every evaluation. Only a fixed interval is checked: an
+//! estimated rate, a schedule or a one-time query has none. A range
+//! evaluation is checked by its latency per step, as priced: the latency
+//! model gives each step a full core, so a request's steps may run in
+//! parallel. Run one after another they take `S` times as long, which this
+//! check does not assume.
 //! [`ResourceUsage::latency_per_query`] reports every query's latency.
 //!
 //! No memory limit applies outside cost model 3, where the cluster's memory
 //! is declared ([`ClusterLimits::memory_bytes`]); without one, a selected
-//! plan whose peak memory is over [`LARGE_PEAK_MEMORY_BYTES`] carries a
-//! warning in the report ([`large_peak_memory_warning`]).
+//! plan whose peak memory is over [`LARGE_PEAK_MEMORY_BYTES`] gets a
+//! warning, which `stage_pipeline` reports ([`large_peak_memory_warning`]).
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -754,19 +758,19 @@ fn latency_violation(
 /// one large machine holds.
 pub const LARGE_PEAK_MEMORY_BYTES: u64 = 1_000_000_000_000;
 
-/// A warning when `usage`'s peak memory is over [`LARGE_PEAK_MEMORY_BYTES`]
+/// A warning when `peak_memory_bytes` is over [`LARGE_PEAK_MEMORY_BYTES`]
 /// and `cost_model` declares no memory capacity (cost models 1 and 2). Under
 /// cost model 3 the cluster's memory is declared and a candidate over it is
 /// rejected ([`RejectionCause::OverClusterCapacity`]), so there is none.
-pub fn large_peak_memory_warning(usage: &ResourceUsage, cost_model: &CostModel) -> Option<String> {
+pub fn large_peak_memory_warning(peak_memory_bytes: u64, cost_model: &CostModel) -> Option<String> {
     match cost_model {
         CostModel::ClusterCapacity(_) => None,
         CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_) => {
-            (usage.peak_memory_bytes > LARGE_PEAK_MEMORY_BYTES).then(|| {
+            (peak_memory_bytes > LARGE_PEAK_MEMORY_BYTES).then(|| {
                 format!(
                     "peak memory {} bytes is over {LARGE_PEAK_MEMORY_BYTES} bytes and the \
                      deployment declares no memory capacity to check it against",
-                    usage.peak_memory_bytes
+                    peak_memory_bytes
                 )
             })
         }
@@ -8612,13 +8616,47 @@ mod tests {
             PlanningModels::builtin(),
         )
         .unwrap();
-        assert!(
-            selection
-                .rejected
-                .iter()
-                .all(|r| r.cause != RejectionCause::LatencyOverRepeatInterval),
-            "{:?}",
-            selection.rejected
+        assert_eq!(selection.selected, candidates[1].id);
+        assert_eq!(selection.rejected.len(), 1, "{:?}", selection.rejected);
+        assert_eq!(selection.rejected[0].id, candidates[0].id);
+        assert_eq!(selection.rejected[0].cause, RejectionCause::Costlier);
+    }
+
+    /// A query over both its latency bound and its repeat interval is
+    /// reported over its bound: the bound is the user's own requirement.
+    /// The interval is also checked for a repetition at a declared phase.
+    #[test]
+    fn a_broken_latency_bound_is_reported_before_the_repeat_interval() {
+        let rows_per_s = 1e9;
+        let candidates = pane_candidates(rows_per_s);
+        let mut bounded = QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: asap_types::workload::RepetitionInterval(MINUTE),
+                evaluation_phase: asap_types::workload::TimestampMs(0),
+            }),
+            ..every_minute()
+        };
+        let select = |entry: &QueryWorkloadEntry| {
+            select_plan(
+                &candidates,
+                std::slice::from_ref(entry),
+                &arriving(rows_per_s),
+                PlanningModels::builtin(),
+            )
+            .unwrap()
+        };
+        let unbounded = select(&bounded);
+        assert_eq!(
+            unbounded.rejected[0].cause,
+            RejectionCause::LatencyOverRepeatInterval
+        );
+        bounded.requirements.max_latency_ms = Some(f64::from(MINUTE));
+        let selection = select(&bounded);
+        assert_eq!(selection.selected, candidates[1].id);
+        assert_eq!(selection.rejected[0].id, candidates[0].id);
+        assert_eq!(
+            selection.rejected[0].cause,
+            RejectionCause::LatencyBoundExceeded
         );
     }
 
@@ -8629,20 +8667,16 @@ mod tests {
     /// check applies instead, so there is no warning.
     #[test]
     fn a_very_large_peak_memory_is_warned_about_only_without_a_declared_capacity() {
-        let usage = |peak_memory_bytes| ResourceUsage {
-            peak_memory_bytes,
-            ..ResourceUsage::default()
-        };
         let usage_over_time = CostModel::UsageOverTime(ResourceUnitCost::illustrative());
         assert_eq!(
-            large_peak_memory_warning(&usage(1_430_000_000_000), &usage_over_time).as_deref(),
+            large_peak_memory_warning(1_430_000_000_000, &usage_over_time).as_deref(),
             Some(
                 "peak memory 1430000000000 bytes is over 1000000000000 bytes and the deployment \
                  declares no memory capacity to check it against"
             )
         );
         assert_eq!(
-            large_peak_memory_warning(&usage(LARGE_PEAK_MEMORY_BYTES), &usage_over_time),
+            large_peak_memory_warning(LARGE_PEAK_MEMORY_BYTES, &usage_over_time),
             None
         );
         let cluster = CostModel::ClusterCapacity(ClusterLimits {
@@ -8651,10 +8685,7 @@ mod tests {
             cpu_cores: None,
             objective: ClusterObjective::LowestLatency,
         });
-        assert_eq!(
-            large_peak_memory_warning(&usage(1_430_000_000_000), &cluster),
-            None
-        );
+        assert_eq!(large_peak_memory_warning(1_430_000_000_000, &cluster), None);
     }
 
     /// When a maintained state's ingestion work needs more than one core,

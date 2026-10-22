@@ -70,7 +70,8 @@
 //     summary), and every other shown candidate under `rejected` with
 //     its `cause`: a failed check (`failure_probability_resize_failed`,
 //     `accuracy_target_missed`, `count_min_weights_not_proven_non_negative`,
-//     `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`, `raw_data_not_retained`,
+//     `per_entity_aggregate_not_executable`, `executor_cannot_compile`,
+//     `no_accuracy_guarantee`, `raw_data_not_retained`,
 //     `latency_bound_exceeded`, `latency_over_repeat_interval`,
 //     `over_cluster_capacity`) or a loss under
 //     the cost model (`costlier`, `slower`, `more_memory`,
@@ -635,7 +636,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .and_then(|run| run.stage3_plan_selection.as_ref().ok())
         .and_then(|selection| {
             large_peak_memory_warning(
-                &selection.costs[&selection.selected].usage,
+                selection.costs[&selection.selected].usage.peak_memory_bytes,
                 &plan_selection.cost_model,
             )
         })

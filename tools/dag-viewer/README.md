@@ -224,8 +224,11 @@ are ignored, `stage_pipeline`'s default.
   priced it, else `analytical`).
 - Each `stage3_plan_selection.rejected` entry has a `cause`: a failed check
   (`failure_probability_resize_failed`, `accuracy_target_missed`,
-  `raw_data_not_retained`, `latency_bound_exceeded`,
-  `latency_over_repeat_interval`, `over_cluster_capacity`) or a loss under the cost model (`costlier`, `slower`, `more_memory`,
+  `count_min_weights_not_proven_non_negative`,
+  `per_entity_aggregate_not_executable`, `executor_cannot_compile`,
+  `no_accuracy_guarantee`, `raw_data_not_retained`, `latency_bound_exceeded`,
+  `latency_over_repeat_interval`, `over_cluster_capacity`) or a loss under
+  the cost model (`costlier`, `slower`, `more_memory`,
   `not_lowest_latency_on_pareto_front`, `dominated`,
   `tied_lost_on_enumeration_order`).
 - `accuracy_guarantees` is `ignored` (`stage_pipeline`'s default: Stage 3
