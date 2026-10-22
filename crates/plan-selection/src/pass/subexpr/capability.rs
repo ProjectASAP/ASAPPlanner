@@ -325,6 +325,7 @@ mod tests {
                 budget_share: 1,
                 requires_exact_children: Vec::new(),
                 rollup_of: None,
+                requires_sites: Vec::new(),
             }]);
         }
         add_shared_builds(&mut memo);

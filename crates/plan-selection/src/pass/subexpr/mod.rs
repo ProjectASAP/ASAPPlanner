@@ -96,6 +96,10 @@ pub(crate) struct ImplementationCandidate {
     /// may also be read per reader (`NotMaterialized`)
     /// ([`scans::scan_materializations`]).
     pub materializations: Vec<Materialization>,
+    /// Sites other groups' chosen implementations must carry for this one
+    /// to be valid: a sketch rollup's finer group exposing its state, a
+    /// coarser grouping's host group building the pane chain it reads.
+    pub requires_sites: Vec<(GroupId, CouplingSite)>,
 }
 
 /// What a [`CandidateOrigin::Rollup`] candidate reads, and what it

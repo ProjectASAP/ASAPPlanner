@@ -563,6 +563,7 @@ mod tests {
                 budget_share: 1,
                 requires_exact_children: Vec::new(),
                 rollup_of: None,
+                requires_sites: Vec::new(),
             };
         let memo = Memo {
             groups: vec![group(&below, vec![]), group(top, vec![GroupId(0)])],

@@ -31,7 +31,7 @@ use std::rc::Rc;
 use asap_logical_asap_optimization::accuracy::estimators::size_for_all_readers;
 use asap_logical_asap_optimization::asap_aware_cse::{
     pane_candidates, rollup_candidates, rollup_pass2_candidates, topk_reuse_candidates,
-    window_composition_pass2_candidates, with_pane_chain, RollupCandidate,
+    window_composition_pass2_candidates, with_pane_chain, with_resized_build, RollupCandidate,
 };
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::flat::flatten;
@@ -77,10 +77,12 @@ pub(crate) struct ChainReader {
     pub merge: Rc<OperatorNode>,
 }
 
-/// Every transformation of this module, in order: window composition,
-/// rollup, exact top-k reuse. `entries[q]` is workload query `q`'s entry.
+/// Every transformation of this module, in order: window composition, a
+/// coarser grouping reading a finer grouping's chain, rollup, exact top-k
+/// reuse. `entries[q]` is workload query `q`'s entry.
 pub(crate) fn add_pass2_candidates(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
     add_window_composition(memo, entries);
+    add_rollup_windows(memo, entries);
     add_rollup(memo);
     add_topk_reuse(memo);
 }
@@ -187,7 +189,12 @@ pub(crate) fn chain_readers(node: &Rc<OperatorNode>) -> Vec<ChainReader> {
         if !seen.insert(Rc::as_ptr(&merge)) {
             continue;
         }
-        let Some(ASAPOp::SummaryMerge { children, .. }) = merge.asap() else {
+        let Some(ASAPOp::SummaryMerge {
+            children,
+            newest_panes,
+            ..
+        }) = merge.asap()
+        else {
             continue;
         };
         let [chain] = &children[..] else {
@@ -229,7 +236,7 @@ pub(crate) fn chain_readers(node: &Rc<OperatorNode>) -> Vec<ChainReader> {
         readers.push(ChainReader {
             key,
             pane_width_ms: *pane_width_ms,
-            window_ms: pane_width_ms * u64::from(*pane_count),
+            window_ms: pane_width_ms * u64::from(newest_panes.unwrap_or(*pane_count)),
             family: family.clone(),
             merge: Rc::clone(&merge),
         });
@@ -372,6 +379,184 @@ pub(crate) fn read_at_threshold(
     Ok(Rc::clone(node))
 }
 
+/// `candidate`'s node (a sketch rollup reading the state of `site`, or
+/// the finer group's candidate exposing it) with that build resized to
+/// `threshold` ([`state_size_thresholds`], which the candidate may read:
+/// [`may_read_state`]); every guarantee composed again.
+pub(crate) fn resize_state_at(
+    candidate: &ImplementationCandidate,
+    site: &CouplingSite,
+    threshold: &FieldDataType,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let build = match candidate
+        .rollup_of
+        .as_ref()
+        .and_then(|r| r.finer_state.as_ref())
+    {
+        Some(state) => Some(Rc::clone(state)),
+        None => OperatorNode::reachable(&candidate.node)
+            .into_iter()
+            .find(|n| is_sketch_build(n) && state_key(n) == site.key),
+    };
+    let Some(build) = build else {
+        return Ok(Rc::clone(&candidate.node));
+    };
+    let roots = [QueryRoot::Operator(Rc::clone(&candidate.node))];
+    let resized = with_resized_build(&roots, &build, threshold.clone())?;
+    let [QueryRoot::Operator(node)] = &resized[..] else {
+        unreachable!("an operator root");
+    };
+    Ok(Rc::clone(node))
+}
+
+/// A coarser grouping reading a finer grouping's pane chain (the
+/// window-composition rule's rollup groups): for each Pass 1 (or
+/// shared-build) candidate of a group with a sketch build over a SQL
+/// table's rows whose readers keep a merged guarantee, and each such
+/// candidate of another group building the same family, input, grouping
+/// and filter over the same rows grouped by more keys over a window at
+/// least as long, a [`CandidateOrigin::Panes`] candidate of the coarser
+/// group that regroups the newest panes of the finer build's chain
+/// (`window_composition_pass2_candidates` on the two, the coarser group's
+/// pane width the finer build's grid). It carries the finer chain's
+/// [`CouplingKind::PaneChain`] site, whose threshold sizes the chain for
+/// every reader, and reads the finer group, which must build that chain:
+/// the finer group gets a copy of its own pane candidate with the site
+/// ([`ImplementationCandidate::requires_sites`]).
+pub(crate) fn add_rollup_windows(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
+    let group_of = group_of_node(&memo.groups);
+    let grids: Vec<Option<u64>> = memo
+        .groups
+        .iter()
+        .map(|group| group_grid_ms(group, entries))
+        .collect();
+    let base = |c: &ImplementationCandidate| {
+        matches!(
+            c.origin,
+            CandidateOrigin::Pass1 | CandidateOrigin::SharedBuild
+        )
+    };
+    let mut added: Vec<(usize, ImplementationCandidate)> = Vec::new();
+    // Per finer group, the chain keys its pane candidates must expose.
+    let mut hosts: Vec<(usize, u64)> = Vec::new();
+    for (coarse_group, coarse_candidates) in memo.candidates.iter().enumerate() {
+        let Some(coarse_grid) = grids[coarse_group] else {
+            continue;
+        };
+        for coarse in coarse_candidates.iter().filter(|c| base(c)) {
+            let coarse_root = [QueryRoot::Operator(Rc::clone(&coarse.node))];
+            // The coarser build's own pane width.
+            let own = pane_candidates(&coarse_root, &[Some(coarse_grid)]);
+            let [own] = &own[..] else {
+                continue;
+            };
+            for (finer_group, finer_candidates) in memo.candidates.iter().enumerate() {
+                if finer_group == coarse_group || grids[finer_group].is_none() {
+                    continue;
+                }
+                for finer in finer_candidates.iter().filter(|c| base(c)) {
+                    let roots = [
+                        QueryRoot::Operator(Rc::clone(&coarse.node)),
+                        QueryRoot::Operator(Rc::clone(&finer.node)),
+                    ];
+                    let grids_of_pair = [Some(coarse_grid), Some(own.pane_width_ms)];
+                    let panes = pane_candidates(&roots, &grids_of_pair);
+                    if panes.len() != 2 {
+                        continue;
+                    }
+                    let Ok(pass2_candidates) = window_composition_pass2_candidates(&roots, &panes)
+                    else {
+                        continue;
+                    };
+                    for pass2_candidate in pass2_candidates {
+                        if pass2_candidate.pane_candidates.len() != 2
+                            || pass2_candidate.shared_chains.is_empty()
+                        {
+                            continue;
+                        }
+                        let Ok(rewritten) = pass2_candidate.roots else {
+                            continue;
+                        };
+                        let [QueryRoot::Operator(node), QueryRoot::Operator(finer_node)] =
+                            &rewritten[..]
+                        else {
+                            continue;
+                        };
+                        // The finer build's chain, which the coarser one
+                        // regroups.
+                        let [finer_chain] = &chain_readers(finer_node)[..] else {
+                            continue;
+                        };
+                        let [coarse_read] = &chain_readers(node)[..] else {
+                            continue;
+                        };
+                        if coarse_read.key != finer_chain.key || !regroups(node, &coarse_read.merge)
+                        {
+                            continue;
+                        }
+                        let site = CouplingSite {
+                            key: finer_chain.key,
+                            kind: CouplingKind::PaneChain,
+                        };
+                        let mut candidate = rewritten_candidate(
+                            &group_of,
+                            coarse,
+                            Rc::clone(node),
+                            CandidateOrigin::Panes,
+                        );
+                        let finer_id = GroupId(finer_group as u32);
+                        if !candidate.children.contains(&finer_id) {
+                            candidate.children.push(finer_id);
+                        }
+                        candidate.coupling_sites.push(site);
+                        candidate.requires_sites.push((finer_id, site));
+                        added.push((coarse_group, candidate));
+                        hosts.push((finer_group, site.key));
+                    }
+                }
+            }
+        }
+    }
+    for (g, candidate) in added {
+        push_new(memo, g, candidate);
+    }
+    // Each finer group's own pane candidates building a host chain, with
+    // its site.
+    hosts.sort_unstable();
+    hosts.dedup();
+    for (g, key) in hosts {
+        let site = CouplingSite {
+            key,
+            kind: CouplingKind::PaneChain,
+        };
+        let exposing: Vec<ImplementationCandidate> = memo.candidates[g]
+            .iter()
+            .filter(|c| c.origin == CandidateOrigin::Panes && !c.coupling_sites.contains(&site))
+            .filter(|c| c.requires_sites.is_empty())
+            .filter(|c| chain_readers(&c.node).iter().any(|r| r.key == key))
+            .cloned()
+            .map(|mut c| {
+                c.coupling_sites
+                    .retain(|s| s.kind != CouplingKind::PaneChain);
+                c.coupling_sites.push(site);
+                c
+            })
+            .collect();
+        for candidate in exposing {
+            push_new(memo, g, candidate);
+        }
+    }
+}
+
+/// Whether `merge` (over a pane chain) is read by a regrouping merge in
+/// `node`: a coarser grouping's read of a finer chain.
+fn regroups(node: &Rc<OperatorNode>, merge: &Rc<OperatorNode>) -> bool {
+    OperatorNode::reachable(node).iter().any(|n| {
+        matches!(n.asap(), Some(ASAPOp::SummaryMerge { children, group_by: Some(_), .. })
+            if Rc::ptr_eq(&children[0], merge))
+    })
+}
+
 /// Rollup: each coarse build of a group's Pass 1 (or shared-build)
 /// candidate that another group's candidate can answer
 /// (`rollup_candidates` over the two) gets a [`CandidateOrigin::Rollup`]
@@ -388,8 +573,6 @@ pub(crate) fn read_at_threshold(
 ///   rule rolls a coarse build up only from the finest build over its rows,
 ///   and every coarse build of one finest build together
 ///   ([`requirements_met`] checks both).
-///
-/// Ends with the groups in topological order ([`in_topological_order`]).
 pub(crate) fn add_rollup(memo: &mut Memo) {
     let group_of = group_of_node(&memo.groups);
     let mut added: Vec<(usize, ImplementationCandidate)> = Vec::new();
@@ -449,7 +632,6 @@ pub(crate) fn add_rollup(memo: &mut Memo) {
     for (g, candidate) in added {
         push_new(memo, g, candidate);
     }
-    in_topological_order(memo);
 }
 
 /// Marks a candidate [`sketch_rollup`] adds to the finer group.
@@ -560,6 +742,7 @@ fn sketch_rollup(
         coarse_candidate: Rc::clone(&coarse.node),
         coarse_build,
     });
+    candidate.requires_sites.push((finer_id, site));
     let mut exposed = finer.clone();
     exposed.coupling_sites.push(site);
     vec![(0, candidate), (FINER, exposed)]
@@ -681,7 +864,8 @@ fn same_size(a: &FieldDataType, b: &FieldDataType) -> bool {
 ///
 /// - never an exact top-k reuse with panes ([`combinable`]);
 /// - every group in a candidate's `requires_exact_children` chose an exact
-///   implementation ([`is_exact`]);
+///   implementation ([`is_exact`]), and every group in its
+///   `requires_sites` one carrying that site;
 /// - every rollup reads the build the joint rule would roll its coarse
 ///   build up from, over the chosen plan with each rollup undone: an exact
 ///   accumulator's coarsest finer build, a sketch's finest, in its finer
@@ -697,6 +881,11 @@ pub(crate) fn requirements_met(chosen: &[(GroupId, &ImplementationCandidate)]) -
     for (_, candidate) in chosen {
         for &g in &candidate.requires_exact_children {
             if !of(g).is_some_and(is_exact) {
+                return false;
+            }
+        }
+        for (g, site) in &candidate.requires_sites {
+            if !of(*g).is_some_and(|c| c.coupling_sites.contains(site)) {
                 return false;
             }
         }
@@ -775,72 +964,6 @@ fn reached(node: &Rc<OperatorNode>) -> HashSet<*const OperatorNode> {
         .collect()
 }
 
-/// Renumber `memo`'s groups so that every group comes after the groups it
-/// reads, through its node or any candidate (children and required
-/// groups), keeping the current order where it allows. Unchanged when
-/// those reads form a cycle.
-pub(crate) fn in_topological_order(memo: &mut Memo) {
-    let n = memo.groups.len();
-    let mut reads: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
-    for (g, group) in memo.groups.iter().enumerate() {
-        reads[g].extend(group.children.iter().map(|c| c.0 as usize));
-        for candidate in &memo.candidates[g] {
-            reads[g].extend(candidate.children.iter().map(|c| c.0 as usize));
-            reads[g].extend(
-                candidate
-                    .requires_exact_children
-                    .iter()
-                    .map(|c| c.0 as usize),
-            );
-            reads[g].extend(candidate.rollup_of.iter().map(|r| r.finer_group.0 as usize));
-        }
-        reads[g].remove(&g);
-    }
-    // Repeatedly take the first group whose reads are all placed.
-    let mut placed = vec![false; n];
-    let mut order: Vec<usize> = Vec::with_capacity(n);
-    while order.len() < n {
-        let Some(next) = (0..n).find(|&g| !placed[g] && reads[g].iter().all(|&r| placed[r])) else {
-            return;
-        };
-        placed[next] = true;
-        order.push(next);
-    }
-    if order.iter().enumerate().all(|(new, &old)| new == old) {
-        return;
-    }
-    let mut new_of = vec![0u32; n];
-    for (new, &old) in order.iter().enumerate() {
-        new_of[old] = new as u32;
-    }
-    let map = |id: &mut GroupId| id.0 = new_of[id.0 as usize];
-    let mut groups: Vec<Option<MemoGroup>> = std::mem::take(&mut memo.groups)
-        .into_iter()
-        .map(Some)
-        .collect();
-    let mut candidates: Vec<Option<Vec<ImplementationCandidate>>> =
-        std::mem::take(&mut memo.candidates)
-            .into_iter()
-            .map(Some)
-            .collect();
-    for &old in &order {
-        let mut group = groups[old].take().expect("each group once");
-        group.children.iter_mut().for_each(map);
-        group.parents.iter_mut().for_each(map);
-        memo.groups.push(group);
-        let mut own = candidates[old].take().expect("each group once");
-        for candidate in &mut own {
-            candidate.implements.iter_mut().for_each(map);
-            candidate.children.iter_mut().for_each(map);
-            candidate.requires_exact_children.iter_mut().for_each(map);
-            if let Some(read) = &mut candidate.rollup_of {
-                map(&mut read.finer_group);
-            }
-        }
-        memo.candidates.push(own);
-    }
-}
-
 /// Exact top-k reuse: the groups that are top-k computations of one input
 /// group and partition with at least two different `k`
 /// (`topk_reuse_candidates` over the groups' nodes) each get a [`CandidateOrigin::TopKReuse`] candidate
@@ -849,8 +972,9 @@ pub(crate) fn in_topological_order(memo: &mut Memo) {
 /// are added when the memo has no equal ones, each with its one candidate
 /// (also of origin `TopKReuse`). The rule reads an exact input: the input
 /// group's chosen implementation must be exact
-/// ([`ImplementationCandidate::requires_exact_children`]). Ends with the
-/// groups in topological order ([`in_topological_order`]).
+/// ([`ImplementationCandidate::requires_exact_children`])..
+/// Appended groups come after their readers; [`Memo::topological_order`]
+/// orders them.
 pub(crate) fn add_topk_reuse(memo: &mut Memo) {
     // The groups' nodes, each input marked exact: the rule reads an exact
     // input, which `requires_exact_children` asks of the input group.
@@ -922,11 +1046,11 @@ pub(crate) fn add_topk_reuse(memo: &mut Memo) {
                 budget_share: 1,
                 requires_exact_children: vec![input_group],
                 rollup_of: None,
+                requires_sites: Vec::new(),
             };
             push_new(memo, g, reuse);
         }
     }
-    in_topological_order(memo);
 }
 
 /// The group whose node equals `node`, or a new one over `children`, read
@@ -961,6 +1085,7 @@ fn group_for(
         budget_share: 1,
         requires_exact_children: Vec::new(),
         rollup_of: None,
+        requires_sites: Vec::new(),
     }]);
     id
 }
@@ -1009,6 +1134,7 @@ fn rewritten_candidate(
         budget_share: from.budget_share,
         requires_exact_children: Vec::new(),
         rollup_of: None,
+        requires_sites: Vec::new(),
     }
 }
 
@@ -1169,12 +1295,24 @@ mod tests {
         queries: &[(&str, AccuracyTarget)],
         intervals_ms: &[u32],
     ) -> (Memo, Vec<QueryWorkloadEntry>) {
+        let nodes = queries
+            .iter()
+            .map(|(query, target)| {
+                with_promql_series_identity(&lower_promql(query, target.clone())).unwrap()
+            })
+            .collect();
+        memo_of_nodes(nodes, intervals_ms)
+    }
+
+    /// [`memo`] of query roots `nodes`, already lowered.
+    fn memo_of_nodes(
+        nodes: Vec<Rc<OperatorNode>>,
+        intervals_ms: &[u32],
+    ) -> (Memo, Vec<QueryWorkloadEntry>) {
         let entries: Vec<QueryWorkloadEntry> =
             intervals_ms.iter().map(|&ms| repeating(ms)).collect();
         let mut memo = Memo::default();
-        for (q, (query, target)) in queries.iter().enumerate() {
-            let node = lower_promql(query, target.clone());
-            let node = with_promql_series_identity(&node).unwrap();
+        for (q, node) in nodes.into_iter().enumerate() {
             let inventory = generate_per_computation_candidates(vec![(
                 q,
                 QueryRoot::Operator(Rc::clone(&node)),
@@ -1197,6 +1335,7 @@ mod tests {
                     budget_share: 1,
                     requires_exact_children: Vec::new(),
                     rollup_of: None,
+                    requires_sites: Vec::new(),
                 })
                 .collect();
             memo.groups.push(MemoGroup {
@@ -1369,7 +1508,9 @@ mod tests {
             .collect();
         assert_eq!(topk.len(), 2);
         for g in topk {
-            assert!(ranking < g, "children before parents");
+            let order = memo.topological_order().unwrap();
+            let at = |g: usize| order.iter().position(|x| x.0 as usize == g).unwrap();
+            assert!(at(ranking) < at(g), "children before parents");
             let reuse = memo.candidates[g]
                 .iter()
                 .find(|c| c.origin == CandidateOrigin::TopKReuse)
@@ -1381,7 +1522,7 @@ mod tests {
             ));
             let input = memo.groups[g].children[0];
             assert_eq!(reuse.requires_exact_children, vec![input]);
-            assert!(input.0 < ranking as u32);
+            assert!(at(input.0 as usize) < at(ranking));
             let panes = ImplementationCandidate {
                 origin: CandidateOrigin::Panes,
                 ..reuse.clone()
@@ -1528,10 +1669,13 @@ mod tests {
             &[60_000, 60_000, 60_000],
         );
         add_rollup(&mut memo);
-        // Rollups reorder the groups finer first: query `q`'s group.
-        let of = |q: usize| memo.groups.iter().position(|g| g.roots_of == [q]).unwrap();
-        let (job, instance, zone) = (of(0), of(1), of(2));
-        assert!(zone < instance && instance < job, "children before parents");
+        let (job, instance, zone) = (0, 1, 2);
+        let order = memo.topological_order().unwrap();
+        let at = |g: usize| order.iter().position(|x| x.0 as usize == g).unwrap();
+        assert!(
+            at(zone) < at(instance) && at(instance) < at(job),
+            "finer first"
+        );
         let rolled_from = |g: usize, from: usize| {
             memo.candidates[g]
                 .iter()
@@ -1589,5 +1733,149 @@ mod tests {
             (id(job), job_from_instance),
             (id(instance), instance_exposed),
         ]));
+    }
+
+    /// The workload of #878 over a SQL table `metrics(ts, city, value)`,
+    /// every 10 s at ε = 0.01: the global median over 5 minutes and the
+    /// per-city p90 over 20 minutes. The global group gets a candidate that
+    /// regroups the newest 30 of the per-city chain's 120 panes of 10 s,
+    /// at the per-city chain's site, which the per-city group must build;
+    /// one threshold (10 s, 20 minutes) serves both.
+    #[test]
+    fn a_coarser_grouping_reads_the_finer_groupings_chain() {
+        use asap_logical_asap_optimization::test_support::{agg, scan_from, time_range};
+        use asap_types::ir::operator::{AggIntent, Source};
+        use asap_types::ir::schema::{DataType, Field, Schema};
+        use std::time::Duration;
+        let scan = || {
+            scan_from(
+                Source::Table {
+                    table_ref: "metrics".into(),
+                },
+                Schema::with_time_index(
+                    vec![
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("city", DataType::Utf8, true),
+                        Field::plain("value", DataType::Float64, true),
+                    ],
+                    0,
+                    vec![],
+                ),
+            )
+        };
+        let quantile = |q: f64| AggIntent::Quantile {
+            col: Some(2),
+            q,
+            accuracy: AccuracyTarget::max_error(0.01),
+        };
+        let minutes = |m: u64| Duration::from_secs(60 * m);
+        let global = agg(vec![], quantile(0.5), time_range(minutes(5), scan()));
+        let per_city = agg(vec![1], quantile(0.9), time_range(minutes(20), scan()));
+        let (mut memo, entries) = memo_of_nodes(vec![global, per_city], &[10_000, 10_000]);
+        add_window_composition(&mut memo, &entries);
+        add_rollup_windows(&mut memo, &entries);
+        let reads: Vec<&ImplementationCandidate> = memo.candidates[0]
+            .iter()
+            .filter(|c| !c.requires_sites.is_empty())
+            .collect();
+        assert!(!reads.is_empty());
+        for read in &reads {
+            assert_eq!(read.origin, CandidateOrigin::Panes);
+            let (host, site) = read.requires_sites[0];
+            assert_eq!(host, GroupId(1));
+            assert!(read.children.contains(&GroupId(1)));
+            assert!(read.coupling_sites.contains(&site));
+            let [reader] = &chain_readers(&read.node)[..] else {
+                panic!("one chain read");
+            };
+            assert!(regroups(&read.node, &reader.merge));
+            assert_eq!((reader.pane_width_ms, reader.window_ms), (10_000, 300_000));
+            let host_candidate = memo.candidates[1]
+                .iter()
+                .find(|c| c.coupling_sites.contains(&site) && chain_readers(&c.node).len() == 1)
+                .expect("the per-city group builds the chain");
+            assert!(requirements_met(&[
+                (GroupId(0), read),
+                (GroupId(1), host_candidate)
+            ]));
+            let own = memo.candidates[1]
+                .iter()
+                .find(|c| c.origin == CandidateOrigin::Pass1)
+                .unwrap();
+            assert!(!requirements_met(&[(GroupId(0), read), (GroupId(1), own)]));
+            let threshold = chain_thresholds(&memo, &site)
+                .into_iter()
+                .find(|t| {
+                    t.pane_width_ms == 10_000
+                        && t.longest_window_ms == 1_200_000
+                        && may_read(t, reader)
+                        && chain_readers(&host_candidate.node)
+                            .iter()
+                            .all(|r| may_read(t, r))
+                })
+                .expect("one threshold serves both");
+            let at = read_at_threshold(read, &site, &threshold).unwrap();
+            let [at_reader] = &chain_readers(&at)[..] else {
+                panic!("one chain read");
+            };
+            assert_eq!(at_reader.window_ms, 300_000);
+            assert!(regroups(&at, &at_reader.merge));
+        }
+    }
+
+    /// A sketch rollup and its finer group's exposing candidate, resized to
+    /// a size threshold, both build the finer KLL at that size.
+    #[test]
+    fn resizing_the_rolled_up_state_to_a_threshold() {
+        let (mut memo, _) = memo_with(
+            &[
+                (
+                    "quantile by (host, job) (0.5, data)",
+                    AccuracyTarget::max_error(0.01),
+                ),
+                (
+                    "quantile by (job) (0.5, data)",
+                    AccuracyTarget::max_error(0.001),
+                ),
+            ],
+            &[60_000, 60_000],
+        );
+        add_rollup(&mut memo);
+        let rollup = memo.candidates[1]
+            .iter()
+            .find(|c| {
+                c.rollup_of
+                    .as_ref()
+                    .is_some_and(|r| r.finer_state.is_some())
+            })
+            .unwrap();
+        let site = rollup.requires_sites[0].1;
+        let exposed = memo.candidates[0]
+            .iter()
+            .find(|c| c.coupling_sites.contains(&site))
+            .unwrap();
+        let sizes = |node: &Rc<OperatorNode>| -> Vec<String> {
+            OperatorNode::reachable(node)
+                .iter()
+                .filter(|n| is_sketch_build(n) && state_key(n) == site.key)
+                .map(|n| match n.asap() {
+                    Some(ASAPOp::SummaryAgg { family, .. }) => format!("{family:?}"),
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        let mut resized = 0;
+        for threshold in state_size_thresholds(&memo, &site) {
+            let expected = vec![format!("{threshold:?}")];
+            for candidate in [exposed, rollup] {
+                if may_read_state(&threshold, candidate, &site) {
+                    let node = resize_state_at(candidate, &site, &threshold).unwrap();
+                    assert_eq!(sizes(&node), expected);
+                    resized += 1;
+                }
+            }
+        }
+        // The larger threshold serves both, the smaller only the finer group.
+        assert_eq!(resized, 3);
     }
 }

@@ -198,6 +198,7 @@ fn pass1_candidates<Id: Clone>(
         budget_share: 1,
         requires_exact_children: Vec::new(),
         rollup_of: None,
+        requires_sites: Vec::new(),
     };
     // Each query's most approximate inputs: its targets that offer a
     // summary, each one sketch state at most.
@@ -339,6 +340,7 @@ fn target_candidates<Id: Clone>(
                 budget_share,
                 requires_exact_children: Vec::new(),
                 rollup_of: None,
+                requires_sites: Vec::new(),
             });
         }
         // Mixed-radix over this group's targets only.

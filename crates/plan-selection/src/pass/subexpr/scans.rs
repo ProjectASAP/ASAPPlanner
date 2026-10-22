@@ -219,6 +219,7 @@ pub(crate) fn widened_at_threshold(
         budget_share: candidate.budget_share,
         requires_exact_children: candidate.requires_exact_children.clone(),
         rollup_of: candidate.rollup_of.clone(),
+        requires_sites: candidate.requires_sites.clone(),
     }))
 }
 
