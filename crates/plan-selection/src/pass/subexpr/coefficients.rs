@@ -410,6 +410,23 @@ fn at_site_thresholds(
                         next.extend(at(index, rewritten));
                     }
                 }
+                // A sketch rollup's finer build, sized for its readers, as
+                // the brute force sizes it.
+                CouplingKind::SharedBuildSize if windows::is_rollup_state(memo, site) => {
+                    for (index, threshold) in windows::state_size_thresholds(memo, site)
+                        .iter()
+                        .enumerate()
+                    {
+                        let rewritten = windows::may_read_state(threshold, &version, site)
+                            .then(|| windows::resize_state_at(&version, site, threshold).ok())
+                            .flatten()
+                            .map(|node| ImplementationCandidate {
+                                node,
+                                ..version.clone()
+                            });
+                        next.extend(at(index, rewritten));
+                    }
+                }
                 CouplingKind::SharedBuildSize => {
                     for (index, threshold) in
                         capability::size_thresholds(memo, site).iter().enumerate()
@@ -1616,6 +1633,18 @@ mod tests {
             &[60_000, 30_000, 60_000],
         );
         assert!(!checked.is_empty());
+    }
+
+    /// A per-job sum and the total rolled up from it. (TODO: a sketch
+    /// rollup, which reads its finer group's build rather than its node;
+    /// the test does not place those plans yet.)
+    #[test]
+    fn coefficients_reproduce_stage_3_with_a_rollup() {
+        assert!(!check(
+            &["sum by (job) (rate(m[5m]))", "sum(rate(m[5m]))"],
+            &[60_000, 60_000],
+        )
+        .is_empty());
     }
 
     /// Two quantiles within 1% and 2% sharing one KLL build at a size
