@@ -1906,7 +1906,7 @@ const FLOWS_TABLE: &str = r#"{"name": "flows", "columns": [{"name": "ts", "type"
 fn several_workload_files_in_different_languages_are_planned_together() {
     let (promql, sql) = mixed_language_workload_files(
         serde_json::json!({"ingesting": {"rows_per_second": 500.0}}),
-        serde_json::json!({"series_count": 10}),
+        serde_json::json!({"series_count": 10, "sample_interval": 1000}),
     );
     let document = document_of(&[
         "--workload",
@@ -1947,8 +1947,29 @@ fn several_workload_files_in_different_languages_are_planned_together() {
 
 /// Files planned together must agree on how the data arrives and on any
 /// source they both declare: a run is refused rather than picking one.
+/// While data arrives, each source must also declare its own rate: plan
+/// selection shares a workload's `rows_per_second` out over all its
+/// sources, so `flows` (10 groups, no sample interval) would be priced at
+/// 1500 × 10 / 15010 ≈ 1 row/s instead of its file's 500.
 #[test]
 fn workload_files_that_disagree_on_the_data_are_refused() {
+    let (promql, sql) = mixed_language_workload_files(
+        serde_json::json!({"ingesting": {"rows_per_second": 500.0}}),
+        serde_json::json!({"series_count": 10}),
+    );
+    let (_, stderr) = failure(&[
+        "--workload",
+        promql.to_str().unwrap(),
+        "--workload",
+        sql.to_str().unwrap(),
+        "--table",
+        FLOWS_TABLE,
+    ]);
+    assert!(
+        stderr.contains("source flows declares no rate of its own"),
+        "{stderr}"
+    );
+
     let (promql, sql) = mixed_language_workload_files(
         serde_json::json!("at_rest"),
         serde_json::json!({"rows_held": 1000}),

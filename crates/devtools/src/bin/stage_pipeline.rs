@@ -139,8 +139,11 @@
 // the data workload is the union of the files' sources. A source several
 // files declare must have the same facts in each, and the files must
 // declare the same kind of arrival: ingesting (or mixed) arrivals add
-// their `rows_per_second`, which each file counts over all its sources.
-// A disagreement is refused.
+// their `rows_per_second`. Plan selection shares a workload's
+// `rows_per_second` out over all its sources, so when the data arrives,
+// every source of several files must declare its own rate
+// (`series_count` and `sample_interval`). A disagreement or a source
+// without its own rate is refused.
 // With `--workload`, each query's accuracy (ε, δ, metric) comes from the
 // file: `--max-error`, `--failure-probability` and `--accuracy-metric` apply
 // to `--promql`/`--sql` queries only.
@@ -222,6 +225,7 @@
 // to true; without `time_index` the table has no time column; a
 // `time_index` that is not a column index is an error).
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeSet, HashSet};
 
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
@@ -541,27 +545,23 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         },
     };
     plan_selection.ignore_accuracy_guarantees = !enforce_accuracy_guarantees;
-    let from_files = match workload_paths.is_empty() {
-        false if example.is_none() && queries.is_empty() => {
-            let mut workloads = Vec::new();
-            for path in &workload_paths {
-                let text =
-                    std::fs::read_to_string(path).map_err(|e| format!("--workload {path}: {e}"))?;
-                let workload: PlanningWorkload =
-                    serde_json::from_str(&text).map_err(|e| format!("--workload {path}: {e}"))?;
-                workload
-                    .validate()
-                    .map_err(|e| format!("--workload {path}: {e}"))?;
-                workloads.push((path.as_str(), workload));
-            }
-            Some((workloads, sql_catalog(&tables)?))
+    let from_files = if workload_paths.is_empty() {
+        None
+    } else if example.is_none() && queries.is_empty() {
+        let mut workloads = Vec::new();
+        for path in &workload_paths {
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("--workload {path}: {e}"))?;
+            let workload: PlanningWorkload =
+                serde_json::from_str(&text).map_err(|e| format!("--workload {path}: {e}"))?;
+            workload
+                .validate()
+                .map_err(|e| format!("--workload {path}: {e}"))?;
+            workloads.push((path.as_str(), workload));
         }
-        false => {
-            return Err(
-                "give exactly one of --example, --workload or --promql/--sql queries".into(),
-            )
-        }
-        true => None,
+        Some((workloads, sql_catalog(&tables)?))
+    } else {
+        return Err("give exactly one of --example, --workload or --promql/--sql queries".into());
     };
     // The workload's queries as the document describes them, the
     // frontends' roots, the workload entries and the data workload.
@@ -782,7 +782,11 @@ fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered,
 /// queries in order, numbered `q1..qN` across the files, and one data
 /// workload with every file's sources. A source several files declare must
 /// have the same facts in each, and their arrivals must agree
-/// ([`arrival_together`]).
+/// ([`arrival_together`]). When several files' data arrives, every source
+/// must declare its own rate (`series_count` and `sample_interval`): plan
+/// selection shares a workload's `rows_per_second` out over all its
+/// sources, so one file's rate would otherwise be priced on another file's
+/// sources.
 fn lowered_together(
     workloads: &[(&str, PlanningWorkload)],
     catalog: &SqlCatalog,
@@ -799,31 +803,51 @@ fn lowered_together(
             data = Some(more_data);
             continue;
         };
-        data.arrival = arrival_together(data.arrival, more_data.arrival)
-            .ok_or_else(|| format!("--workload {path}: its data arrival {:?} disagrees with the earlier files' {:?}; files planned together must declare the same kind of arrival", more_data.arrival, data.arrival))?;
+        data.arrival = arrival_together(data.arrival, more_data.arrival).ok_or_else(|| {
+            format!(
+                "--workload {path}: its data arrival {:?} disagrees with the earlier files' {:?} \
+                 (a file without a data_workload declares an unknown arrival); files planned \
+                 together must declare the same kind of arrival",
+                more_data.arrival, data.arrival
+            )
+        })?;
         for (source, facts) in more_data.sources {
-            match data.sources.get(&source) {
-                Some(earlier) if *earlier != facts => {
-                    return Err(format!(
-                        "--workload {path}: source {source} is declared with other facts in an earlier file"
-                    ))
+            match data.sources.entry(source) {
+                Entry::Vacant(slot) => {
+                    slot.insert(facts);
                 }
-                Some(_) => {}
-                None => {
-                    data.sources.insert(source, facts);
-                }
+                Entry::Occupied(earlier) if *earlier.get() != facts => return Err(format!(
+                    "--workload {path}: source {} is declared with other facts in an earlier file",
+                    earlier.key()
+                )),
+                Entry::Occupied(_) => {}
             }
         }
     }
+    let data = data.unwrap_or_default();
+    if workloads.len() > 1 && data.arrival.rows_per_second().is_some() {
+        if let Some((source, _)) = data
+            .sources
+            .iter()
+            .find(|(_, facts)| facts.series_count.is_none() || facts.sample_interval.is_none())
+        {
+            return Err(format!(
+                "--workload: source {source} declares no rate of its own (series_count and \
+                 sample_interval); with several files, each source needs one, since a file's \
+                 rows_per_second is shared out over every file's sources"
+            ));
+        }
+    }
+    data.validate().map_err(|e| e.to_string())?;
     for (index, query) in described.iter_mut().enumerate() {
         query["id"] = json!(format!("q{}", index + 1));
     }
-    Ok((described, roots, entries, data.unwrap_or_default()))
+    Ok((described, roots, entries, data))
 }
 
 /// The arrival of two files' data planned together: ingesting (or mixed)
-/// at the sum of their rates, which each counts over all its sources; the
-/// same arrival when both are at rest or unknown; `None` when they differ.
+/// at the sum of their rates; the same arrival when both are at rest or
+/// unknown; `None` when they differ.
 fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArrival> {
     match (earlier, later) {
         (
