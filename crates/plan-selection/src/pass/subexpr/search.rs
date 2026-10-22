@@ -19,7 +19,6 @@ use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate}
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-
 use super::{groups, CouplingKind, GroupId, ImplementationCandidate, Memo};
 use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
 
@@ -136,8 +135,8 @@ fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
 
 /// The chosen candidates of `choice`, each rewritten at a threshold of each
 /// of its coupling sites: every combination of thresholds every reader may
-/// read. A site without a rewrite (raw horizon, a shared build until it can
-/// be resized) leaves its readers as they are; Stage 3 prices it.
+/// read. A raw-horizon site has no rewrite and leaves its readers as they
+/// are; Stage 3 prices it.
 fn at_thresholds(memo: &Memo, choice: &GroupChoice) -> Vec<Vec<Option<ImplementationCandidate>>> {
     let chosen: Vec<Option<ImplementationCandidate>> = choice
         .iter()
@@ -213,7 +212,30 @@ fn at_thresholds(memo: &Memo, choice: &GroupChoice) -> Vec<Vec<Option<Implementa
                         }
                     }
                 }
-                CouplingKind::SharedBuildSize | CouplingKind::RawHorizon => next.push(plan),
+                CouplingKind::SharedBuildSize => {
+                    for threshold in super::capability::size_thresholds(memo, &site) {
+                        let mut rewritten = plan.clone();
+                        let mut valid = true;
+                        for candidate in rewritten.iter_mut().flatten() {
+                            if !candidate.coupling_sites.contains(&site) {
+                                continue;
+                            }
+                            match super::capability::resized_at_threshold(
+                                memo, candidate, &site, &threshold,
+                            ) {
+                                Ok(Some(node)) => candidate.node = node,
+                                _ => {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if valid {
+                            next.push(rewritten);
+                        }
+                    }
+                }
+                CouplingKind::RawHorizon => next.push(plan),
             }
         }
         plans = next;
@@ -315,6 +337,46 @@ fn substituted(
     new
 }
 
+/// `roots` with its identical nodes made one node, then its summary builds
+/// equal to one of `resized` (over equal windows of two groups) made one
+/// build and the identical nodes above them shared in turn.
+fn shared(roots: &[QueryRoot], resized: &[Rc<OperatorNode>]) -> Vec<QueryRoot> {
+    let identical = |roots: Vec<QueryRoot>| {
+        let shareable = sharing_candidates(&roots);
+        match shareable.is_empty() {
+            true => roots,
+            false => share_identical_expressions(&roots, &shareable),
+        }
+    };
+    identical(super::capability::share_equal_builds(
+        &identical(roots.to_vec()),
+        resized,
+    ))
+}
+
+/// The shared builds `plan` resized: each shared-build reader's build that
+/// differs from the build of the memo's candidate it was chosen as
+/// (`choice`).
+fn resized_builds(
+    memo: &Memo,
+    choice: &GroupChoice,
+    plan: &[Option<ImplementationCandidate>],
+) -> Vec<Rc<OperatorNode>> {
+    choice
+        .iter()
+        .zip(plan)
+        .enumerate()
+        .filter_map(|(g, (c, candidate))| {
+            let candidate = candidate.as_ref()?;
+            let original = &memo.candidates[g][(*c)?];
+            let build = super::capability::shared_build_of(candidate)?;
+            let own = super::capability::shared_build_of(original)?;
+            (candidate.origin == super::CandidateOrigin::SharedBuild && *build != *own)
+                .then_some(build)
+        })
+        .collect()
+}
+
 /// The reference search: every plan of the memo ([`group_choices`] ×
 /// [`at_thresholds`]), its identical nodes made one node, implemented in
 /// every Stage 2 materialization and priced by Stage 3; the cheapest
@@ -350,11 +412,7 @@ pub(crate) fn brute_force<Id: Clone>(
             let Ok(roots) = recompose_guarantees(&roots) else {
                 continue;
             };
-            let shareable = sharing_candidates(&roots);
-            let roots = match shareable.is_empty() {
-                true => roots,
-                false => share_identical_expressions(&roots, &shareable),
-            };
+            let roots = shared(&roots, &resized_builds(&memo, choice, &plan));
             number += 1;
             let id = format!("L{number}");
             let Ok(implemented) =
@@ -393,6 +451,66 @@ mod tests {
         DataArrival, DurationMs, MetricType, Predictability, QueryRecurrence, QueryRequirements,
         RepeatedDemand, RepetitionInterval, SourceFacts,
     };
+
+    /// The 0.9 quantile of `m[5m]` within 1% and within 2% error, each
+    /// query reading its shared-build twin: at the larger threshold both
+    /// builds are resized to one `k`, and the composed plan, its identical
+    /// nodes shared, has one KLL build, although the two queries' windows
+    /// are two groups. At the smaller threshold the stricter reader may not
+    /// read the build, so it is the only plan.
+    #[test]
+    fn two_kll_readers_at_a_threshold_compose_to_one_build() {
+        use super::super::CandidateOrigin;
+        let roots: Vec<(usize, QueryRoot)> = [0.01, 0.02]
+            .iter()
+            .map(|&e| {
+                QueryRoot::Operator(lower_promql(
+                    "quantile_over_time(0.9, m[5m])",
+                    AccuracyTarget::max_error(e),
+                ))
+            })
+            .enumerate()
+            .collect();
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let mut memo = groups::memo_of(&per_computation);
+        super::super::capability::add_shared_builds(&mut memo);
+        let is_kll = |c: &ImplementationCandidate| {
+            OperatorNode::reachable(&c.node).iter().any(|n| {
+                matches!(n.asap(), Some(asap_types::ir::ASAPOp::SummaryAgg { family, .. })
+                    if format!("{family:?}").contains("Kll"))
+            })
+        };
+        // Each query's root group reads its KLL twin; every other group
+        // its one candidate.
+        let choice: GroupChoice = memo
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(g, group)| {
+                if group.roots_of.is_empty() {
+                    return Some(0);
+                }
+                memo.candidates[g]
+                    .iter()
+                    .position(|c| c.origin == CandidateOrigin::SharedBuild && is_kll(c))
+            })
+            .collect();
+        assert!(choice.iter().all(Option::is_some));
+        let plans = at_thresholds(&memo, &choice);
+        assert_eq!(plans.len(), 1);
+        let roots = composed_roots(&memo, &per_computation, &plans[0]).unwrap();
+        let roots = shared(&roots, &resized_builds(&memo, &choice, &plans[0]));
+        let builds: std::collections::HashSet<*const OperatorNode> = roots
+            .iter()
+            .flat_map(|root| match root {
+                QueryRoot::Operator(node) => OperatorNode::reachable(node),
+                QueryRoot::Scalar(_) => Vec::new(),
+            })
+            .filter(|n| matches!(n.asap(), Some(asap_types::ir::ASAPOp::SummaryAgg { .. })))
+            .map(|n| Rc::as_ptr(&n))
+            .collect();
+        assert_eq!(builds.len(), 1);
+    }
 
     #[test]
     #[ignore = "debugging aid"]
