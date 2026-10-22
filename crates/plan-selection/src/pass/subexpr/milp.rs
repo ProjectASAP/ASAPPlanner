@@ -73,6 +73,17 @@ pub(crate) struct Choice {
     pub children: Vec<GroupId>,
     pub assignment: Vec<Materialization>,
     pub coefficients: ChoiceCoefficients,
+    /// `None`: the group's one node, shared by every query reading it.
+    /// `Some(q)`: query `q`'s own copy of it (the group apart); a group's
+    /// copies are all apart or all shared.
+    pub copy_of: Option<usize>,
+    /// Each child group that is a scan: `None` when it is apart and its
+    /// copy is this choice's own (not in `children`); `Some(h)` when it is
+    /// the scan shared at horizon `h` ms (its choice's `scan_horizon_ms`).
+    pub scan_children: Vec<(GroupId, Option<u64>)>,
+    /// For a scan group's choice: the horizon it reads, the longest window
+    /// among its readers.
+    pub scan_horizon_ms: Option<u64>,
 }
 
 /// A shared group's own node, built once per evaluation when chosen.
@@ -561,6 +572,9 @@ mod tests {
                 slots: Vec::new(),
                 child_via: children.iter().map(|_| Via::Direct).collect(),
             },
+            copy_of: None,
+            scan_children: Vec::new(),
+            scan_horizon_ms: None,
         }
     }
 

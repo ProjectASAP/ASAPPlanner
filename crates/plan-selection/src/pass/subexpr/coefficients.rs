@@ -34,7 +34,7 @@
 //! chain's slot is charged per unit of its group's union rate, while
 //! Stage 3 computes it once per request (range steps not counted).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
@@ -136,9 +136,24 @@ pub(super) fn choice_parts(
     models: PlanningModels<'_>,
     cache: &mut PriceCache,
 ) -> Result<Vec<ChoiceParts>, SelectionError> {
+    let node = &memo.groups[group.0 as usize].node;
     let queries = &memo.groups[group.0 as usize].queries;
-    let group_entries: Vec<QueryWorkloadEntry> =
-        queries.iter().map(|&q| entries[q].clone()).collect();
+    let is_scan = matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
+    // Shared (one node for every query), and for a group several queries
+    // read, apart (a copy per query); a scan apart is its reader's.
+    let mut modes: Vec<Option<usize>> = vec![None];
+    if queries.len() > 1 && !is_scan {
+        modes.extend(queries.iter().map(|&q| Some(q)));
+    }
+    // A shared scan reads the longest window of its readers: one choice
+    // per horizon a reader may read.
+    let own_horizons: Vec<Option<u64>> = match node.non_asap() {
+        Some(NonASAPOp::Scan { source, .. }) => raw_windows(memo)
+            .get(&super::scans::raw_horizon_key(source))
+            .map(|windows| windows.iter().map(|&w| Some(w)).collect())
+            .unwrap_or_else(|| vec![None]),
+        _ => vec![None],
+    };
     let mut out = Vec::new();
     let versions: Vec<(usize, ImplementationCandidate, SiteThresholds)> = memo.candidates
         [group.0 as usize]
@@ -150,89 +165,168 @@ pub(super) fn choice_parts(
                 .map(move |(version, thresholds)| (index, version, thresholds))
         })
         .collect();
-    for (index, candidate, thresholds) in &versions {
-        let (index, candidate) = (*index, candidate);
-        let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.node)); queries.len().max(1)];
-        let Ok(physicals) = optimize_physical_asap(
-            "S",
-            &roots,
-            &group_entries,
-            data,
-            models.deployment_capabilities,
-        ) else {
-            continue;
+    for copy_of in modes {
+        let built_for: Vec<usize> = match copy_of {
+            Some(q) => vec![q],
+            None => queries.clone(),
         };
-        let child_groups = children_of(memo, group, candidate);
-
-        let mut children: HashSet<u32> = HashSet::new();
-        let mut child_roots: Vec<Option<u32>> = Vec::new();
-        for &child in &child_groups {
-            let keys = child_keys(memo, child, entries, data, &models, cache);
-            children.extend(keys.nodes.iter().copied());
-            child_roots.push(keys.root);
-        }
-        let mut seen: Vec<Vec<Materialization>> = Vec::new();
-        for physical in &physicals {
-            let keys = keys_of(&physical.dag, cache.keys_mut());
-            let shallow = shallow_keys(&physical.dag, cache.keys_mut());
-            let private: Vec<bool> = keys.iter().map(|k| !children.contains(k)).collect();
-            let builds: Vec<usize> = (0..physical.dag.nodes.len())
-                .filter(|&i| private[i] && is_build(&physical.dag.nodes[i].payload))
-                .collect();
-            // Only the private builds are the choice's; any other
-            // materialized node (the group's own node built once, a
-            // child's build) is another variable of the model.
-            let foreign = physical.dag.nodes.iter().enumerate().any(|(i, n)| {
-                n.materialization != Materialization::NotMaterialized && !builds.contains(&i)
-            });
-            if foreign {
-                continue;
-            }
-            let assignment: Vec<Materialization> = builds
-                .iter()
-                .map(|&i| physical.dag.nodes[i].materialization)
-                .collect();
-            if seen.contains(&assignment) {
-                continue;
-            }
-            seen.push(assignment.clone());
-            let Some(parts) = coefficients_of(
-                memo,
-                group,
-                index,
-                candidate,
-                physical,
-                &keys,
-                &shallow,
-                &private,
-                &child_roots,
-                &horizons_of(memo, thresholds),
-                &group_entries,
+        let part_entries: Vec<QueryWorkloadEntry> =
+            built_for.iter().map(|&q| entries[q].clone()).collect();
+        for (index, candidate, thresholds) in &versions {
+            let (index, candidate) = (*index, candidate);
+            let roots =
+                vec![QueryRoot::Operator(Rc::clone(&candidate.node)); built_for.len().max(1)];
+            let Ok(physicals) = optimize_physical_asap(
+                "S",
+                &roots,
+                &part_entries,
                 data,
-                &models,
-            )?
-            else {
+                models.deployment_capabilities,
+            ) else {
                 continue;
             };
-            out.push(ChoiceParts {
-                choice: Choice {
-                    group,
-                    candidate: index,
-                    implements: candidate.implements.clone(),
-                    children: child_groups.clone(),
-                    assignment,
-                    coefficients: parts.coefficients,
-                },
-                lazy: LazyTerms {
-                    thresholds: thresholds.clone(),
-                    ..parts.lazy
-                },
-                root_key: parts.root_key,
-                root_producer_keys: parts.root_producer_keys,
-                slot_keys: parts.slot_keys,
-                build_keys: builds.iter().map(|&i| shallow[i]).collect(),
-                part_keys: parts.part_keys,
-            });
+            let child_groups = children_of(memo, group, candidate);
+            let child_key_sets: Vec<Rc<super::pricing::ChildKeys>> = child_groups
+                .iter()
+                .map(|&child| child_keys(memo, child, entries, data, &models, cache))
+                .collect();
+            // Each scan child: apart (its nodes this choice's) or shared at
+            // a horizon no shorter than this choice's window on it.
+            let scan_children: Vec<(usize, u64, Vec<Option<u64>>)> = child_groups
+                .iter()
+                .enumerate()
+                .filter_map(
+                    |(i, child)| match memo.groups[child.0 as usize].node.non_asap() {
+                        Some(NonASAPOp::Scan { source, .. }) => {
+                            let key = super::scans::raw_horizon_key(source);
+                            let mut variants = vec![None];
+                            variants.extend(
+                                raw_windows(memo)
+                                    .get(&key)
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|&w| Some(w)),
+                            );
+                            Some((i, key, variants))
+                        }
+                        _ => None,
+                    },
+                )
+                .collect();
+            let mut combinations: Vec<Vec<Option<u64>>> = vec![Vec::new()];
+            for (_, _, variants) in &scan_children {
+                combinations = combinations
+                    .into_iter()
+                    .flat_map(|chosen| {
+                        variants.iter().map(move |v| {
+                            let mut chosen = chosen.clone();
+                            chosen.push(*v);
+                            chosen
+                        })
+                    })
+                    .collect();
+            }
+            for own_horizon in &own_horizons {
+                for combination in &combinations {
+                    // Children whose nodes are not this choice's, and the
+                    // horizon each shared scan child reads.
+                    let mut horizons: HashMap<u64, u64> = HashMap::new();
+                    let mut absorbed: Vec<usize> = Vec::new();
+                    for ((i, key, _), variant) in scan_children.iter().zip(combination) {
+                        match variant {
+                            Some(h) => {
+                                horizons.insert(*key, *h);
+                            }
+                            None => absorbed.push(*i),
+                        }
+                    }
+                    let mut children: HashSet<u32> = HashSet::new();
+                    let mut child_roots: Vec<Option<u32>> = Vec::new();
+                    let mut kept_children: Vec<GroupId> = Vec::new();
+                    for (i, keys) in child_key_sets.iter().enumerate() {
+                        if absorbed.contains(&i) {
+                            continue;
+                        }
+                        children.extend(keys.nodes.iter().copied());
+                        child_roots.push(keys.root);
+                        kept_children.push(child_groups[i]);
+                    }
+                    let mut seen: Vec<Vec<Materialization>> = Vec::new();
+                    for physical in &physicals {
+                        let keys = keys_of(&physical.dag, cache.keys_mut());
+                        let shallow = shallow_keys(&physical.dag, cache.keys_mut());
+                        let private: Vec<bool> =
+                            keys.iter().map(|k| !children.contains(k)).collect();
+                        let builds: Vec<usize> = (0..physical.dag.nodes.len())
+                            .filter(|&i| private[i] && is_build(&physical.dag.nodes[i].payload))
+                            .collect();
+                        // Only the private builds are the choice's; any
+                        // other materialized node (the group's own node
+                        // built once, a child's build) is another variable
+                        // of the model.
+                        let foreign = physical.dag.nodes.iter().enumerate().any(|(i, n)| {
+                            n.materialization != Materialization::NotMaterialized
+                                && !builds.contains(&i)
+                        });
+                        if foreign {
+                            continue;
+                        }
+                        let assignment: Vec<Materialization> = builds
+                            .iter()
+                            .map(|&i| physical.dag.nodes[i].materialization)
+                            .collect();
+                        if seen.contains(&assignment) {
+                            continue;
+                        }
+                        seen.push(assignment.clone());
+                        let Some(parts) = coefficients_of(
+                            memo,
+                            group,
+                            index,
+                            candidate,
+                            physical,
+                            &keys,
+                            &shallow,
+                            &private,
+                            &child_roots,
+                            &horizons,
+                            own_horizon.or_else(|| scan_lookback_ms(memo, group)),
+                            &part_entries,
+                            data,
+                            &models,
+                        )?
+                        else {
+                            continue;
+                        };
+                        out.push(ChoiceParts {
+                            choice: Choice {
+                                group,
+                                candidate: index,
+                                implements: candidate.implements.clone(),
+                                children: kept_children.clone(),
+                                assignment,
+                                coefficients: parts.coefficients,
+                                copy_of,
+                                scan_children: scan_children
+                                    .iter()
+                                    .zip(combination)
+                                    .map(|((i, _, _), v)| (child_groups[*i], *v))
+                                    .collect(),
+                                scan_horizon_ms: *own_horizon,
+                            },
+                            lazy: LazyTerms {
+                                thresholds: thresholds.clone(),
+                                ..parts.lazy
+                            },
+                            root_key: parts.root_key,
+                            root_producer_keys: parts.root_producer_keys,
+                            slot_keys: parts.slot_keys,
+                            build_keys: builds.iter().map(|&i| shallow[i]).collect(),
+                            part_keys: parts.part_keys,
+                        });
+                    }
+                }
+            }
         }
     }
     Ok(out)
@@ -240,10 +334,9 @@ pub(super) fn choice_parts(
 
 /// `candidate` rewritten at each combination of thresholds of its coupling
 /// sites that it may read, as the brute-force search rewrites a plan's
-/// candidates, with the index of each threshold. At a raw-horizon
-/// threshold the candidate is unchanged and its query-time scans of the
-/// site's source read the threshold's horizon ([`horizons_of`]). A
-/// candidate without sites is itself.
+/// candidates, with the index of each threshold. A raw-horizon site has
+/// no threshold here: scan sharing is part of each choice
+/// ([`Choice::scan_children`]). A candidate without sites is itself.
 fn at_site_thresholds(
     memo: &Memo,
     candidate: &ImplementationCandidate,
@@ -304,19 +397,10 @@ fn at_site_thresholds(
                         next.extend(at(index, rewritten));
                     }
                 }
-                CouplingKind::RawHorizon => {
-                    let own: Vec<scans::RawReader> = scans::raw_readers(memo, &version)
-                        .into_iter()
-                        .filter(|r| r.key == site.key)
-                        .collect();
-                    for (index, threshold) in
-                        scans::horizon_thresholds(memo, site).iter().enumerate()
-                    {
-                        if own.iter().all(|r| scans::may_read_horizon(threshold, r)) {
-                            next.extend(at(index, Some(version.clone())));
-                        }
-                    }
-                }
+                // A raw horizon is the look-back of a shared scan: each
+                // choice prices its scan children shared at a horizon or
+                // apart ([`Choice::scan_children`]).
+                CouplingKind::RawHorizon => next.push((version, chosen)),
             }
         }
         versions = next;
@@ -324,17 +408,56 @@ fn at_site_thresholds(
     versions
 }
 
-/// The raw-data horizon of each source key `thresholds` fixes, in ms.
-fn horizons_of(memo: &Memo, thresholds: &[(CouplingSite, usize)]) -> HashMap<u64, u64> {
-    thresholds
-        .iter()
-        .filter(|(site, _)| site.kind == CouplingKind::RawHorizon)
-        .filter_map(|(site, index)| {
-            super::scans::horizon_thresholds(memo, site)
-                .get(*index)
-                .map(|t| (site.key, t.horizon_ms))
-        })
-        .collect()
+/// Every window a raw scan of each source may be read for, by the source's
+/// raw-horizon key: each range over it (through time shifts), and each
+/// pane chain over it, kept across evaluations (its pane width) or not
+/// (its panes), in every candidate and every chain threshold of the memo.
+fn raw_windows(memo: &Memo) -> HashMap<u64, BTreeSet<u64>> {
+    use asap_types::ir::OperatorNode;
+    let mut windows: HashMap<u64, BTreeSet<u64>> = HashMap::new();
+    let scan_below = |node: &Rc<OperatorNode>| -> Option<u64> {
+        let mut node = Rc::clone(node);
+        loop {
+            match node.non_asap() {
+                Some(NonASAPOp::Scan { source, .. }) => {
+                    return Some(super::scans::raw_horizon_key(source))
+                }
+                Some(NonASAPOp::TimeShift { child, .. }) => node = Rc::clone(child),
+                _ => return None,
+            }
+        }
+    };
+    for candidate in memo.candidates.iter().flatten() {
+        for (version, _) in at_site_thresholds(memo, candidate) {
+            for node in OperatorNode::reachable(&version.node) {
+                match (node.non_asap(), node.asap()) {
+                    (Some(NonASAPOp::TimeRange { range, child, .. }), _) => {
+                        if let Some(key) = scan_below(child) {
+                            let ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
+                            windows.entry(key).or_default().insert(ms);
+                        }
+                    }
+                    (
+                        _,
+                        Some(ASAPOp::PaneChain {
+                            child,
+                            pane_width_ms,
+                            pane_count,
+                            ..
+                        }),
+                    ) => {
+                        if let Some(key) = scan_below(child) {
+                            let entry = windows.entry(key).or_default();
+                            entry.insert(*pane_width_ms);
+                            entry.insert(pane_width_ms.saturating_mul(u64::from(*pane_count)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    windows
 }
 
 /// The child groups of `candidate`: its own, and every other group whose
@@ -489,6 +612,7 @@ fn coefficients_of(
     private: &[bool],
     child_roots: &[Option<u32>],
     horizons: &HashMap<u64, u64>,
+    scan_lookback: Option<u64>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
@@ -509,7 +633,6 @@ fn coefficients_of(
     if !private[position[&root]] {
         return Ok(None);
     }
-    let scan_lookback = scan_lookback_ms(memo, group);
     let priced = per_computation(dag, entries, scan_lookback, horizons, data, models)?;
     let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
     for e in &dag.edges {
@@ -920,6 +1043,19 @@ mod tests {
         )
         .ok()?;
         let expected = cost.cost_per_second?;
+        let debug = std::env::var("W2DBG").is_ok();
+        if debug {
+            for (id, n) in &cost.per_node {
+                eprintln!(
+                    "stage3 {id} {:?} {:?} {:?} x{} {}",
+                    n.cost_per_second,
+                    nodes[id].output_state.timing,
+                    nodes[id].materialization,
+                    n.multiplier,
+                    n.detail
+                );
+            }
+        }
 
         let rates = computations(
             dag,
@@ -947,6 +1083,49 @@ mod tests {
         };
         let query_rate =
             |q: usize| crate::shared_evaluation_rate(&[&entries[q]], settings).unwrap();
+        // Each node's producers, and the nodes below a node.
+        let producers = |id: PhysicalASAPNodeId| -> Vec<PhysicalASAPNodeId> {
+            dag.edges
+                .iter()
+                .filter(|e| e.consumer == id)
+                .map(|e| e.producer)
+                .collect()
+        };
+        let consumers =
+            |id: PhysicalASAPNodeId| dag.edges.iter().filter(|e| e.producer == id).count();
+        let below = |root: PhysicalASAPNodeId| -> Vec<PhysicalASAPNodeId> {
+            let mut seen = HashSet::new();
+            let mut stack = vec![root];
+            let mut out = Vec::new();
+            while let Some(id) = stack.pop() {
+                if seen.insert(id) {
+                    out.push(id);
+                    stack.extend(producers(id));
+                }
+            }
+            out
+        };
+        // The queries whose plan reaches each node at all.
+        let starts = crate::query_starts(dag);
+        let reaches_at_all = |id: PhysicalASAPNodeId| -> Vec<usize> {
+            starts
+                .iter()
+                .enumerate()
+                .filter(|(_, start)| start.iter().any(|s| below(*s).contains(&id)))
+                .map(|(q, _)| q)
+                .collect()
+        };
+        let kept = kept_pane_chains(dag);
+        // A scan's horizon in the plan, or `None` when one reader has it
+        // (apart, its reader's).
+        let scan_variant = |s: PhysicalASAPNodeId| -> Option<u64> {
+            (consumers(s) > 1).then(|| {
+                windows_read(dag, &nodes, s, &kept)
+                    .into_iter()
+                    .max()
+                    .unwrap_or(0)
+            })
+        };
         // Each needed group's choice in this plan: its candidate, with the
         // plan's materialization of its private builds.
         struct Placed<'p> {
@@ -960,84 +1139,147 @@ mod tests {
         }
         let mut placed: Vec<Placed> = Vec::new();
         let mut used: HashSet<PhysicalASAPNodeId> = HashSet::new();
-        // The plan's groups: the chosen ones, and the children their
-        // choices read that the memo's candidates do not list (their first
-        // candidate).
+        // The plan's groups, parents first: the chosen ones, and the
+        // children their choices read that the memo's candidates do not
+        // list (their first candidate).
         let mut chosen: Vec<Option<usize>> = choice.to_vec();
-        let mut queue: Vec<usize> = (0..chosen.len()).filter(|&g| chosen[g].is_some()).collect();
-        let mut order = Vec::new();
-        while let Some(g) = queue.pop() {
-            order.push(g);
-            let c = chosen[g].expect("queued groups are chosen");
-            for part in parts[g].iter().filter(|p| p.choice.candidate == c).take(1) {
-                for child in &part.choice.children {
-                    let h = child.0 as usize;
-                    if chosen[h].is_none() {
-                        chosen[h] = Some(0);
-                        queue.push(h);
-                    }
+        for g in (0..chosen.len()).rev() {
+            let Some(c) = chosen[g] else { continue };
+            for part in parts[g].iter().filter(|p| p.choice.candidate == c) {
+                for child in part
+                    .choice
+                    .children
+                    .iter()
+                    .chain(part.choice.scan_children.iter().map(|(h, _)| h))
+                {
+                    chosen[child.0 as usize].get_or_insert(0);
                 }
             }
         }
-        order.sort_unstable();
-        for g in order {
-            let c = chosen[g].expect("chosen");
-            let candidates: Vec<&ChoiceParts> = parts[g]
-                .iter()
-                .filter(|p| p.choice.candidate == c)
-                .collect();
-            let part = candidates.into_iter().find(|p| {
-                p.build_keys
-                    .iter()
-                    .zip(&p.choice.assignment)
-                    .all(|(key, m)| {
-                        by_key(*key)
-                            .iter()
-                            .any(|id| nodes[id].materialization == *m)
-                    })
-            });
-            let part = part?;
+        for g in (0..chosen.len()).rev() {
+            let Some(c) = chosen[g] else { continue };
+            let Some(sample) = parts[g].iter().find(|p| p.choice.candidate == c) else {
+                return None;
+            };
             // The plan's copies of its node: equal shallow keys, reading
             // equal private producers.
-            let copies: Vec<PhysicalASAPNodeId> = by_key(part.root_key)
+            let copies: Vec<PhysicalASAPNodeId> = by_key(sample.root_key)
                 .into_iter()
                 .filter(|id| !used.contains(id))
                 .filter(|id| {
-                    let producers: Vec<u32> = dag
-                        .edges
+                    let keys_below: Vec<u32> = producers(*id)
                         .iter()
-                        .filter(|e| e.consumer == *id)
-                        .map(|e| keys[position_of[&e.producer]])
+                        .map(|p| keys[position_of[p]])
                         .collect();
-                    part.root_producer_keys
+                    sample
+                        .root_producer_keys
                         .iter()
-                        .all(|k| producers.contains(k))
+                        .all(|k| keys_below.contains(k))
                 })
                 .collect();
+            if copies.is_empty() {
+                // A scan every reader has apart.
+                if sample.choice.group.0 as usize == g
+                    && parts[g]
+                        .iter()
+                        .all(|p| p.choice.scan_horizon_ms.is_some() || p.choice.copy_of.is_none())
+                {
+                    continue;
+                }
+                return None;
+            }
             used.extend(copies.iter().copied());
             let timing = |id: &PhysicalASAPNodeId| nodes[id].output_state.timing;
-            let query_time = copies
+            let query_time: Vec<PhysicalASAPNodeId> = copies
                 .iter()
                 .copied()
-                .find(|id| timing(id) == ExecutionTiming::QueryTime);
+                .filter(|id| timing(id) == ExecutionTiming::QueryTime)
+                .collect();
             let at_ingestion: Vec<PhysicalASAPNodeId> = copies
                 .iter()
                 .copied()
                 .filter(|id| timing(id) == ExecutionTiming::IngestionTime)
                 .collect();
-            let root = query_time.or(at_ingestion.first().copied())?;
-            let slots = part
-                .slot_keys
-                .iter()
-                .map(|key| by_key(*key).first().copied())
-                .collect::<Option<Vec<_>>>()?;
-            placed.push(Placed {
-                part,
-                root,
-                at_query_time: query_time.is_some(),
-                at_ingestion,
-                slots,
-            });
+            let apart = query_time.len() > 1;
+            let roots: Vec<(PhysicalASAPNodeId, bool)> = match query_time.is_empty() {
+                true => vec![(at_ingestion[0], false)],
+                false => query_time.iter().map(|&id| (id, true)).collect(),
+            };
+            for (k, &(root, at_query_time)) in roots.iter().enumerate() {
+                let copy_of = match apart {
+                    true => Some(*reaches_at_all(root).first()?),
+                    false => None,
+                };
+                let mine = below(root);
+                let scans_below: Vec<Option<u64>> = mine
+                    .iter()
+                    .filter(|id| {
+                        matches!(nodes[id].payload, Operator::NonASAP(NonASAPOp::Scan { .. }))
+                    })
+                    .filter(|id| {
+                        producers(root).contains(id)
+                            || mine.iter().any(|m| producers(*m).contains(id))
+                    })
+                    .map(|&s| scan_variant(s))
+                    .collect();
+                let part = parts[g].iter().find(|p| {
+                    p.choice.candidate == c
+                        && p.choice.copy_of == copy_of
+                        && p.build_keys
+                            .iter()
+                            .zip(&p.choice.assignment)
+                            .all(|(key, m)| {
+                                mine.iter().any(|id| {
+                                    keys[position_of[id]] == *key && nodes[id].materialization == *m
+                                })
+                            })
+                        && p.choice
+                            .scan_children
+                            .iter()
+                            .all(|(_, v)| scans_below.contains(v))
+                        && match p.choice.scan_horizon_ms {
+                            None => true,
+                            Some(h) => {
+                                scan_variant(root).unwrap_or(h) == h
+                                    || windows_read(dag, &nodes, root, &kept).into_iter().max()
+                                        == Some(h)
+                            }
+                        }
+                })?;
+                // Apart scans below are this choice's.
+                for (_, v) in &part.choice.scan_children {
+                    if v.is_none() {
+                        for id in &mine {
+                            if matches!(
+                                nodes[id].payload,
+                                Operator::NonASAP(NonASAPOp::Scan { .. })
+                            ) && consumers(*id) == 1
+                            {
+                                used.insert(*id);
+                            }
+                        }
+                    }
+                }
+                let slots = part
+                    .slot_keys
+                    .iter()
+                    .map(|key| {
+                        mine.iter()
+                            .copied()
+                            .find(|id| keys[position_of[id]] == *key)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                placed.push(Placed {
+                    part,
+                    root,
+                    at_query_time,
+                    at_ingestion: match k {
+                        0 => at_ingestion.clone(),
+                        _ => Vec::new(),
+                    },
+                    slots,
+                });
+            }
         }
         let part_root = |p: &Placed, via: Via| match via {
             Via::Direct => p.root,
@@ -1063,6 +1305,9 @@ mod tests {
         let mut actual = 0.0;
         let mut scans = Vec::new();
         for p in &placed {
+            if debug {
+                eprintln!("placed g{} c{} copy {:?} scans {:?} h {:?} root {} qt {} ing {:?} slots {:?} direct {:?} slotsc {:?} ingc {:?} rate {}", p.part.choice.group.0, p.part.choice.candidate, p.part.choice.copy_of, p.part.choice.scan_children, p.part.choice.scan_horizon_ms, p.root, p.at_query_time, p.at_ingestion, p.slots, p.part.choice.coefficients.direct, p.part.choice.coefficients.slots, p.part.lazy.direct_at_ingestion, rates[&p.root].1);
+            }
             let coefficients = &p.part.choice.coefficients;
             if p.at_query_time {
                 actual += coefficients.direct.cost_per_unit_rate * rates[&p.root].1;
@@ -1141,9 +1386,6 @@ mod tests {
     /// chain (the chain site's thresholds), built at query or ingestion
     /// time.
     #[test]
-    #[ignore = "a pane chain over a raw scan is no raw-horizon reader: the shared \
-                scan's look-back (the longest window of its readers) is not a site \
-                threshold, so a chain's input rows depend on other groups"]
     fn coefficients_reproduce_stage_3_with_a_shared_pane_chain() {
         let checked = check(
             &["sum_over_time(m[5m])", "sum_over_time(m[1h])"],
