@@ -195,6 +195,8 @@ fn pass1_candidates<Id: Clone>(
         origin: CandidateOrigin::Pass1,
         coupling_sites: Vec::new(),
         budget_share: 1,
+        requires_exact_children: Vec::new(),
+        rollup_of: None,
     };
     // Each query's most approximate inputs: its targets that offer a
     // summary, each one sketch state at most.
@@ -333,6 +335,8 @@ fn target_candidates<Id: Clone>(
                 origin: CandidateOrigin::Pass1,
                 coupling_sites: Vec::new(),
                 budget_share,
+                requires_exact_children: Vec::new(),
+                rollup_of: None,
             });
         }
         // Mixed-radix over this group's targets only.

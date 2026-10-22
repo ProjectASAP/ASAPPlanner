@@ -12,13 +12,16 @@
 //!   size are the site's threshold ([`chain_thresholds`], [`may_read`],
 //!   [`read_at_threshold`]).
 //! - **Rollup** ([`add_rollup`]): a coarse exact accumulator answered by
-//!   regrouping a finer group's values (`rollup_candidates`' conditions).
+//!   regrouping a finer group's values, or a coarse sketch by merging a
+//!   finer group's build states (`rollup_candidates`' conditions).
 //! - **Exact top-k reuse** ([`add_topk_reuse`]): a top-k answered from a
 //!   ranking group, `Limit(k_max)` over a descending `Sort` of the input,
 //!   added to the memo when missing.
 //!
-//! The joint search never reuses a top-k ranking in a plan with panes
-//! ([`combinable`]).
+//! What the joint rules require across groups, the search checks on a
+//! choice with [`requirements_met`]: no top-k reuse with panes, exact
+//! inputs where a rule reads exact values, and each rollup reading the
+//! build the joint rule would choose.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -27,11 +30,12 @@ use std::rc::Rc;
 
 use asap_logical_asap_optimization::accuracy::estimators::size_for_all_readers;
 use asap_logical_asap_optimization::asap_aware_cse::{
-    pane_candidates, rollup_candidates, topk_reuse_candidates, window_composition_pass2_candidates,
-    with_pane_chain,
+    pane_candidates, rollup_candidates, rollup_pass2_candidates, topk_reuse_candidates,
+    window_composition_pass2_candidates, with_pane_chain, RollupCandidate,
 };
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::flat::flatten;
+use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::schema::sketch::SketchKind;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -39,6 +43,7 @@ use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 
 use super::{
     CandidateOrigin, CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo, MemoGroup,
+    RollupRead,
 };
 
 /// One threshold of a shared pane chain: its grid, the longest window it
@@ -367,13 +372,24 @@ pub(crate) fn read_at_threshold(
     Ok(Rc::clone(node))
 }
 
-/// Rollup: each coarse exact accumulator of a group's Pass 1 (or
-/// shared-build) candidate that another group's candidate can answer by
-/// regrouping its finalized values (`rollup_candidates`), as a
-/// [`CandidateOrigin::Rollup`] candidate that reads that group: the finer
-/// value is the finer group's output, so the finer candidate must be that
-/// group's whole implementation. Sketch rollups, which merge a finer
-/// build's states rather than a group's output, are not offered.
+/// Rollup: each coarse build of a group's Pass 1 (or shared-build)
+/// candidate that another group's candidate can answer
+/// (`rollup_candidates` over the two) gets a [`CandidateOrigin::Rollup`]
+/// candidate of the coarse group:
+///
+/// - an exact accumulator regroups the finer group's finalized values: the
+///   finer value is the finer group's output, which must be exact
+///   ([`ImplementationCandidate::requires_exact_children`]);
+/// - a sketch merges the finer build's states by the coarse keys: it reads
+///   that state ([`ImplementationCandidate::rollup_of`]), and the
+///   finer build is sized for both groups' readers, a
+///   [`CouplingKind::SharedBuildSize`] site ([`state_size_thresholds`])
+///   that the finer group's candidate also gets a copy with. The joint
+///   rule rolls a coarse build up only from the finest build over its rows,
+///   and every coarse build of one finest build together
+///   ([`requirements_met`] checks both).
+///
+/// Ends with the groups in topological order ([`in_topological_order`]).
 pub(crate) fn add_rollup(memo: &mut Memo) {
     let group_of = group_of_node(&memo.groups);
     let mut added: Vec<(usize, ImplementationCandidate)> = Vec::new();
@@ -385,10 +401,7 @@ pub(crate) fn add_rollup(memo: &mut Memo) {
     };
     for (coarse_group, coarse_candidates) in memo.candidates.iter().enumerate() {
         for coarse in coarse_candidates.iter().filter(|c| base(c)) {
-            let reached: HashSet<*const OperatorNode> = OperatorNode::reachable(&coarse.node)
-                .iter()
-                .map(Rc::as_ptr)
-                .collect();
+            let in_coarse = reached(&coarse.node);
             for (finer_group, finer_candidates) in memo.candidates.iter().enumerate() {
                 if finer_group == coarse_group {
                     continue;
@@ -398,45 +411,36 @@ pub(crate) fn add_rollup(memo: &mut Memo) {
                         QueryRoot::Operator(Rc::clone(&coarse.node)),
                         QueryRoot::Operator(Rc::clone(&finer.node)),
                     ];
+                    let in_finer = reached(&finer.node);
                     for rollup in rollup_candidates(&roots) {
-                        let exact = matches!(
-                            rollup.finer.asap(),
-                            Some(ASAPOp::FinalizeExactAccumulator { .. })
-                        );
-                        if !exact
-                            || !Rc::ptr_eq(&rollup.finer, &finer.node)
-                            || !reached.contains(&Rc::as_ptr(&rollup.coarse))
+                        if !in_coarse.contains(&Rc::as_ptr(&rollup.coarse))
+                            || in_coarse.contains(&Rc::as_ptr(&rollup.finer))
+                            || !in_finer.contains(&Rc::as_ptr(&rollup.finer))
                         {
                             continue;
                         }
-                        // As `rollup_pass2_candidates` rewrites it, with the finer
-                        // value read from the finer group: every finalized value
-                        // of the coarse build replaced by the rollup.
-                        let finer_output = &memo.groups[finer_group].node;
-                        let to_group = HashMap::from([(Rc::as_ptr(&finer.node), finer_output)]);
-                        let Ok(rolled) = replace(&rollup.rollup, &to_group, &mut HashMap::new())
-                        else {
-                            continue;
+                        let made = if is_sketch_build(&rollup.finer) {
+                            sketch_rollup(&group_of, coarse, finer_group, finer, &roots, rollup)
+                        } else {
+                            exact_rollup(
+                                &memo.groups,
+                                &group_of,
+                                coarse,
+                                finer_group,
+                                finer,
+                                &rollup,
+                            )
                         };
-                        let finalized: Vec<Rc<OperatorNode>> = OperatorNode::reachable(
-                            &coarse.node,
-                        )
-                        .into_iter()
-                        .filter(|n| {
-                            matches!(n.asap(), Some(ASAPOp::FinalizeExactAccumulator { child })
-                                    if Rc::ptr_eq(child, &rollup.coarse))
-                        })
-                        .collect();
-                        let by_rollup: HashMap<*const OperatorNode, &Rc<OperatorNode>> =
-                            finalized.iter().map(|n| (Rc::as_ptr(n), &rolled)).collect();
-                        let Ok(node) = replace(&coarse.node, &by_rollup, &mut HashMap::new())
-                        else {
-                            continue;
-                        };
-                        added.push((
-                            coarse_group,
-                            rewritten_candidate(&group_of, coarse, node, CandidateOrigin::Rollup),
-                        ));
+                        added.extend(made.into_iter().map(|(g, c)| {
+                            (
+                                if g == FINER {
+                                    finer_group
+                                } else {
+                                    coarse_group
+                                },
+                                c,
+                            )
+                        }));
                     }
                 }
             }
@@ -445,33 +449,432 @@ pub(crate) fn add_rollup(memo: &mut Memo) {
     for (g, candidate) in added {
         push_new(memo, g, candidate);
     }
+    in_topological_order(memo);
 }
 
-/// Exact top-k reuse: the groups whose Pass 1 candidates are exact top-k
-/// computations of one input and partition with at least two different
-/// `k` (`topk_reuse_candidates` over the candidates' nodes, which carry
-/// their guarantees) each get a [`CandidateOrigin::TopKReuse`] candidate
+/// Marks a candidate [`sketch_rollup`] adds to the finer group.
+const FINER: usize = usize::MAX;
+
+/// The exact rollup of `rollup` (over `coarse`'s and `finer`'s nodes): the
+/// coarse candidate with every finalized value of the coarse build
+/// replaced by the regrouping of the finer group's output, as
+/// `rollup_pass2_candidates` rewrites it. `finer` must be the finer
+/// group's whole implementation (its node the finalized finer value).
+fn exact_rollup(
+    groups: &[MemoGroup],
+    group_of: &HashMap<*const OperatorNode, usize>,
+    coarse: &ImplementationCandidate,
+    finer_group: usize,
+    finer: &ImplementationCandidate,
+    rollup: &RollupCandidate,
+) -> Vec<(usize, ImplementationCandidate)> {
+    if !Rc::ptr_eq(&rollup.finer, &finer.node) {
+        return Vec::new();
+    }
+    let finer_output = &groups[finer_group].node;
+    let to_group = HashMap::from([(Rc::as_ptr(&finer.node), finer_output)]);
+    let Ok(rolled) = replace(&rollup.rollup, &to_group, &mut HashMap::new()) else {
+        return Vec::new();
+    };
+    let by_rollup: HashMap<*const OperatorNode, &Rc<OperatorNode>> =
+        OperatorNode::reachable(&coarse.node)
+            .into_iter()
+            .filter(|n| {
+                matches!(n.asap(), Some(ASAPOp::FinalizeExactAccumulator { child })
+                    if Rc::ptr_eq(child, &rollup.coarse))
+            })
+            .map(|n| (Rc::as_ptr(&n), &rolled))
+            .collect();
+    let Ok(node) = replace(&coarse.node, &by_rollup, &mut HashMap::new()) else {
+        return Vec::new();
+    };
+    let mut candidate = rewritten_candidate(group_of, coarse, node, CandidateOrigin::Rollup);
+    let finer_id = GroupId(finer_group as u32);
+    if !candidate.children.contains(&finer_id) {
+        candidate.children.push(finer_id);
+    }
+    candidate.requires_exact_children = vec![finer_id];
+    candidate.rollup_of = Some(RollupRead {
+        finer_group: finer_id,
+        finer_state: None,
+        coarse_candidate: Rc::clone(&coarse.node),
+        coarse_build: Rc::clone(&rollup.coarse),
+    });
+    vec![(0, candidate)]
+}
+
+/// The sketch rollup of `rollup` (over `roots`: `coarse`'s and `finer`'s
+/// nodes): the coarse candidate as `rollup_pass2_candidates` rewrites it
+/// (the coarse build replaced by the regrouping merge of the finer build,
+/// sized for both), reading the finer build's state, and the finer
+/// candidate's copy that exposes that state; both with the build's
+/// [`CouplingKind::SharedBuildSize`] site.
+fn sketch_rollup(
+    group_of: &HashMap<*const OperatorNode, usize>,
+    coarse: &ImplementationCandidate,
+    finer_group: usize,
+    finer: &ImplementationCandidate,
+    roots: &[QueryRoot],
+    rollup: RollupCandidate,
+) -> Vec<(usize, ImplementationCandidate)> {
+    let site = CouplingSite {
+        key: state_key(&rollup.finer),
+        kind: CouplingKind::SharedBuildSize,
+    };
+    let coarse_build = Rc::clone(&rollup.coarse);
+    let Ok(mut pass2) = rollup_pass2_candidates(roots, &[rollup]) else {
+        return Vec::new();
+    };
+    let Some(Ok(rolled)) = pass2.pop().map(|p| p.roots) else {
+        return Vec::new();
+    };
+    let QueryRoot::Operator(node) = &rolled[0] else {
+        return Vec::new();
+    };
+    // The resized finer build the regrouping merge reads.
+    let Some(finer_build) =
+        OperatorNode::reachable(node)
+            .into_iter()
+            .find_map(|n| match n.asap() {
+                Some(ASAPOp::SummaryMerge {
+                    children,
+                    group_by: Some(_),
+                    ..
+                }) if is_sketch_build(&children[0]) => Some(Rc::clone(&children[0])),
+                _ => None,
+            })
+    else {
+        return Vec::new();
+    };
+    let mut candidate =
+        rewritten_candidate(group_of, coarse, Rc::clone(node), CandidateOrigin::Rollup);
+    // Its private nodes stop at the finer build, which the finer group
+    // builds: the walk below it found the finer group's children.
+    candidate.children = coarse.children.clone();
+    let finer_id = GroupId(finer_group as u32);
+    candidate.children.push(finer_id);
+    candidate.coupling_sites.push(site);
+    candidate.rollup_of = Some(RollupRead {
+        finer_group: finer_id,
+        finer_state: Some(finer_build),
+        coarse_candidate: Rc::clone(&coarse.node),
+        coarse_build,
+    });
+    let mut exposed = finer.clone();
+    exposed.coupling_sites.push(site);
+    vec![(0, candidate), (FINER, exposed)]
+}
+
+/// Whether `node` is a sketch `SummaryAgg`.
+fn is_sketch_build(node: &OperatorNode) -> bool {
+    matches!(
+        node.asap(),
+        Some(ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(..),
+            ..
+        })
+    )
+}
+
+/// The key of a sketch build's state, its size masked: the build with its
+/// family's algorithm and grouping only.
+fn state_key(build: &OperatorNode) -> u64 {
+    let mut value = serde_json::to_value(&build.operator).unwrap_or_default();
+    if let (Some(ASAPOp::SummaryAgg { family, .. }), Some(agg)) = (
+        build.asap(),
+        value
+            .pointer_mut("/ASAP/SummaryAgg")
+            .and_then(|v| v.as_object_mut()),
+    ) {
+        agg.insert(
+            "family".to_string(),
+            serde_json::Value::String(family_without_size(family)),
+        );
+    }
+    hash_of(&format!("rollup state {value}"))
+}
+
+/// The sizes the finer build of a sketch rollup's `site` may take: the
+/// shared size ([`size_for_all_readers`]) of every set of its readers'
+/// sizes (the finer group's own build and each rolled-up coarse build),
+/// without one larger than the shared size of the readers it admits.
+pub(crate) fn state_size_thresholds(memo: &Memo, site: &CouplingSite) -> Vec<FieldDataType> {
+    let readers: Vec<FieldDataType> = memo
+        .candidates
+        .iter()
+        .flatten()
+        .filter(|c| c.coupling_sites.contains(site))
+        .filter_map(|c| state_reader_size(c, site))
+        .collect();
+    let mut sizes: Vec<FieldDataType> = Vec::new();
+    for reader in &readers {
+        let mut grown: Vec<FieldDataType> = sizes
+            .iter()
+            .filter_map(|size| shared_size(size, reader))
+            .collect();
+        grown.push(reader.clone());
+        for size in grown {
+            if !sizes.iter().any(|known| same_size(known, &size)) {
+                sizes.push(size);
+            }
+        }
+    }
+    sizes
+        .into_iter()
+        .filter(|threshold| {
+            let joined = readers
+                .iter()
+                .filter(|r| no_stricter(r, threshold))
+                .try_fold(None::<FieldDataType>, |acc, r| {
+                    Some(Some(match acc {
+                        None => r.clone(),
+                        Some(acc) => shared_size(&acc, r)?,
+                    }))
+                });
+            matches!(joined, Some(Some(joined)) if same_size(&joined, threshold))
+        })
+        .collect()
+}
+
+/// Whether `candidate`, a reader of the sketch rollup state `site`, may
+/// read it at size `threshold`: its size is no stricter.
+pub(crate) fn may_read_state(
+    threshold: &FieldDataType,
+    candidate: &ImplementationCandidate,
+    site: &CouplingSite,
+) -> bool {
+    state_reader_size(candidate, site).is_some_and(|size| no_stricter(&size, threshold))
+}
+
+/// The size a reader of the rollup state `site` needs: a rollup's coarse
+/// build's, or the finer group's own build's.
+fn state_reader_size(
+    candidate: &ImplementationCandidate,
+    site: &CouplingSite,
+) -> Option<FieldDataType> {
+    let build = match &candidate.rollup_of {
+        Some(read) => Rc::clone(&read.coarse_build),
+        None => OperatorNode::reachable(&candidate.node)
+            .into_iter()
+            .find(|n| is_sketch_build(n) && state_key(n) == site.key)?,
+    };
+    match build.asap() {
+        Some(ASAPOp::SummaryAgg { family, .. }) => Some(family.clone()),
+        _ => None,
+    }
+}
+
+/// Whether a build of size `size` serves a reader needing `required`.
+fn no_stricter(required: &FieldDataType, size: &FieldDataType) -> bool {
+    shared_size(size, required).is_some_and(|joined| same_size(&joined, size))
+}
+
+/// Equal families and sizes, the recorded failure probabilities and errors
+/// included (which `SketchParams` equality ignores).
+fn same_size(a: &FieldDataType, b: &FieldDataType) -> bool {
+    a == b && format!("{a:?}") == format!("{b:?}")
+}
+
+/// Whether the candidates `chosen` (one per group, with every group they
+/// name and every group with a summary build over the same rows as a
+/// rolled-up build, in workload order) meet each other's requirements:
+///
+/// - never an exact top-k reuse with panes ([`combinable`]);
+/// - every group in a candidate's `requires_exact_children` chose an exact
+///   implementation ([`is_exact`]);
+/// - every rollup reads the build the joint rule would roll its coarse
+///   build up from, over the chosen plan with each rollup undone: an exact
+///   accumulator's coarsest finer build, a sketch's finest, in its finer
+///   group's chosen implementation;
+/// - a sketch rollup's finer group chose a candidate exposing the state at
+///   the same site, and every chosen coarse build whose finest build that is
+///   rolls up too (the joint rule's choice of one finest build).
+pub(crate) fn requirements_met(chosen: &[(GroupId, &ImplementationCandidate)]) -> bool {
+    if !combinable(chosen.iter().map(|(_, c)| *c)) {
+        return false;
+    }
+    let of = |g: GroupId| chosen.iter().find(|(h, _)| *h == g).map(|(_, c)| *c);
+    for (_, candidate) in chosen {
+        for &g in &candidate.requires_exact_children {
+            if !of(g).is_some_and(is_exact) {
+                return false;
+            }
+        }
+    }
+    let rolled: Vec<&RollupRead> = chosen
+        .iter()
+        .filter_map(|(_, c)| c.rollup_of.as_ref())
+        .collect();
+    if rolled.is_empty() {
+        return true;
+    }
+    // The joint rule's rollups over the chosen plan, each rollup undone.
+    let roots: Vec<QueryRoot> = chosen
+        .iter()
+        .map(|(_, c)| match &c.rollup_of {
+            Some(read) => QueryRoot::Operator(Rc::clone(&read.coarse_candidate)),
+            None => QueryRoot::Operator(Rc::clone(&c.node)),
+        })
+        .collect();
+    let source: Vec<(*const OperatorNode, Rc<OperatorNode>)> = rollup_candidates(&roots)
+        .into_iter()
+        .map(|r| (Rc::as_ptr(&r.coarse), r.finer))
+        .collect();
+    let mut used_state: HashSet<*const OperatorNode> = HashSet::new();
+    let mut rolled_coarse: HashSet<*const OperatorNode> = HashSet::new();
+    for read in &rolled {
+        let Some(finer) = of(read.finer_group) else {
+            return false;
+        };
+        let Some((_, build)) = source
+            .iter()
+            .find(|(coarse, _)| *coarse == Rc::as_ptr(&read.coarse_build))
+        else {
+            return false;
+        };
+        if !reached(&finer.node).contains(&Rc::as_ptr(build)) {
+            return false;
+        }
+        rolled_coarse.insert(Rc::as_ptr(&read.coarse_build));
+        let Some(state) = &read.finer_state else {
+            continue;
+        };
+        let site = CouplingSite {
+            key: state_key(state),
+            kind: CouplingKind::SharedBuildSize,
+        };
+        if !finer.coupling_sites.contains(&site) || state_key(build) != site.key {
+            return false;
+        }
+        used_state.insert(Rc::as_ptr(build));
+    }
+    source
+        .iter()
+        .filter(|(_, build)| used_state.contains(&Rc::as_ptr(build)))
+        .all(|(coarse, _)| rolled_coarse.contains(coarse))
+}
+
+/// Whether `candidate` computes exactly: no node it reaches builds an
+/// approximate summary (every summary an exact accumulator).
+pub(crate) fn is_exact(candidate: &ImplementationCandidate) -> bool {
+    OperatorNode::reachable(&candidate.node).iter().all(|n| {
+        !matches!(
+            n.asap(),
+            Some(
+                ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }
+            ) if !matches!(family, FieldDataType::ExactAggregate(..))
+        )
+    })
+}
+
+/// The addresses of every node `node` reaches.
+fn reached(node: &Rc<OperatorNode>) -> HashSet<*const OperatorNode> {
+    OperatorNode::reachable(node)
+        .iter()
+        .map(Rc::as_ptr)
+        .collect()
+}
+
+/// Renumber `memo`'s groups so that every group comes after the groups it
+/// reads, through its node or any candidate (children and required
+/// groups), keeping the current order where it allows. Unchanged when
+/// those reads form a cycle.
+pub(crate) fn in_topological_order(memo: &mut Memo) {
+    let n = memo.groups.len();
+    let mut reads: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    for (g, group) in memo.groups.iter().enumerate() {
+        reads[g].extend(group.children.iter().map(|c| c.0 as usize));
+        for candidate in &memo.candidates[g] {
+            reads[g].extend(candidate.children.iter().map(|c| c.0 as usize));
+            reads[g].extend(
+                candidate
+                    .requires_exact_children
+                    .iter()
+                    .map(|c| c.0 as usize),
+            );
+            reads[g].extend(candidate.rollup_of.iter().map(|r| r.finer_group.0 as usize));
+        }
+        reads[g].remove(&g);
+    }
+    // Repeatedly take the first group whose reads are all placed.
+    let mut placed = vec![false; n];
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    while order.len() < n {
+        let Some(next) = (0..n).find(|&g| !placed[g] && reads[g].iter().all(|&r| placed[r])) else {
+            return;
+        };
+        placed[next] = true;
+        order.push(next);
+    }
+    if order.iter().enumerate().all(|(new, &old)| new == old) {
+        return;
+    }
+    let mut new_of = vec![0u32; n];
+    for (new, &old) in order.iter().enumerate() {
+        new_of[old] = new as u32;
+    }
+    let map = |id: &mut GroupId| id.0 = new_of[id.0 as usize];
+    let mut groups: Vec<Option<MemoGroup>> = std::mem::take(&mut memo.groups)
+        .into_iter()
+        .map(Some)
+        .collect();
+    let mut candidates: Vec<Option<Vec<ImplementationCandidate>>> =
+        std::mem::take(&mut memo.candidates)
+            .into_iter()
+            .map(Some)
+            .collect();
+    for &old in &order {
+        let mut group = groups[old].take().expect("each group once");
+        group.children.iter_mut().for_each(map);
+        group.parents.iter_mut().for_each(map);
+        memo.groups.push(group);
+        let mut own = candidates[old].take().expect("each group once");
+        for candidate in &mut own {
+            candidate.implements.iter_mut().for_each(map);
+            candidate.children.iter_mut().for_each(map);
+            candidate.requires_exact_children.iter_mut().for_each(map);
+            if let Some(read) = &mut candidate.rollup_of {
+                map(&mut read.finer_group);
+            }
+        }
+        memo.candidates.push(own);
+    }
+}
+
+/// Exact top-k reuse: the groups that are top-k computations of one input
+/// group and partition with at least two different `k`
+/// (`topk_reuse_candidates` over the groups' nodes) each get a [`CandidateOrigin::TopKReuse`] candidate
 /// reading the ranking group, `Limit(k_max)` over a descending `Sort` of
 /// the input group (the top-k group's child). The ranking's two groups
 /// are added when the memo has no equal ones, each with its one candidate
 /// (also of origin `TopKReuse`). The rule reads an exact input: the input
-/// group's chosen implementation must be exact.
+/// group's chosen implementation must be exact
+/// ([`ImplementationCandidate::requires_exact_children`]). Ends with the
+/// groups in topological order ([`in_topological_order`]).
 pub(crate) fn add_topk_reuse(memo: &mut Memo) {
-    let mut group_of_candidate: HashMap<*const OperatorNode, usize> = HashMap::new();
+    // The groups' nodes, each input marked exact: the rule reads an exact
+    // input, which `requires_exact_children` asks of the input group.
+    let mut group_of_copy: HashMap<*const OperatorNode, usize> = HashMap::new();
     let mut roots: Vec<QueryRoot> = Vec::new();
-    for (g, candidates) in memo.candidates.iter().enumerate() {
-        for candidate in candidates {
-            if candidate.origin == CandidateOrigin::Pass1 {
-                group_of_candidate.insert(Rc::as_ptr(&candidate.node), g);
-                roots.push(QueryRoot::Operator(Rc::clone(&candidate.node)));
-            }
-        }
+    for (g, group) in memo.groups.iter().enumerate() {
+        let [input] = &group.node.children()[..] else {
+            continue;
+        };
+        let exact_input = Rc::new(OperatorNode::clone(input).with_guarantee(Some(
+            AccuracyGuarantee::exact("the input group chosen exact"),
+        )));
+        let Ok(copy) = group.node.with_new_children(|_| Rc::clone(&exact_input)) else {
+            continue;
+        };
+        let copy = Rc::new(copy);
+        group_of_copy.insert(Rc::as_ptr(&copy), g);
+        roots.push(QueryRoot::Operator(copy));
     }
     for candidate in topk_reuse_candidates(&roots) {
         let mut members: Vec<usize> = candidate
             .members
             .iter()
-            .filter_map(|m| group_of_candidate.get(&Rc::as_ptr(m)).copied())
+            .filter_map(|m| group_of_copy.get(&Rc::as_ptr(m)).copied())
             .collect();
         members.sort_unstable();
         members.dedup();
@@ -485,17 +888,16 @@ pub(crate) fn add_topk_reuse(memo: &mut Memo) {
             .into_iter()
             .collect();
         // The ranking over the input group's node.
-        let Some(&input) = memo.groups[members[0]].node.children().first() else {
+        let Some(&input_group) = memo.groups[members[0]].children.first() else {
             continue;
         };
-        let input = Rc::clone(input);
+        let input = Rc::clone(&memo.groups[input_group.0 as usize].node);
         let sort = candidate.ranking.children()[0];
         let Ok(sort) = sort.with_new_children(|_| Rc::clone(&input)) else {
             continue;
         };
         let sort = Rc::new(sort);
-        let input_group = find_group(&memo.groups, &input);
-        let sort_group = group_for(memo, &sort, input_group.into_iter().collect(), &queries);
+        let sort_group = group_for(memo, &sort, vec![input_group], &queries);
         let sort = Rc::clone(&memo.groups[sort_group.0 as usize].node);
         let ranking = match candidate.ranking.with_new_children(|_| Rc::clone(&sort)) {
             Ok(ranking) => Rc::new(ranking),
@@ -517,10 +919,13 @@ pub(crate) fn add_topk_reuse(memo: &mut Memo) {
                 origin: CandidateOrigin::TopKReuse,
                 coupling_sites: Vec::new(),
                 budget_share: 1,
+                requires_exact_children: vec![input_group],
+                rollup_of: None,
             };
             push_new(memo, g, reuse);
         }
     }
+    in_topological_order(memo);
 }
 
 /// The group whose node equals `node`, or a new one over `children`, read
@@ -552,6 +957,8 @@ fn group_for(
         origin: CandidateOrigin::TopKReuse,
         coupling_sites: Vec::new(),
         budget_share: 1,
+        requires_exact_children: Vec::new(),
+        rollup_of: None,
     }]);
     id
 }
@@ -597,6 +1004,8 @@ fn rewritten_candidate(
         origin,
         coupling_sites: from.coupling_sites.clone(),
         budget_share: from.budget_share,
+        requires_exact_children: Vec::new(),
+        rollup_of: None,
     }
 }
 
@@ -745,11 +1154,23 @@ mod tests {
     /// `intervals_ms[q]`), its node the lowered query, its candidates every
     /// Pass 1 candidate of the query alone, each wholly private.
     fn memo(queries: &[&str], intervals_ms: &[u32]) -> (Memo, Vec<QueryWorkloadEntry>) {
+        let exact: Vec<(&str, AccuracyTarget)> = queries
+            .iter()
+            .map(|&q| (q, AccuracyTarget::exact()))
+            .collect();
+        memo_with(&exact, intervals_ms)
+    }
+
+    /// [`memo`] with each query's own accuracy target.
+    fn memo_with(
+        queries: &[(&str, AccuracyTarget)],
+        intervals_ms: &[u32],
+    ) -> (Memo, Vec<QueryWorkloadEntry>) {
         let entries: Vec<QueryWorkloadEntry> =
             intervals_ms.iter().map(|&ms| repeating(ms)).collect();
         let mut memo = Memo::default();
-        for (q, query) in queries.iter().enumerate() {
-            let node = lower_promql(query, AccuracyTarget::exact());
+        for (q, (query, target)) in queries.iter().enumerate() {
+            let node = lower_promql(query, target.clone());
             let node = with_promql_series_identity(&node).unwrap();
             let inventory = generate_per_computation_candidates(vec![(
                 q,
@@ -770,6 +1191,8 @@ mod tests {
                     origin: CandidateOrigin::Pass1,
                     coupling_sites: Vec::new(),
                     budget_share: 1,
+                    requires_exact_children: Vec::new(),
+                    rollup_of: None,
                 })
                 .collect();
             memo.groups.push(MemoGroup {
@@ -902,18 +1325,25 @@ mod tests {
             .all(|c| c.origin != CandidateOrigin::Rollup));
     }
 
-    /// Exact top-5 and top-10 of one per-job sum: the ranking (`Limit(10)`
-    /// over a `Sort`) is added as a group, and each top-k gets a candidate
-    /// reading it; it cannot be chosen with a pane candidate.
+    /// Exact top-5 and top-10 of one per-job sum (the memo of the
+    /// workload): the ranking (`Limit(10)` over a `Sort` of the sum group)
+    /// is added as a group before both top-k groups, and each top-k gets a
+    /// candidate reading it that requires the sum group exact; it cannot be
+    /// chosen with a pane candidate.
     #[test]
     fn a_topk_reuse_candidate_reads_the_ranking() {
-        let (mut memo, entries) = memo(
-            &[
-                "topk(5, sum by (job) (sum_over_time(m[5m])))",
-                "topk(10, sum by (job) (sum_over_time(m[5m])))",
-            ],
-            &[60_000, 60_000],
-        );
+        let queries = [
+            "topk(5, sum by (job) (sum_over_time(m[5m])))",
+            "topk(10, sum by (job) (sum_over_time(m[5m])))",
+        ];
+        let roots = queries
+            .iter()
+            .map(|q| QueryRoot::Operator(lower_promql(q, AccuracyTarget::exact())))
+            .enumerate()
+            .collect();
+        let mut memo =
+            super::super::groups::memo_of(&generate_per_computation_candidates(roots).unwrap());
+        let entries = vec![repeating(60_000); 2];
         add_pass2_candidates(&mut memo, &entries);
         let ranking = memo
             .groups
@@ -925,22 +1355,235 @@ mod tests {
                 )
             })
             .expect("a ranking group");
-        for g in 0..2 {
+        let topk: Vec<usize> = (0..memo.groups.len())
+            .filter(|&g| {
+                memo.candidates[g]
+                    .iter()
+                    .any(|c| c.origin == CandidateOrigin::TopKReuse && g != ranking)
+                    && !memo.groups[g].roots_of.is_empty()
+            })
+            .collect();
+        assert_eq!(topk.len(), 2);
+        for g in topk {
+            assert!(ranking < g, "children before parents");
             let reuse = memo.candidates[g]
                 .iter()
                 .find(|c| c.origin == CandidateOrigin::TopKReuse)
-                .expect("a top-k reuse candidate");
+                .unwrap();
             assert_eq!(reuse.children, vec![GroupId(ranking as u32)]);
             assert!(Rc::ptr_eq(
                 reuse.node.children()[0],
                 &memo.groups[ranking].node
             ));
+            let input = memo.groups[g].children[0];
+            assert_eq!(reuse.requires_exact_children, vec![input]);
+            assert!(input.0 < ranking as u32);
             let panes = ImplementationCandidate {
                 origin: CandidateOrigin::Panes,
                 ..reuse.clone()
             };
             assert!(!combinable([reuse, &panes]));
-            assert!(combinable([reuse]));
+            let exact_input = memo.candidates[input.0 as usize]
+                .iter()
+                .find(|c| is_exact(c))
+                .unwrap();
+            assert!(requirements_met(&[
+                (GroupId(g as u32), reuse),
+                (input, exact_input)
+            ]));
+            assert!(!requirements_met(&[(GroupId(g as u32), reuse)]));
         }
+    }
+
+    /// An exact rollup requires the finer group exact and implemented by
+    /// the build it rolls up from: met with the finer group's grouped
+    /// exact accumulator, not with its per-series one (no rollup source),
+    /// nor with a sketch implementation chosen.
+    #[test]
+    fn an_exact_rollup_requires_the_finer_group_exact() {
+        let (mut memo, _) = memo(
+            &[
+                "sum by (job, instance) (sum_over_time(m[5m]))",
+                "sum by (job) (sum_over_time(m[5m]))",
+            ],
+            &[60_000, 60_000],
+        );
+        add_rollup(&mut memo);
+        let rollup = memo.candidates[1]
+            .iter()
+            .find(|c| c.origin == CandidateOrigin::Rollup)
+            .unwrap();
+        assert_eq!(rollup.requires_exact_children, vec![GroupId(0)]);
+        let met: Vec<bool> = memo.candidates[0]
+            .iter()
+            .map(|finer| requirements_met(&[(GroupId(0), finer), (GroupId(1), rollup)]))
+            .collect();
+        assert!(met.contains(&true) && met.contains(&false), "{met:?}");
+        let source = &memo.candidates[0][met.iter().position(|&m| m).unwrap()];
+        assert!(is_exact(source));
+        // A KLL quantile stands in for an approximate implementation.
+        let (sketched, _) = memo_with(
+            &[(
+                "quantile_over_time(0.9, m[5m])",
+                AccuracyTarget::max_error(0.01),
+            )],
+            &[60_000],
+        );
+        let approximate = sketched.candidates[0]
+            .iter()
+            .find(|c| !is_exact(c))
+            .unwrap();
+        assert!(!requirements_met(&[
+            (GroupId(0), approximate),
+            (GroupId(1), rollup)
+        ]));
+    }
+
+    /// KLL quantiles by `(host, job)` at ε 0.01 and by `job` at 0.001: the
+    /// per-job group gets a rollup reading the finer group's KLL state, the
+    /// finer group a copy exposing it, both at one size site whose largest
+    /// threshold is the coarse reader's (the larger `k`); the requirement
+    /// holds only with the exposing copy chosen.
+    #[test]
+    fn a_sketch_rollup_reads_the_finer_groups_state() {
+        let (mut memo, _) = memo_with(
+            &[
+                (
+                    "quantile by (host, job) (0.5, data)",
+                    AccuracyTarget::max_error(0.01),
+                ),
+                (
+                    "quantile by (job) (0.5, data)",
+                    AccuracyTarget::max_error(0.001),
+                ),
+            ],
+            &[60_000, 60_000],
+        );
+        add_rollup(&mut memo);
+        let rollup = memo.candidates[1]
+            .iter()
+            .find(|c| {
+                c.rollup_of
+                    .as_ref()
+                    .is_some_and(|r| r.finer_state.is_some())
+            })
+            .expect("a sketch rollup");
+        let read = rollup.rollup_of.as_ref().unwrap();
+        assert_eq!(read.finer_group, GroupId(0));
+        assert!(rollup.children.contains(&GroupId(0)));
+        let site = *rollup
+            .coupling_sites
+            .iter()
+            .find(|s| s.kind == CouplingKind::SharedBuildSize)
+            .unwrap();
+        let exposed = memo.candidates[0]
+            .iter()
+            .find(|c| c.coupling_sites.contains(&site))
+            .expect("the finer group exposes the state");
+        let plain = memo.candidates[0]
+            .iter()
+            .find(|c| c.coupling_sites.is_empty() && Rc::ptr_eq(&c.node, &exposed.node))
+            .unwrap();
+        assert!(requirements_met(&[
+            (GroupId(0), exposed),
+            (GroupId(1), rollup)
+        ]));
+        assert!(!requirements_met(&[
+            (GroupId(0), plain),
+            (GroupId(1), rollup)
+        ]));
+        let k = |family: &FieldDataType| match family {
+            FieldDataType::Sketch(kind, _) => format!("{:?}", kind.params()),
+            _ => String::new(),
+        };
+        let thresholds = state_size_thresholds(&memo, &site);
+        let coarse_size = state_reader_size(rollup, &site).unwrap();
+        assert!(thresholds.iter().any(|t| k(t) == k(&coarse_size)));
+        assert!(thresholds.iter().all(|t| may_read_state(t, exposed, &site)
+            || !no_stricter(&state_reader_size(exposed, &site).unwrap(), t)));
+        let largest = thresholds
+            .iter()
+            .find(|t| may_read_state(t, rollup, &site) && may_read_state(t, exposed, &site))
+            .expect("one size serves both");
+        assert_eq!(k(largest), k(&coarse_size));
+    }
+
+    /// Three KLL groupings `job` ⊂ `(job, instance)` ⊂ `(job, instance,
+    /// zone)`: the joint rule rolls both coarse builds up from the finest
+    /// together. Rolling one alone, or rolling from the middle build while
+    /// the finest is chosen, fails the requirement.
+    #[test]
+    fn sketch_rollups_follow_the_finest_build_all_or_nothing() {
+        let target = AccuracyTarget::max_error(0.01);
+        let (mut memo, _) = memo_with(
+            &[
+                ("quantile by (job) (0.9, m)", target.clone()),
+                ("quantile by (job, instance) (0.9, m)", target.clone()),
+                ("quantile by (job, instance, zone) (0.9, m)", target),
+            ],
+            &[60_000, 60_000, 60_000],
+        );
+        add_rollup(&mut memo);
+        // Rollups reorder the groups finer first: query `q`'s group.
+        let of = |q: usize| memo.groups.iter().position(|g| g.roots_of == [q]).unwrap();
+        let (job, instance, zone) = (of(0), of(1), of(2));
+        assert!(zone < instance && instance < job, "children before parents");
+        let rolled_from = |g: usize, from: usize| {
+            memo.candidates[g]
+                .iter()
+                .find(|c| {
+                    c.rollup_of.as_ref().is_some_and(|r| {
+                        r.finer_state.is_some() && r.finer_group == GroupId(from as u32)
+                    })
+                })
+                .unwrap_or_else(|| panic!("group {g} rolls up from {from}"))
+        };
+        let exposing = |g: usize, rollup: &ImplementationCandidate| {
+            let site = rollup
+                .coupling_sites
+                .iter()
+                .find(|s| s.kind == CouplingKind::SharedBuildSize)
+                .unwrap();
+            memo.candidates[g]
+                .iter()
+                .find(|c| c.rollup_of.is_none() && c.coupling_sites.contains(site))
+                .unwrap()
+        };
+        let id = |g: usize| GroupId(g as u32);
+        let job_from_zone = rolled_from(job, zone);
+        let instance_from_zone = rolled_from(instance, zone);
+        let zone_exposed = exposing(zone, job_from_zone);
+        assert!(requirements_met(&[
+            (id(job), job_from_zone),
+            (id(instance), instance_from_zone),
+            (id(zone), zone_exposed),
+        ]));
+        // The `(job, instance)` build itself, sketched, not rolled up.
+        let instance_own = memo.candidates[instance]
+            .iter()
+            .find(|c| c.origin == CandidateOrigin::Pass1 && !is_exact(c))
+            .unwrap();
+        assert!(!requirements_met(&[
+            (id(job), job_from_zone),
+            (id(instance), instance_own),
+            (id(zone), zone_exposed),
+        ]));
+        // From the middle build while the finest is chosen.
+        let job_from_instance = rolled_from(job, instance);
+        let instance_exposed = exposing(instance, job_from_instance);
+        let zone_own = memo.candidates[zone]
+            .iter()
+            .find(|c| c.origin == CandidateOrigin::Pass1 && !is_exact(c))
+            .unwrap();
+        assert!(!requirements_met(&[
+            (id(job), job_from_instance),
+            (id(instance), instance_exposed),
+            (id(zone), zone_own),
+        ]));
+        // Without the finest build, the middle one is the finest.
+        assert!(requirements_met(&[
+            (id(job), job_from_instance),
+            (id(instance), instance_exposed),
+        ]));
     }
 }
