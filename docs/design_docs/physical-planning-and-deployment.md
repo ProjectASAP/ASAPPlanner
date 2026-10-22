@@ -433,6 +433,15 @@ in `(T - s - w, T - s]` at evaluation time `T`, a filter against `now()`,
 and passes the rows through each `TimeShift`. That is the window a PromQL
 range selector reads.
 
+A runtime that maintains a SQL window or pane at ingestion time feeds it
+table rows as it feeds a PromQL window samples. A raw-data-sample window over a
+table `Scan` is read with the executor's `TableRowSelector`, the table
+counterpart of `RawDataSampleSelector`. For each window end, `window_batch`
+keeps the table rows whose time column lies in `(end - w, end]` and that the
+`Scan`'s predicates keep, in the `TimeRange`'s schema. The runtime binds that
+batch at the `TimeRange`. Each call reads all the rows it is given, so a
+runtime passes the rows of that window or pane, not the whole retained table.
+
 The Planner integration test executes both candidates through the shared runtime
 and reverses the selected frontier with two controlled cost fixtures. It also
 rejects shadowed/duplicate boundaries and incomparable planning horizons. This

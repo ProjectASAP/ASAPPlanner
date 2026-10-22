@@ -7,7 +7,8 @@
 //! needs three things from it: the DAG to install (`dag`), the summaries to
 //! store (`stored_outputs`), and where raw data samples go (each stored output's
 //! `inputs.raw_data_sample_windows` and `query_time_raw_windows`, fed with
-//! `asap_executor::RawDataSampleSelector`). How the Planner represents the
+//! `asap_executor::RawDataSampleSelector` for a time-series `Scan` or
+//! `asap_executor::TableRowSelector` for a SQL table `Scan`). How the Planner represents the
 //! plan internally (e.g. a tumbling-pane chain, which the stage export keeps
 //! for costing and display) is not the runtime's concern: the installable
 //! DAG has every chain expanded into the panes the executor runs.
@@ -20,7 +21,8 @@
 //! (sealed) and each stored input is built. It compiles the DAG with the
 //! executor for that output's node, with each input bound as a source: a
 //! raw-data-sample window at its `time_range_node_id` (the rows
-//! `RawDataSampleSelector::window_batch` returns) and a stored input at its own
+//! `RawDataSampleSelector::window_batch` or `TableRowSelector::window_batch`
+//! returns) and a stored input at its own
 //! node id (its stored state). It runs the build in an ingestion run
 //! (`StoredOutputBuild::IngestionRun`) or in the query run of the
 //! evaluation that first needs it (`StoredOutputBuild::QueryRun`), stores

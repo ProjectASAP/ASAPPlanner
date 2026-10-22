@@ -3,19 +3,23 @@
 //! the plan compiles with the table's scans (the compile check sees them),
 //! `now()` is the evaluation time, `COUNT(DISTINCT)` over an `Int64` id
 //! column answers with the type the Planner gives it, from a distinct-count
-//! sketch or exactly.
+//! sketch or exactly. A plan that keeps panes at ingestion time runs as a
+//! runtime runs it: each pane built in an ingestion run from the table rows
+//! of its window (`TableRowSelector`), the queries answered from the panes.
 #![cfg(feature = "sql")]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use asap_executor::physical_planner::bind_with_data_sources;
+use asap_executor::operators::Operator as ExecutorOperator;
+use asap_executor::physical_planner::{bind_with_data_sources, compile, InputContract};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::{DataSources, MemorySource};
 use asap_executor::values::{Batch, Value};
+use asap_executor::TableRowSelector;
 use asap_planner::{
-    plan_installable, FrontendInput, InstallablePlan, PlanningModels, PlanningWorkload, SqlCatalog,
-    UserInput,
+    plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, PlanningModels,
+    PlanningWorkload, SqlCatalog, StoredOutputBuild, UserInput,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -76,12 +80,30 @@ async fn plan(query: &str, accuracy: &str) -> InstallablePlan {
 }
 
 async fn plan_all(queries: &[&str], accuracy: &str) -> InstallablePlan {
+    plan_for(queries, accuracy, &DeploymentCapabilities::default()).await
+}
+
+/// [`plan_all`] for a deployment that keeps no raw data: every window is
+/// read by state maintained at ingestion time.
+async fn plan_without_raw_data(queries: &[&str], accuracy: &str) -> InstallablePlan {
+    let deployment = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    plan_for(queries, accuracy, &deployment).await
+}
+
+async fn plan_for(
+    queries: &[&str],
+    accuracy: &str,
+    deployment: &DeploymentCapabilities,
+) -> InstallablePlan {
     let catalog = SqlCatalog::new().with_table("http", http_schema());
     let workload = workload(queries, accuracy);
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Sql { catalog: &catalog },
-        PlanningModels::builtin(),
+        PlanningModels::builtin().with_deployment_capabilities(deployment),
     ))
     .await
     .expect("plan_installable plans a SQL workload over a table")
@@ -361,5 +383,206 @@ async fn row_counts_over_5_and_15_minute_windows_read_each_row_once() {
             .map(|s| (format!("s{s}"), shown(&Value::Int64(rows_per_service))))
             .collect();
         assert_eq!(by_key(run_query(&plan, query).1), expected, "query {query}");
+    }
+}
+
+/// Runs `ids` of `dag` in `scope` with each of `inputs` bound to the node
+/// its key names: the batches of each id's output.
+fn run_bound(
+    dag: &asap_types::ir::physical_export::PhysicalASAPDAG,
+    inputs: BTreeMap<u64, Batch>,
+    ids: &[u64],
+    scope: Scope,
+) -> Vec<Vec<Batch>> {
+    // What each bound input holds: its rows' schema.
+    let contracts = inputs
+        .iter()
+        .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
+        .collect();
+    // The executor's plan for `ids`, cut at the bound inputs.
+    let compiled = compile(dag, contracts, ids).expect("the executor compiles the plan");
+    // Each bound input as an in-memory source of its rows.
+    let sources = inputs
+        .into_iter()
+        .map(|(id, batch)| {
+            let source = ExecutorOperator::source(batch.schema().clone(), vec![batch]).unwrap();
+            (
+                id,
+                Box::new(source) as asap_executor::physical_planner::Source<'_>,
+            )
+        })
+        .collect();
+    let instance = compiled.instantiate(sources).unwrap();
+    block_on(async {
+        let context = RunContext::new(scope, Limits::default()).unwrap();
+        let outputs = instance.execute(compiled.roots(), context).unwrap();
+        futures::future::join_all(outputs.into_iter().map(|mut output| async move {
+            let mut batches = Vec::new();
+            while let Some(batch) = output.next().await {
+                batches.push((*batch.unwrap()).clone());
+            }
+            batches
+        }))
+        .await
+    })
+}
+
+/// The data plane of `plan` at [`EVALUATION_MS`] over the table rows
+/// [`rows`], as a runtime runs it: every stored output built once, in the
+/// plan's order, from the table rows of its windows ([`TableRowSelector`])
+/// and its stored inputs, in an ingestion run over its data's span (or the
+/// query run, for one built there); then every query answered from the
+/// stored outputs it reaches. The answer rows of each query.
+fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
+    let dag = &plan.dag.dag;
+    // The table's rows in the schema the plan's scans read.
+    let schema = dag
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { schema, .. }) => {
+                Some(Arc::new(schema.clone()))
+            }
+            _ => None,
+        })
+        .expect("the plan scans the table");
+    let table = Batch::try_new(schema, rows()).unwrap();
+    // Each window's input rows at its end.
+    let window_rows = |window: &asap_planner::RawDataSampleWindow, end_ms: i64| {
+        let selector = TableRowSelector::new(dag, window).unwrap();
+        assert_eq!(selector.table(), "http");
+        selector.window_batch(end_ms, &table).unwrap()
+    };
+    // Each stored output's state, by node id, with its data's span.
+    let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
+    for output in &plan.stored_outputs {
+        let span = output
+            .inputs
+            .raw_data_sample_windows
+            .iter()
+            .map(|window| window.bounds_ms(EVALUATION_MS))
+            .chain(
+                output
+                    .inputs
+                    .stored_outputs
+                    .iter()
+                    .map(|id| built[&(*id as u64)].1),
+            )
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+            .expect("a stored output reads something");
+        let mut sources = BTreeMap::new();
+        for window in &output.inputs.raw_data_sample_windows {
+            let (_, end_ms) = window.bounds_ms(EVALUATION_MS);
+            sources.insert(
+                window.time_range_node_id as u64,
+                window_rows(window, end_ms),
+            );
+        }
+        for id in &output.inputs.stored_outputs {
+            sources.insert(*id as u64, built[&(*id as u64)].0.clone());
+        }
+        let scope = match output.built_at {
+            StoredOutputBuild::IngestionRun => Scope::Ingestion {
+                window_start_ms: span.0,
+                window_end_ms: span.1,
+                revision: 1,
+            },
+            StoredOutputBuild::QueryRun => Scope::Query {
+                evaluation_time_ms: EVALUATION_MS,
+                revision: 1,
+            },
+        };
+        let batches = run_bound(dag, sources, &[output.node_id as u64], scope).remove(0);
+        let state_rows = batches.iter().flat_map(|b| b.to_rows()).collect();
+        let state = Batch::try_new(batches[0].schema().clone(), state_rows).unwrap();
+        built.insert(output.node_id as u64, (state, span));
+    }
+    // The query run reads the stored outputs it reaches without passing
+    // another one, and the windows it reads at query time.
+    let roots: Vec<u64> = plan.queries.iter().map(|q| q.root_node_id as u64).collect();
+    let mut inputs = BTreeMap::new();
+    let mut pending = roots.clone();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match built.get(&id) {
+            Some((state, _)) => {
+                inputs.insert(id, state.clone());
+            }
+            None => pending.extend(
+                dag.edges
+                    .iter()
+                    .filter(|edge| edge.consumer as u64 == id)
+                    .map(|edge| edge.producer as u64),
+            ),
+        }
+    }
+    for window in &plan.query_time_raw_windows {
+        let (_, end_ms) = window.bounds_ms(EVALUATION_MS);
+        inputs.insert(
+            window.time_range_node_id as u64,
+            window_rows(window, end_ms),
+        );
+    }
+    let query = Scope::Query {
+        evaluation_time_ms: EVALUATION_MS,
+        revision: 1,
+    };
+    run_bound(dag, inputs, &roots, query)
+        .iter()
+        .map(|batches| batches.iter().flat_map(|b| b.to_rows()).collect())
+        .collect()
+}
+
+/// A 5 and a 15 minute distinct count kept in tumbling panes at ingestion
+/// time (the deployment keeps no raw data): each pane is built in an ingestion run from the table rows of its
+/// window, and both queries answer exactly from the panes (the sketch is
+/// exact below its capacity), as the query-time reference does.
+#[tokio::test]
+async fn ingestion_time_panes_built_from_table_rows_answer_exactly() {
+    let fifteen = DISTINCT_USERS_LAST_5_MINUTES.replace("5 minutes", "15 minutes");
+    let plan = plan_without_raw_data(&[DISTINCT_USERS_LAST_5_MINUTES, &fifteen], APPROXIMATE).await;
+    assert!(
+        plan.stored_outputs
+            .iter()
+            .any(|o| o.built_at == StoredOutputBuild::IngestionRun
+                && !o.inputs.raw_data_sample_windows.is_empty()),
+        "panes built at ingestion time from table rows: {:?}",
+        plan.stored_outputs
+    );
+    // Older panes read windows that end before the evaluation.
+    assert!(plan
+        .stored_outputs
+        .iter()
+        .flat_map(|o| &o.inputs.raw_data_sample_windows)
+        .any(|w| w.end_offset_ms > 0));
+    let answers = run_data_plane(&plan);
+    assert_eq!(by_key(answers[0].clone()), expected_distinct_users());
+    let expected: BTreeMap<String, String> = (0..3)
+        .map(|s| (format!("s{s}"), shown(&Value::Int64(57))))
+        .collect();
+    assert_eq!(by_key(answers[1].clone()), expected);
+}
+
+/// Exact row counts over 5 and 15 minutes from ingestion-time state: each
+/// window's table rows are read once, 100 and 300 per service.
+#[tokio::test]
+async fn ingestion_time_row_counts_read_each_table_row_once() {
+    let five = "SELECT service, COUNT(*) AS value FROM http \
+                WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
+    let fifteen = five.replace("5 minutes", "15 minutes");
+    let plan = plan_without_raw_data(&[five, &fifteen], EXACT).await;
+    assert!(
+        plan.query_time_raw_windows.is_empty(),
+        "no raw data at query time"
+    );
+    let answers = run_data_plane(&plan);
+    for (query, rows_per_service) in [(0, 100), (1, 300)] {
+        let expected: BTreeMap<String, String> = (0..3)
+            .map(|s| (format!("s{s}"), shown(&Value::Int64(rows_per_service))))
+            .collect();
+        assert_eq!(by_key(answers[query].clone()), expected, "query {query}");
     }
 }

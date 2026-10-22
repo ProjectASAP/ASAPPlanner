@@ -16,6 +16,7 @@ pub mod capability;
 mod samples;
 pub use samples::{
     series_identity, series_labels_of_output_row, RawDataSample, RawDataSampleSelector,
+    TableRowSelector,
 };
 mod supported_summaries;
 pub use summary_kernels::factory;
