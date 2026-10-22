@@ -90,6 +90,10 @@ pub(crate) struct ImplementationCandidate {
     pub requires_exact_children: Vec<GroupId>,
     /// For a rollup, what it rolls up and from where; `None` otherwise.
     pub rollup_of: Option<RollupRead>,
+    /// Sites other groups' chosen implementations must carry for this one
+    /// to be valid: a sketch rollup's finer group exposing its state, a
+    /// coarser grouping's host group building the pane chain it reads.
+    pub requires_sites: Vec<(GroupId, CouplingSite)>,
 }
 /// What a [`CandidateOrigin::Rollup`] candidate reads, and what it
 /// rewrites: the search checks that the finer group's chosen
