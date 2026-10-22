@@ -31,7 +31,8 @@ so the SQL frontend recognizes only the Float64 product.
 
 **Stand-in.** The SQL frontend lowers Q1 to a distinct count and recognizes
 Q2 and Q3 as `Entropy` and `L2`. It lowers the time filter to the same
-1-min `TimeRange` a PromQL range selector lowers to. Most tests run the planning stages on a PromQL stand-in with the same
+1-min `TimeRange` a PromQL range selector lowers to. Most tests were
+written before it did and run the planning stages on a PromQL stand-in with the same
 structure, three statistics of one input over the same 1-min window:
 `distinct_over_time(flows_src_ip[1m])`,
 `entropy_over_time(flows_src_ip[1m])` and `l2_over_time(flows_src_ip[1m])`,

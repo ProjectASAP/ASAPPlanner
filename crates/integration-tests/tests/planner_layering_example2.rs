@@ -9,7 +9,7 @@
 //! The doc's workload is SQL; the SQL frontend lowers Q1 to a distinct
 //! count and recognizes Q2 and Q3 as `Entropy` and `L2` (Q3 with a Float64
 //! product), and its time filter to the same 1-min `TimeRange` as PromQL's
-//! `[1m]`. The planning stages also run on a PromQL stand-in with the same structure: three
+//! `[1m]`. Most planning tests predate that and run on a PromQL stand-in with the same structure: three
 //! statistics of one input over the same 1-min window, through the
 //! frontend's `distinct_over_time`, `entropy_over_time` and `l2_over_time`.
 

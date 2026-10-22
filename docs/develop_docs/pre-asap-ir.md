@@ -446,8 +446,10 @@ The SQL front end recognizes one conjunct `ts >= now() - INTERVAL 'w'` (also `>`
 mirrored `now() - INTERVAL 'w' <= ts`, and `ts BETWEEN now() - INTERVAL 'w' AND now()`)
 on the table's `time_index`, with a fixed-length `w` (days and smaller; a month has no fixed
 length). It reads the window with PromQL's range timing, `(T - w, T]` at evaluation time
-`T`: the start is exclusive for `>=` too, and rows later than `T` have not arrived yet. Any
-other time condition stays a `Scan` predicate.
+`T`: the start is exclusive for `>=` too, so a row stamped exactly `T - w` is not read, and rows
+later than `T` have not arrived yet. Any other time condition stays a `Scan` predicate, and so
+does the window itself when another conjunct also reads `now()` (in a pane or at ingestion time
+that conjunct would read other rows).
 
 **Fields:**
 - `range` — how far back to look (the PromQL `[5m]` duration, or the instant lookback).

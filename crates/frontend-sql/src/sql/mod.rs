@@ -423,8 +423,10 @@ impl<'a> SqlLowerer<'a> {
     /// `WHERE` — a conjunction of ordinary predicates plus, possibly, subquery
     /// predicates (issue #111).
     ///
-    /// The ordinary conjuncts stay one predicate, folded onto a bare `Scan`
-    /// (`filter_or_fold`). A subquery conjunct — `c IN (SELECT …)`, `EXISTS
+    /// A trailing window on a bare table `Scan`'s time index
+    /// ([`trailing_window_of_scan`]) becomes a range `TimeRange` over that
+    /// `Scan`. The other ordinary conjuncts stay one predicate, folded onto a
+    /// bare `Scan` (`filter_or_fold`). A subquery conjunct — `c IN (SELECT …)`, `EXISTS
     /// (…)`, `x > (SELECT …)` — is a row filter whose predicate reads another
     /// operator (`UnresolvedScalar::InSubquery` / `Exists` /
     /// `ScalarSubquery`); each one becomes its own `Filter` **above** the
@@ -440,29 +442,35 @@ impl<'a> SqlLowerer<'a> {
     fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<Unresolved, LoweringError> {
         let mut conjuncts = Vec::new();
         split_conjunction(&filter.predicate, &mut conjuncts);
-        let (subqueries, residual): (Vec<_>, Vec<_>) =
+        let (subqueries, mut residual): (Vec<_>, Vec<_>) =
             conjuncts.into_iter().partition(|e| reads_subquery(e));
 
         let input = self.lower_plan(&filter.input)?;
         // A trailing window on the table's time column is the query's
         // lookback: a range `TimeRange` over the `Scan`, as PromQL's `m[w]`.
-        let window_ms = trailing_window_of_scan(&input, &residual);
-        let residual: Vec<&Expr> = match window_ms {
-            Some((index, _)) => residual
-                .into_iter()
+        // Only when no other conjunct reads `now()`: such a condition would
+        // be evaluated per pane and at ingestion time once the window is a
+        // `TimeRange`, and would select other rows there.
+        let other_reads_now = |window: usize| {
+            residual
+                .iter()
                 .enumerate()
-                .filter(|(i, _)| *i != index)
-                .map(|(_, e)| e)
-                .collect(),
-            None => residual,
+                .any(|(i, e)| i != window && reads_now(e))
+                || subqueries.iter().any(|e| reads_now(e))
         };
+        let window = trailing_window_of_scan(&input, &residual)
+            .filter(|(index, _)| !other_reads_now(*index))
+            .map(|(index, width_ms)| {
+                residual.remove(index);
+                Duration::from_millis(width_ms)
+            });
         let mut node = match rebuild_conjunction(&residual) {
             Some(pred) => filter_or_fold(self.lower_expr(&pred)?, input),
             None => input,
         };
-        if let Some((_, window_ms)) = window_ms {
+        if let Some(range) = window {
             node = Unresolved::TimeRange {
-                range: Duration::from_millis(window_ms),
+                range,
                 kind: TimeRangeKind::Range,
                 child: Rc::new(node),
             };
@@ -1988,7 +1996,8 @@ fn filter_or_fold(pred: Scalar, child: Unresolved) -> Unresolved {
 
 /// The one conjunct of `conjuncts` that is a trailing window on the time
 /// column of `input`, a bare table `Scan` with a time index, as `(its
-/// position, the window width in ms)`. `None` when `input` is not such a
+/// position, the window width in ms)`. The caller also requires that no
+/// other conjunct reads `now()`. `None` when `input` is not such a
 /// `Scan`, or when no conjunct or more than one is a trailing window.
 ///
 /// A trailing window is `time >= now() - INTERVAL 'w'` (or `>`, or the
@@ -2018,12 +2027,12 @@ fn trailing_window_ms(conjunct: &Expr, time_column: &str) -> Option<u64> {
     let is_time = |e: &Expr| matches!(without_casts(e), Expr::Column(c) if c.name == time_column);
     match conjunct {
         Expr::BinaryExpr(b) => match b.op {
-            Op::GtEq | Op::Gt if is_time(&b.left) => window_start_ms(&b.right),
-            Op::LtEq | Op::Lt if is_time(&b.right) => window_start_ms(&b.left),
+            Op::GtEq | Op::Gt if is_time(&b.left) => now_minus_interval_ms(&b.right),
+            Op::LtEq | Op::Lt if is_time(&b.right) => now_minus_interval_ms(&b.left),
             _ => None,
         },
         Expr::Between(b) if !b.negated && is_time(&b.expr) && is_now(&b.high) => {
-            window_start_ms(&b.low)
+            now_minus_interval_ms(&b.low)
         }
         _ => None,
     }
@@ -2031,7 +2040,7 @@ fn trailing_window_ms(conjunct: &Expr, time_column: &str) -> Option<u64> {
 
 /// `w` in ms for `now() - INTERVAL 'w'` with a fixed-length `w > 0`. A
 /// month or year has no fixed length, so it is `None`.
-fn window_start_ms(expr: &Expr) -> Option<u64> {
+fn now_minus_interval_ms(expr: &Expr) -> Option<u64> {
     let Expr::BinaryExpr(b) = without_casts(expr) else {
         return None;
     };
@@ -2056,6 +2065,12 @@ fn window_start_ms(expr: &Expr) -> Option<u64> {
         _ => return None,
     };
     u64::try_from(ms).ok().filter(|&ms| ms > 0)
+}
+
+/// Whether `now()` / `CURRENT_TIMESTAMP` appears anywhere in `expr`.
+fn reads_now(expr: &Expr) -> bool {
+    expr.exists(|e| Ok(is_now(e)))
+        .expect("the predicate never fails")
 }
 
 /// Whether `expr` is `now()` / `CURRENT_TIMESTAMP`, under any casts.
