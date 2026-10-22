@@ -1889,12 +1889,12 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
 /// for its queries' targets (#669b), before pricing, so that cost reflects
 /// the deeper sketch. A query with a target with failure probability `δ`,
 /// over `n` approximate inputs ([`approximate_inputs`]) and covering `V`
-/// values per evaluation ([`AccuracyScope::values_covered`]: 1 for a
+/// values per evaluation ([`AccuracyScope::max_values_covered`]: 1 for a
 /// per-value target, at most `⌊1 / share⌋` for one over the groups holding
 /// a record share, `G` ([`values_per_result`]) for the whole result), needs
 /// each input to fail with probability at most `δ / (n · V)`: `n · V` such
 /// failures union-bound to `δ` over the values the target covers. A summary
-/// several queries read takes the smallest, i.e. the strictest scope. The
+/// several queries read takes the smallest `δ / (n · V)` among them. The
 /// parameters that depend on it are enlarged ([`with_failure_probability`];
 /// classic HLL's precision from its source's distinct bound), and the
 /// guarantees above are composed again. A query whose `V` is unbound (a
@@ -1957,13 +1957,15 @@ pub fn resize_for_failure_probability(
         };
         let values = target
             .accuracy_scope
-            .values_covered(values_per_result(root, series_read(root, data)));
+            .max_values_covered(values_per_result(root, series_read(root, data)));
         let Some(values) = values else { continue };
         let inputs = approximate_inputs(root);
-        let share = delta / (inputs.len() as f64 * values as f64);
+        let per_input_failure_probability = delta / (inputs.len() as f64 * values as f64);
         for state in &inputs {
-            let entry = required.entry(Rc::as_ptr(state)).or_insert(share);
-            *entry = entry.min(share);
+            let entry = required
+                .entry(Rc::as_ptr(state))
+                .or_insert(per_input_failure_probability);
+            *entry = entry.min(per_input_failure_probability);
         }
     }
     if required.is_empty() {

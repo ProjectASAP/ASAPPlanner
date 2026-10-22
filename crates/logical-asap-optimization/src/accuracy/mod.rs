@@ -71,8 +71,8 @@ fn metric_meets(guarantee: AccuracyMetric, target: AccuracyMetric) -> bool {
 /// Whether `guarantee`'s failure probability covers the values `target`'s
 /// does ([`AccuracyScope::covers`]). A whole-result guarantee covers every
 /// target, and one over the groups holding at least a share of the records
-/// covers a target over a larger share or a single value. A per-value one
-/// covers only a per-value target: it must first be stated over the
+/// covers a target over a larger share (not a per-value one, whose value may
+/// be a smaller group). A per-value one covers only a per-value target: it must first be stated over the
 /// target's scope ([`AccuracyGuarantee::over_scope`]). The scope bounds
 /// only the failure probability, so it does not matter for a target
 /// without a δ requirement or for a guarantee that never fails.
@@ -236,9 +236,14 @@ mod tests {
             &one_percent_g.over_scope(share(0.01), None),
             &five_percent
         ));
+        let over_five = g.over_scope(share(0.05), None);
         assert!(!satisfies(
-            &g.over_scope(share(0.05), None),
+            &over_five,
             &five_percent.clone().accuracy_scope(share(0.01))
+        ));
+        assert!(!satisfies(
+            &over_five,
+            &five_percent.clone().accuracy_scope(AccuracyScope::PerValue)
         ));
     }
 

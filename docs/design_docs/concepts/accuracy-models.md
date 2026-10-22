@@ -51,15 +51,18 @@ once, with probability at least 1 − δ:
 |---|---|---|
 | `PerValue` | `"per_value"` | Each value on its own: `V = 1` |
 | `WholeResult` (default) | `"whole_result"` | Every value of the result: `V = G`, the values one evaluation returns; unbound for a SQL grouped result and for a PromQL vector whose sources declare no series count |
-| `GroupsWithRecordShareAtLeast(share)` | `{"groups_with_record_share_at_least": 0.05}` | Every group (result row) holding at least `share` of the records the query aggregates in one evaluation: `V = min(⌊1 / share⌋, G)`, bound even when `G` is not |
+| `GroupsWithRecordShareAtLeast(share)` | `{"groups_with_record_share_at_least": 0.05}` | Every group (result row) holding at least `share` of the records the query aggregates in one evaluation: `V = min(⌊1 / share⌋, G)`, bound even when `G` is not; a smaller group is not covered |
 
 The record-share scope is for queries that watch only their large groups, for
 example an anomaly detector reading per-group distinct counts. `share` is a
-fraction in (0, 1]; any other value is rejected when the target is read. More
+fraction in (0, 1]; JSON rejects any other value, and one built in Rust
+covers an unbound number of values, so its target stays unmet. More
 than `⌊1 / share⌋` groups cannot each hold `share` of the records, so at most
 100 groups qualify at 1% and 20 at 5%, whatever the number of groups. When a
 row reads several aggregations, its group must hold the share of each one's
-records. Groups below the share are not covered.
+records. Groups below the share are not covered, so a guarantee over a
+share meets a target over a larger share but not a per-value target, and only
+a per-value guarantee is restated over a scope.
 
 A scope bounds only the failure probability; the error bound is unchanged.
 Every estimator and composition produces a per-value guarantee (for a grouped
@@ -75,9 +78,10 @@ membership needs its own evidence under every scope.
 
 Plan selection sizes each approximate input of a query with `n` approximate
 inputs for `δ / (n · V)`, so the union bound gives δ over the covered values.
-A summary several queries read is sized for the smallest share, which is the
-strictest scope: every group (`G`), then a 1% share (100), then a 5% share
-(20), then a single value (1). A whole-result target with an unbound `G`
+A summary several queries read is sized for the smallest `δ / (n · V)` among
+its readers. At equal δ and `n`, the scope covering the most values is the
+strictest: every group (`G`, when `G` is above 100), then a 1% share (100),
+then a 5% share (20), then a single value (1). A whole-result target with an unbound `G`
 enlarges nothing and stays unmet; a SQL grouped result has no bound on `G` yet,
 so a sketch meets a whole-result target over SQL groups only once a grouping's
 cardinality can be declared.

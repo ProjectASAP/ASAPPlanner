@@ -104,7 +104,7 @@ impl From<MetricName> for AccuracyMetric {
 ///
 /// A scope bounds only the failure probability: a per-value guarantee with
 /// failure probability `δ` holds over the `n` values a scope covers with
-/// `n · δ` by the union bound ([`Self::values_covered`]), whatever their
+/// `n · δ` by the union bound ([`Self::max_values_covered`]), whatever their
 /// dependence. Not `Eq`: a record share is an `f64`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,6 +128,10 @@ pub enum AccuracyScope {
     GroupsWithRecordShareAtLeast(#[serde(deserialize_with = "record_share")] f64),
 }
 
+/// Relative tolerance for `⌊1 / share⌋`, so a share such as 0.05 whose
+/// reciprocal computes just below an integer counts that integer.
+const RECORD_SHARE_ROUNDING_TOLERANCE: f64 = 1e-9;
+
 /// A record share, rejected unless it is a fraction in (0, 1].
 fn record_share<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
     let share = f64::deserialize(deserializer)?;
@@ -149,15 +153,20 @@ impl AccuracyScope {
     /// is not. Sizing divides a target's failure probability by it, and the
     /// guarantee check multiplies a per-value one by it, so the strictest of
     /// several scopes is the one that covers the most values.
-    pub fn values_covered(self, values_per_result: Option<u64>) -> Option<u64> {
+    pub fn max_values_covered(self, values_per_result: Option<u64>) -> Option<u64> {
         match self {
             Self::PerValue => Some(1),
             Self::WholeResult => values_per_result,
+            // A share outside (0, 1] (possible only through the Rust API;
+            // JSON rejects it) bounds nothing, so its target stays unmet.
+            Self::GroupsWithRecordShareAtLeast(share) if !(share > 0.0 && share <= 1.0) => None,
             Self::GroupsWithRecordShareAtLeast(share) => {
                 // More than `1 / share` groups cannot each hold `share` of
-                // the records. The tolerance keeps `1 / 0.05` at 20 when it
-                // rounds just below.
-                let qualifying = (share.recip() * (1.0 + 1e-9)).floor().max(1.0) as u64;
+                // the records. Rounding up near an integer keeps `1 / 0.05`
+                // at 20 when it computes just below; it only enlarges the
+                // count, which is conservative.
+                let qualifying =
+                    (share.recip() * (1.0 + RECORD_SHARE_ROUNDING_TOLERANCE)).floor() as u64;
                 Some(values_per_result.map_or(qualifying, |values| values.min(qualifying)))
             }
         }
@@ -165,10 +174,11 @@ impl AccuracyScope {
 
     /// Whether a statement over this scope also covers every value `other`
     /// covers: the whole result covers every scope, a record share covers a
-    /// larger share and a single value, and a single value only itself.
+    /// larger share (not every value: a smaller group is outside it), and a
+    /// single value only itself.
     pub fn covers(self, other: Self) -> bool {
         match (self, other) {
-            (Self::WholeResult, _) | (_, Self::PerValue) => true,
+            (Self::WholeResult, _) | (Self::PerValue, Self::PerValue) => true,
             (
                 Self::GroupsWithRecordShareAtLeast(share),
                 Self::GroupsWithRecordShareAtLeast(other_share),
@@ -805,40 +815,49 @@ mod tests {
     #[test]
     fn a_scope_covers_at_most_one_over_its_share_groups() {
         use AccuracyScope::*;
-        assert_eq!(PerValue.values_covered(None), Some(1));
-        assert_eq!(WholeResult.values_covered(None), None);
-        assert_eq!(WholeResult.values_covered(Some(625)), Some(625));
+        assert_eq!(PerValue.max_values_covered(None), Some(1));
+        assert_eq!(WholeResult.max_values_covered(None), None);
+        assert_eq!(WholeResult.max_values_covered(Some(625)), Some(625));
         assert_eq!(
-            GroupsWithRecordShareAtLeast(0.05).values_covered(None),
+            GroupsWithRecordShareAtLeast(0.05).max_values_covered(None),
             Some(20)
         );
         assert_eq!(
-            GroupsWithRecordShareAtLeast(0.01).values_covered(None),
+            GroupsWithRecordShareAtLeast(0.01).max_values_covered(None),
             Some(100)
         );
         assert_eq!(
-            GroupsWithRecordShareAtLeast(0.03).values_covered(None),
+            GroupsWithRecordShareAtLeast(0.03).max_values_covered(None),
             Some(33)
         );
         assert_eq!(
-            GroupsWithRecordShareAtLeast(1.0).values_covered(None),
+            GroupsWithRecordShareAtLeast(1.0).max_values_covered(None),
             Some(1)
         );
+        for invalid in [0.0, -0.1, 1.5, f64::NAN] {
+            assert_eq!(
+                GroupsWithRecordShareAtLeast(invalid).max_values_covered(None),
+                None,
+                "{invalid}"
+            );
+        }
         assert_eq!(
-            GroupsWithRecordShareAtLeast(0.01).values_covered(Some(4)),
+            GroupsWithRecordShareAtLeast(0.01).max_values_covered(Some(4)),
             Some(4)
         );
     }
 
     /// The whole result covers every scope; a record share covers a larger
-    /// share and a single value; a single value covers only itself.
+    /// share but not a single value, which may be a smaller group; a single
+    /// value covers only itself.
     #[test]
     fn a_wider_scope_covers_a_narrower_one() {
         use AccuracyScope::*;
         let share = GroupsWithRecordShareAtLeast;
         assert!(WholeResult.covers(share(0.01)));
         assert!(share(0.01).covers(share(0.05)));
-        assert!(share(0.05).covers(PerValue));
+        assert!(!share(0.05).covers(PerValue));
+        assert!(PerValue.covers(PerValue));
         assert!(!share(0.05).covers(share(0.01)));
         assert!(!share(0.05).covers(WholeResult));
         assert!(!PerValue.covers(share(0.05)));

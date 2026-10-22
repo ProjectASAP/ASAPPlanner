@@ -468,22 +468,26 @@ impl AccuracyGuarantee {
     /// This guarantee stated over `scope`, for a result of
     /// `values_per_result` values (`G`, `None` when unbound): a per-value
     /// failure probability `δ` becomes `n · δ` by the union bound over the
-    /// `n` values the scope covers ([`AccuracyScope::values_covered`]),
+    /// `n` values the scope covers ([`AccuracyScope::max_values_covered`]),
     /// whatever their dependence. The error is unchanged. A guarantee that
     /// never fails (`δ = 0`) holds for every value at once; an unbound `n`
     /// (the whole result of an unbound `G`) leaves the failure probability
-    /// symbolic in [`VALUES_PER_RESULT`]. A guarantee whose scope already
-    /// covers `scope` is returned as it is. Plan selection uses it to check
-    /// a target over `scope`.
+    /// symbolic in [`VALUES_PER_RESULT`]. A guarantee over any other scope
+    /// is returned as it is: the check then accepts it only for a scope it
+    /// covers ([`AccuracyScope::covers`]). Plan selection uses it to check a
+    /// target over `scope`.
     pub fn over_scope(&self, scope: AccuracyScope, values_per_result: Option<u64>) -> Self {
         let mut over = self.clone();
-        if self.spec.accuracy_scope.covers(scope) {
+        // Only a per-value statement extends to more values by the union
+        // bound: one over some groups says nothing about the others, so it
+        // is returned as it is and misses a scope it does not cover.
+        if self.spec.accuracy_scope != AccuracyScope::PerValue || scope == AccuracyScope::PerValue {
             return over;
         }
         over.spec.accuracy_scope = scope;
         if !self.spec.failure_probability.is_zero() {
             over.spec.failure_probability = ProbabilityExpr::Scaled {
-                count: scope.values_covered(values_per_result).map_or_else(
+                count: scope.max_values_covered(values_per_result).map_or_else(
                     || BoundExpr::Unknown {
                         statistic: VALUES_PER_RESULT.into(),
                     },
@@ -711,6 +715,11 @@ mod tests {
         );
         let whole = per_value.over_scope(AccuracyScope::WholeResult, Some(10));
         assert_eq!(whole.over_scope(five_percent, None), whole);
+        // A statement over the 5% groups says nothing about groups between
+        // 1% and 5%, nor about the whole result: it is not rescaled.
+        let one_percent = AccuracyScope::GroupsWithRecordShareAtLeast(0.01);
+        assert_eq!(over.over_scope(one_percent, None), over);
+        assert_eq!(over.over_scope(AccuracyScope::WholeResult, Some(10)), over);
         assert_eq!(
             per_value
                 .over_scope(AccuracyScope::WholeResult, None)
