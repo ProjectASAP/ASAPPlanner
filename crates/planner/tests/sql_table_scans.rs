@@ -41,15 +41,24 @@ fn http_schema() -> Schema {
     )
 }
 
-/// One repeating SQL query every minute with `accuracy`, over `http`
+/// Repeating SQL `queries`, each every minute with `accuracy`, over `http`
 /// ingesting 100 rows per second.
-fn workload(query: &str, accuracy: &str) -> PlanningWorkload {
+fn workload(queries: &[&str], accuracy: &str) -> PlanningWorkload {
+    let entries: Vec<String> = queries
+        .iter()
+        .map(|query| {
+            format!(
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval": 60000}},
+                "requirements": {{"accuracy": {accuracy}}},
+                "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": {{"sql": "datafusion_sql"}},
-              "repeating_queries": [{{"query": {query:?}, "demand": {{"fixed_interval": 60000}},
-                "requirements": {{"accuracy": {accuracy}}},
-                "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
-            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100.0}}}}}}}}"#
+              "repeating_queries": [{}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100.0}}}}}}}}"#,
+        entries.join(",")
     ))
     .unwrap()
 }
@@ -63,8 +72,12 @@ const APPROXIMATE: &str = r#"{"accuracy_metric": "relative", "max_error": 0.05,
 const EXACT: &str = r#"{"max_error": 0.0, "failure_probability": 0.0}"#;
 
 async fn plan(query: &str, accuracy: &str) -> InstallablePlan {
+    plan_all(&[query], accuracy).await
+}
+
+async fn plan_all(queries: &[&str], accuracy: &str) -> InstallablePlan {
     let catalog = SqlCatalog::new().with_table("http", http_schema());
-    let workload = workload(query, accuracy);
+    let workload = workload(queries, accuracy);
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Sql { catalog: &catalog },
@@ -92,15 +105,25 @@ fn rows() -> Vec<Vec<Value>> {
         .collect()
 }
 
-/// Runs query 0 of `plan` at [`EVALUATION_MS`] with `http` bound to
-/// [`rows`]: its output field types and its rows.
+/// Runs query 0 of `plan`, every node at query time (its reference plan,
+/// which reads the table's rows wherever the plan keeps state), at
+/// [`EVALUATION_MS`] with `http` bound to [`rows`]: its output field types
+/// and its rows. A `WHERE ts >= now() - INTERVAL` window is a `TimeRange`
+/// the executor runs as a filter on `ts` against the evaluation time.
 fn run(plan: &InstallablePlan) -> (Vec<FieldDataType>, Vec<Vec<Value>>) {
-    assert!(plan.stored_outputs.is_empty() && plan.query_time_raw_windows.is_empty());
+    run_query(plan, 0)
+}
+
+/// [`run`] for query `query` of `plan`.
+fn run_query(plan: &InstallablePlan, query: usize) -> (Vec<FieldDataType>, Vec<Vec<Value>>) {
+    let reference = plan
+        .dag
+        .dag
+        .with_every_node_at_query_time()
+        .expect("the plan runs at query time");
     // The table's rows in the schema the plan's scan reads (its columns
     // qualified by the table).
-    let schema = plan
-        .dag
-        .dag
+    let schema = reference
         .nodes
         .iter()
         .find_map(|node| match &node.payload {
@@ -120,8 +143,8 @@ fn run(plan: &InstallablePlan) -> (Vec<FieldDataType>, Vec<Vec<Value>>) {
             Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
         )
         .unwrap();
-    let roots = [plan.queries[0].root_node_id as u64];
-    let bound = bind_with_data_sources(&plan.dag.dag, BTreeMap::new(), &roots, &sources)
+    let roots = [reference.roots[query] as u64];
+    let bound = bind_with_data_sources(&reference, BTreeMap::new(), &roots, &sources)
         .expect("the plan binds to the table");
     let context = RunContext::new(
         Scope::Query {
@@ -263,10 +286,12 @@ async fn an_exact_grouped_sql_percentile_runs() {
         planned_output(&plan),
         "the executor's output type is the plan's"
     );
-    // Each service's latencies `i` over the last 5 minutes (i >= 899).
+    // Each service's latencies `i` over the last 5 minutes. The window is a
+    // range selector's `(T - 5m, T]`, so the row stamped exactly `T - 5m`
+    // (i = 899) is not read: i >= 900.
     let expected: BTreeMap<String, String> = (0..3i64)
         .map(|s| {
-            let latencies = (899..1200)
+            let latencies = (900..1200)
                 .filter(|i| i % 3 == s)
                 .map(|i| i as f64)
                 .collect();
@@ -297,4 +322,23 @@ async fn an_exact_global_sql_percentile_of_no_row_is_null() {
     );
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0][0], Value::Null), "{:?}", rows[0][0]);
+}
+
+/// A 5 and a 15 minute distinct count over one table: the plan builds them
+/// in tumbling panes, each pane a `TimeRange` over a shifted table `Scan`,
+/// which the executor runs as filters on `ts`. Both answer exactly (the
+/// sketch is exact below its capacity).
+#[tokio::test]
+async fn distinct_counts_over_5_and_15_minute_windows_run_from_panes() {
+    let fifteen = DISTINCT_USERS_LAST_5_MINUTES.replace("5 minutes", "15 minutes");
+    let plan = plan_all(&[DISTINCT_USERS_LAST_5_MINUTES, &fifteen], APPROXIMATE).await;
+    let selected = format!("{:?}", plan.dag.dag.nodes);
+    assert!(selected.contains("TimeShift"), "panes: {selected}");
+    assert_eq!(by_key(run_query(&plan, 0).1), expected_distinct_users());
+    // The last 15 minutes (i >= 300): every user `i % 50` of each service
+    // (3 and 50 are coprime) and its 7 recent ones.
+    let expected: BTreeMap<String, String> = (0..3)
+        .map(|s| (format!("s{s}"), shown(&Value::Int64(57))))
+        .collect();
+    assert_eq!(by_key(run_query(&plan, 1).1), expected);
 }

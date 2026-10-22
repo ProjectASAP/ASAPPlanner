@@ -425,6 +425,14 @@ contract once its predicates compile, so a compile check (the one
 `plan_installable` runs) cuts the plan there. SQL `now()` is the query's
 evaluation time (`Scope::Query`); it has no value in an ingestion run.
 
+A SQL trailing window is a range `TimeRange(w)` over the table `Scan`, below
+any `TimeShift`s a tumbling pane adds (offsets summing to `s`). When the
+executor runs it from the bound table (rather than from window rows a
+runtime feeds at the `TimeRange`), it keeps the rows whose time column lies
+in `(T - s - w, T - s]` at evaluation time `T`, a filter against `now()`,
+and passes the rows through each `TimeShift`. That is the window a PromQL
+range selector reads.
+
 The Planner integration test executes both candidates through the shared runtime
 and reverses the selected frontier with two controlled cost fixtures. It also
 rejects shadowed/duplicate boundaries and incomparable planning horizons. This
