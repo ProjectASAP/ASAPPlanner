@@ -89,10 +89,11 @@ own accuracy requirement, an `AccuracyTarget` with the fields `error` (ε),
 | `AccuracyTarget::max_error(e)` | Error at most ε, with no δ requirement and no metric set | `max_error(0.01)` |
 | `.failure_probability(d)` | Also require the bound to hold with probability at least 1 − δ | `max_error(0.01).failure_probability(0.05)` |
 | `.accuracy_metric(m)` | State ε in `AccuracyMetric` `m` (`Absolute { scale }`, `Relative` or `Rank`); unset accepts a guarantee in any metric | `.accuracy_metric(AccuracyMetric::Rank)` |
-| `.accuracy_scope(s)` | Which output values one statement covers (`AccuracyScope`) | `.accuracy_scope(AccuracyScope::WholeResult)` |
+| `.accuracy_scope(s)` | Which output values one statement covers (`AccuracyScope`): `PerValue`, `WholeResult` (default) or `GroupsWithRecordShareAtLeast(share)`, every group holding at least `share` (a fraction) of the records | `.accuracy_scope(AccuracyScope::GroupsWithRecordShareAtLeast(0.05))` |
 
 In JSON the target is a plain struct, for example
-`{"max_error": 0.01, "failure_probability": 0.001, "accuracy_metric": "rank"}`.
+`{"max_error": 0.01, "failure_probability": 0.001, "accuracy_metric": "rank"}`;
+a record-share scope is `"accuracy_scope": {"groups_with_record_share_at_least": 0.05}`.
 
 Epsilon does not mean the same error quantity for every statistic. Inspect the
 candidate's guarantee and its error metric; a target is a requirement, not proof

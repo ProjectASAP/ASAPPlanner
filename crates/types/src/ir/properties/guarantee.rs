@@ -386,7 +386,7 @@ pub enum GuaranteeSource {
 }
 
 /// The statistic an unbound number of values per result is left as
-/// ([`AccuracyGuarantee::over_whole_result`]); nothing binds it, so the
+/// ([`AccuracyGuarantee::over_scope`]); nothing binds it, so the
 /// failure probability stays unknown.
 pub const VALUES_PER_RESULT: &str = "values_per_result";
 
@@ -465,23 +465,29 @@ impl AccuracyGuarantee {
         )
     }
 
-    /// This guarantee stated over the whole result of one evaluation of
-    /// `values_per_result` values (`G`): a per-value failure probability
-    /// `δ` becomes `G · δ` by the union bound over the values, whatever
-    /// their dependence. The error is unchanged. A guarantee that never
-    /// fails (`δ = 0`) holds for every value at once whatever `G`; an
-    /// unbound `G` (`None`) leaves the failure probability symbolic in
-    /// [`VALUES_PER_RESULT`]. A whole-result guarantee is returned as it is.
-    /// Plan selection uses it to check a whole-result target.
-    pub fn over_whole_result(&self, values_per_result: Option<u64>) -> Self {
-        let mut whole = self.clone();
-        if self.spec.accuracy_scope == AccuracyScope::WholeResult {
-            return whole;
+    /// This guarantee stated over `scope`, for a result of
+    /// `values_per_result` values (`G`, `None` when unbound): a per-value
+    /// failure probability `δ` becomes `n · δ` by the union bound over the
+    /// `n` values the scope covers ([`AccuracyScope::max_values_covered`]),
+    /// whatever their dependence. The error is unchanged. A guarantee that
+    /// never fails (`δ = 0`) holds for every value at once; an unbound `n`
+    /// (the whole result of an unbound `G`) leaves the failure probability
+    /// symbolic in [`VALUES_PER_RESULT`]. A guarantee over any other scope
+    /// is returned as it is: the check then accepts it only for a scope it
+    /// covers ([`AccuracyScope::covers`]). Plan selection uses it to check a
+    /// target over `scope`.
+    pub fn over_scope(&self, scope: AccuracyScope, values_per_result: Option<u64>) -> Self {
+        let mut over = self.clone();
+        // Only a per-value statement extends to more values by the union
+        // bound: one over some groups says nothing about the others, so it
+        // is returned as it is and misses a scope it does not cover.
+        if self.spec.accuracy_scope != AccuracyScope::PerValue || scope == AccuracyScope::PerValue {
+            return over;
         }
-        whole.spec.accuracy_scope = AccuracyScope::WholeResult;
+        over.spec.accuracy_scope = scope;
         if !self.spec.failure_probability.is_zero() {
-            whole.spec.failure_probability = ProbabilityExpr::Scaled {
-                count: values_per_result.map_or_else(
+            over.spec.failure_probability = ProbabilityExpr::Scaled {
+                count: scope.max_values_covered(values_per_result).map_or_else(
                     || BoundExpr::Unknown {
                         statistic: VALUES_PER_RESULT.into(),
                     },
@@ -492,7 +498,7 @@ impl AccuracyGuarantee {
                 inner: Box::new(self.spec.failure_probability.clone()),
             };
         }
-        whole
+        over
     }
 
     /// `true` iff this guarantee promises zero error with certainty.
@@ -681,6 +687,47 @@ mod tests {
         assert_eq!(json["spec"]["error"]["op"], "sum");
         let back: AccuracyGuarantee = serde_json::from_value(json).unwrap();
         assert_eq!(back, g);
+    }
+
+    /// A per-value guarantee over the groups holding at least 5% of the
+    /// records fails with at most 20 times its per-value probability, even
+    /// when the number of values the result returns is unknown: at most 20
+    /// groups can hold 5% each. Fewer values bound it lower. The error is
+    /// unchanged, and a scope the guarantee already covers keeps it as it is.
+    #[test]
+    fn a_record_share_scope_union_bounds_over_one_over_share_groups() {
+        let per_value = AccuracyGuarantee::new(
+            AccuracyMetric::Relative,
+            BoundExpr::Constant { value: 0.05 },
+            ProbabilityExpr::Constant { value: 0.001 },
+            vec![],
+        );
+        let five_percent = AccuracyScope::GroupsWithRecordShareAtLeast(0.05);
+        let over = per_value.over_scope(five_percent, None);
+        assert_eq!(over.spec.accuracy_scope, five_percent);
+        assert_eq!(over.spec.error, per_value.spec.error);
+        assert!((over.spec.failure_probability.evaluate().unwrap() - 0.02).abs() < 1e-12);
+        let few = per_value.over_scope(five_percent, Some(4));
+        assert!((few.spec.failure_probability.evaluate().unwrap() - 0.004).abs() < 1e-12);
+        assert_eq!(
+            per_value.over_scope(AccuracyScope::PerValue, None),
+            per_value
+        );
+        let whole = per_value.over_scope(AccuracyScope::WholeResult, Some(10));
+        assert_eq!(whole.over_scope(five_percent, None), whole);
+        // A statement over the 5% groups says nothing about groups between
+        // 1% and 5%, nor about the whole result: it is not rescaled.
+        let one_percent = AccuracyScope::GroupsWithRecordShareAtLeast(0.01);
+        assert_eq!(over.over_scope(one_percent, None), over);
+        assert_eq!(over.over_scope(AccuracyScope::WholeResult, Some(10)), over);
+        assert_eq!(
+            per_value
+                .over_scope(AccuracyScope::WholeResult, None)
+                .spec
+                .failure_probability
+                .evaluate(),
+            None
+        );
     }
 
     /// A supplied statistic replaces its `Unknown` leaves, in the bound and
