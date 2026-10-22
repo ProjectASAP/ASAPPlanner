@@ -363,90 +363,41 @@ The result is the plan the exhaustive search would select. It is checked by `joi
 
 1. **Hash-cons** the workload's logical DAG into groups.
 2. **Generate** each group's implementation candidates (Pass 1, then the Pass 2 transformations), each with its child groups and its coupling sites.
-3. **Clusters.** Groups linked by a shared group or a coupling site form a cluster; clusters are solved separately.
-4. **Enumerate the coupling choices of a cluster, with bounds.** A shared group's size depends only on its strictest reader, so instead of reader subsets the search enumerates the strictness threshold (one value per distinct reader requirement, the per-parameter maximum when a size has several parameters); a reader no stricter than the threshold may read it, and does iff that is cheapest for it. Pane chains add the grid (the closure of the readers' widths under gcd) and the longest window. A metric's scans enumerate the label sets of their readers. A source's raw retention enumerates the horizon threshold among its raw-reading readers. Branch and bound prunes threshold combinations whose lower bound exceeds the incumbent.
-5. **Dynamic programming** over the rest of the group DAG, given the coupling choices: each group keeps its frontier of candidates (cheapest, or Pareto under cost models 2 and 3), computed bottom-up from its children's frontiers with the cached local prices.
-6. **Combine** the clusters' frontiers; peaks and capacity limits (cost models 2 and 3) are checked when frontiers combine. Latency and repeat-interval checks are checked when a reader attaches to a shared group, at that group's threshold.
-7. **Build late.** Compose the selected plan once, run Stage 3's checks and the executor's compile check on it, and report it.
+3. **Coefficients.** Price each candidate's private nodes with Stage 3's per-node pricing, per consumer rate and per materialization, and each coupling site's node at each of its thresholds. Stage 3 stays the only source of prices.
+4. **Solve one MILP over the memo** (below): one choice per needed group, its materializations and the coupling sites' thresholds.
+5. **Lazy cuts.** Compose the solver's plan, recompose its guarantees and price it with Stage 3. If Stage 3's price exceeds the solver's objective (the held-memory term), or a composed guarantee fails, add a cut that corrects or excludes that plan, and solve again. Stop when Stage 3's price equals the objective and every check passes. The gap must be 0 to report the plan as optimal.
+6. **Build late.** Run the executor's compile check on the selected plan only, and report it.
 
-### The search: threshold enumeration, branch and bound, dynamic programming
+### The solver: MILP over the memo
 
-Steps 4 and 5 combine three techniques. One example runs through all three: three quantile queries over one metric that may share one DDSketch build, `Qa` with relative error 0.01, `Qb` with 0.02 and `Qc` with 0.05.
+Threshold enumeration still turns each coupling site into discrete choices: a shared size set by one reader's requirement, a pane chain's grid and longest window, a scan's label set, a source's raw horizon. The MILP chooses among them instead of a hand-written search.
 
-**Threshold enumeration: which readers join a shared node, and how large it is.** Choosing which readers join is a subset choice: 2³ = 8 subsets here, 2ⁿ for n readers. The shared node's size depends only on its strictest member, and a reader no stricter than that size can join without enlarging it (it only adds its own read). So the search enumerates the size, as a threshold set by one reader's requirement, instead of the subset:
+**Variables.**
+- `x[g,c]`: group `g` implemented by candidate `c`. Groups a chosen candidate reads must be implemented; a fused candidate implements several.
+- `m[s,o]`: materialization `o` of slot `s` (a candidate's build, or a shared group's node).
+- `u[site,t]`: coupling site at threshold `t`; a reader may attach only to a threshold it may read.
+- `r[k,g]`: consumer `k` (a query, or a materialized slot) reaches group `g` through unmaterialized nodes.
+- `y[k,g,c] = r[k,g] ∧ x[g,c]`, linearized as `y ≥ r + x − 1`.
 
-| Threshold (sized for) | Readers that may join | Readers that cannot |
-| --- | --- | --- |
-| 0.01 (`Qa`) | `Qa`, `Qb`, `Qc` | none |
-| 0.02 (`Qb`) | `Qb`, `Qc` | `Qa` builds its own |
-| 0.05 (`Qc`) | `Qc` | `Qa`, `Qb` build their own |
-| no shared node | none | all build their own |
+**Objective (cost model 1).** Σ rate(k) · per-consumer cost(g, c) · y, plus each materialized slot's own cost, each threshold's site cost, raw retention per source (`R_s ≥ bytes · query-time raw scan`), and pane retention (`keep ≥ span · read`). A slot built once per evaluation for readers on different grids takes the union rate through one indicator per distinct grid set.
 
-Given a threshold, each reader that may join decides on its own, by comparing its read of the shared node with its cheapest own implementation. That is n + 1 thresholds with n independent decisions each, instead of 2ⁿ subsets. A size with several parameters (a KLL's `k` and failure probability) takes each reader's requirement vector as a candidate threshold and drops dominated ones. The other coupling sites follow the same pattern:
-- a pane chain enumerates its grid (the gcd closure of its readers' widths) and its longest window;
-- a source's raw retention enumerates the horizon;
-- a metric's scan enumerates its label set.
+**Constraints.** One candidate per needed group; down-closure (ingestion needs ingestion below); the reach propagation; attachment only to admitted thresholds; the combination rules (top-k reuse never with panes; rollup source rules); each query's latency (the sum of the work it reaches) within its bound and its repeat interval.
 
-**Branch and bound: which combinations of coupling choices to try.** A cluster usually has several coupling sites, so their thresholds still multiply. The search assigns one site at a time, in a search tree, and prunes:
-1. **Branch**: pick the next coupling site and try each of its thresholds.
-2. **Bound**: for a partial assignment, compute a lower bound on any completion. Assigned sites are priced exactly. Every unassigned site is priced once, at its least demanding reader's size. Every group is priced at its cheapest frontier candidate given the sites so far. Sharing only removes repeated charges, so no completion is cheaper than this bound.
-3. **Prune**: when the bound exceeds the best complete assignment found so far (the incumbent), skip the whole subtree.
+**Lazy terms.** Memory held while a query runs costs bytes × that query's latency, a product of two sums over its reach. The model omits it, which gives a lower bound, and step 5 adds it back through cuts on the incumbent. Composed accuracy guarantees depend on the chosen children; step 5 checks them on the incumbent and excludes failing combinations with no-good cuts.
 
-For example, if an incumbent costs 0.50 per second and a branch fixes the source's raw horizon at 24 hours, whose disk charge alone is 0.60 per second, none of that branch's completions can win, so none of them is expanded. Only provably worse branches are pruned, so the result stays exact.
+**Cost models 2 and 3.** The same variables. Peaks and capacity limits become linear constraints over the per-node peak contributions, and each objective is as specified.
 
-**Dynamic programming: everything else, once per group.** With the coupling choices fixed, the remaining groups no longer affect each other's cost. Each group's frontier is computed bottom-up from its children's, once, and cached:
-
-```text
-G2 = TimeRange(5m)               coupling choice fixed: built once per evaluation
-G6 = sum_over_time over G2       exact accumulator only: c6
-G8 = sum by (job) over G6        min(exact over G6: c6 + x,  rollup of G7: c7 + y)
-G9 = topk(5) over G8             min(exact top-k: best(G8) + z,  fused heap over G2: w)
-```
-
-A parent reads its children's best values; it never multiplies their alternatives with its own. This is where the memo's speed comes from: work proportional to the number of groups and their implementations, not to the product of every query's choices.
-
-**How the three fit together:**
-
-```text
-for each sharing cluster:
-  branch and bound over the cluster's coupling sites
-    each site's candidate values come from threshold enumeration (n + 1, not 2^n)
-      each complete assignment: dynamic programming over the remaining groups (cached)
-  keep the cheapest assignment (the incumbent)
-compose the clusters' selections into one plan; check and compile it once
-```
-
-None of the three discards a plan that could be optimal, so the selection equals the exhaustive search's. `joint_search_equivalence` checks this on workloads small enough for `--exhaustive`.
+**Validation.** The brute force over the memo is a second oracle. `joint_search_equivalence` checks the MILP, the brute force and `--exhaustive` against each other on small workloads under all three cost models: a peak case, a capacity case and a raw-horizon case.
 
 ### Coupled charges
 
-- **Raw data on disk**: a per-source coupling site whose size is the longest horizon among the readers that scan raw data, enumerated as a threshold (step 4).
-- **Cost models 2 and 3**: frontiers instead of minima (step 5), peaks and limits at combination (step 6).
-- **A measured cost table**: the calibration factor is fitted once, before the search, over every candidate node the generation produced (before pruning), and frozen; every group is priced with it.
-
-### Exactness
-
-The search is exact when every interaction between groups is a shared group or a coupling site, and each coupling site's cost depends only on its threshold. When a cluster has a construct no threshold captures, that cluster is searched exhaustively over its frontiers and the report names it; no cap is applied. Each rule is checked against exhaustive enumeration on small workloads (`joint_search_equivalence`), including raw-retention coupling, a cost model 2 peak, a cost model 3 capacity limit and a partial measured table.
+- **Raw data on disk**: a per-source horizon threshold, linear in the MILP.
+- **Cost models 2 and 3**: peaks and limits as linear constraints.
+- **A measured cost table**: the calibration factor is fitted once, before the search, over every candidate node the generation produced (before pruning), and frozen; every coefficient is priced with it.
 
 ### Code layout
 
-`crates/plan-selection/src/pass/memo/`, behind `Stage1ToStage3Search::memo_groups` until it matches the current search on every equivalence test:
-
-```rust
-/// One hash-consed logical sub-expression.
-pub(crate) struct MemoGroup { pub node: Rc<OperatorNode>, pub parents: Vec<GroupId>, pub queries: Vec<usize> }
-/// One implementation of one group (or of several, for a fused computation).
-pub(crate) struct ImplementationCandidate { pub implements: Vec<GroupId>, pub node: Rc<OperatorNode>, pub children: Vec<GroupId>, pub coupling_sites: Vec<CouplingSite> }
-/// A choice several groups' costs depend on, keyed so that equal keys are one site.
-pub(crate) struct CouplingSite { pub key: u64, pub kind: CouplingKind }
-pub(crate) enum CouplingKind { SharedGroupSize, PaneChain, ScanLabels, RawHorizon }
-/// The cached local price of a candidate in a context (thresholds of its sites).
-pub(crate) fn local_price(group: GroupId, candidate: &ImplementationCandidate, context: &Context, cache: &mut PriceCache) -> Result<LocalUsage, SelectionError>;
-/// The frontier of a group given its children's frontiers and a context.
-pub(crate) fn frontier(group: GroupId, context: &Context, memo: &Memo, cache: &mut PriceCache) -> Frontier;
-/// The cluster's selection: thresholds enumerated with bounds, the DP below them.
-pub(crate) fn solve_cluster(cluster: &Cluster, memo: &Memo, cache: &mut PriceCache) -> Result<ClusterSelection, SelectionError>;
-```
+`crates/plan-selection/src/pass/subexpr/`: `groups.rs` (hash-consing, Pass 1), `capability.rs`, `windows.rs`, `scans.rs` (the Pass 2 transformations), `pricing.rs` (per-node prices in a consumer context), `search.rs` (the memo and the brute-force reference), `milp.rs` (the model, the lazy-cut loop). The search is chosen by `--search legacy|memo-brute-force|memo-milp`; the MILP becomes the default once it matches `--exhaustive` on every equivalence test.
 
 ## Future work
 
