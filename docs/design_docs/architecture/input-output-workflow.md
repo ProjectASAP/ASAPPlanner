@@ -116,7 +116,7 @@ struct QueryWorkload {
 
 | Field | Required | Purpose |
 |---|---:|---|
-| `language` | Yes | Source language shared by every entry: PromQL, a SQL dialect, DataFusion, or Elastic DSL. It selects the frontend. |
+| `language` | Yes | Source language shared by every entry: PromQL, a SQL dialect, DataFusion, or Elastic DSL. It selects the frontend. A workload in several languages is several `PlanningWorkload`s, one per language, which `stage_pipeline` plans together (repeated `--workload`). |
 | `query_batch` | Optional | Finite one-time query entries. `None` means there is no batch portion. |
 | `repeating_queries` | Optional | Recurrent query entries. `None` means there is no repeating portion. |
 

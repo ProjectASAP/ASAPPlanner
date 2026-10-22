@@ -329,7 +329,7 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | --- | --- |
 | `--promql <query>`, `--sql <query>` | A query; repeat and mix for several, in workload order |
 | `--name <name>` | Names the query before it (default `q1`, `q2`, …) |
-| `--workload <file>` | A `PlanningWorkload` JSON file instead of queries: its queries, their requirements and recurrence, and its data workload. Each query's accuracy comes from the file, so `--max-error`, `--failure-probability` and `--accuracy-metric` do not apply. |
+| `--workload <file>` | A `PlanningWorkload` JSON file instead of queries: its queries, their requirements and recurrence, and its data workload. Each query's accuracy comes from the file, so `--max-error`, `--failure-probability` and `--accuracy-metric` do not apply. Repeat it to plan several files, each in its own language (for example PromQL and SQL), as one workload: queries are numbered `q1..qN` across the files, sources are combined (a source two files declare must have the same facts), and the files' arrivals must be the same kind; ingesting or mixed rates add up. |
 | `--table '<json>'` | A table the SQL queries read, for example `{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}, {"name": "service", "type": "utf8"}], "time_index": 0}`; repeat for several |
 | `--max-error`, `--failure-probability` | Accuracy (ε, δ) for every query; without them the queries are exact |
 | `--accuracy-metric <metric>` | The error metric of that accuracy: `absolute`, `absolute_stream_l1`, `absolute_stream_l2`, `relative` or `rank`. Without it, a plan is accepted in whatever metric meets ε (and δ). |

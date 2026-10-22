@@ -1848,4 +1848,137 @@ fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
     );
     assert!(counter["stage3_plan_selection"]["selected"].is_string());
     assert!(counter["stage3_plan_selection"].get("warnings").is_none());
+
+/// A PromQL file and a SQL file, each a `PlanningWorkload` in its own
+/// language.
+fn mixed_language_workload_files(sql_arrival: Value, sql_facts: Value) -> (PathBuf, PathBuf) {
+    let entry = |query: &str| {
+        serde_json::json!({
+            "query": query,
+            "demand": {"fixed_interval": 60000},
+            "requirements": {},
+            "predictability": {"predictable": {"known_at": null}},
+        })
+    };
+    let promql = serde_json::json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [entry("sum by (job) (rate(http_requests_total[1m]))")],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+            "sources": {"http_requests_total": {"series_count": 15000, "metric_type": "counter", "sample_interval": 15000}},
+        },
+    });
+    let sql = serde_json::json!({
+        "query_workload": {
+            "language": {"sql": "datafusion_sql"},
+            "query_batch": null,
+            "repeating_queries": [entry(
+                "SELECT service, COUNT(*) FROM flows \
+                 WHERE ts >= NOW() - INTERVAL '1 minute' GROUP BY service"
+            )],
+        },
+        "data_workload": {"arrival": sql_arrival, "sources": {"flows": sql_facts}},
+    });
+    let path = |name: &str| {
+        std::env::temp_dir().join(format!(
+            "stage_pipeline_{}_mixed_{name}.json",
+            std::process::id()
+        ))
+    };
+    let (promql_path, sql_path) = (path("promql"), path("sql"));
+    std::fs::write(&promql_path, promql.to_string()).unwrap();
+    std::fs::write(&sql_path, sql.to_string()).unwrap();
+    (promql_path, sql_path)
+}
+
+const FLOWS_TABLE: &str = r#"{"name": "flows", "columns": [{"name": "ts", "type": "timestamp"}, {"name": "service", "type": "utf8", "nullable": false}], "time_index": 0}"#;
+
+/// One run can plan PromQL and SQL queries together: `--workload` repeats,
+/// each file is lowered by its own language's frontend (SQL over the
+/// `--table` declarations), and their queries are planned as one workload.
+/// The document numbers the queries across files (q1 from the PromQL
+/// file, q2 from the SQL file) and its data workload is the union of the
+/// files' sources, with their arrival rates added (1000 + 500 rows/s).
+#[test]
+fn several_workload_files_in_different_languages_are_planned_together() {
+    let (promql, sql) = mixed_language_workload_files(
+        serde_json::json!({"ingesting": {"rows_per_second": 500.0}}),
+        serde_json::json!({"series_count": 10}),
+    );
+    let document = document_of(&[
+        "--workload",
+        promql.to_str().unwrap(),
+        "--workload",
+        sql.to_str().unwrap(),
+        "--table",
+        FLOWS_TABLE,
+    ]);
+    let queries = document["workload"]["queries"].as_array().unwrap();
+    let ids_and_languages: Vec<(&str, &str)> = queries
+        .iter()
+        .map(|q| (q["id"].as_str().unwrap(), q["language"].as_str().unwrap()))
+        .collect();
+    assert_eq!(ids_and_languages, [("q1", "promql"), ("q2", "sql")]);
+    let data = &document["workload"]["data_workload"];
+    assert_eq!(
+        data["arrival"],
+        serde_json::json!({"ingesting": {"rows_per_second": 1500.0}})
+    );
+    let sources: Vec<&String> = data["sources"].as_object().unwrap().keys().collect();
+    assert_eq!(sources, ["flows", "http_requests_total"]);
+    assert_eq!(
+        document["stage0_query_language_frontends"]["dag"]["roots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        document["stage3_plan_selection"]["selected"].is_string(),
+        "{}",
+        document["stage3_plan_selection"]
+    );
+    std::fs::remove_file(promql).unwrap();
+    std::fs::remove_file(sql).unwrap();
+}
+
+/// Files planned together must agree on how the data arrives and on any
+/// source they both declare: a run is refused rather than picking one.
+#[test]
+fn workload_files_that_disagree_on_the_data_are_refused() {
+    let (promql, sql) = mixed_language_workload_files(
+        serde_json::json!("at_rest"),
+        serde_json::json!({"rows_held": 1000}),
+    );
+    let (_, stderr) = failure(&[
+        "--workload",
+        promql.to_str().unwrap(),
+        "--workload",
+        sql.to_str().unwrap(),
+        "--table",
+        FLOWS_TABLE,
+    ]);
+    assert!(stderr.contains("arrival"), "{stderr}");
+    std::fs::remove_file(&sql).unwrap();
+
+    // The same source declared twice with different facts.
+    let other = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_mixed_promql_other.json",
+        std::process::id()
+    ));
+    let mut text: Value = serde_json::from_str(&std::fs::read_to_string(&promql).unwrap()).unwrap();
+    text["data_workload"]["sources"]["http_requests_total"]["series_count"] = serde_json::json!(7);
+    std::fs::write(&other, text.to_string()).unwrap();
+    let (_, stderr) = failure(&[
+        "--workload",
+        promql.to_str().unwrap(),
+        "--workload",
+        other.to_str().unwrap(),
+    ]);
+    assert!(stderr.contains("http_requests_total"), "{stderr}");
+    std::fs::remove_file(promql).unwrap();
+    std::fs::remove_file(other).unwrap();
 }

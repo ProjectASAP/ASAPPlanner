@@ -10,6 +10,11 @@
 // `"range_evaluation": {"step_ms": 60000, "span_ms": 3600000}`; PromQL, or
 // SQL over `--table` declarations)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
+//     --workload promql.json --workload sql.json --table '<json>' --out run.json
+// (`--workload` repeats: each file keeps its one language and is lowered by
+// its own frontend, and their queries are planned as one workload; see
+// below)
+// cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --max-error 0.01 --failure-probability 0.001 --out run.json
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --table '{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"},
@@ -127,6 +132,15 @@
 // Planning never caps or truncates the candidates it ranks; only the display
 // does (`--max-displayed`).
 //
+// `--workload` may repeat, so one run plans queries in several languages
+// (e.g. a PromQL file and a SQL file) together. Each file is lowered by
+// its own language's frontend (SQL over the `--table` declarations), the
+// queries are numbered `q1..qN` across the files in the order given, and
+// the data workload is the union of the files' sources. A source several
+// files declare must have the same facts in each, and the files must
+// declare the same kind of arrival: ingesting (or mixed) arrivals add
+// their `rows_per_second`, which each file counts over all its sources.
+// A disagreement is refused.
 // With `--workload`, each query's accuracy (ε, δ, metric) comes from the
 // file: `--max-error`, `--failure-probability` and `--accuracy-metric` apply
 // to `--promql`/`--sql` queries only.
@@ -242,7 +256,7 @@ use asap_types::workload::{
 use serde_json::{json, Value};
 
 const USAGE: &str =
-    "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
+    "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | (--workload <file>)... [--table <json>...] | ((--promql | --sql) <query> \
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
@@ -331,7 +345,8 @@ fn document_of(
 
 fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut example = None;
-    let mut workload_path: Option<String> = None;
+    // `--workload` files, planned together in this order.
+    let mut workload_paths: Vec<String> = Vec::new();
     // (language, text, name) in workload order.
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
@@ -361,7 +376,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         let number = |v: String| v.parse::<f64>().map_err(|e| format!("{v}: {e}"));
         match flag.as_str() {
             "--example" => example = Some(value()?),
-            "--workload" => workload_path = Some(value()?),
+            "--workload" => workload_paths.push(value()?),
             "--promql" => queries.push((QueryLanguage::PromQL, value()?, None)),
             "--sql" => queries.push((
                 QueryLanguage::SQL(SqlDialect::DataFusionSQL),
@@ -429,12 +444,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let has_sql = queries
         .iter()
         .any(|(language, _, _)| *language != QueryLanguage::PromQL);
-    if !tables.is_empty() && !has_sql && workload_path.is_none() {
+    if !tables.is_empty() && !has_sql && workload_paths.is_empty() {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
     if (series_count.is_some() || rows_per_second.is_some() || rows_held.is_some())
-        && (workload_path.is_some() || example.is_some())
+        && (!workload_paths.is_empty() || example.is_some())
     {
         return Err(
             "--series-count, --rows-per-second and --rows-held declare facts for --promql/--sql \
@@ -526,30 +541,34 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         },
     };
     plan_selection.ignore_accuracy_guarantees = !enforce_accuracy_guarantees;
-    let from_file = match &workload_path {
-        Some(path) if example.is_none() && queries.is_empty() => {
-            let text =
-                std::fs::read_to_string(path).map_err(|e| format!("--workload {path}: {e}"))?;
-            let workload: PlanningWorkload =
-                serde_json::from_str(&text).map_err(|e| format!("--workload {path}: {e}"))?;
-            workload
-                .validate()
-                .map_err(|e| format!("--workload {path}: {e}"))?;
-            Some((workload, sql_catalog(&tables)?))
+    let from_files = match workload_paths.is_empty() {
+        false if example.is_none() && queries.is_empty() => {
+            let mut workloads = Vec::new();
+            for path in &workload_paths {
+                let text =
+                    std::fs::read_to_string(path).map_err(|e| format!("--workload {path}: {e}"))?;
+                let workload: PlanningWorkload =
+                    serde_json::from_str(&text).map_err(|e| format!("--workload {path}: {e}"))?;
+                workload
+                    .validate()
+                    .map_err(|e| format!("--workload {path}: {e}"))?;
+                workloads.push((path.as_str(), workload));
+            }
+            Some((workloads, sql_catalog(&tables)?))
         }
-        Some(_) => {
+        false => {
             return Err(
                 "give exactly one of --example, --workload or --promql/--sql queries".into(),
             )
         }
-        None => None,
+        true => None,
     };
     // The workload's queries as the document describes them, the
     // frontends' roots, the workload entries and the data workload.
     let (described, roots, entries, data) = match (example.as_deref(), queries.is_empty()) {
-        (None, true) if from_file.is_some() => {
-            let (workload, catalog) = from_file.expect("checked");
-            lowered(&workload, &catalog)?
+        (None, true) if from_files.is_some() => {
+            let (workloads, catalog) = from_files.expect("checked");
+            lowered_together(&workloads, &catalog)?
         }
         (Some(example), true) => {
             let (workload, catalog) = match example {
@@ -756,6 +775,72 @@ fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered,
     let entries = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     Ok((workload_queries(workload), roots, entries, data))
+}
+
+/// `workloads` (each `--workload` file's path and workload, in order),
+/// each lowered by its own language's frontend, as one workload: their
+/// queries in order, numbered `q1..qN` across the files, and one data
+/// workload with every file's sources. A source several files declare must
+/// have the same facts in each, and their arrivals must agree
+/// ([`arrival_together`]).
+fn lowered_together(
+    workloads: &[(&str, PlanningWorkload)],
+    catalog: &SqlCatalog,
+) -> Result<Lowered, String> {
+    let (mut described, mut roots, mut entries) = (Vec::new(), Vec::new(), Vec::new());
+    let mut data: Option<DataWorkload> = None;
+    for (path, workload) in workloads {
+        let (queries, more_roots, more_entries, more_data) =
+            lowered(workload, catalog).map_err(|e| format!("--workload {path}: {e}"))?;
+        described.extend(queries);
+        roots.extend(more_roots);
+        entries.extend(more_entries);
+        let Some(data) = data.as_mut() else {
+            data = Some(more_data);
+            continue;
+        };
+        data.arrival = arrival_together(data.arrival, more_data.arrival)
+            .ok_or_else(|| format!("--workload {path}: its data arrival {:?} disagrees with the earlier files' {:?}; files planned together must declare the same kind of arrival", more_data.arrival, data.arrival))?;
+        for (source, facts) in more_data.sources {
+            match data.sources.get(&source) {
+                Some(earlier) if *earlier != facts => {
+                    return Err(format!(
+                        "--workload {path}: source {source} is declared with other facts in an earlier file"
+                    ))
+                }
+                Some(_) => {}
+                None => {
+                    data.sources.insert(source, facts);
+                }
+            }
+        }
+    }
+    for (index, query) in described.iter_mut().enumerate() {
+        query["id"] = json!(format!("q{}", index + 1));
+    }
+    Ok((described, roots, entries, data.unwrap_or_default()))
+}
+
+/// The arrival of two files' data planned together: ingesting (or mixed)
+/// at the sum of their rates, which each counts over all its sources; the
+/// same arrival when both are at rest or unknown; `None` when they differ.
+fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArrival> {
+    match (earlier, later) {
+        (
+            DataArrival::Ingesting { rows_per_second: a },
+            DataArrival::Ingesting { rows_per_second: b },
+        ) => Some(DataArrival::Ingesting {
+            rows_per_second: a + b,
+        }),
+        (DataArrival::Mixed { rows_per_second: a }, DataArrival::Mixed { rows_per_second: b }) => {
+            Some(DataArrival::Mixed {
+                rows_per_second: a + b,
+            })
+        }
+        (DataArrival::AtRest, DataArrival::AtRest) => Some(DataArrival::AtRest),
+        (DataArrival::Unknown, DataArrival::Unknown) => Some(DataArrival::Unknown),
+        _ => None,
+    }
 }
 
 /// The document for `run`, whose workload queries are `queries`.
