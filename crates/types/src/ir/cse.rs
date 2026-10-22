@@ -42,9 +42,10 @@
 //! drops its keys, … is always inserted fresh even when it is structurally
 //! identical to something already interned. A `Scan` is the exception: equal
 //! scans read the same source rows, so every reader of one shared scan reads
-//! the rows it would have read alone, a SQL table's keyless rows included. An ASAP node (summary state and
-//! its evaluations) has no such gate: equal operator, schema and guarantee make
-//! it shareable, exactly as post-ASAP sharing decided before this IR.
+//! the rows it would have read alone, a SQL table's keyless rows included.
+//! An ASAP node (summary state and its evaluations) has no such gate: equal
+//! operator, schema and guarantee make it shareable, exactly as post-ASAP
+//! sharing decided before this IR.
 //!
 //! ## Single-query CSE falls out for free
 //!

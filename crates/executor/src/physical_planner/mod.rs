@@ -635,7 +635,7 @@ fn compile_internal(
             {
                 if keys.is_empty() && built_from_relation(&restored[&id]) {
                     let operator = compile_node(node, &schemas)
-                        .and_then(Operator::with_empty_global_state)
+                        .and_then(Operator::with_emit_empty_global)
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
                     physical_dag.add(id, inputs, operator)?;
                     continue;

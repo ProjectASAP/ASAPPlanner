@@ -187,7 +187,7 @@ enum Kind {
         /// global SQL aggregate has one row over no input rows. Only a merge
         /// with no groups; `false` (no output row) by default.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        empty_global_state: bool,
+        emit_empty_global: bool,
     },
     Evaluation {
         state: usize,

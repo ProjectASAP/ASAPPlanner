@@ -457,3 +457,30 @@ async fn q2_pane_chain_serves_q1_through_newest_panes_and_a_rollup() {
         }
     }
 }
+
+/// A global SQL `COUNT(*)` is 0 over no rows, but a rollup of the per-city
+/// counts would sum no count into NULL. A rollup to no keys over a table is
+/// offered, yet no candidate answers the global count from the per-city
+/// counts: an exact rollup never sums Int64 counts again.
+#[tokio::test]
+async fn a_global_count_is_not_rolled_up_from_grouped_counts() {
+    let global = "SELECT COUNT(*) FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE";
+    let by_city = "SELECT city, COUNT(*) FROM metrics \
+                   WHERE ts > now() - INTERVAL '5' MINUTE GROUP BY city";
+    let finalized = |root: &QueryRoot| -> Vec<*const OperatorNode> {
+        OperatorNode::reachable(operator(root))
+            .iter()
+            .filter(|n| matches!(n.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. })))
+            .map(Rc::as_ptr)
+            .collect()
+    };
+    for (id, roots) in stage1(&[global, by_city]).await {
+        let by_city_values = finalized(&roots[1]);
+        assert!(
+            !finalized(&roots[0])
+                .iter()
+                .any(|value| by_city_values.contains(value)),
+            "{id}: the global count reads the per-city counts"
+        );
+    }
+}

@@ -1249,6 +1249,7 @@ pub fn window_composition_pass2_candidates(
             max: MAX_PANE_CANDIDATES,
         });
     }
+    let rollable = rollable_pane_candidates(roots, candidates);
     let mut pass2_candidates = Vec::new();
     for mask in 1u64..(1u64 << candidates.len()) {
         let chosen: Vec<PaneCandidate> = (0..candidates.len())
@@ -1269,10 +1270,14 @@ pub fn window_composition_pass2_candidates(
             push_shared_chains(roots, &chosen, &on_gcd_panes, &mut pass2_candidates);
         }
         // Coarser groupings read a finer grouping's chain, rolled up.
+        let chosen_rollable: Vec<bool> = (0..candidates.len())
+            .filter(|&i| mask >> i & 1 == 1)
+            .map(|i| rollable[i])
+            .collect();
         push_shared_chains(
             roots,
             &chosen,
-            &rollup_window_groups(roots, &chosen),
+            &rollup_window_groups(&chosen, &chosen_rollable),
             &mut pass2_candidates,
         );
     }
@@ -1406,20 +1411,12 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
     shared
 }
 
-/// The pane candidates (positions in `candidates`) that can read one
-/// chain of a finer grouping's panes, each group with its chain: a host,
-/// and every candidate whose group keys are the host's or fewer
-/// ([`rolls_up_into`]), whose window is at most the host's and whose pane
-/// width the host's divides. Each member merges the newest panes of its
-/// window, and a coarser member then rolls the host's groups up into its
-/// own (a regrouping `SummaryMerge`): `p90 per city over 20 minutes` in
-/// 10 s panes serves `p90 over 5 minutes` as the newest 30 panes merged
-/// across cities. A coarser member's every reader in `roots` is an
-/// estimate whose merged readout keeps a guarantee, as for the rollup rule.
-/// Hosts are tried by most group keys, then longest window, and each
-/// candidate joins one group. Only groups with a coarser member are
-/// listed; the others are [`nested_window_groups`]'s.
-fn rollup_window_groups(roots: &[QueryRoot], candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
+/// Whether each of `candidates` may be read rolled up from a finer
+/// grouping's chain: a sketch build over a SQL relation's rows (a PromQL
+/// rollup over newest panes is not offered yet) whose every reader in
+/// `roots` is an estimate whose merged readout keeps a guarantee, as for
+/// the rollup rule.
+fn rollable_pane_candidates(roots: &[QueryRoot], candidates: &[PaneCandidate]) -> Vec<bool> {
     let mut nodes = Vec::new();
     let mut seen = HashSet::new();
     for node in roots.iter().flat_map(root_operators) {
@@ -1431,12 +1428,38 @@ fn rollup_window_groups(roots: &[QueryRoot], candidates: &[PaneCandidate]) -> Ve
             readers.entry(Rc::as_ptr(child)).or_default().push(node);
         }
     }
-    let rolls_up_with_guarantee = |member: &PaneCandidate| match member.build.asap() {
-        Some(ASAPOp::SummaryAgg { family, .. }) => readers
-            .get(&Rc::as_ptr(&member.build))
-            .is_some_and(|readers| read_with_merged_guarantee(family, readers)),
-        _ => false,
-    };
+    candidates
+        .iter()
+        .map(|candidate| match candidate.build.asap() {
+            Some(ASAPOp::SummaryAgg {
+                child: range,
+                family: family @ FieldDataType::Sketch(..),
+                ..
+            }) => {
+                range.children()[0].result_kind == OperatorResultKind::Relation
+                    && readers
+                        .get(&Rc::as_ptr(&candidate.build))
+                        .is_some_and(|readers| read_with_merged_guarantee(family, readers))
+            }
+            _ => false,
+        })
+        .collect()
+}
+
+/// The pane candidates (positions in `candidates`) that can read one
+/// chain of a finer grouping's panes, each group with its chain: a host,
+/// and every candidate whose group keys are the host's or fewer
+/// ([`rolls_up_into`]), whose window is at most the host's and whose pane
+/// width the host's divides. Each member merges the newest panes of its
+/// window, and a coarser member then rolls the host's groups up into its
+/// own (a regrouping `SummaryMerge`): `p90 per city over 20 minutes` in
+/// 10 s panes serves `p90 over 5 minutes` as the newest 30 panes merged
+/// across cities. A coarser member is one `rollable[i]` allows
+/// ([`rollable_pane_candidates`]). Hosts are tried by most group keys,
+/// then longest window, and each candidate joins one group. Only groups
+/// with a coarser member are listed; the others are
+/// [`nested_window_groups`]'s.
+fn rollup_window_groups(candidates: &[PaneCandidate], rollable: &[bool]) -> Vec<SharedPaneChain> {
     let mut hosts: Vec<usize> = (0..candidates.len()).collect();
     hosts.sort_by_key(|&i| {
         (
@@ -1461,7 +1484,7 @@ fn rollup_window_groups(roots: &[QueryRoot], candidates: &[PaneCandidate]) -> Ve
                     && member.window_ms() <= chain.window_ms()
                     && member.pane_width_ms.is_multiple_of(chain.pane_width_ms)
                     && rolls_up_into(member, chain)
-                    && (!coarser(i) || rolls_up_with_guarantee(member)))
+                    && (!coarser(i) || rollable[i]))
         };
         let members: Vec<usize> = (0..candidates.len()).filter(|&i| reads_host(i)).collect();
         if !members.iter().any(|&i| coarser(i)) {
@@ -2073,13 +2096,7 @@ fn finer_keys(coarse: &OperatorNode, fine: &OperatorNode) -> Option<usize> {
         && same_filter
         && fine_keys.len() > coarse_keys.len()
         && coarse_keys.iter().all(|key| fine_keys.contains(key))
-        && same_rows(child, fine_child)
-        // A global SQL count over no rows is 0, but an exact rollup sums no
-        // finer value into NULL. A sketch rollup to no keys has one empty
-        // state over no rows, as the global build has.
-        && !(coarse_keys.is_empty()
-            && child.result_kind == OperatorResultKind::Relation
-            && matches!(family, FieldDataType::ExactAggregate(..))))
+        && same_rows(child, fine_child))
     .then_some(fine_keys.len())
 }
 

@@ -193,11 +193,11 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::SummaryMerge {
                 state,
                 groups,
-                empty_global_state,
+                emit_empty_global,
             } => {
                 let merge = Operator::summary_merge(input(0)?, state, groups)?;
-                if empty_global_state {
-                    merge.with_empty_global_state()?
+                if emit_empty_global {
+                    merge.with_emit_empty_global()?
                 } else {
                     merge
                 }
