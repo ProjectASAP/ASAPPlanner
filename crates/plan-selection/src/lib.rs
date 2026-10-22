@@ -2468,7 +2468,8 @@ fn guarantee_check(
                     "q{query}: the output's guarantee holds for each value, and the number \
                      of values one evaluation returns is not bound (no declared series \
                      count for a source a PromQL vector reads, and no declared \
-                     `distinct_values_per_label` for every group key, or a key that is not \
+                     `distinct_values_per_label` for every group key nor a \
+                     `distinct_values_per_label_set` covering them, or a key that is not \
                      an unchanged source column), so it does not meet \
                      whole-result target {target:?}, and \
                      the deployment has no evidence that it meets it (a target on the groups \
@@ -2906,16 +2907,138 @@ fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<f
     Some(own + workload_rows_per_ms.map_or(shared, |all| shared.min(all)))
 }
 
+/// The names of `node`'s output columns that still hold one source row's
+/// label (or column) values unchanged, given each producer's: every column
+/// of a scan; through operators that keep their input's rows and columns
+/// (filter, sort, limit, dedup, time range and shift), a projection or
+/// grouping key that passes a column on under its own name, a per-series
+/// reduction's other columns, a union's columns unchanged in every branch,
+/// and a summary's grouping columns. Any other operator (a join or binary
+/// operator pairing rows, a relabeling, a computed column) gives none, so a
+/// declared label set never bounds values it does not describe.
+fn unchanged_source_columns<'a>(
+    node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
+    producers: &[PhysicalASAPNodeId],
+    nodes: &NodeMap<'a>,
+    unchanged_columns_of: &HashMap<PhysicalASAPNodeId, BTreeSet<&'a str>>,
+) -> BTreeSet<&'a str> {
+    let output_names = || node.output_schema.fields.iter().map(|f| f.name.as_str());
+    let first = || {
+        producers.first().map(|producer| {
+            (
+                &unchanged_columns_of[producer],
+                &nodes[producer].output_schema,
+            )
+        })
+    };
+    // The output columns passing input column `input[i]` on as itself.
+    let passed_on = |inputs: &mut dyn Iterator<Item = Option<usize>>| -> BTreeSet<&'a str> {
+        let Some((unchanged, schema)) = first() else {
+            return BTreeSet::new();
+        };
+        output_names()
+            .zip(inputs)
+            .filter(|(name, input)| {
+                input
+                    .and_then(|input| schema.fields.get(input))
+                    .is_some_and(|field| field.name == *name && unchanged.contains(*name))
+            })
+            .map(|(name, _)| name)
+            .collect()
+    };
+    let kept = || -> BTreeSet<&'a str> {
+        first().map_or_else(BTreeSet::new, |(unchanged, _)| {
+            output_names()
+                .filter(|name| unchanged.contains(name))
+                .collect()
+        })
+    };
+    match &node.payload {
+        Payload::NonASAP(operator) => match operator {
+            NonASAPOp::Scan { .. } => output_names().collect(),
+            NonASAPOp::Filter { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. } => kept(),
+            NonASAPOp::Project { cols, .. } => {
+                passed_on(&mut cols.iter().map(|col| match col.expr {
+                    ScalarExpr::Column(input) => Some(input),
+                    _ => None,
+                }))
+            }
+            // A `count_values` label named like a key replaces it.
+            NonASAPOp::Aggregate {
+                reduction: Reduction::Reduce(keys),
+                measures,
+                ..
+            } if !keys.is_without()
+                && !measures
+                    .iter()
+                    .any(|m| matches!(m, AggIntent::CountValues { .. })) =>
+            {
+                passed_on(&mut keys.keys().iter().map(|&key| Some(key)))
+            }
+            // A per-series reduction keeps every column but the ones it
+            // reduces and the ones it names.
+            NonASAPOp::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures,
+                output_names: measure_names,
+                ..
+            } => {
+                let Some((_, schema)) = first() else {
+                    return BTreeSet::new();
+                };
+                let mut columns = kept();
+                for measure in measures {
+                    for input in measure.input_cols() {
+                        if let Some(field) = schema.fields.get(input) {
+                            columns.remove(field.name.as_str());
+                        }
+                    }
+                }
+                for name in measure_names {
+                    columns.remove(name.as_str());
+                }
+                columns
+            }
+            NonASAPOp::SetOp {
+                kind: RelationalSetOpKind::Union,
+                ..
+            }
+            | NonASAPOp::Concat { .. } => {
+                let mut columns = kept();
+                for producer in producers {
+                    columns.retain(|name| unchanged_columns_of[producer].contains(name));
+                }
+                columns
+            }
+            _ => BTreeSet::new(),
+        },
+        Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::PaneChain { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. },
+        ) => kept(),
+        _ => BTreeSet::new(),
+    }
+}
+
 /// The groups (or partitions) a `by (keys)` over rows of schema `input`
 /// from `sources` is priced at, from declared or derivable facts only: the
 /// smallest of
-/// - over one source with no join or binary operator below
-///   (`joined_below` false), the smallest product of the counts it declares
-///   in `distinct_values_per_label` and `distinct_values_per_label_set`
-///   that covers the keys
+/// - when the keys read one source and are all in
+///   `unchanged_input_columns` (one source row's labels, unchanged), the
+///   smallest product of the counts it declares in
+///   `distinct_values_per_label` and `distinct_values_per_label_set` that
+///   covers the keys
 ///   ([`SourceFacts::declared_distinct_combinations`](asap_types::workload::SourceFacts::declared_distinct_combinations));
-///   over several sources, or rows a join pairs (whose key values can come
-///   from different rows), the product of each key's
+///   otherwise (several sources, a join pairing labels of different rows,
+///   or a relabeled key) the product of each key's
 ///   `distinct_values_per_label` count summed over the sources (a union
 ///   holds at most the sum, while a join matching on the key is
 ///   over-counted), when every key has one;
@@ -2928,7 +3051,7 @@ fn group_count_bound(
     keys: &GroupKeys,
     input: Option<&Schema>,
     sources: &BTreeSet<&str>,
-    joined_below: bool,
+    unchanged_input_columns: &BTreeSet<&str>,
     data: &DataWorkload,
     rows_read: u64,
 ) -> u64 {
@@ -2949,19 +3072,26 @@ fn group_count_bound(
         })
     };
     let declared = || -> Option<u64> {
-        match sources.iter().collect::<Vec<_>>().as_slice() {
-            _ if keys.is_without() => None,
-            [] => None,
-            // Rows of one source, no join below: each group's key values
-            // are one row's, which the source's declared label sets bound.
-            [source] if !joined_below => data
-                .sources
-                .get(**source)?
-                .declared_distinct_combinations(&labels()?),
-            _ => labels()?.into_iter().try_fold(1u64, |product, label| {
-                Some(product.saturating_mul(label_count(label)?))
-            }),
+        if keys.is_without() || sources.is_empty() {
+            return None;
         }
+        let labels = labels()?;
+        // Keys that are one source row's unchanged labels: the source's
+        // declared label sets bound their combinations.
+        if let [source] = sources.iter().collect::<Vec<_>>().as_slice() {
+            if labels
+                .iter()
+                .all(|label| unchanged_input_columns.contains(label))
+            {
+                return data
+                    .sources
+                    .get(**source)?
+                    .declared_distinct_combinations(&labels);
+            }
+        }
+        labels.into_iter().try_fold(1u64, |product, label| {
+            Some(product.saturating_mul(label_count(label)?))
+        })
     };
     // Over several sources a group combines one series (or group of rows)
     // of each at most, as a join does; a union's groups are fewer.
@@ -3271,9 +3401,9 @@ fn price_at_scale(
     };
     // The sources each node reads, filled children first.
     let mut sources_read_by: HashMap<PhysicalASAPNodeId, BTreeSet<&str>> = HashMap::new();
-    // Whether a join or a binary operator over two inputs lies at or below
-    // each node: its rows can pair values of different input rows.
-    let mut joined_below: HashMap<PhysicalASAPNodeId, bool> = HashMap::new();
+    // Each node's output columns that still hold one source row's label (or
+    // column) values unchanged, by name ([`unchanged_source_columns`]).
+    let mut unchanged_columns_of: HashMap<PhysicalASAPNodeId, BTreeSet<&str>> = HashMap::new();
     let multipliers = computations(
         dag,
         recurrence,
@@ -3343,11 +3473,8 @@ fn price_at_scale(
             )
         };
         sources_read_by.insert(node.id, sources);
-        let joined = matches!(
-            node.payload,
-            Payload::NonASAP(NonASAPOp::Join { .. } | NonASAPOp::BinaryOp { .. })
-        ) || producers.iter().any(|producer| joined_below[producer]);
-        joined_below.insert(node.id, joined);
+        let unchanged = unchanged_source_columns(node, producers, nodes, &unchanged_columns_of);
+        unchanged_columns_of.insert(node.id, unchanged);
         let family = match &node.payload {
             Payload::ASAP(
                 ASAPOp::SummaryAgg {
@@ -3451,7 +3578,9 @@ fn price_at_scale(
                 keys,
                 input_schema,
                 &sources_read_by[&node.id],
-                joined_below[&node.id],
+                producers
+                    .first()
+                    .map_or(&BTreeSet::new(), |producer| &unchanged_columns_of[producer]),
                 data,
                 rows_read,
             ))
@@ -6516,6 +6645,19 @@ mod tests {
                 "topk by (service, endpoint) (3, sum_over_time(x[15m]))".to_string(),
                 true,
                 " in 625 partitions;",
+            ),
+            // A relabeled key no longer holds the declared set's values:
+            // `endpoint` now joins `region` and `endpoint` (up to 4 x 625).
+            (
+                r#"sum by (service, endpoint) (label_join(sum_over_time(x[15m]), "endpoint", "-", "region", "endpoint"))"#.to_string(),
+                true,
+                "into 10000 states",
+            ),
+            // A binary operator pairs the labels of two rows: per-label only.
+            (
+                "sum by (service, endpoint) (sum_over_time(x[15m]) / on (service) group_left (endpoint) sum_over_time(x[15m]))".to_string(),
+                true,
+                "into 10000 states",
             ),
         ] {
             let details = details(&query, declared_set);

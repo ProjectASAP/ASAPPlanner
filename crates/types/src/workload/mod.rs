@@ -613,8 +613,8 @@ pub struct LabelSetDistinctValues {
     pub distinct_values: u64,
 }
 
-/// Groupings with more keys than this are priced from the per-label counts
-/// only: covering them with declared sets searches every subset of the keys.
+/// The most keys declared label sets are searched over: covering them
+/// searches every subset of the keys some declared set names.
 const MAX_KEYS_COVERED_BY_LABEL_SETS: usize = 16;
 
 impl SourceFacts {
@@ -625,27 +625,35 @@ impl SourceFacts {
     /// (`distinct_values_per_label`), whose labels together cover
     /// `labels`. A set covering labels beyond `labels` still bounds them.
     /// `Some(1)` for no labels; `None` when some label is in no declared
-    /// count. With more than 16 distinct labels only the per-label product
-    /// is used.
+    /// count. Only labels some declared set names are searched over (every
+    /// other label contributes its own count); with more than 16 of them,
+    /// only the per-label product is used.
     pub fn declared_distinct_combinations(&self, labels: &[&str]) -> Option<u64> {
         let mut keys = labels.to_vec();
         keys.sort_unstable();
         keys.dedup();
-        // Each declared count as (the keys it covers as a bit mask, count).
-        let mut counts: Vec<(usize, u64)> = keys
+        let label_product = |keys: &[&str]| {
+            keys.iter().try_fold(1u64, |product, key| {
+                Some(product.saturating_mul(*self.distinct_values_per_label.get(*key)?))
+            })
+        };
+        let (in_sets, alone): (Vec<&str>, Vec<&str>) = keys.iter().partition(|key| {
+            self.distinct_values_per_label_set
+                .iter()
+                .any(|set| set.labels.iter().any(|label| label == *key))
+        });
+        if in_sets.is_empty() || in_sets.len() > MAX_KEYS_COVERED_BY_LABEL_SETS {
+            return label_product(&keys);
+        }
+        // Each declared count over `in_sets` as (the keys it covers as a bit
+        // mask, count).
+        let mut counts: Vec<(usize, u64)> = in_sets
             .iter()
             .enumerate()
             .filter_map(|(bit, key)| Some((1 << bit, *self.distinct_values_per_label.get(*key)?)))
             .collect();
-        if keys.len() > MAX_KEYS_COVERED_BY_LABEL_SETS {
-            return (counts.len() == keys.len()).then(|| {
-                counts
-                    .iter()
-                    .fold(1u64, |product, (_, count)| product.saturating_mul(*count))
-            });
-        }
         counts.extend(self.distinct_values_per_label_set.iter().filter_map(|set| {
-            let covered = keys
+            let covered = in_sets
                 .iter()
                 .enumerate()
                 .filter(|(_, key)| set.labels.iter().any(|label| label == *key))
@@ -653,7 +661,7 @@ impl SourceFacts {
             (covered != 0).then_some((covered, set.distinct_values))
         }));
         // smallest[m]: the smallest product of counts covering the keys in m.
-        let every_key = (1usize << keys.len()) - 1;
+        let every_key = (1usize << in_sets.len()) - 1;
         let mut smallest: Vec<Option<u64>> = vec![None; every_key + 1];
         smallest[0] = Some(1);
         for keys_left in 1..=every_key {
@@ -665,7 +673,7 @@ impl SourceFacts {
                 })
                 .min();
         }
-        smallest[every_key]
+        Some(smallest[every_key]?.saturating_mul(label_product(&alone)?))
     }
 }
 
@@ -985,8 +993,8 @@ pub enum WorkloadError {
     /// two labels, or one label twice (one label's count belongs in
     /// `distinct_values_per_label`).
     #[error(
-        "source {source_name}: a distinct_values_per_label_set entry names two or more distinct \
-         labels, got {labels:?}"
+        "source {source_name}: a distinct_values_per_label_set entry must name two or more \
+         distinct labels, got {labels:?}"
     )]
     LabelSetNeedsTwoLabels {
         source_name: String,
@@ -1231,6 +1239,15 @@ mod tests {
             sessions.declared_distinct_combinations(&["session"]),
             Some(7)
         );
+        // 70 keys, two in a declared set: only those two are searched over.
+        let mut wide = hierarchical_facts(&[(&["service", "endpoint"], 625)]);
+        let names: Vec<String> = (0..68).map(|i| format!("l{i}")).collect();
+        for name in &names {
+            wide.distinct_values_per_label.insert(name.clone(), 1);
+        }
+        let mut labels: Vec<&str> = names.iter().map(String::as_str).collect();
+        labels.extend(["service", "endpoint"]);
+        assert_eq!(wide.declared_distinct_combinations(&labels), Some(625));
     }
 
     /// A declared set count is an input error, naming the source, when it
