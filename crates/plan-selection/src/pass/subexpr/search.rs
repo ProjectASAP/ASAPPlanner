@@ -31,6 +31,7 @@ pub(crate) fn memo<Id: Clone>(
     super::windows::add_pass2_candidates(&mut memo, entries);
     super::scans::add_scan_widening(&mut memo);
     super::scans::add_raw_horizons(&mut memo);
+    super::scans::scan_materializations(&mut memo);
     memo
 }
 
