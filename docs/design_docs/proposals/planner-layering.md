@@ -743,11 +743,15 @@ The planner implements a subset of the window-composition rule today:
 through a `SummaryMerge`, with `L = gcd(W_q, E_q)` for each query. Two or
 more queries share one chain when their builds have the same family (at any
 size), the same summary input data and the same output column names, and
-their windows end at the same time. The shared chain's pane width is the
-finest of their own pane widths, offered only when it divides every other
-one (the gcd of their widths, never finer than a chain some query builds
-anyway), so queries that repeat at different intervals read the same panes,
-each at its own cadence. The chain covers the longest window and is sized
+their windows end at the same time. Two shared grids are offered: the
+finest of their own pane widths, for the queries whose widths it divides
+(never finer than a chain some query builds anyway), and the gcd of all
+their widths, even when it is finer than every query's own panes (1-min and
+90-s panes share 30-s panes). Queries that repeat at different intervals
+read the same panes, each at its own cadence. Finer panes mean more states
+kept and more panes merged, so Stage 3's pricing decides which grid, if
+any, pays; no pane-count limit is imposed beyond the pane count fitting in
+32 bits. The chain covers the longest window and is sized
 for all of them, each parameter at its largest value among them, as the
 summary-capability rule sizes a shared build. Each query merges only the
 newest panes covering its own window (`SummaryMerge.newest_panes`), since a
@@ -763,9 +767,8 @@ fails with at most the shared state's failure probability. Stage 3 prices
 each merge by the panes it reads, at its query's rate. The per-query chains
 stay candidates too. A chain read at different intervals is not kept across
 evaluations from query time: that option needs every reader to build one
-new pane per evaluation. A grid finer than every query's own panes, long-window
-segments, sliding windows and Exponential Histograms are not implemented
-yet.
+new pane per evaluation. Long-window segments, sliding windows and Exponential Histograms are
+not implemented yet.
 
 ### 2. Physical ASAP-aware optimization
 
