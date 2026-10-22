@@ -470,6 +470,30 @@ Cost models 2 and 3 keep (1)–(8) and the cuts, and change the objective:
 
 A branch and bound with dynamic programming would need custom bounds for both, plus Pareto frontiers for cost models 2 and 3. In a MILP each of these is a standard exact linearization or a linear constraint, and the solver supplies the bounds, the search and an optimality certificate.
 
+**Why dynamic programming alone does not apply.** Dynamic programming over the memo needs optimal substructure: a group's best implementation depends only on what lies below it, and the plan's cost is the sum of its parts. This workload breaks that in three ways:
+
+1. **The memo is a DAG, not a tree.**
+   - A shared group (a scan, a time range, a shared sketch) has several parents.
+   - Its size is set by its strictest reader, and which parents read it depends on their own choices.
+   - Its cost is paid once and split among the readers.
+   - So its best choice depends on the choices above it, not only on its subtree. This is the core difficulty of multi-query optimization, which is NP-hard.
+2. **Costs depend on the context above.**
+   - How often a node runs depends on its ancestors' materialization: below a node built once per evaluation or maintained at ingestion time, the node is not recomputed per reader.
+   - Cost therefore flows top-down, while dynamic programming works bottom-up.
+   - Cascades handles this by memoizing per (group, required properties). Here the context is the reader set, the thresholds and the materializations above, and their combinations bring the blow-up back.
+3. **The objective is not additive.**
+   - Held memory costs bytes × the query's latency, and the latency is the sum of the work along the query's whole path. This is a product of sums, not a sum.
+   - A subtree that is cheapest on its own is not always part of the optimum: a slightly costlier but faster subtree lowers the query's latency and so its held-memory cost elsewhere.
+   - Each subproblem would have to keep a Pareto front over (cost, latency) rather than one minimum, and the fronts can grow large.
+   - Raw retention (the longest horizon among readers) and pane retention (the longest span) are maxima, which are not additive either.
+
+A MILP needs none of these properties. It solves all choices jointly:
+- sharing and context are linear constraints (reach `r`, products `y`, thresholds `u`);
+- maxima are lower-bound variables (`R`, `keep`);
+- the product term is added back by lazy cuts.
+
+Dynamic programming remains useful only for the parts that do decompose, for example independent blocks with no shared group.
+
 This is the multi-query optimization problem. The memo is its AND-OR DAG: a group is an equivalence node and a candidate is an operation node. Greedy multi-query optimizers (for example Roy et al., SIGMOD 2000) give up optimality for speed. Exact formulations are integer programs. Our shared sizes depend on the strictest reader, accuracy guarantees compose, and time enters through panes and retention, so we need the exact form.
 
 **How each non-additive term is encoded.**
