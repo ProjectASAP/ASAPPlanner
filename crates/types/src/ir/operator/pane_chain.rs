@@ -6,7 +6,11 @@
 //! `child` shifted back by `i·w`. A `SummaryMerge` over the chain is the
 //! state of one build over `TimeRange(n·w)` ([`whole_window_build`]) when
 //! the family merges (the family-capability table), and the executor runs
-//! the chain as its panes ([`expand_pane_chains`]).
+//! the chain as its panes ([`expand_pane_chains`]). A merge of only the
+//! newest `m < n` panes (`SummaryMerge::newest_panes`) is the state of one
+//! build over `TimeRange(m·w)` ([`merged_window_build`]): one chain kept for
+//! the longest window serves every query whose window, on the same panes,
+//! ends at the same time and is shorter.
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -24,11 +28,12 @@ fn invalid(message: &str) -> SchemaDerivationError {
 }
 
 /// The `PaneChain` a summary-state node carries merged: the chain itself,
-/// or the one chain a `SummaryMerge` reads. `None` for any other node.
+/// or the one chain a `SummaryMerge` reads, in full or its newest panes
+/// ([`merged_pane_count`]). `None` for any other node.
 pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     match state.asap()? {
         ASAPOp::PaneChain { .. } => Some(state),
-        ASAPOp::SummaryMerge { children } => match children.as_slice() {
+        ASAPOp::SummaryMerge { children, .. } => match children.as_slice() {
             [child] if matches!(child.asap(), Some(ASAPOp::PaneChain { .. })) => Some(child),
             _ => None,
         },
@@ -36,20 +41,57 @@ pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     }
 }
 
+/// How many of its chain's panes, newest first, a summary-state node with
+/// a [`merged_chain`] merges: the merge's `newest_panes`, otherwise the
+/// chain's `pane_count`. `None` for any other node.
+fn merged_pane_count(state: &OperatorNode) -> Option<u32> {
+    let Some(ASAPOp::PaneChain { pane_count, .. }) = merged_chain(state)?.asap() else {
+        return None;
+    };
+    match state.asap()? {
+        ASAPOp::SummaryMerge {
+            newest_panes: Some(newest),
+            ..
+        } => Some(*newest),
+        _ => Some(*pane_count),
+    }
+}
+
 /// The `SummaryAgg` over `TimeRange(pane_count · pane_width_ms)` over the
 /// chain's input whose state the merged panes of `chain` equal.
 pub fn whole_window_build(chain: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
+    let Some(ASAPOp::PaneChain { pane_count, .. }) = chain.asap() else {
+        return Err(invalid("expected a pane chain"));
+    };
+    newest_panes_build(chain, *pane_count)
+}
+
+/// The `SummaryAgg` whose state a summary-state node with a
+/// [`merged_chain`] carries: one build over the window of the panes it
+/// merges ([`merged_pane_count`]).
+pub fn merged_window_build(state: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
+    let (Some(chain), Some(pane_count)) = (merged_chain(state), merged_pane_count(state)) else {
+        return Err(invalid("expected merged panes of one pane chain"));
+    };
+    newest_panes_build(chain, pane_count)
+}
+
+/// The `SummaryAgg` over `TimeRange(pane_count · pane_width_ms)` over the
+/// chain's input: the state of the chain's newest `pane_count` panes.
+fn newest_panes_build(
+    chain: &OperatorNode,
+    pane_count: u32,
+) -> Result<OperatorNode, SchemaDerivationError> {
     let Some(ASAPOp::PaneChain {
         child,
         pane_width_ms,
-        pane_count,
         ..
     }) = chain.asap()
     else {
         return Err(invalid("expected a pane chain"));
     };
     let window = pane_width_ms
-        .checked_mul(u64::from(*pane_count))
+        .checked_mul(u64::from(pane_count))
         .ok_or_else(|| invalid("pane chain window overflows"))?;
     build_over(chain, range(Rc::clone(child), window)?)
 }
@@ -152,7 +194,8 @@ fn build_over(
 
 /// `root` with every `PaneChain` expanded into its panes: a `SummaryMerge`
 /// reads each pane of each chain it read, newest first, as plain
-/// `SummaryAgg` nodes the executor runs. Every other node keeps its
+/// `SummaryAgg` nodes the executor runs; a merge of the newest `n` panes
+/// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
 /// guarantee, timing and materialization. Each pane takes its chain's
 /// timing and materialization, and the range and shift it reads take the
 /// chain's timing: a chain materialized at ingestion time expands into
@@ -171,8 +214,8 @@ pub fn expand_pane_chains(
 pub struct PaneChainExpansion {
     /// The workload's roots, in order, with every chain expanded.
     pub roots: Vec<QueryRoot>,
-    /// Each expanded chain with its panes, newest first, in the order the
-    /// chains were first reached.
+    /// Each expanded chain with its panes some merge reads, newest first,
+    /// in the order the chains were first reached.
     pub chains: Vec<ExpandedPaneChain>,
     /// Every other node of the input workload the expansion reached, with
     /// the node that replaces it (itself when nothing below it changed),
@@ -187,7 +230,8 @@ pub struct PaneChainExpansion {
 pub struct ExpandedPaneChain {
     /// The chain node, as the input workload holds it.
     pub chain: Rc<OperatorNode>,
-    /// Its panes in the expanded workload, newest first.
+    /// Its panes in the expanded workload that some merge reads, newest
+    /// first.
     pub panes: Vec<Rc<OperatorNode>>,
 }
 
@@ -229,7 +273,7 @@ pub fn expand_pane_chains_in_workload(
                 _ => unreachable!("only chains are recorded"),
             };
             let panes = (0..pane_count)
-                .map(|index| Rc::clone(&memo.panes[&(Rc::as_ptr(&chain), index)]))
+                .map_while(|index| memo.panes.get(&(Rc::as_ptr(&chain), index)).cloned())
                 .collect();
             ExpandedPaneChain { chain, panes }
         })
@@ -281,12 +325,15 @@ fn expand(
         Operator::ASAP(ASAPOp::PaneChain { .. }) => {
             return Err(invalid("a pane chain is read only through a summary merge"))
         }
-        Operator::ASAP(ASAPOp::SummaryMerge { children }) => {
+        Operator::ASAP(ASAPOp::SummaryMerge {
+            children,
+            newest_panes,
+        }) => {
             let mut inputs = Vec::new();
             for child in children {
                 match child.asap() {
                     Some(ASAPOp::PaneChain { pane_count, .. }) => {
-                        for index in 0..*pane_count {
+                        for index in 0..newest_panes.unwrap_or(*pane_count) {
                             let key = (Rc::as_ptr(child), index);
                             if let Some(done) = memo.panes.get(&key) {
                                 inputs.push(Rc::clone(done));
@@ -310,8 +357,10 @@ fn expand(
                     _ => inputs.push(expand(child, memo)?),
                 }
             }
-            let merge =
-                OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge { children: inputs }))?;
+            let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
+                children: inputs,
+                newest_panes: None,
+            }))?;
             Rc::new(
                 OperatorNode::with_schema(merge.operator, node.schema.clone())
                     .with_guarantee(node.guarantee.clone())

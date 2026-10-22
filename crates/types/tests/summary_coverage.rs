@@ -172,7 +172,10 @@ fn pane_rows(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
 }
 
 fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children }))
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children,
+        newest_panes: None,
+    }))
 }
 
 fn rejected(children: Vec<Rc<OperatorNode>>) -> CoverageError {
@@ -575,6 +578,7 @@ fn forged_merges_fail_validation() {
     let forged = Rc::new(OperatorNode::with_schema(
         Operator::ASAP(ASAPOp::SummaryMerge {
             children: vec![us.clone(), us],
+            newest_panes: None,
         }),
         schema,
     ));

@@ -499,6 +499,9 @@ function stageNodeLines(operator, inputSchema) {
       lines.push(`instances: ${summaryInstancesText(op.grouping, op.reduction)}`);
       break;
     case 'SummaryEstimate': lines.push(`query: ${compactWire(op.query)}`); break;
+    case 'SummaryMerge':
+      if (op.newest_panes) lines.push(`newest ${op.newest_panes} panes`);
+      break;
     case 'PaneChain':
       lines.push(`summary: ${summaryFamilyText(op.family)}`);
       lines.push(`${op.pane_count} panes × ${durationText(op.pane_width_ms)}`);
@@ -629,7 +632,10 @@ function stageLaneElements(dag, options) {
       }
     }
     if (from) {
-      for (let k = 0; k < panes(e.producer); k += 1) {
+      // A merge of the chain's newest panes reads only those.
+      const consumer = byId.get(e.consumer);
+      const read = (consumer && consumer.body && consumer.body.newest_panes) || panes(e.producer);
+      for (let k = 0; k < read; k += 1) {
         edge(`e${index}q${k}`, `n${e.producer}p${k}`, into ? `n${e.consumer}p0r` : `n${e.consumer}`, e.raw);
       }
     }

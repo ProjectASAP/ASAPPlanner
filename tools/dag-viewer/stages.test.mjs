@@ -62,6 +62,19 @@ test('a collapsed chain is one node; expanded, one build, range and shift per pa
   assert.equal(cy.elements('.dimmed').length, all.length - keep.size);
 });
 
+test('a merge of the newest panes reads only those panes, and says so', () => {
+  const partial = JSON.parse(JSON.stringify(dag));
+  const merge = partial.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryMerge
+    && partial.edges.some((e) => e.consumer === n.id && e.producer === chain.id));
+  assert.ok(merge, 'a merge reads the chain');
+  merge.payload.ASAP.SummaryMerge.newest_panes = 2;
+  const elements = call('stageLaneElements', partial, { physical: true, queryIds, expandedChains: [chain.id] });
+  const into = edgesOf(elements).filter((e) => e.data.target === `n${merge.id}` && e.data.source.startsWith(`n${chain.id}p`));
+  assert.equal(into.map((e) => e.data.source).sort().join(), `n${chain.id}p0,n${chain.id}p1`);
+  const label = nodesOf(elements).find((e) => e.data.id === `n${merge.id}`).data.label;
+  assert.match(label, /newest 2 panes/);
+});
+
 test('every node lists the queries reaching it; shared nodes say how many', () => {
   const elements = call('stageLaneElements', dag, { physical: true, queryIds });
   const shared = nodesOf(elements).filter((e) => e.data.reachedBy.length > 1);

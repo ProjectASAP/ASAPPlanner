@@ -168,7 +168,7 @@ impl OperatorNode {
     pub fn summary_build(&self) -> Option<&ASAPOp> {
         match self.asap()? {
             op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. }) => Some(op),
-            ASAPOp::SummaryMerge { children } => children.first()?.summary_build(),
+            ASAPOp::SummaryMerge { children, .. } => children.first()?.summary_build(),
             _ => None,
         }
     }

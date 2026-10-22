@@ -75,6 +75,7 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
         .collect();
     let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: panes.clone(),
+        newest_panes: None,
     }))
     .unwrap();
     let root = replace(root, &agg, &merged);
@@ -686,8 +687,11 @@ fn panes_at(root: &Rc<OperatorNode>, panes: &[(i64, i64)]) -> Result<Rc<Operator
             OperatorNode::new_shared(agg.operator.map_children(|_| range.clone())).unwrap()
         })
         .collect();
-    let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children }))
-        .map_err(|error| format!("{error:?}"))?;
+    let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children,
+        newest_panes: None,
+    }))
+    .map_err(|error| format!("{error:?}"))?;
     Ok(replace(root, &agg, &merged))
 }
 
@@ -707,4 +711,65 @@ fn counter_panes_with_a_gap_or_an_overlap_are_rejected() {
         .err()
         .unwrap_or_default();
     assert!(overlap.contains("InputsOverlap"), "{overlap}");
+}
+
+/// A 2-min and a 5-min quantile, both every minute, on 1-min panes: the
+/// window-composition rule offers one 5-pane chain both read, the 2-min
+/// query merging only its newest 2 panes. Expanded, rebuilt at query time
+/// or maintained at ingestion time, each query's answer from the shared
+/// chain equals its answer from its own chain.
+#[test]
+fn newest_panes_of_a_shared_chain_match_a_separate_chain() {
+    let accuracy = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
+    let roots = [
+        QueryRoot::Operator(single_build(
+            "quantile_over_time(0.5, m[2m])",
+            accuracy.clone(),
+        )),
+        QueryRoot::Operator(single_build("quantile_over_time(0.99, m[5m])", accuracy)),
+    ];
+    let grid = Some(PANE_MS as u64);
+    let rule_candidates = pane_candidates(&roots, &[grid, grid]);
+    assert_eq!(rule_candidates.len(), 2, "{rule_candidates:?}");
+    let pass2_candidates = window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
+    let both = |shared: bool| -> Vec<Rc<OperatorNode>> {
+        pass2_candidates
+            .iter()
+            .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty() != shared)
+            .expect("both builds in panes")
+            .roots
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|root| match root {
+                QueryRoot::Operator(node) => Rc::clone(node),
+                QueryRoot::Scalar(_) => panic!("an operator root"),
+            })
+            .collect()
+    };
+    let (shared, separate) = (both(true), both(false));
+    let newest = OperatorNode::reachable(&shared[0])
+        .into_iter()
+        .find_map(|n| match n.asap() {
+            Some(ASAPOp::SummaryMerge { newest_panes, .. }) => Some(*newest_panes),
+            _ => None,
+        });
+    assert_eq!(newest, Some(Some(2)));
+    let data = samples(0);
+    for (query, (shared, separate)) in shared.iter().zip(&separate).enumerate() {
+        let expected = execute(&expand_pane_chains(separate).unwrap(), &data);
+        assert!(!expected.is_empty());
+        assert_eq!(
+            render(&execute(&expand_pane_chains(shared).unwrap(), &data)),
+            render(&expected),
+            "Q{}: the shared chain rebuilt at query time",
+            query + 1
+        );
+        assert_eq!(
+            render(&execute_maintained_chain(shared, &data)),
+            render(&expected),
+            "Q{}: the shared chain maintained at ingestion time",
+            query + 1
+        );
+    }
 }

@@ -645,7 +645,7 @@ fn validate_asap(
             }
             Ok(())
         }
-        ASAPOp::SummaryMerge { children } => {
+        ASAPOp::SummaryMerge { children, .. } => {
             for child in children {
                 let s = state_of(child);
                 if s.primitive != DataPrimitive::SummaryState

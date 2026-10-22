@@ -201,7 +201,10 @@ fn try_run(
         let merge = compile_node(
             &node(
                 2,
-                Payload::ASAP(ASAPOp::SummaryMerge { children: vec![1] }),
+                Payload::ASAP(ASAPOp::SummaryMerge {
+                    children: vec![1],
+                    newest_panes: None,
+                }),
                 (*state).clone(),
             ),
             std::slice::from_ref(&state),

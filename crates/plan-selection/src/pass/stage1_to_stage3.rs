@@ -18,7 +18,9 @@
 //!    candidates, and, for the composed candidate and each
 //!    summary-capability candidate, those of the window-composition rule
 //!    ([`window_composition_pass2_candidates`]: one per non-empty subset of
-//!    the builds a repeating query could build as tumbling panes), each
+//!    the builds a repeating query could build as tumbling panes, and one
+//!    more for a subset whose nested windows on one pane width can read one
+//!    shared chain), each
 //!    followed by its own identical-expression candidates, and, for the
 //!    composed candidate, those of the reuse rules (exact top-k reuse, then
 //!    each rollup Pass 2 candidate followed by its own exact top-k reuse

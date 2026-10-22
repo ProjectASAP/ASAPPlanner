@@ -3,7 +3,7 @@
 //! `docs/design_docs/proposals/planner-layering.md` (Algorithm 2).
 //!
 //! Its three rules are implemented: the identical-expression rule, the
-//! summary-capability rule and, for tumbling panes of one query, the
+//! summary-capability rule and, for tumbling panes, the
 //! window-composition rule; so are two reuse rules (#680), rollup and exact
 //! top-k reuse.
 //!
@@ -70,9 +70,19 @@
 //! a compact node whatever the pane count, with the build's family and
 //! size (a mergeable family's merged state has one build's guarantee), and
 //! every guarantee above is composed again. Nothing is materialized here:
-//! the panes are rebuilt at each evaluation until Stage 2 keeps them. A pane
-//! width shared by several queries, sliding windows and Exponential
-//! Histograms are not implemented.
+//! the panes are rebuilt at each evaluation until Stage 2 keeps them.
+//!
+//! Nested windows share one chain: when a subset holds builds of one family
+//! (at any size) over the same input below their ranges, read the same way,
+//! with the same output column names, in panes of one width but different
+//! counts ([`nested_window_groups`]),
+//! the subset also comes as a Pass 2 candidate in which each such group
+//! reads one chain of its most panes, sized for every member
+//! ([`size_for_all_readers`]). Every window ends at the evaluation time, so
+//! each shorter one is the chain's newest panes: its `SummaryMerge` merges
+//! only those (`newest_panes`), and has the guarantee of one build over its
+//! own window. Panes at the gcd of different widths, long-window segments,
+//! sliding windows and Exponential Histograms are not implemented.
 //!
 //! # Rollup rule
 //!
@@ -842,6 +852,10 @@ pub struct PaneCandidate {
 pub struct WindowCompositionPass2Candidate {
     /// The builds built as tumbling panes, in [`pane_candidates`] order.
     pub pane_candidates: Vec<PaneCandidate>,
+    /// Groups of positions in `pane_candidates` whose builds read one
+    /// shared chain ([`nested_window_groups`]); empty when each build has
+    /// its own chain.
+    pub shared_chains: Vec<Vec<usize>>,
     /// The candidate's roots with those builds in panes.
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
@@ -937,7 +951,10 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
 /// ([`pane_candidates`]): one per non-empty subset of them, in
 /// binary-counter order (the first candidate the lowest bit). Each build in
 /// the subset becomes a `SummaryMerge` over one [`ASAPOp::PaneChain`] of
-/// its panes; every other build is untouched. An error only for more than
+/// its panes; every other build is untouched. A subset with groups of
+/// nested windows ([`nested_window_groups`]) is followed by a second Pass 2
+/// candidate in which each group reads one shared chain, each member
+/// merging its newest panes. An error only for more than
 /// [`MAX_PANE_CANDIDATES`] pane candidates; a Pass 2 candidate whose
 /// composition fails carries its own error.
 pub fn window_composition_pass2_candidates(
@@ -958,23 +975,166 @@ pub fn window_composition_pass2_candidates(
             .map(|i| candidates[i].clone())
             .collect();
         pass2_candidates.push(WindowCompositionPass2Candidate {
-            roots: in_panes(roots, &chosen),
-            pane_candidates: chosen,
+            roots: in_panes(roots, &chosen, &[]),
+            pane_candidates: chosen.clone(),
+            shared_chains: Vec::new(),
         });
+        // Each group with a size that serves every member, and that build.
+        let mut shared = Vec::new();
+        for group in nested_window_groups(&chosen) {
+            match shared_chain_build(&chosen, &group) {
+                Ok(Some(build)) => shared.push((group, build)),
+                Ok(None) => {}
+                Err(error) => {
+                    pass2_candidates.push(WindowCompositionPass2Candidate {
+                        roots: Err(error),
+                        pane_candidates: chosen.clone(),
+                        shared_chains: vec![group],
+                    });
+                }
+            }
+        }
+        if !shared.is_empty() {
+            pass2_candidates.push(WindowCompositionPass2Candidate {
+                roots: in_panes(roots, &chosen, &shared),
+                pane_candidates: chosen,
+                shared_chains: shared.into_iter().map(|(group, _)| group).collect(),
+            });
+        }
     }
     Ok(pass2_candidates)
 }
 
+/// The pane candidates (positions in `candidates`) that can read one
+/// shared chain, in groups of two or more with at least two pane counts:
+/// builds of one family ([`same_family`], at any size) that read the same
+/// input below their ranges the same way (item and weight, grouping and
+/// filter), with the same output column names (each reader reads the
+/// shared chain's columns by position), in panes of one width. Their windows end at the same time, so
+/// each is the newest panes of the longest: one chain of the most panes,
+/// sized for every reader ([`size_for_all_readers`]), serves them all.
+fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, candidate) in candidates.iter().enumerate() {
+        match groups
+            .iter_mut()
+            .find(|group| same_panes_over_one_input(&candidates[group[0]], candidate))
+        {
+            Some(group) => group.push(i),
+            None => groups.push(vec![i]),
+        }
+    }
+    groups.retain(|group| {
+        group
+            .iter()
+            .any(|&i| candidates[i].pane_count != candidates[group[0]].pane_count)
+    });
+    groups
+}
+
+/// Whether two pane candidates build one family in panes of one width over
+/// the same input below their ranges, read the same way.
+fn same_panes_over_one_input(a: &PaneCandidate, b: &PaneCandidate) -> bool {
+    let (
+        Some(ASAPOp::SummaryAgg {
+            child: range,
+            family,
+            input,
+            reduction,
+            grouping,
+            filter,
+        }),
+        Some(ASAPOp::SummaryAgg {
+            child: range_b,
+            family: family_b,
+            input: input_b,
+            reduction: reduction_b,
+            grouping: grouping_b,
+            filter: filter_b,
+        }),
+    ) = (a.build.asap(), b.build.asap())
+    else {
+        return false;
+    };
+    let (below, below_b) = (range.children()[0], range_b.children()[0]);
+    let names = |build: &OperatorNode| -> Vec<(String, Option<String>)> {
+        build
+            .schema
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.table.clone()))
+            .collect()
+    };
+    a.pane_width_ms == b.pane_width_ms
+        && names(&a.build) == names(&b.build)
+        && same_family(family, family_b)
+        && (Rc::ptr_eq(below, below_b) || below == below_b)
+        && input == input_b
+        && reduction == reduction_b
+        && grouping == grouping_b
+        && filter == filter_b
+}
+
+/// The member of `group` (positions in `candidates`) with the most panes.
+fn longest(candidates: &[PaneCandidate], group: &[usize]) -> usize {
+    *group
+        .iter()
+        .max_by_key(|&&i| candidates[i].pane_count)
+        .expect("a group has members")
+}
+
+/// The build one chain shared by `group` (positions in `candidates`) is
+/// made of: the longest member's, sized for every member
+/// ([`sized_for_all`]); `None` when their sizes have no shared size.
+fn shared_chain_build(
+    candidates: &[PaneCandidate],
+    group: &[usize],
+) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+    let host = longest(candidates, group);
+    let members: Vec<&Rc<OperatorNode>> = std::iter::once(host)
+        .chain(group.iter().copied().filter(|&i| i != host))
+        .map(|i| &candidates[i].build)
+        .collect();
+    sized_for_all(&members)
+}
+
 /// `roots` with the build of each of `candidates` built as its tumbling
-/// panes, and every
-/// guarantee composed again.
+/// panes, and every guarantee composed again. The builds of each group in
+/// `shared_chains` (positions in `candidates`, with its
+/// [`shared_chain_build`]) read one chain of the group's most panes: each
+/// merges its own newest panes.
 fn in_panes(
     roots: &[QueryRoot],
     candidates: &[PaneCandidate],
+    shared_chains: &[(Vec<usize>, Rc<OperatorNode>)],
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
     let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    for (group, build) in shared_chains {
+        let longest = longest(candidates, group);
+        let chain = pane_chain(&PaneCandidate {
+            build: Rc::clone(build),
+            ..candidates[longest].clone()
+        })?;
+        for &i in group {
+            let newest = candidates[i].pane_count;
+            let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
+                children: vec![Rc::clone(&chain)],
+                newest_panes: (newest < candidates[longest].pane_count).then_some(newest),
+            }))?;
+            replaced.insert(Rc::as_ptr(&candidates[i].build), Rc::new(merge));
+        }
+    }
     for candidate in candidates {
-        replaced.insert(Rc::as_ptr(&candidate.build), merged_panes(candidate)?);
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            replaced.entry(Rc::as_ptr(&candidate.build))
+        {
+            entry.insert(Rc::new(OperatorNode::new(Operator::ASAP(
+                ASAPOp::SummaryMerge {
+                    children: vec![pane_chain(candidate)?],
+                    newest_panes: None,
+                },
+            ))?));
+        }
     }
     let mut rebuilt: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
     let mut out = Vec::new();
@@ -997,11 +1157,9 @@ fn in_panes(
     recompose_guarantees(&out)
 }
 
-/// `SummaryMerge` over the [`ASAPOp::PaneChain`] of `candidate`'s panes,
-/// with the build's output names.
-fn merged_panes(
-    candidate: &PaneCandidate,
-) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+/// The [`ASAPOp::PaneChain`] of `candidate`'s panes, with the build's
+/// output names.
+fn pane_chain(candidate: &PaneCandidate) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(ASAPOp::SummaryAgg {
         child: range,
         family,
@@ -1032,11 +1190,7 @@ fn merged_panes(
         field.name = kept.name.clone();
         field.table = kept.table.clone();
     }
-    Ok(Rc::new(OperatorNode::new(Operator::ASAP(
-        ASAPOp::SummaryMerge {
-            children: vec![Rc::new(chain)],
-        },
-    ))?))
+    Ok(Rc::new(chain))
 }
 
 /// `node` with every replaced build below it swapped for its shared build;
@@ -2374,7 +2528,7 @@ mod tests {
             .into_iter()
             .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryMerge { .. })))
             .expect("a merge");
-        let Some(ASAPOp::SummaryMerge { children }) = merge.asap() else {
+        let Some(ASAPOp::SummaryMerge { children, .. }) = merge.asap() else {
             unreachable!()
         };
         let [chain] = children.as_slice() else {
@@ -2405,7 +2559,8 @@ mod tests {
     }
 
     /// Two builds that could be split give three candidates: each alone and
-    /// both, in binary-counter order.
+    /// both, in binary-counter order. Their windows (5 and 2 min) nest on
+    /// 1-min panes, so both together are also offered as one shared chain.
     #[test]
     fn every_non_empty_subset_of_the_pane_candidates_is_a_pass2_candidate() {
         let roots = chose(
@@ -2422,10 +2577,149 @@ mod tests {
             .iter()
             .map(|v| {
                 assert!(v.roots.is_ok());
-                positions(&rule_candidates, &v.pane_candidates, |c| &c.build)
+                (
+                    positions(&rule_candidates, &v.pane_candidates, |c| &c.build),
+                    v.shared_chains.clone(),
+                )
             })
             .collect();
-        assert_eq!(subsets, [vec![0], vec![1], vec![0, 1]]);
+        assert_eq!(
+            subsets,
+            [
+                (vec![0], vec![]),
+                (vec![1], vec![]),
+                (vec![0, 1], vec![]),
+                (vec![0, 1], vec![vec![0, 1]])
+            ]
+        );
+    }
+
+    /// The pane chains in `roots`, one per distinct node.
+    fn chains(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
+        let mut found: Vec<Rc<OperatorNode>> = Vec::new();
+        for root in roots {
+            for node in OperatorNode::reachable(operator(root)) {
+                if matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                    && !found.iter().any(|c| Rc::ptr_eq(c, &node))
+                {
+                    found.push(node);
+                }
+            }
+        }
+        found
+    }
+
+    /// The `newest_panes` of the one merge `root` reads.
+    fn newest_panes(root: &QueryRoot) -> Option<u32> {
+        OperatorNode::reachable(operator(root))
+            .into_iter()
+            .find_map(|n| match n.asap() {
+                Some(ASAPOp::SummaryMerge { newest_panes, .. }) => Some(*newest_panes),
+                _ => None,
+            })
+            .expect("a merge")
+    }
+
+    /// A 1-min and a 5-min KLL quantile over one metric, both every 10 s,
+    /// are 6 and 30 panes of 10 s; the 1-min window is the newest 6 of the
+    /// 5-min one. Besides each query's own chain, the rule offers one chain
+    /// of 30 panes read by both: the 5-min query merges every pane, the
+    /// 1-min one only the newest 6, and each keeps the guarantee of its own
+    /// whole-window build (a KLL merges exactly).
+    #[test]
+    fn nested_windows_on_equal_panes_share_one_chain() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.5, m[1m])", 0.01),
+                ("quantile_over_time(0.9, m[5m])", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let rule_candidates = pane_candidates(&roots, &[Some(10_000), Some(10_000)]);
+        assert_eq!(
+            panes(&roots, &[Some(10_000), Some(10_000)]),
+            [(10_000, 6), (10_000, 30)]
+        );
+        let pass2_candidates =
+            window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
+        let shared: Vec<_> = pass2_candidates
+            .iter()
+            .filter(|c| !c.shared_chains.is_empty())
+            .collect();
+        let [shared] = shared.as_slice() else {
+            panic!("one shared-chain candidate: {pass2_candidates:?}")
+        };
+        assert_eq!(shared.shared_chains, [vec![0, 1]]);
+        let shared_roots = shared.roots.as_ref().unwrap();
+        let [chain] = chains(shared_roots)
+            .try_into()
+            .unwrap_or_else(|c: Vec<_>| panic!("one chain, found {}", c.len()));
+        assert!(matches!(
+            chain.asap(),
+            Some(ASAPOp::PaneChain {
+                pane_width_ms: 10_000,
+                pane_count: 30,
+                ..
+            })
+        ));
+        assert_eq!(newest_panes(&shared_roots[0]), Some(6));
+        assert_eq!(newest_panes(&shared_roots[1]), None);
+        for (root, whole) in shared_roots.iter().zip(&roots) {
+            let root = operator(root);
+            root.validate_structure().unwrap();
+            assert!(root.guarantee.is_some());
+            assert_eq!(root.guarantee, operator(whole).guarantee);
+        }
+        // The per-query chains stay candidates: two chains, each read in full.
+        let separate = pass2_candidates
+            .iter()
+            .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty())
+            .expect("both builds in their own panes");
+        assert_eq!(chains(separate.roots.as_ref().unwrap()).len(), 2);
+    }
+
+    /// The shared chain is sized for its strictest reader
+    /// ([`size_for_all_readers`]): a 1-min quantile at ε = 0.01 and a
+    /// 5-min one at ε = 0.05 read one chain of the 1-min query's `k`.
+    #[test]
+    fn a_shared_chain_is_sized_for_its_strictest_reader() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.5, m[1m])", 0.01),
+                ("quantile_over_time(0.9, m[5m])", 0.05),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let family = |node: &OperatorNode| match node.asap() {
+            Some(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
+                family.clone()
+            }
+            _ => unreachable!(),
+        };
+        let strict = family(&builds(&roots[0])[0]);
+        assert_ne!(strict, family(&builds(&roots[1])[0]));
+        let rule_candidates = pane_candidates(&roots, &[Some(10_000), Some(10_000)]);
+        let pass2_candidates =
+            window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
+        let shared = pass2_candidates
+            .iter()
+            .find(|c| !c.shared_chains.is_empty())
+            .expect("a shared-chain candidate");
+        let shared_roots = shared.roots.as_ref().unwrap();
+        let [chain] = chains(shared_roots)
+            .try_into()
+            .unwrap_or_else(|c: Vec<_>| panic!("one chain, found {}", c.len()));
+        assert_eq!(family(&chain), strict);
+        // The 1-min query keeps its own guarantee; the 5-min one reads the
+        // stricter state, so its guarantee is the 1-min build's size's,
+        // not its own looser one.
+        let guarantee = |root: &QueryRoot| operator(root).guarantee.clone().unwrap();
+        assert_eq!(guarantee(&shared_roots[0]), guarantee(&roots[0]));
+        assert_ne!(guarantee(&shared_roots[1]), guarantee(&roots[1]));
+        assert_eq!(
+            guarantee(&shared_roots[1]).spec,
+            guarantee(&shared_roots[0]).spec
+        );
     }
     /// The composed candidate of `queries` with every target at its exact
     /// option (an exact accumulator, or plain exact execution).

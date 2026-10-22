@@ -74,7 +74,11 @@ fn chain(input: Rc<OperatorNode>) -> Rc<OperatorNode> {
 }
 
 fn merge(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children })).unwrap()
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children,
+        newest_panes: None,
+    }))
+    .unwrap()
 }
 
 fn relative_time(node: &OperatorNode) -> (Bound<i64>, Bound<i64>) {
@@ -153,7 +157,7 @@ fn expansion_merges_the_panes() {
     let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = expanded.asap() else {
         panic!("{:?}", expanded.operator)
     };
-    let Some(ASAPOp::SummaryMerge { children }) = summary_input.asap() else {
+    let Some(ASAPOp::SummaryMerge { children, .. }) = summary_input.asap() else {
         panic!("{:?}", summary_input.operator)
     };
     assert_eq!(children.len(), 5);
@@ -254,4 +258,107 @@ fn merges_over_one_chain_share_its_panes() {
     let (first, second) = (panes(&expanded[0]), panes(&expanded[1]));
     assert_eq!(first.len(), 5);
     assert!(first.iter().zip(&second).all(|(a, b)| Rc::ptr_eq(a, b)));
+}
+
+fn newest(chain: Rc<OperatorNode>, newest_panes: u32) -> Rc<OperatorNode> {
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![chain],
+        newest_panes: Some(newest_panes),
+    }))
+    .unwrap()
+}
+
+/// A merge of the newest 2 of 5 panes is a state of one build over the
+/// newest 2 minutes: coverage `(-2m, 0]`, the window build's schema, and
+/// a valid structure.
+#[test]
+fn a_merge_of_the_newest_panes_covers_their_window() {
+    use asap_types::ir::operator::pane_chain::merged_window_build;
+    let partial = newest(chain(scan()), 2);
+    partial.validate_structure().unwrap();
+    let build = merged_window_build(&partial).unwrap();
+    let Some(NonASAPOp::TimeRange { range, .. }) = build.children()[0].non_asap() else {
+        panic!("{:?}", build.operator)
+    };
+    assert_eq!(*range, Duration::from_millis(2 * MINUTE));
+    assert_eq!(partial.schema, build.schema);
+    assert_eq!(partial.coverage(), build.coverage());
+    assert_eq!(
+        relative_time(&partial),
+        (Bound::Excluded(-2 * MINUTE as i64), Bound::Included(0))
+    );
+}
+
+/// `newest_panes` must name between 1 and fewer than all panes of the one
+/// chain the merge reads; anything else is rejected.
+#[test]
+fn a_merge_of_the_newest_panes_reads_one_chain_and_fewer_than_all_panes() {
+    let chain = chain(scan());
+    let build = whole_window_build(&chain).unwrap();
+    for (children, newest_panes) in [
+        (vec![Rc::clone(&chain)], 0),
+        (vec![Rc::clone(&chain)], 5),
+        (vec![Rc::clone(&chain)], 6),
+        (vec![Rc::clone(&chain), Rc::clone(&chain)], 2),
+        (vec![Rc::new(build)], 1),
+    ] {
+        let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
+            children,
+            newest_panes: Some(newest_panes),
+        }));
+        assert!(merge.is_err(), "newest {newest_panes}");
+    }
+}
+
+/// A merge of the newest 2 panes and a merge of all 5 over one chain
+/// expand into one set of panes: the partial merge reads the first 2 of
+/// the full merge's 5 nodes, newest first, and the chain lists all 5.
+#[test]
+fn a_merge_of_the_newest_panes_reads_the_first_panes_of_the_chain() {
+    use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
+    use asap_types::ir::QueryRoot;
+    let shared = chain(scan());
+    let roots = [
+        QueryRoot::Operator(newest(Rc::clone(&shared), 2)),
+        QueryRoot::Operator(merge(vec![shared])),
+    ];
+    let expansion = expand_pane_chains_in_workload(&roots).unwrap();
+    assert_eq!(expansion.chains.len(), 1);
+    assert_eq!(expansion.chains[0].panes.len(), 5);
+    let panes = |root: &QueryRoot| match root {
+        QueryRoot::Operator(node) => node.children().into_iter().cloned().collect::<Vec<_>>(),
+        QueryRoot::Scalar(_) => unreachable!(),
+    };
+    let (partial, full) = (panes(&expansion.roots[0]), panes(&expansion.roots[1]));
+    assert_eq!((partial.len(), full.len()), (2, 5));
+    assert!(partial.iter().zip(&full).all(|(a, b)| Rc::ptr_eq(a, b)));
+    for (root, window) in expansion.roots.iter().zip([2, 5]) {
+        let QueryRoot::Operator(node) = root else {
+            unreachable!()
+        };
+        assert_eq!(
+            relative_time(node),
+            (Bound::Excluded(-window * MINUTE as i64), Bound::Included(0))
+        );
+    }
+}
+
+/// `newest_panes` is left out of the JSON when `None`, and JSON without it
+/// reads as `None`; `Some(n)` round-trips.
+#[test]
+fn newest_panes_serializes_only_when_set() {
+    let full: ASAPOp<()> = ASAPOp::SummaryMerge {
+        children: vec![()],
+        newest_panes: None,
+    };
+    let json = serde_json::to_string(&full).unwrap();
+    assert!(!json.contains("newest_panes"), "{json}");
+    let read: ASAPOp<()> = serde_json::from_str(r#"{"SummaryMerge":{"children":[null]}}"#).unwrap();
+    assert_eq!(read, full);
+    let partial: ASAPOp<()> = ASAPOp::SummaryMerge {
+        children: vec![()],
+        newest_panes: Some(6),
+    };
+    let json = serde_json::to_string(&partial).unwrap();
+    assert_eq!(serde_json::from_str::<ASAPOp<()>>(&json).unwrap(), partial);
 }

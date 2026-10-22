@@ -95,7 +95,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
-use asap_types::ir::operator::pane_chain::{merged_chain, whole_window_build};
+use asap_types::ir::operator::pane_chain::{merged_chain, merged_window_build};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::guarantee::{
     AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator, GuaranteeSource,
@@ -1693,7 +1693,8 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
 
 /// The guarantee of an estimate or finalized value read from merged
 /// tumbling panes ([`merged_chain`]): the guarantee of the same read of one
-/// build over the panes' whole window ([`whole_window_build`]) when the
+/// build over the merged panes' window ([`merged_window_build`]: the whole
+/// chain's, or its newest panes') when the
 /// family's merged error for that read is exact or the same as that build's
 /// (the family-capability table); none when it is approximate (evidence
 /// only, for plan selection to judge) or the family has no merge. `None` for
@@ -1725,25 +1726,25 @@ fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarante
         return Some(None);
     }
     let chain = merged_chain(state)?;
-    let Ok(mut whole) = whole_window_build(chain) else {
+    let Ok(mut window_build) = merged_window_build(state) else {
         return Some(None);
     };
-    // The whole window's range over the chain's input carries the guarantee
-    // composed over that input.
+    // The merged panes' window range over the chain's input carries the
+    // guarantee composed over that input.
     let ASAPOp::PaneChain { child: input, .. } = chain.asap()? else {
         return Some(None);
     };
-    if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut whole.operator {
+    if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut window_build.operator {
         let mut timed = (**range).clone();
         timed.guarantee = composed_guarantee(&timed);
         debug_assert!(Rc::ptr_eq(timed.children()[0], input));
         *range = Rc::new(timed);
     }
-    let whole = Rc::new(whole);
+    let window_build = Rc::new(window_build);
     let reader = OperatorNode::with_schema(
         node.operator.map_children(|child| {
             if Rc::ptr_eq(child, state) {
-                Rc::clone(&whole)
+                Rc::clone(&window_build)
             } else {
                 Rc::clone(child)
             }
@@ -4882,6 +4883,7 @@ mod tests {
         let merged = Rc::new(
             OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![chain],
+                newest_panes: None,
             }))
             .unwrap(),
         );

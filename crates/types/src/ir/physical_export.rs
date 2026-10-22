@@ -641,7 +641,7 @@ fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)>
         },
         Operator::ASAP(op) => match op {
             ASAPOp::SummarySubtract { .. } | ASAPOp::SummaryJoin { .. } => vec![Left, Right],
-            ASAPOp::SummaryMerge { children } => vec![Input; children.len()],
+            ASAPOp::SummaryMerge { children, .. } => vec![Input; children.len()],
             _ => vec![Input],
         },
     };
