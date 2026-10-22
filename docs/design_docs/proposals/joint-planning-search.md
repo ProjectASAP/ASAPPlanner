@@ -532,6 +532,43 @@ Each cut removes or corrects at least one of finitely many combinations, so the 
 
 **Validation.** The brute force over the memo is a second oracle. `joint_search_equivalence` checks the MILP, the brute force and `--exhaustive` against each other on small workloads under all three cost models: a peak case, a capacity case and a raw-horizon case.
 
+### Coefficients
+
+**Principle: Stage 3 is the only source of prices, and the model only needs a lower bound.**
+- Every coefficient comes from Stage 3's per-node pricing (`price_node`), evaluated in a hypothetical context. The MILP has no cost formula of its own.
+- The selected plan is always re-priced by Stage 3 as a whole, and its cost is that price. So a coefficient may be any value **no greater than** the true cost of the choice it prices.
+- Exact coefficients make the first bound tight. Lower-bound coefficients keep the result exact at the cost of more lazy-cut rounds.
+
+**Decomposition.** A plan's cost is the sum over its nodes of `price_node(node, context)`. A node's context is who computes it, how often, how it is materialized, at which threshold it is sized, and how large its input is. When a cost depends only on discrete context, each value of the context gets its own coefficient, selected by a 0/1 variable:
+
+| Cost depends on | Variable | Coefficient |
+| --- | --- | --- |
+| the chosen implementation | `x[g,c]` | `price_node` of the candidate's own nodes |
+| the materialization | `m[g,c,o]` | standing cost `a(g,c,o)` and per-computation cost `w(g,c)` for that `o` |
+| which consumers compute it, how often | `y[k,g,c]` | `rate(k) · w(g,c)`, with `w` priced at one computation |
+| a shared node's size | `u[s,t]` | `σ(s,t)`: the node priced at threshold `t` |
+
+Example: `quantile_over_time(0.9, data[5m])` as a KLL built once per evaluation at threshold 0.01 is the choice (group, KLL, `mq`, `t = 0.01`). Its `w` is Stage 3's price of one KLL sized for 0.01 over five minutes of rows, and its objective term is `rate(Q1) · w · y[Q1, G4, KLL]`. Coefficients are generated per candidate, per combination of its coupling-site thresholds, and per materialization of its private builds.
+
+**Terms that do not decompose, and their lower bounds:**
+
+| Term | Why it does not decompose | Coefficient used | Corrected by |
+| --- | --- | --- | --- |
+| Held memory, bytes × latency | the latency is a sum over the whole path | 0, or a McCormick bound from the memo's byte and latency ranges | a cut on the term |
+| A shared scan's window (the longest reader's) | its input depends on other groups' choices | priced at the reader's own window | a cut when a longer reader is chosen |
+| A child consumed by an ingestion-time build | the child runs at ingestion time instead | the cheaper of the two pricings | a cut on the pair |
+| A chain kept across evaluations, charged per request | depends on the request count | the per-evaluation price | a cut |
+| Compaction with several ingest workers | depends on the global worker count | 0 | a cut |
+| Composed accuracy | depends on the chosen children | not priced | a no-good cut on a failing combination |
+
+Validation: for every plan of the brute force over the memo, the sum of its coefficients is at most Stage 3's price, and equal wherever the term decomposes exactly.
+
+**Cuts.** When Stage 3's price of the incumbent exceeds the bound, the loop adds:
+- a **term cut** for each underestimated term, conditioned only on the choices that term depends on, for example "if `m[n,o]` then held memory of `n` ≥ H" or "if `x[g,c]` and `x[g',c']` then the scan window cost ≥ W". One term cut corrects every plan sharing those choices.
+- a **no-good cut** on the whole combination, as the fallback that guarantees termination.
+
+The report gives the number of rounds and the first round's bound against the final price (the tightness of the model).
+
 ### Coupled charges
 
 - **Raw data on disk**: a per-source horizon threshold, linear in the MILP.
