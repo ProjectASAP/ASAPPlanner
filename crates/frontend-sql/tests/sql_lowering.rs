@@ -3165,3 +3165,69 @@ async fn a_cast_to_varchar_lowers_to_utf8() {
         FieldDataType::Plain(DataType::Utf8)
     );
 }
+
+/// The trailing window `TimeRange(w)` over the table `Scan` a query reads, or
+/// `None` when the query's leaf is not one.
+fn trailing_window(node: &OperatorNode) -> Option<(std::time::Duration, &OperatorNode)> {
+    if let NonASAPOp::TimeRange { range, kind, child } = op(node) {
+        assert_eq!(*kind, asap_types::ir::TimeRangeKind::Range);
+        return Some((*range, child));
+    }
+    node.children().into_iter().find_map(|c| trailing_window(c))
+}
+
+// A trailing window on the table's time column is the query's lookback, the
+// same `TimeRange` a PromQL range selector lowers to, so Pass 2 can build it
+// in panes and Stage 2 at ingestion time. Other conjuncts stay on the `Scan`.
+#[tokio::test]
+async fn trailing_window_on_the_time_column_lowers_to_a_time_range() {
+    for (sql, window_ms) in [
+        (
+            "SELECT service, COUNT(DISTINCT bytes) FROM metrics \
+             WHERE ts >= now() - INTERVAL '5 minutes' AND service = 'api' GROUP BY service",
+            300_000,
+        ),
+        (
+            "SELECT COUNT(*) FROM metrics WHERE ts > now() - INTERVAL '15 minutes'",
+            900_000,
+        ),
+        (
+            "SELECT COUNT(*) FROM metrics WHERE now() - INTERVAL '1 hour' <= ts",
+            3_600_000,
+        ),
+        (
+            "SELECT COUNT(*) FROM metrics \
+             WHERE ts BETWEEN now() - INTERVAL '90 seconds' AND now()",
+            90_000,
+        ),
+    ] {
+        let qe = lower(sql).await;
+        let (range, child) =
+            trailing_window(&qe).unwrap_or_else(|| panic!("no TimeRange for {sql}: {qe:#?}"));
+        assert_eq!(range.as_millis(), window_ms, "{sql}");
+        let NonASAPOp::Scan { predicates, .. } = op(child) else {
+            panic!("TimeRange must sit on the Scan for {sql}: {child:#?}");
+        };
+        let rest = usize::from(sql.contains("service = 'api'"));
+        assert_eq!(
+            predicates.len(),
+            rest,
+            "only the window leaves the Scan: {sql}"
+        );
+    }
+}
+
+// Conditions that are not a trailing window on the time column stay
+// ordinary predicates: another column, a month-long (variable) interval, an
+// upper bound alone, and a window on a table without a time index.
+#[tokio::test]
+async fn other_time_conditions_stay_scan_predicates() {
+    for sql in [
+        "SELECT COUNT(*) FROM metrics WHERE ts < now() - INTERVAL '5 minutes'",
+        "SELECT COUNT(*) FROM metrics WHERE ts >= now() - INTERVAL '1 month'",
+        "SELECT COUNT(*) FROM metrics WHERE ts >= now() - INTERVAL '5 minutes' OR service = 'a'",
+    ] {
+        let qe = lower(sql).await;
+        assert!(trailing_window(&qe).is_none(), "{sql}: {qe:#?}");
+    }
+}

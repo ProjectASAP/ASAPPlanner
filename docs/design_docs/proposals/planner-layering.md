@@ -1265,7 +1265,10 @@ FROM (
 );
 ```
 
-The SQL frontend recognizes Q2 as `Entropy` and Q3 as `L2` when Q3 casts its
+The SQL frontend lowers each `WHERE ts >= now() - INTERVAL '1 minute'` to a
+1-min range `TimeRange` over the `flows` scan, the node PromQL's `[1m]` lowers
+to, so the window-composition rule and ingestion-time builds apply to SQL as
+to PromQL. The SQL frontend recognizes Q2 as `Entropy` and Q3 as `L2` when Q3 casts its
 counts to DOUBLE (`CAST(c AS DOUBLE) * CAST(c AS DOUBLE)`): the Int64 `c * c`
 above can overflow, so only the Float64 product is recognized.
 
