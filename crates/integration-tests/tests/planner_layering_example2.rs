@@ -304,6 +304,21 @@ async fn stage1_logical_asap_optimization_sql_has_the_standin_options() {
     }
 }
 
+/// The doc's SQL workload itself gets the summary-capability rule's shared
+/// candidate: one UnivMon read by Q1, Q2 and Q3.
+#[tokio::test]
+async fn stage1_logical_asap_optimization_sql_adds_one_univmon_for_all_three() {
+    let workload = sql_workload();
+    let run = run_stages(&workload, lower_sql(&workload).await);
+    assert!(
+        run.logical.iter().any(|c| {
+            let ums = univmons(c);
+            ums.len() == 1 && ums[0].0 == BTreeSet::from([0, 1, 2])
+        }),
+        "no SQL candidate reads one UnivMon for Q1, Q2 and Q3"
+    );
+}
+
 /// The stand-in lowers to the three statistics, each over a 1-min range of one input.
 #[test]
 fn stage0_query_language_frontends_standin_lowers_to_three_statistics_of_one_input() {
