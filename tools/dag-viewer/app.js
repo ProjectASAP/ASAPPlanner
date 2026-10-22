@@ -264,6 +264,7 @@
 
     $('pick1').innerHTML = logical.candidates.map((c) => `<option value="${esc(c.id)}">${esc(c.id)} · ${esc(c.display_name)}</option>`).join('');
     $('pick2').innerHTML = rows.filter((r) => rowKey(r).startsWith('P'))
+      .sort((a, b) => byPlanNumber(a.id, b.id))
       .map((r) => `<option value="${esc(r.id)}">${esc(r.id)} · ${esc(r.display_name)}</option>`).join('');
 
     render(0, doc.stage0_query_language_frontends.dag, false, null);

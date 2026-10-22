@@ -366,6 +366,11 @@ function stageCandidateRows(doc) {
 // error) and why plan selection failed when it failed for a reason other
 // than rejecting every candidate, then the selection's warnings (e.g. a
 // very large peak memory with no declared memory capacity).
+// Plan ids in plan-number order: P2 before P2-m1 before P10.
+function byPlanNumber(a, b) {
+  return a.localeCompare(b, undefined, { numeric: true });
+}
+
 function stageCandidateHeader(doc) {
   const logical = doc.stage1_logical_asap_optimization || {};
   const selection = doc.stage3_plan_selection || {};
