@@ -254,11 +254,12 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
     };
     let mut groups_with_rates: BTreeSet<usize> = once.keys().map(|g| g.0 as usize).collect();
     for choice in &input.choices {
-        if choice
-            .coefficients
-            .slots
-            .iter()
-            .any(|s| !matches!(s.materialization, Materialization::MatAtIngestion(_)))
+        if !choice.coefficients.shared_nodes.is_empty()
+            || choice
+                .coefficients
+                .slots
+                .iter()
+                .any(|s| !matches!(s.materialization, Materialization::MatAtIngestion(_)))
         {
             groups_with_rates.insert(choice.group.0 as usize);
         }
@@ -273,6 +274,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
 
     // The objective.
     let mut objective = Expression::from(0.0);
+    let mut products_pending: Vec<(Variable, Variable, Variable)> = Vec::new();
     // A consumer's constant rate, or `None` for one built once at query
     // time, whose rate is its group's union rate.
     let rate = |k: Consumer| -> Option<f64> {
@@ -287,13 +289,44 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
     };
     // Products of a variable rate (a set selector) and a reach variable.
     let mut rated: Vec<(Variable, Variable, f64)> = Vec::new();
+    // The shareable nodes of a choice's direct part cost, per unit of
+    // rate, `shared_cost[c]`, charged either per consumer (the rest of the
+    // direct part's charge) or once at the union rate of the queries
+    // reaching the group when built once: the model charges the smaller
+    // (`per_consumer_shared[c]` against `built_once_shared[c]`).
+    let shared_cost: Vec<f64> = input
+        .choices
+        .iter()
+        .map(|choice| {
+            choice
+                .coefficients
+                .shared_nodes
+                .iter()
+                .map(|node| node.cost_per_unit_rate)
+                .sum()
+        })
+        .collect();
+    let mut per_consumer_shared: Vec<Vec<(Variable, f64)>> = vec![Vec::new(); input.choices.len()];
+    let mut built_once_shared: Vec<Vec<(Variable, f64)>> = vec![Vec::new(); input.choices.len()];
+    let mut product = |vars: &mut ProblemVariables, a: Variable, b: Variable| {
+        let z = vars.add(variable().min(0).max(1));
+        products_pending.push((z, a, b));
+        z
+    };
     for (&(k, c), &v) in &y {
-        let cost = input.choices[c].coefficients.direct.cost_per_unit_rate;
-        if cost == 0.0 {
+        let total = input.choices[c].coefficients.direct.cost_per_unit_rate;
+        let shared = shared_cost[c].min(total);
+        let cost = total - shared;
+        if total == 0.0 {
             continue;
         }
         match rate(k) {
-            Some(r) => objective += r * cost * v,
+            Some(r) => {
+                objective += r * cost * v;
+                if shared != 0.0 {
+                    per_consumer_shared[c].push((v, r * shared));
+                }
+            }
             None => {
                 let g = match k {
                     Consumer::Group(g) => g.0 as usize,
@@ -301,10 +334,40 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                     Consumer::Query(_) => unreachable!("a query's rate is constant"),
                 };
                 for (set, selector) in &rate_of[&g] {
-                    rated.push((*selector, v, input.union_rate[set] * cost));
+                    let union = input.union_rate[set];
+                    if cost != 0.0 {
+                        rated.push((*selector, v, union * cost));
+                    }
+                    if shared != 0.0 {
+                        let z = product(&mut vars, *selector, v);
+                        per_consumer_shared[c].push((z, union * shared));
+                    }
                 }
             }
         }
+    }
+    for (c, choice) in input.choices.iter().enumerate() {
+        if shared_cost[c] == 0.0 {
+            continue;
+        }
+        for (set, selector) in &rate_of[&(choice.group.0 as usize)] {
+            let z = product(&mut vars, *selector, x[c]);
+            built_once_shared[c].push((z, input.union_rate[set] * shared_cost[c]));
+        }
+    }
+    // min(A, B) as a + b with a ≥ A − M·u, b ≥ B − M·(1 − u), u binary.
+    let mut cheaper_of: Vec<(Variable, Variable, Variable, usize, f64)> = Vec::new();
+    for c in 0..input.choices.len() {
+        if per_consumer_shared[c].is_empty() && built_once_shared[c].is_empty() {
+            continue;
+        }
+        let big_m: f64 = per_consumer_shared[c].iter().map(|(_, w)| w).sum::<f64>()
+            + built_once_shared[c].iter().map(|(_, w)| w).sum::<f64>();
+        let a = vars.add(variable().min(0));
+        let b = vars.add(variable().min(0));
+        let u = vars.add(variable().binary());
+        objective += a + b;
+        cheaper_of.push((a, b, u, c, big_m));
     }
     for (c, choice) in input.choices.iter().enumerate() {
         for slot in &choice.coefficients.slots {
@@ -474,8 +537,20 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             }
         }
     }
-    for &(z, a, b) in &products {
+    for &(z, a, b) in products.iter().chain(&products_pending) {
         constraints.push(constraint!(z >= a + b - 1));
+    }
+    for &(a, b, u, c, big_m) in &cheaper_of {
+        let mut per_consumer = Expression::from(0.0);
+        for &(v, w) in &per_consumer_shared[c] {
+            per_consumer += w * v;
+        }
+        let mut built_once = Expression::from(0.0);
+        for &(v, w) in &built_once_shared[c] {
+            built_once += w * v;
+        }
+        constraints.push(constraint!(a >= per_consumer - big_m * u));
+        constraints.push(constraint!(b >= built_once - big_m * (1 - u)));
     }
     // Latency bounds: the work each query reaches at query time.
     for (q, query) in input.queries.iter().enumerate() {
@@ -622,7 +697,13 @@ pub(crate) fn search<Id: Clone>(
             models,
             &mut cache,
         )?;
-        choices.extend(group_choices);
+        // A group's copies (apart) cost at least its shared choice with its
+        // node not built once: each copy is charged per consumer as the
+        // shared node is, its own scans read at least the shortest horizon,
+        // and its builds are sized for fewer readers but built per copy. So
+        // the model keeps the shared choices (a lower bound), and the exact
+        // pricing of a group choice prices both.
+        choices.extend(group_choices.into_iter().filter(|c| c.copy_of.is_none()));
     }
     let input = model_input(&memo, choices, entries, models)?;
     let mut input = input;
