@@ -265,21 +265,28 @@ pub(crate) fn share_equal_builds(
     roots: &[QueryRoot],
     resized: &[Rc<OperatorNode>],
 ) -> Vec<QueryRoot> {
-    let mut kept: Vec<Rc<OperatorNode>> = Vec::new();
+    // Equal by node key: guarantees, composed again over a plan, may differ
+    // from the resized candidate's.
+    let mut keys = super::groups::NodeKeys::default();
+    let resized: Vec<u64> = resized.iter().map(|r| keys.key(r)).collect();
+    let mut kept: Vec<(u64, Rc<OperatorNode>)> = Vec::new();
     let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
     let mut seen = HashSet::new();
     for node in roots.iter().flat_map(root_nodes) {
         if !seen.insert(Rc::as_ptr(&node))
             || !matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
-            || !resized.iter().any(|r| **r == *node)
         {
             continue;
         }
-        match kept.iter().find(|k| ***k == *node) {
+        let key = keys.key(&node);
+        if !resized.contains(&key) {
+            continue;
+        }
+        match kept.iter().find(|(k, _)| *k == key).map(|(_, n)| n) {
             Some(first) => {
                 replaced.insert(Rc::as_ptr(&node), Rc::clone(first));
             }
-            None => kept.push(node),
+            None => kept.push((key, node)),
         }
     }
     if replaced.is_empty() {

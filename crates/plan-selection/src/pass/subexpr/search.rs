@@ -10,13 +10,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::asap_aware_cse::{
-    share_identical_expressions, sharing_candidates,
+    identical_expression_pass2_candidates, sharing_candidates, with_union_scan_labels,
 };
 use asap_logical_asap_optimization::per_computation_candidates::{
     recompose_guarantees, PerComputationCandidates,
 };
 use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use super::{groups, CouplingKind, GroupId, ImplementationCandidate, Memo};
@@ -243,43 +243,87 @@ fn at_thresholds(memo: &Memo, choice: &GroupChoice) -> Vec<Vec<Option<Implementa
     plans
 }
 
-/// The query roots of a plan: each chosen candidate's node with every
-/// child group's node replaced by that group's built node, children first,
-/// so a group read by several parents is one node.
+/// `roots` (each query's own nodes, as Pass 1 composes them) and its
+/// identical-expression Pass 2 candidates, as the exhaustive search lists
+/// them: every closed set of identical nodes made one node, and, when a
+/// metric's scans project different labels, the candidates over every
+/// metric's scans widened to one label set that share a scan.
+fn identical_expression_variants(roots: Vec<QueryRoot>) -> Vec<Vec<QueryRoot>> {
+    let mut variants = Vec::new();
+    for shared in identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots)) {
+        variants.push(shared.roots);
+    }
+    if let Ok(Some(widened)) = with_union_scan_labels(&roots) {
+        for shared in identical_expression_pass2_candidates(&widened, &sharing_candidates(&widened))
+        {
+            let shares_a_scan = shared
+                .sharing_candidates
+                .iter()
+                .any(|c| matches!(c.nodes[0].non_asap(), Some(NonASAPOp::Scan { .. })));
+            if shares_a_scan {
+                variants.push(shared.roots);
+            }
+        }
+    }
+    variants.insert(0, roots);
+    variants
+}
+
+/// The query roots of a plan, each query's own nodes as Pass 1 composes
+/// them: each chosen candidate's node with every child group's node
+/// replaced by that group's built node, children first. A group below
+/// several queries' roots is built once per query (the identical-expression
+/// rule shares them: [`identical_expression_variants`]); a group a Pass 2
+/// candidate reads from outside its query (a rollup's finer group, a
+/// ranking, a host chain) is built once, by the first query below whose
+/// root it is, or once for all.
 fn composed_roots<Id>(
     memo: &Memo,
     per_computation: &PerComputationCandidates<Id>,
     chosen: &[Option<ImplementationCandidate>],
 ) -> Option<Vec<QueryRoot>> {
-    let order = memo.topological_order()?;
-    let mut built: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
-    let mut built_of: Vec<Option<Rc<OperatorNode>>> = vec![None; memo.groups.len()];
-    for GroupId(g) in order {
-        let g = g as usize;
-        let Some(candidate) = &chosen[g] else {
-            continue;
-        };
-        let mut rebuilt = HashMap::new();
-        let node = substituted(&candidate.node, &built, &mut rebuilt);
-        for implemented in &candidate.implements {
-            built.insert(
-                Rc::as_ptr(&memo.groups[implemented.0 as usize].node),
-                Rc::clone(&node),
-            );
+    memo.topological_order()?;
+    let queries = per_computation.roots.len();
+    // Per query, the groups below its root through the groups' children.
+    let mut below: Vec<Vec<bool>> = vec![vec![false; memo.groups.len()]; queries];
+    for (g, group) in memo.groups.iter().enumerate() {
+        for &q in &group.roots_of {
+            mark_below(memo, g, &mut below[q]);
         }
-        built_of[g] = Some(node);
     }
+    // A child below the reading query's root is built in that query; any
+    // other in the first query it is below, or once for all (`queries`).
+    let scope_of = |scope: usize, c: usize| {
+        if scope < queries && below[scope][c] {
+            scope
+        } else {
+            (0..queries).find(|&q| below[q][c]).unwrap_or(queries)
+        }
+    };
+    // The candidate building each group: its own, or the fused candidate
+    // implementing it.
+    let building: Vec<Option<&ImplementationCandidate>> = (0..memo.groups.len())
+        .map(|g| {
+            chosen[g].as_ref().or_else(|| {
+                chosen
+                    .iter()
+                    .flatten()
+                    .find(|c| c.implements.contains(&GroupId(g as u32)))
+            })
+        })
+        .collect();
+    let mut built: Vec<HashMap<usize, Rc<OperatorNode>>> = vec![HashMap::new(); queries + 1];
     let roots: Vec<QueryRoot> = per_computation
         .roots
         .iter()
         .enumerate()
         .map(|(q, (_, root))| {
-            let group_of = |node: &Rc<OperatorNode>| -> Option<Rc<OperatorNode>> {
-                memo.groups
+            let mut group_of = |node: &Rc<OperatorNode>| -> Option<Rc<OperatorNode>> {
+                let g = memo
+                    .groups
                     .iter()
-                    .enumerate()
-                    .find(|(_, group)| group.roots_of.contains(&q) && *group.node == **node)
-                    .and_then(|(g, _)| built_of[g].clone())
+                    .position(|group| group.roots_of.contains(&q) && *group.node == **node)?;
+                build(memo, &building, q, g, &scope_of, &mut built)
             };
             Some(match root {
                 QueryRoot::Operator(node) => QueryRoot::Operator(group_of(node)?),
@@ -303,6 +347,52 @@ fn composed_roots<Id>(
     // guarantees depends on the implementations chosen below it, so every
     // node's guarantee is composed again, as Pass 1 composition does.
     recompose_guarantees(&roots).ok()
+}
+
+/// Group `g` built in `scope` (a query, or the scope of groups no query
+/// root reaches): its building candidate's node over its children's built
+/// nodes, each child built in `scope_of(scope, child)`; memoized in
+/// `built`.
+fn build(
+    memo: &Memo,
+    building: &[Option<&ImplementationCandidate>],
+    scope: usize,
+    g: usize,
+    scope_of: &dyn Fn(usize, usize) -> usize,
+    built: &mut Vec<HashMap<usize, Rc<OperatorNode>>>,
+) -> Option<Rc<OperatorNode>> {
+    if let Some(node) = built[scope].get(&g) {
+        return Some(Rc::clone(node));
+    }
+    let candidate = building[g]?;
+    let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    for child in &candidate.children {
+        let c = child.0 as usize;
+        let node = build(memo, building, scope_of(scope, c), c, scope_of, built)?;
+        replaced.insert(Rc::as_ptr(&memo.groups[c].node), node);
+    }
+    // A node of its own in each scope, even a leaf's (a scan), so that two
+    // queries share it only through the identical-expression rule.
+    let node = Rc::new(OperatorNode::clone(&substituted(
+        &candidate.node,
+        &replaced,
+        &mut HashMap::new(),
+    )));
+    for implemented in &candidate.implements {
+        built[scope].insert(implemented.0 as usize, Rc::clone(&node));
+    }
+    Some(node)
+}
+
+/// Mark `g` and every group below it through the groups' children.
+fn mark_below(memo: &Memo, g: usize, below: &mut [bool]) {
+    if below[g] {
+        return;
+    }
+    below[g] = true;
+    for child in &memo.groups[g].children {
+        mark_below(memo, child.0 as usize, below);
+    }
 }
 
 /// `node` with every node `built` maps (by address) replaced by its built
@@ -335,23 +425,6 @@ fn substituted(
     };
     rebuilt.insert(Rc::as_ptr(node), Rc::clone(&new));
     new
-}
-
-/// `roots` with its identical nodes made one node, then its summary builds
-/// equal to one of `resized` (over equal windows of two groups) made one
-/// build and the identical nodes above them shared in turn.
-fn shared(roots: &[QueryRoot], resized: &[Rc<OperatorNode>]) -> Vec<QueryRoot> {
-    let identical = |roots: Vec<QueryRoot>| {
-        let shareable = sharing_candidates(&roots);
-        match shareable.is_empty() {
-            true => roots,
-            false => share_identical_expressions(&roots, &shareable),
-        }
-    };
-    identical(super::capability::share_equal_builds(
-        &identical(roots.to_vec()),
-        resized,
-    ))
 }
 
 /// The shared builds `plan` resized: each shared-build reader's build that
@@ -402,6 +475,14 @@ pub(crate) fn brute_force<Id: Clone>(
         if !super::windows::requirements_met(&chosen) {
             continue;
         }
+        // Scans are widened as the identical-expression rule widens them,
+        // every metric's at once ([`identical_expression_variants`]).
+        if chosen
+            .iter()
+            .any(|(_, c)| c.origin == super::CandidateOrigin::WidenedScans)
+        {
+            continue;
+        }
         for plan in at_thresholds(&memo, choice) {
             let Some(roots) = composed_roots(&memo, per_computation, &plan) else {
                 continue;
@@ -412,25 +493,37 @@ pub(crate) fn brute_force<Id: Clone>(
             let Ok(roots) = recompose_guarantees(&roots) else {
                 continue;
             };
-            let roots = shared(&roots, &resized_builds(&memo, choice, &plan));
-            number += 1;
-            let id = format!("L{number}");
-            let Ok(implemented) =
-                optimize_physical_asap(&id, &roots, entries, data, models.deployment_capabilities)
-            else {
-                continue;
-            };
-            for (k, mut physical) in implemented.into_iter().enumerate() {
-                physical.id = match k {
-                    0 => format!("P{number}"),
-                    k => format!("P{number}-m{k}"),
+            // Shared builds are one build (the summary-capability rule),
+            // then identical nodes shared or not, as the exhaustive search
+            // lists them.
+            let roots = super::capability::share_equal_builds(
+                &roots,
+                &resized_builds(&memo, choice, &plan),
+            );
+            for roots in identical_expression_variants(roots) {
+                number += 1;
+                let id = format!("L{number}");
+                let Ok(implemented) = optimize_physical_asap(
+                    &id,
+                    &roots,
+                    entries,
+                    data,
+                    models.deployment_capabilities,
+                ) else {
+                    continue;
                 };
-                selector.offer(&physical)?;
+                for (k, mut physical) in implemented.into_iter().enumerate() {
+                    physical.id = match k {
+                        0 => format!("P{number}"),
+                        k => format!("P{number}-m{k}"),
+                    };
+                    selector.offer(&physical)?;
+                }
+                if selector.keeps_from_logical(&id) {
+                    logical.insert(id, roots);
+                }
+                logical.retain(|id, _| selector.keeps_from_logical(id));
             }
-            if selector.keeps_from_logical(&id) {
-                logical.insert(id, roots);
-            }
-            logical.retain(|id, _| selector.keeps_from_logical(id));
         }
     }
     let (selection, selected) = selector.finish()?;
@@ -499,7 +592,10 @@ mod tests {
         let plans = at_thresholds(&memo, &choice);
         assert_eq!(plans.len(), 1);
         let roots = composed_roots(&memo, &per_computation, &plans[0]).unwrap();
-        let roots = shared(&roots, &resized_builds(&memo, &choice, &plans[0]));
+        let roots = super::super::capability::share_equal_builds(
+            &roots,
+            &resized_builds(&memo, &choice, &plans[0]),
+        );
         let builds: std::collections::HashSet<*const OperatorNode> = roots
             .iter()
             .flat_map(|root| match root {

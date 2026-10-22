@@ -1325,6 +1325,25 @@ fn debug_memo_seed() {
     };
     let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
     let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
+    /// A plan's shape: its flattened DAG without what composition derives.
+    fn shape(roots: &[QueryRoot]) -> String {
+        fn strip(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for field in ["guarantee", "schema", "timing", "materialization"] {
+                        map.remove(field);
+                    }
+                    map.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let mut value = serde_json::to_value(flatten(roots).0).unwrap();
+        strip(&mut value);
+        value.to_string()
+    }
+    let mut runs = Vec::new();
     for (name, search) in [
         ("exhaustive", Stage1ToStage3Search::exhaustive()),
         (
@@ -1353,5 +1372,64 @@ fn debug_memo_seed() {
             out.push_str("--\n");
         }
         eprintln!("{out}");
+        let selected = run.selected().unwrap();
+        eprintln!(
+            "materialization: {:?}",
+            selected.materialization.values().collect::<Vec<_>>()
+        );
+        runs.push(run);
     }
+    let memo_shape = shape(
+        runs[1]
+            .stage1_selected
+            .as_ref()
+            .unwrap()
+            .roots
+            .as_ref()
+            .unwrap(),
+    );
+    let found: Vec<&str> = runs[0]
+        .stage1_logical_asap_optimization
+        .iter()
+        .filter(|c| c.roots.as_ref().is_ok_and(|r| shape(r) == memo_shape))
+        .map(|c| c.id.as_str())
+        .collect();
+    eprintln!(
+        "memo's plan among the exhaustive candidates ({} listed): {found:?}",
+        runs[0].stage1_logical_asap_optimization.len()
+    );
+    // The exhaustive search's price of each of them.
+    if let Ok(selection) = &runs[0].stage3_plan_selection {
+        for id in &found {
+            for (physical, cost) in &selection.costs {
+                if runs[0]
+                    .stage2_physical_asap_optimization
+                    .iter()
+                    .any(|p| &p.id == physical && p.from_logical == *id)
+                {
+                    eprintln!("  {physical}: {:?}", cost.cost_per_second);
+                }
+            }
+        }
+        for rejection in selection_rejections(&runs[0], &found) {
+            eprintln!("  rejected: {rejection}");
+        }
+    }
+}
+
+/// The Stage 3 rejections of the physical candidates of `logical`.
+fn selection_rejections(run: &Stage1ToStage3Run<usize>, logical: &[&str]) -> Vec<String> {
+    let Ok(selection) = &run.stage3_plan_selection else {
+        return Vec::new();
+    };
+    selection
+        .rejected
+        .iter()
+        .filter(|r| {
+            run.stage2_physical_asap_optimization
+                .iter()
+                .any(|p| p.id == r.id && logical.contains(&p.from_logical.as_str()))
+        })
+        .map(|r| format!("{} {:?} {}", r.id, r.cause, r.reason))
+        .collect()
 }
