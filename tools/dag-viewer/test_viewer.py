@@ -48,10 +48,13 @@ def seed862() -> dict:
 
 
 def stage_pipeline(*args: str) -> dict:
-    """A document written on demand by the built stage_pipeline."""
+    """A document written on demand by the built stage_pipeline; queries
+    given on the command line read sources declared to hold 1,000 series
+    each (pricing uses only declared facts)."""
+    facts = ["--series-count", "1000"] if "--promql" in args or "--sql" in args else []
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "doc.json"
-        subprocess.run([str(server.BINARY), *args, "--out", str(out)], check=True, capture_output=True)
+        subprocess.run([str(server.BINARY), *args, *facts, "--out", str(out)], check=True, capture_output=True)
         return json.loads(out.read_text())
 
 
@@ -558,7 +561,10 @@ class WorkloadViewTests(unittest.TestCase):
     def test_search_header_groups_discards_by_cause(self):
         text = self.js.call("searchText", self.doc)
         self.assertIn("default search · ", text)
-        self.assertIn("2 independent components searched separately", text)
+        # The components' combined plan is not in the joint search space, so
+        # the workload is searched as one and the header has no component count.
+        self.assertEqual(self.doc["stage3_plan_selection"]["search"]["searched_as_one"], "not_in_joint_space")
+        self.assertNotIn("independent components", text)
         self.assertIn("discarded before composition: no accuracy guarantee ×7 (q3, q4, q5, q6, q7) · ", text)
         self.assertIn("Stage 2 assignments skipped: they scan raw data at query time", text)
 
@@ -649,13 +655,13 @@ class PanesAndPathsTests(unittest.TestCase):
 
     def test_each_node_lists_the_queries_reaching_it_and_shared_nodes_say_so(self):
         elements = self.elements()
-        # The quantile queries q3-q5 share one scan, one pane chain of
-        # DDSketches; q3 and q4 also share its merge.
+        # The quantile queries q3-q5 read the same 100 s window of one
+        # per-series DDSketch pane chain, so they share its scan and merge.
         scans = [e for e in lane_nodes(elements) if e["data"]["kind"] == "Scan"]
         shared = next(e for e in scans if e["data"]["reachedBy"] == ["q3", "q4", "q5"])
         self.assertIn("shared ×3", shared["data"]["label"])
-        merge = next(e for e in lane_nodes(elements) if e["data"]["kind"] == "SummaryMerge" and e["data"]["reachedBy"] == ["q3", "q4"])
-        self.assertIn("shared ×2", merge["data"]["label"])
+        merge = next(e for e in lane_nodes(elements) if e["data"]["kind"] == "SummaryMerge" and e["data"]["reachedBy"] == ["q3", "q4", "q5"])
+        self.assertIn("shared ×3", merge["data"]["label"])
         root = self.node(elements, f"n{self.dag['roots'][8]}")
         self.assertEqual(root["data"]["reachedBy"], ["q9"])
         self.assertNotIn("shared", root["data"]["label"])
@@ -843,7 +849,10 @@ class AppTests(unittest.TestCase):
         self.assertIn("Candidates per stage", self.text(js, "counts"))
         self.assertIn("✓ selected", self.text(js, "lane2-meta"))
         self.assertEqual(js.eval("__els.pick2.value"), selected)
-        self.assertEqual(js.eval("__els.pick1.value"), "L1")
+        # Lane 1 shows the Stage 1 candidate the selected plan came from.
+        from_logical = next(c["from_logical"] for c in example1()["stage2_physical_asap_optimization"]["candidates"] if c["id"] == selected)
+        self.assertEqual(from_logical, "L3")
+        self.assertEqual(js.eval("__els.pick1.value"), from_logical)
         combinations = example1()["stage1_logical_asap_optimization"]["combinations"]
         rank_meta = js.eval("__els['rank-meta'].textContent")
         self.assertIn(f"{combinations} candidates", rank_meta)

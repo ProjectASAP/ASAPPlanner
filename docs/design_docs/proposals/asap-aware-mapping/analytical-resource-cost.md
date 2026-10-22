@@ -230,7 +230,7 @@ normalized workload, lowered query IR, and declared statistics:
 
 | Cost concept | Canonical source |
 |---|---|
-| Source row cardinality | `DataWorkload.sources[source].series_count`. |
+| Source row cardinality | `DataWorkload.sources[source].series_count`, and `rows_held` for data at rest or a scan with no window. No default: a missing fact fails planning, naming the source and the fact. |
 | Groups of a `by (...)` grouping or partition | The smallest fact-based bound: the product of `DataWorkload.sources[source].distinct_values_per_label` over its keys (all declared), the declared `series_count` (series, or groups of rows for a SQL table) of the sources it reads, and the rows it reads per evaluation (at ingestion time, the arriving rows of the window it maintains; a grouping with no window is an error). No count is assumed for an undeclared key. |
 | Arrival and update rate | `DataWorkload.arrival` and its `rows_per_second`. |
 | Query demand | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. |

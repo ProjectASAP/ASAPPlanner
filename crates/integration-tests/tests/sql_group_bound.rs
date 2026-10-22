@@ -41,7 +41,8 @@ fn http_catalog() -> SqlCatalog {
 fn workload(query: &str, metric: &str, declared: serde_json::Value) -> PlanningWorkload {
     let http = serde_json::json!({
         "series_count": 10000, "sample_interval": 5, "values_non_negative": true,
-        "max_distinct_per_evaluation": 1000000, "distinct_values_per_label": declared
+        "max_distinct_per_evaluation": 1000000, "distinct_values_per_label": declared,
+        "rows_held": 1000000000
     });
     serde_json::from_value(serde_json::json!({
         "query_workload": {"language": {"sql": "datafusion_sql"}, "query_batch": null,

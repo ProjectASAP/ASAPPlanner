@@ -19,7 +19,7 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
-    RepetitionInterval, SqlDialect,
+    RepetitionInterval, SourceFacts, SqlDialect,
 };
 
 fn approximate() -> QueryRequirements {
@@ -72,9 +72,17 @@ fn sql_workload(
             query_batch: Some(batch_entries),
             repeating_queries: repeating,
         },
+        // `lineitem` at rest, holding a million rows.
         data_workload: Some(DataWorkload {
             arrival: DataArrival::AtRest,
-            ..Default::default()
+            sources: [(
+                "lineitem".to_string(),
+                SourceFacts {
+                    rows_held: Some(1_000_000),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into(),
         }),
     }
 }
@@ -353,7 +361,8 @@ async fn each_plan_carries_its_selected_root() {
                 range_evaluation: None,
             }]),
         },
-        // A range selector only: no sample interval is needed.
+        // A range selector only: no sample interval is needed; 1,000 rows
+        // arrive per second.
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000.0,
@@ -387,12 +396,15 @@ async fn scalar_roots_survive_planning_in_workload_order() {
                 query_batch: Some(queries.iter().map(|q| batch(q)).collect()),
                 repeating_queries: None,
             },
-            data_workload: Some(DataWorkload::sampled_every(
-                queries
-                    .iter()
-                    .flat_map(|q| asap_frontend_promql::promql_metric_names(q).unwrap()),
-                DurationMs(1000),
-            )),
+            data_workload: Some(
+                DataWorkload::sampled_every(
+                    queries
+                        .iter()
+                        .flat_map(|q| asap_frontend_promql::promql_metric_names(q).unwrap()),
+                    DurationMs(1000),
+                )
+                .with_series_count(1_000),
+            ),
         };
         let output = e2e_plan(UserInput::new(
             &workload,

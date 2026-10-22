@@ -548,7 +548,6 @@ mod tests {
     use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
-    use asap_types::ir::schema::schema_support::with_promql_series_identity;
     use asap_types::workload::{
         DataArrival, DurationMs, MetricType, Predictability, QueryRecurrence, QueryRequirements,
         RepeatedDemand, RepetitionInterval, SourceFacts,

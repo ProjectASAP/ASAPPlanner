@@ -156,6 +156,22 @@ def plan_args(payload: object, out: str) -> list[str]:
         if max_error is None:
             raise ValueError("accuracy_metric needs max_error")
         args.extend(["--accuracy-metric", accuracy_metric])
+    # Declared source facts, each for every source the queries read.
+    for key, flag, kind in (
+        ("series_count", "--series-count", int),
+        ("rows_per_second", "--rows-per-second", float),
+        ("rows_held", "--rows-held", int),
+    ):
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a number")
+        if kind is int and (value != int(value) or value <= 0):
+            raise ValueError(f"{key} must be a positive integer")
+        if kind is float and value < 0:
+            raise ValueError(f"{key} must be a non-negative number")
+        args.extend([flag, str(kind(value))])
     interval = payload.get("interval_ms", 15_000)
     if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
         raise ValueError("interval_ms must be a positive integer")

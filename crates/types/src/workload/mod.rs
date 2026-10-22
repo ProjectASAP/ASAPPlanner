@@ -441,8 +441,9 @@ pub enum DataArrival {
     Ingesting {
         /// Rows (PromQL samples) arriving per second over all sources.
         /// Plan selection prices a source's scans with its share of it, by
-        /// series count, when the source does not declare both its
-        /// `series_count` and its `sample_interval` ([`SourceFacts`]).
+        /// series count when every source declares one, else with all of
+        /// it, when the source does not declare both its `series_count` and
+        /// its `sample_interval` ([`SourceFacts`]).
         rows_per_second: f64,
     },
     /// Older rows are stored and new rows keep arriving.
@@ -514,7 +515,9 @@ pub struct SourceFacts {
     /// How many series (PromQL) or groups of rows (SQL) the source holds
     /// (default: unknown). Plan selection bounds the values a query returns
     /// (`G`) by it, to split a whole-result failure probability, and prices
-    /// scans and selectors with it (1,000 when unknown). Must be positive.
+    /// scans and selectors with it (with `sample_interval`, the source's
+    /// arrival rate). Unknown, pricing bounds a per-series count by the rows
+    /// read instead. Must be positive.
     #[serde(default)]
     pub series_count: Option<u64>,
     /// Declared Prometheus type of the metric (`# TYPE` metadata). The
@@ -574,6 +577,13 @@ pub struct SourceFacts {
     /// NULL) as one more value, and positive. Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub distinct_values_per_label: BTreeMap<String, u64>,
+    /// How many rows (PromQL samples) the source holds at rest, at most
+    /// (default: unknown). Plan selection bounds the rows a scan reads by
+    /// it: the whole source for a scan with no window above it, such as a
+    /// SQL query with no time predicate, and data at rest that declares no
+    /// arrival rate. Must be positive. Omitted from JSON when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_held: Option<u64>,
 }
 
 /// Upper bounds on the norms of the frequency (weight) vector any one
@@ -670,6 +680,15 @@ impl DataWorkload {
         }
     }
 
+    /// This data workload with every source it declares holding
+    /// `series_count` series (or groups of rows).
+    pub fn with_series_count(mut self, series_count: u64) -> Self {
+        for facts in self.sources.values_mut() {
+            facts.series_count = Some(series_count);
+        }
+        self
+    }
+
     /// Validate the arrival and source facts independently of query demand
     /// or language.
     pub fn validate(&self) -> Result<(), WorkloadError> {
@@ -697,6 +716,9 @@ impl DataWorkload {
                 .any(|&count| count == 0)
             {
                 return Err(WorkloadError::ZeroDistinctValues);
+            }
+            if facts.rows_held == Some(0) {
+                return Err(WorkloadError::ZeroRowsHeld);
             }
         }
         Ok(())
@@ -847,6 +869,9 @@ pub enum WorkloadError {
     /// a source's `distinct_values_per_label`.
     #[error("a source's distinct_values_per_label counts must be greater than zero")]
     ZeroDistinctValues,
+    /// Bad input: a source's `rows_held` of zero.
+    #[error("a source's rows_held must be greater than zero")]
+    ZeroRowsHeld,
     /// Bad input: a source declares a `series_count` of zero. A source
     /// with no series has nothing to plan for, and `absent(m)` over it
     /// still returns one row.
@@ -966,6 +991,23 @@ mod tests {
         };
         assert!(with(1).validate().is_ok());
         assert_eq!(with(0).validate(), Err(WorkloadError::ZeroMaxDistinct));
+    }
+
+    /// A declared `rows_held` is positive.
+    #[test]
+    fn rows_held_must_be_positive() {
+        let with = |rows: u64| DataWorkload {
+            sources: BTreeMap::from([(
+                "t".to_string(),
+                SourceFacts {
+                    rows_held: Some(rows),
+                    ..SourceFacts::default()
+                },
+            )]),
+            ..DataWorkload::default()
+        };
+        assert!(with(1).validate().is_ok());
+        assert_eq!(with(0).validate(), Err(WorkloadError::ZeroRowsHeld));
     }
 
     /// A declared distinct-value count is positive: a label with no value
@@ -1259,6 +1301,7 @@ mod tests {
                         }),
                         max_distinct_per_evaluation: Some(100),
                         distinct_values_per_label: BTreeMap::from([("job".to_string(), 10)]),
+                        rows_held: Some(1_000_000),
                     },
                 )]),
             }),
@@ -1276,7 +1319,8 @@ mod tests {
                     "sample_interval": 15000,
                     "stream_norms": {"l1": 1e9, "l2": null},
                     "max_distinct_per_evaluation": 100,
-                    "distinct_values_per_label": {"job": 10}
+                    "distinct_values_per_label": {"job": 10},
+                    "rows_held": 1000000
                 }}
             })
         );

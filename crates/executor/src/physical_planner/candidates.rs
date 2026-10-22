@@ -361,10 +361,11 @@ mod tests {
                 }]),
                 repeating_queries: None,
             },
-            data_workload: Some(DataWorkload::sampled_every(
-                ["m".to_string()],
-                DurationMs(1000),
-            )),
+            // `m` holds 1,000 series sampled every second.
+            data_workload: Some(
+                DataWorkload::sampled_every(["m".to_string()], DurationMs(1000))
+                    .with_series_count(1_000),
+            ),
         };
         let root = asap_frontend_promql::lower_promql_workload(&workload)
             .unwrap()

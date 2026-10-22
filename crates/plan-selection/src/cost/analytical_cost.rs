@@ -1521,6 +1521,14 @@ pub enum AnalyticalCostError {
     /// none).
     #[error("an ingestion-time grouping has no window below it, so no fact bounds its groups")]
     IngestionGroupingWithoutWindow,
+    /// Bad input: no declared fact bounds what a node reads from `source`
+    /// (`missing` names the facts that would), so pricing refuses rather
+    /// than assume one.
+    #[error("pricing source {source_name} needs {missing}, and none is declared")]
+    MissingSourceFact {
+        source_name: String,
+        missing: &'static str,
+    },
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
