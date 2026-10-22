@@ -9185,16 +9185,26 @@ mod tests {
     /// merging its newest 2 panes) or a chain each. Its physical candidate
     /// with every chain maintained at ingestion time.
     fn nested_windows_at_ingestion(shared: bool, rows_per_s: f64) -> PhysicalCandidate {
-        use asap_logical_asap_optimization::per_computation_candidates as pcc;
         let queries = [
-            "quantile_over_time(0.5, m[2m])",
-            "quantile_over_time(0.99, m[5m])",
+            ("quantile_over_time(0.5, m[2m])", MINUTE),
+            ("quantile_over_time(0.99, m[5m])", MINUTE),
         ];
+        shared_windows_at_ingestion(queries, shared, rows_per_s)
+    }
+
+    /// [`nested_windows_at_ingestion`] for two queries, each with its own
+    /// repeat interval in ms.
+    fn shared_windows_at_ingestion(
+        queries: [(&str, u32); 2],
+        shared: bool,
+        rows_per_s: f64,
+    ) -> PhysicalCandidate {
+        use asap_logical_asap_optimization::per_computation_candidates as pcc;
         let inventory = pcc::generate_per_computation_candidates(
             queries
                 .iter()
                 .enumerate()
-                .map(|(q, query)| (q, QueryRoot::Operator(lower_promql(query, p99_target()))))
+                .map(|(q, (query, _))| (q, QueryRoot::Operator(lower_promql(query, p99_target()))))
                 .collect(),
         )
         .unwrap();
@@ -9219,7 +9229,7 @@ mod tests {
             .collect();
         let rule_candidates = asap_logical_asap_optimization::asap_aware_cse::pane_candidates(
             &roots,
-            &[Some(u64::from(MINUTE)), Some(u64::from(MINUTE))],
+            &queries.map(|(_, interval_ms)| Some(u64::from(interval_ms))),
         );
         let roots =
             asap_logical_asap_optimization::asap_aware_cse::window_composition_pass2_candidates(
@@ -9235,7 +9245,12 @@ mod tests {
         optimize_physical_asap(
             "L1",
             &roots,
-            &[every_minute(), every_minute()],
+            &queries.map(|(_, interval_ms)| QueryWorkloadEntry {
+                predictability: asap_types::workload::Predictability::Predictable {
+                    known_at: None,
+                },
+                ..entry_with(p99_target(), repeating(interval_ms))
+            }),
             &arriving(rows_per_s),
             &DeploymentCapabilities::default(),
         )
@@ -9299,6 +9314,71 @@ mod tests {
             cost.cost_per_second,
             separate_cost.cost_per_second
         );
+    }
+
+    /// A 10-min quantile every minute (10 × 1-min panes) and one every 5
+    /// min (2 × 5-min panes), maintained at ingestion time: one chain of
+    /// 1-min panes serves both, the 5-min query merging all 10 panes once
+    /// per 5 min, and costs less than a chain per query.
+    #[test]
+    fn queries_at_different_intervals_share_one_chain_at_ingestion_time() {
+        let rows_per_s = 10_000.0;
+        let queries = [
+            ("quantile_over_time(0.5, m[10m])", MINUTE),
+            ("quantile_over_time(0.99, m[10m])", 5 * MINUTE),
+        ];
+        let shared = shared_windows_at_ingestion(queries, true, rows_per_s);
+        let chains: Vec<_> = shared
+            .dag
+            .nodes
+            .iter()
+            .filter(|n| is_chain(&n.payload))
+            .collect();
+        assert_eq!(chains.len(), 1);
+        assert!(matches!(
+            chains[0].payload,
+            Payload::ASAP(ASAPOp::PaneChain {
+                pane_width_ms: 60_000,
+                pane_count: 10,
+                ..
+            })
+        ));
+        let recurrence = [repeating(MINUTE), repeating(5 * MINUTE)];
+        let settings = PlanSelectionSettings::default();
+        let cost = price(&shared.dag, &recurrence, &arriving(rows_per_s), &settings).unwrap();
+        let separate = shared_windows_at_ingestion(queries, false, rows_per_s);
+        let separate_cost =
+            price(&separate.dag, &recurrence, &arriving(rows_per_s), &settings).unwrap();
+        assert!(
+            cost.cost_per_second.unwrap() < separate_cost.cost_per_second.unwrap(),
+            "{:?} vs {:?}",
+            cost.cost_per_second,
+            separate_cost.cost_per_second
+        );
+        assert!(cost.usage.average_memory_bytes < separate_cost.usage.average_memory_bytes);
+        // Each query merges all 10 panes per series at its own rate: once
+        // a minute and once per 5 min.
+        let mut merges: Vec<(u64, String)> = shared
+            .dag
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })))
+            .map(|n| {
+                let detail = &cost.per_node[&n.id].detail;
+                let states = detail
+                    .strip_prefix("merge ")
+                    .and_then(|rest| rest.split(' ').next())
+                    .and_then(|states| states.parse().ok())
+                    .unwrap_or_else(|| panic!("not a merge: {detail}"));
+                let rate = detail.split("; x ").nth(1).unwrap_or_default().to_string();
+                (states, rate)
+            })
+            .collect();
+        merges.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(merges.len(), 2);
+        assert_eq!(merges[0].0, merges[1].0);
+        assert!(merges[0].1.starts_with("0.0033/s"), "{merges:?}");
+        assert!(merges[1].1.starts_with("0.0167/s"), "{merges:?}");
     }
 
     /// With more than one ingest worker, each worker beyond the first holds

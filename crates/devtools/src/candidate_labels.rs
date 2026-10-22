@@ -174,71 +174,90 @@ pub fn pass2_label(
     // Window-composition rule, e.g. "Kll for Q1 in 5 × 1m panes": the
     // queries that read the pane chain the build became. Identical builds
     // in different queries become one structurally identical chain, listed
-    // once with all its readers. A chain shared by nested windows is listed
-    // once, as its longest member's, with the queries that merge only its
-    // newest panes, e.g. "one Kll for Q1, Q2 in 30 × 10s panes (Q1 newest
-    // 6)".
+    // once with all its readers. A chain several builds share is listed
+    // once, with the queries that merge only its newest panes, e.g. "one
+    // Kll for Q1, Q2 in 30 × 10s panes (Q1 newest 6)".
     let candidates = &pass2.pane_candidates;
-    let group_of = |i: usize| pass2.shared_pane_chains.iter().find(|g| g.contains(&i));
-    let longest = |group: &[usize]| {
-        group
+    let shared_member = |i: usize| {
+        pass2
+            .shared_pane_chains
             .iter()
-            .copied()
-            .max_by_key(|&m| candidates[m].pane_count)
+            .any(|shared| shared.members.contains(&i))
     };
-    let panes: Vec<String> = candidates
+    let own: Vec<String> = candidates
         .iter()
         .enumerate()
-        .filter(|&(i, candidate)| match group_of(i) {
-            Some(group) => longest(group) == Some(i),
-            None => !candidates[..i]
-                .iter()
-                .any(|earlier| same_pane_chain(earlier, candidate)),
+        .filter(|&(i, candidate)| {
+            !shared_member(i)
+                && !candidates[..i]
+                    .iter()
+                    .any(|earlier| same_pane_chain(earlier, candidate))
         })
-        .map(|(i, candidate)| {
-            let shared = group_of(i).is_some();
-            let chain = |node: &OperatorNode| is_pane_chain_of(node, candidate, shared);
-            let mut text = format!(
-                "{}{} in {} × {} panes",
-                if shared { "one " } else { "" },
+        .map(|(_, candidate)| {
+            let chain = |node: &OperatorNode| {
+                is_pane_chain_of(
+                    node,
+                    &candidate.build,
+                    candidate.pane_width_ms,
+                    candidate.pane_count,
+                    false,
+                )
+            };
+            format!(
+                "{} in {} × {} panes",
                 for_queries(
                     state_name(&candidate.build),
                     &readers(candidate_roots, chain)
                 ),
                 candidate.pane_count,
                 duration_name(candidate.pane_width_ms)
-            );
-            let mut counts: Vec<u32> = group_of(i)
-                .into_iter()
-                .flatten()
-                .map(|&m| candidates[m].pane_count)
-                .filter(|&n| n < candidate.pane_count)
-                .collect();
-            counts.sort_unstable();
-            counts.dedup();
-            let newest: Vec<String> = counts
-                .into_iter()
-                .map(|n| {
-                    let reads_newest = |node: &OperatorNode| match node.asap() {
-                        Some(ASAPOp::SummaryMerge {
-                            children,
-                            newest_panes,
-                            ..
-                        }) => *newest_panes == Some(n) && children.iter().any(|c| chain(c)),
-                        _ => false,
-                    };
-                    format!(
-                        "{} newest {n}",
-                        query_names(&readers(candidate_roots, reads_newest))
-                    )
-                })
-                .collect();
-            if !newest.is_empty() {
-                text += &format!(" ({})", newest.join(", "));
-            }
-            text
+            )
         })
         .collect();
+    let shared = pass2.shared_pane_chains.iter().map(|shared| {
+        let build = &candidates[shared.members[0]].build;
+        let chain = |node: &OperatorNode| {
+            is_pane_chain_of(node, build, shared.pane_width_ms, shared.pane_count, true)
+        };
+        let mut text = format!(
+            "one {} in {} × {} panes",
+            for_queries(state_name(build), &readers(candidate_roots, chain)),
+            shared.pane_count,
+            duration_name(shared.pane_width_ms)
+        );
+        let mut counts: Vec<u32> = shared
+            .members
+            .iter()
+            .map(|&m| {
+                u32::try_from(candidates[m].window_ms() / shared.pane_width_ms).unwrap_or(u32::MAX)
+            })
+            .filter(|&n| n < shared.pane_count)
+            .collect();
+        counts.sort_unstable();
+        counts.dedup();
+        let newest: Vec<String> = counts
+            .into_iter()
+            .map(|n| {
+                let reads_newest = |node: &OperatorNode| match node.asap() {
+                    Some(ASAPOp::SummaryMerge {
+                        children,
+                        newest_panes,
+                        ..
+                    }) => *newest_panes == Some(n) && children.iter().any(|c| chain(c)),
+                    _ => false,
+                };
+                format!(
+                    "{} newest {n}",
+                    query_names(&readers(candidate_roots, reads_newest))
+                )
+            })
+            .collect();
+        if !newest.is_empty() {
+            text += &format!(" ({})", newest.join(", "));
+        }
+        text
+    });
+    let panes: Vec<String> = own.into_iter().chain(shared).collect();
     if !panes.is_empty() {
         label += &format!(" · {}", panes.join(", "));
     }
@@ -355,11 +374,17 @@ fn same_computation(a: &OperatorNode, b: &OperatorNode) -> bool {
                 .all(|(x, y)| same_computation(x, y)))
 }
 
-/// Whether `node` is the pane chain `candidate`'s build became: the same
-/// family, update, grouping and filter, over the build's window input, in
-/// `candidate`'s panes. With `any_size`, the family at any size: a chain
-/// shared by nested windows is sized for all its readers.
-fn is_pane_chain_of(node: &OperatorNode, candidate: &PaneCandidate, any_size: bool) -> bool {
+/// Whether `node` is a pane chain `build` became: the same family, update,
+/// grouping and filter, over the build's window input, in `chain_pane_count`
+/// panes of `chain_pane_width_ms`. With `any_size`, the family at any size:
+/// a shared chain is sized for all its readers.
+fn is_pane_chain_of(
+    node: &OperatorNode,
+    build: &OperatorNode,
+    chain_pane_width_ms: u64,
+    chain_pane_count: u32,
+    any_size: bool,
+) -> bool {
     let (
         Some(ASAPOp::PaneChain {
             child,
@@ -379,11 +404,11 @@ fn is_pane_chain_of(node: &OperatorNode, candidate: &PaneCandidate, any_size: bo
             grouping: build_grouping,
             filter: build_filter,
         }),
-    ) = (node.asap(), candidate.build.asap())
+    ) = (node.asap(), build.asap())
     else {
         return false;
     };
-    (*pane_width_ms, *pane_count) == (candidate.pane_width_ms, candidate.pane_count)
+    (*pane_width_ms, *pane_count) == (chain_pane_width_ms, chain_pane_count)
         && (family == build_family
             || any_size
                 && match (family, build_family) {
@@ -599,6 +624,54 @@ mod tests {
         );
         let distinct: std::collections::BTreeSet<&String> = logical.iter().copied().collect();
         assert_eq!(distinct.len(), logical.len(), "{logical:#?}");
+    }
+
+    /// A 1-min sum every 10 s (6 × 10-s panes) and a 2-min sum every 20 s
+    /// (6 × 20-s panes) read one chain of 10-s panes: the label lists it
+    /// once with both readers and the newest panes the 1-min sum merges.
+    #[test]
+    fn a_chain_shared_across_intervals_is_listed_once_with_its_newest_readers() {
+        use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
+        use asap_types::ir::properties::AccuracyTarget;
+        use asap_types::workload::{
+            DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
+            QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+        };
+        let panel = |query: &str, interval_ms: u32| RepeatingEntry {
+            query: Query(query.into()),
+            demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval_ms)),
+            requirements: QueryRequirements {
+                accuracy: AccuracyTarget::exact(),
+                max_latency_ms: None,
+            },
+            predictability: Predictability::Predictable { known_at: None },
+            range_evaluation: None,
+        };
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: None,
+                repeating_queries: Some(vec![
+                    panel("sum_over_time(a[1m])", 10_000),
+                    panel("sum_over_time(a[2m])", 20_000),
+                ]),
+            },
+            data_workload: Some(shared_data_workload(
+                DataArrival::Ingesting {
+                    rows_per_second: SHARED_ROWS_PER_SECOND,
+                },
+                "a",
+            )),
+        };
+        let run =
+            run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
+        let labels = candidate_labels(&run);
+        assert!(
+            labels
+                .values()
+                .any(|l| l.contains("one Sum acc for Q1, Q2 in 12 × 10s panes (Q1 newest 6)")),
+            "{labels:#?}"
+        );
     }
 
     /// A fused computation's candidate is labeled apart from the unfused pair's:
