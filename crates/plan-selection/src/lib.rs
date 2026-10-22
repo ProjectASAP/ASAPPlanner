@@ -1889,19 +1889,135 @@ fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
 
 /// How many values one evaluation of `root` returns at most (`G`): one for
 /// a scalar root and for a root of at most one row ([`at_most_one_row`]),
-/// provable from the query; otherwise `series_read` ([`series_read`]) for
-/// a PromQL instant vector, which bounds the values it can return: each
-/// branch of an `or` adds its own. `None` when unbound: `series_read` is,
-/// any other SQL result (until a bound on the groups of its source is an
-/// input), and a range vector.
-fn values_per_result(root: &QueryRoot, series_read: Option<u64>) -> Option<u64> {
-    match root {
-        QueryRoot::Scalar(_) => Some(1),
-        QueryRoot::Operator(node) if at_most_one_row(node) => Some(1),
-        QueryRoot::Operator(node) if node.result_kind == OperatorResultKind::InstantVector => {
-            series_read.map(|series| series.max(1))
+/// provable from the query. Otherwise the smaller of two bounds, either
+/// alone when the other is unknown: `series_read` ([`series_read`]) for a
+/// PromQL instant vector, which bounds the values it can return (each
+/// branch of an `or` adds its own), and, for a grouped root of any
+/// language, the groups its keys' declared distinct values allow
+/// ([`declared_group_bound`]), at most `series_read`. `None` when neither
+/// applies: an ungrouped SQL result, a grouping with an undeclared key, a
+/// range vector.
+fn values_per_result(
+    root: &QueryRoot,
+    series_read: Option<u64>,
+    data: &DataWorkload,
+) -> Option<u64> {
+    let node = match root {
+        QueryRoot::Scalar(_) => return Some(1),
+        QueryRoot::Operator(node) if at_most_one_row(node) => return Some(1),
+        QueryRoot::Operator(node) => node,
+    };
+    let by_series = (node.result_kind == OperatorResultKind::InstantVector)
+        .then_some(series_read)
+        .flatten();
+    let by_groups = declared_group_bound(node, data)
+        .map(|groups| series_read.map_or(groups, |series| groups.min(series)));
+    let values = match (by_series, by_groups) {
+        (Some(series), Some(groups)) => Some(series.min(groups)),
+        (series, groups) => series.or(groups),
+    };
+    values.map(|values| values.max(1))
+}
+
+/// An upper bound on the groups `node` returns, from the distinct values
+/// the sources it reads declare for its group keys
+/// (`SourceFacts::distinct_values_per_label`): the product over the keys of
+/// each key's counts summed over those sources. The grouping is found
+/// below operators that only keep, drop or reorder rows, and through a
+/// summary's estimate (not a top-k, which returns several rows per group),
+/// merge and finalization. `None` when no such grouping is found, it is a
+/// `without (...)`, or a source read does not declare one of its keys: the
+/// declared counts are upper bounds, never defaults.
+fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64> {
+    let grouped = |reduction: &Reduction, input: &Rc<OperatorNode>| -> Option<u64> {
+        let Reduction::Reduce(keys) = reduction else {
+            return None;
+        };
+        if keys.is_without() {
+            return None;
         }
-        QueryRoot::Operator(_) => None,
+        let mut sources = BTreeSet::new();
+        scan_sources(input, &mut HashSet::new(), &mut sources);
+        if sources.is_empty() {
+            return None;
+        }
+        keys.keys().iter().try_fold(1u64, |product, key| {
+            let label = &input.schema.fields.get(*key)?.name;
+            let count = sources.iter().try_fold(0u64, |total, source| {
+                let count = data
+                    .sources
+                    .get(source)?
+                    .distinct_values_per_label
+                    .get(label)?;
+                Some(total.saturating_add(*count))
+            })?;
+            Some(product.saturating_mul(count))
+        })
+    };
+    match &node.operator {
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            child,
+            ..
+        }) if !measures
+            .iter()
+            .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. })) =>
+        {
+            grouped(reduction, child)
+        }
+        Operator::ASAP(
+            ASAPOp::SummaryAgg {
+                reduction, child, ..
+            }
+            | ASAPOp::PaneChain {
+                reduction, child, ..
+            },
+        ) => grouped(reduction, child),
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => match node.summary_build() {
+            Some(
+                ASAPOp::SummaryAgg {
+                    reduction, child, ..
+                }
+                | ASAPOp::PaneChain {
+                    reduction, child, ..
+                },
+            ) => grouped(reduction, child),
+            _ => None,
+        },
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query,
+        }) if !matches!(query, SketchStatistic::TopK { .. }) => {
+            declared_group_bound(summary_input, data)
+        }
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
+        | Operator::NonASAP(
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. }
+            | NonASAPOp::Dedup { child, .. },
+        ) => declared_group_bound(child, data),
+        _ => None,
+    }
+}
+
+/// The sources (PromQL metrics, SQL tables) the scans under `node` read;
+/// `seen` holds the nodes already visited, so a shared node is read once.
+fn scan_sources(
+    node: &OperatorNode,
+    seen: &mut HashSet<*const OperatorNode>,
+    sources: &mut BTreeSet<String>,
+) {
+    if !seen.insert(node as *const OperatorNode) {
+        return;
+    }
+    if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
+        sources.insert(source_name(source).to_string());
+    }
+    for child in node.children() {
+        scan_sources(child, seen, sources);
     }
 }
 
@@ -2036,9 +2152,11 @@ pub fn resize_for_failure_probability(
         else {
             continue;
         };
-        let values = target
-            .accuracy_scope
-            .max_values_covered(values_per_result(root, series_read(root, data)));
+        let values = target.accuracy_scope.max_values_covered(values_per_result(
+            root,
+            series_read(root, data),
+            data,
+        ));
         let Some(values) = values else { continue };
         let inputs = approximate_inputs(root);
         let per_input_failure_probability = delta / (inputs.len() as f64 * values as f64);
@@ -2222,7 +2340,7 @@ fn guarantee_check(
     // A guarantee per value is stated over the values the target's scope
     // covers: the whole result's `G`, or at most `⌊1 / share⌋` groups.
     let series = series_read(root, data);
-    let values = values_per_result(root, series);
+    let values = values_per_result(root, series, data);
     let over_scope = |g: AccuracyGuarantee| g.over_scope(target.accuracy_scope, values);
     let guarantee = bound_root_guarantee(root, series, data, models).map(over_scope);
     let meets = |g: &AccuracyGuarantee| models.effective_accuracy().satisfies(g, target);
@@ -2279,8 +2397,9 @@ fn guarantee_check(
                 format!(
                     "q{query}: the output's guarantee holds for each value, and the number \
                      of values one evaluation returns is not bound (no declared series \
-                     count for a source a PromQL vector reads; no bound on a SQL result's \
-                     groups yet), so it does not meet whole-result target {target:?}, and \
+                     count for a source a PromQL vector reads, and no declared \
+                     `distinct_values_per_label` for every group key), so it does not meet \
+                     whole-result target {target:?}, and \
                      the deployment has no evidence that it meets it (a target on the groups \
                      holding a share of the records, `groups_with_record_share_at_least`, \
                      covers a bound number of values)"
@@ -4602,7 +4721,7 @@ mod tests {
 
     /// `G` of `root` over `data` ([`values_per_result`]).
     fn values_of(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
-        values_per_result(root, series_read(root, data))
+        values_per_result(root, series_read(root, data), data)
     }
 
     /// [`bound_root_guarantee`] of `root` over `data`.
@@ -6029,6 +6148,29 @@ mod tests {
             few.iter().any(|d| d.contains(" in 50 partitions;")),
             "{few:?}"
         );
+    }
+
+    /// A grouped root's `G` is also bound by its keys' declared distinct
+    /// values, at most the series read: `by (job)` with 10 jobs returns at
+    /// most 10 values; a key without a declared count, `without (...)` and
+    /// a top-k (several rows per group) keep the series bound.
+    #[test]
+    fn values_per_result_is_bound_by_the_declared_distinct_values_of_its_keys() {
+        let root =
+            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::max_error(0.01)));
+        let mut data = with_series(Some(10_000));
+        data.sources.get_mut("x").unwrap().distinct_values_per_label =
+            [("job".to_string(), 10), ("instance".to_string(), 5_000)].into();
+        for (query, values) in [
+            ("sum by (job) (rate(x[5m]))", 10),
+            ("sum by (job, instance) (rate(x[5m]))", 10_000),
+            ("sum by (job, region) (rate(x[5m]))", 10_000),
+            ("sum without (instance) (rate(x[5m]))", 10_000),
+            ("topk by (job) (3, rate(x[5m]))", 10_000),
+            ("sum by (job) (rate(x[5m]) + rate(m[5m]))", 20_000),
+        ] {
+            assert_eq!(values_of(&root(query), &data), Some(values), "{query}");
+        }
     }
 
     /// `G` counts the values the root can return: an `or` returns the

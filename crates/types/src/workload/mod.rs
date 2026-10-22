@@ -564,8 +564,12 @@ pub struct SourceFacts {
     /// `{"host": 1000, "job": 10}`. Plan selection estimates the groups of
     /// a `by (k1, k2, ...)` as the product of its keys' counts, at most
     /// `series_count`; a grouping with an undeclared key keeps the default
-    /// of 100 groups, also at most `series_count`. Each count must be
-    /// positive. Omitted from JSON when empty.
+    /// of 100 groups, also at most `series_count`. When every key of a
+    /// grouped result declares a count, their product (at most the series
+    /// read) also bounds the values one evaluation returns (`G`), which a
+    /// whole-result accuracy target splits its failure probability over:
+    /// each count must be an upper bound, and positive. Omitted from JSON
+    /// when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub distinct_values_per_label: BTreeMap<String, u64>,
 }

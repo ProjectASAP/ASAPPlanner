@@ -50,7 +50,7 @@ once, with probability at least 1 − δ:
 | `AccuracyScope` | JSON | Values covered (`V`) |
 |---|---|---|
 | `PerValue` | `"per_value"` | Each value on its own: `V = 1` |
-| `WholeResult` (default) | `"whole_result"` | Every value of the result: `V = G`, the values one evaluation returns; unbound for a SQL grouped result and for a PromQL vector whose sources declare no series count |
+| `WholeResult` (default) | `"whole_result"` | Every value of the result: `V = G`, the values one evaluation returns; unbound for a grouped result (PromQL or SQL) whose keys' distinct values are not all declared and whose sources declare no series count (PromQL), and for an ungrouped SQL result |
 | `GroupsWithRecordShareAtLeast(share)` | `{"groups_with_record_share_at_least": 0.05}` | Every group (result row) holding at least `share` of the records the query aggregates in one evaluation: `V = min(⌊1 / share⌋, G)`, bound even when `G` is not; a smaller group is not covered |
 
 The record-share scope is for queries that watch only their large groups, for
@@ -82,9 +82,13 @@ A summary several queries read is sized for the smallest `δ / (n · V)` among
 its readers. At equal δ and `n`, the scope covering the most values is the
 strictest: every group (`G`, when `G` is above 100), then a 1% share (100),
 then a 5% share (20), then a single value (1). A whole-result target with an unbound `G`
-enlarges nothing and stays unmet; a SQL grouped result has no bound on `G` yet,
-so a sketch meets a whole-result target over SQL groups only once a grouping's
-cardinality can be declared.
+enlarges nothing and stays unmet. A grouped result's `G` is bound by the
+distinct values its sources declare for its group keys
+(`SourceFacts.distinct_values_per_label`): the product over the keys, at most
+the series read. So a sketch meets a whole-result target over SQL groups when
+every grouping column's distinct values are declared, and over 25 services
+and 25 endpoints sizes each group's sketch for `δ / 625`. Nothing declared
+leaves `G` unbound; no default stands in for it.
 
 An `AccuracyGuarantee` contains an error metric, an error-bound expression, a
 failure-probability expression and provenance. The metric is essential:
