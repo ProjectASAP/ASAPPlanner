@@ -292,13 +292,18 @@ query's window comes from its text (range and offset). These facts are separate:
 `Mixed` with `rows_per_second`, or `Unknown`) and `sources`, a map from
 PromQL metric or SQL table name to `SourceFacts`: `series_count`,
 `metric_type`, `values_non_negative`, `sample_interval` (PromQL and
-MetricsQL), `stream_norms` and `max_distinct_per_evaluation`. Every fact is declared: the planner has no
+MetricsQL), `stream_norms`, `max_distinct_per_evaluation` and
+`distinct_values_per_label` (distinct values per label or column, which
+plan selection prices a `by (...)` grouping's groups at: the product of its
+keys' counts, or 100 when a key is undeclared, at most `series_count`
+either way; over several sources a key's counts add). Every fact is declared: the planner has no
 clock, so a caller drops facts that no longer hold before planning. Plan
 selection bounds a query's number of values `G`, and its input row count,
 by the `series_count` of the sources it reads, counting each branch of an
 `or` or union. `DataWorkload::validate()` checks the data facts: the
 arrival rate must be finite and nonnegative, a sample interval nonzero,
-stream norms finite and nonnegative, and distinct bounds positive.
+stream norms finite and nonnegative, and distinct bounds and per-label
+distinct-value counts positive.
 `PlanningWorkload::validate()` shares these checks.
 
 ```json

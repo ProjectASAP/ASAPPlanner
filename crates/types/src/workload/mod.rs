@@ -559,6 +559,15 @@ pub struct SourceFacts {
     /// is unknown. KMV's guarantee needs no bound.
     #[serde(default)]
     pub max_distinct_per_evaluation: Option<u64>,
+    /// How many distinct values each label (PromQL) or column (SQL) of the
+    /// source takes, keyed by its name (default: none declared), e.g.
+    /// `{"host": 1000, "job": 10}`. Plan selection estimates the groups of
+    /// a `by (k1, k2, ...)` as the product of its keys' counts, at most
+    /// `series_count`; a grouping with an undeclared key keeps the default
+    /// of 100 groups, also at most `series_count`. Each count must be
+    /// positive. Omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub distinct_values_per_label: BTreeMap<String, u64>,
 }
 
 /// Upper bounds on the norms of the frequency (weight) vector any one
@@ -675,6 +684,13 @@ impl DataWorkload {
             }
             if facts.max_distinct_per_evaluation == Some(0) {
                 return Err(WorkloadError::ZeroMaxDistinct);
+            }
+            if facts
+                .distinct_values_per_label
+                .values()
+                .any(|&count| count == 0)
+            {
+                return Err(WorkloadError::ZeroDistinctValues);
             }
         }
         Ok(())
@@ -821,6 +837,10 @@ pub enum WorkloadError {
     /// Bad input: a source's `max_distinct_per_evaluation` of zero.
     #[error("a source's max_distinct_per_evaluation must be greater than zero")]
     ZeroMaxDistinct,
+    /// Bad input: a label (or column) declared with zero distinct values in
+    /// a source's `distinct_values_per_label`.
+    #[error("a source's distinct_values_per_label counts must be greater than zero")]
+    ZeroDistinctValues,
     /// Bad input: a source declares a `series_count` of zero. A source
     /// with no series has nothing to plan for, and `absent(m)` over it
     /// still returns one row.
@@ -940,6 +960,27 @@ mod tests {
         };
         assert!(with(1).validate().is_ok());
         assert_eq!(with(0).validate(), Err(WorkloadError::ZeroMaxDistinct));
+    }
+
+    /// A declared distinct-value count is positive: a label with no value
+    /// would make every grouping over it empty.
+    #[test]
+    fn distinct_values_per_label_must_be_positive() {
+        let with = |count: u64| DataWorkload {
+            sources: BTreeMap::from([(
+                "m".to_string(),
+                SourceFacts {
+                    distinct_values_per_label: BTreeMap::from([
+                        ("host".to_string(), 1_000),
+                        ("job".to_string(), count),
+                    ]),
+                    ..SourceFacts::default()
+                },
+            )]),
+            ..DataWorkload::default()
+        };
+        assert!(with(1).validate().is_ok());
+        assert_eq!(with(0).validate(), Err(WorkloadError::ZeroDistinctValues));
     }
 
     /// A declared series count is positive: with zero series, `absent(m)`
@@ -1211,6 +1252,7 @@ mod tests {
                             l2: None,
                         }),
                         max_distinct_per_evaluation: Some(100),
+                        distinct_values_per_label: BTreeMap::from([("job".to_string(), 10)]),
                     },
                 )]),
             }),
@@ -1227,7 +1269,8 @@ mod tests {
                     "values_non_negative": true,
                     "sample_interval": 15000,
                     "stream_norms": {"l1": 1e9, "l2": null},
-                    "max_distinct_per_evaluation": 100
+                    "max_distinct_per_evaluation": 100,
+                    "distinct_values_per_label": {"job": 10}
                 }}
             })
         );

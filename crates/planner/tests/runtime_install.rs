@@ -1207,18 +1207,20 @@ fn relative_time(from_ms: i64, to_ms: i64) -> Vec<SelectionBox> {
     }]
 }
 
-/// A fine and a coarse sum (`sum by (job, instance)` and `sum by (job)`),
-/// both built at ingestion from one stored per-series sum: Stage 1 shares
-/// the per-series sums the two queries read (over scans that project other
-/// labels). The per-series sum is listed first, then each group sum, which
-/// reads only it, with its time selection under a definition of its own;
-/// built in that order from stored inputs, they answer as the query-time
-/// reference.
+/// A per-group maximum and a per-group sum (`max by (job)` and
+/// `sum by (job, instance)`), both built at ingestion from one stored
+/// per-series sum: Stage 1 shares the per-series sums the two queries read
+/// (over scans that project other labels). The per-series sum is listed
+/// first, then each group output, which reads only it, with its time
+/// selection under a definition of its own; built in that order from
+/// stored inputs, they answer as the query-time reference. (A coarse sum
+/// in place of the maximum rolls up from the fine sum instead:
+/// [`a_coarse_sum_rolls_up_from_the_stored_fine_sum`].)
 #[tokio::test]
-async fn group_sums_from_one_stored_per_series_sum_are_listed_and_built() {
+async fn group_outputs_from_one_stored_per_series_sum_are_listed_and_built() {
     let workload = exact_workload(
         &[
-            "sum by (job) (sum_over_time(m[1m]))",
+            "max by (job) (sum_over_time(m[1m]))",
             "sum by (job, instance) (sum_over_time(m[1m]))",
         ],
         "",
@@ -1261,6 +1263,45 @@ async fn group_sums_from_one_stored_per_series_sum_are_listed_and_built() {
         &mut SummaryStore::new(),
     );
     assert_eq!(run.outputs_built, 3);
+    assert_eq!(run.answers_per_query[0].len(), 2, "one maximum per job");
+    assert_eq!(run.answers_per_query[1].len(), 6, "one sum per series");
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// A coarse and a fine sum (`sum by (job)` and `sum by (job, instance)`):
+/// the fine grouping is priced at no more than the 6 series, as the
+/// per-series sum is, so the coarse sum rolls up from it and the plan
+/// stores two outputs, the second reading only the first. Built in that
+/// order, they answer as the query-time reference.
+#[tokio::test]
+async fn a_coarse_sum_rolls_up_from_the_stored_fine_sum() {
+    let workload = exact_workload(
+        &[
+            "sum by (job) (sum_over_time(m[1m]))",
+            "sum by (job, instance) (sum_over_time(m[1m]))",
+        ],
+        "",
+    );
+    let plan_json = forced_plan_json(
+        &workload,
+        &DeploymentCapabilities::default(),
+        summaries_at_ingestion,
+    )
+    .await;
+    let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    let [first, rolled_up] = plan.stored_outputs.as_slice() else {
+        panic!("{:#?}", plan.stored_outputs);
+    };
+    assert!(first.inputs.stored_outputs.is_empty());
+    assert_eq!(rolled_up.inputs.stored_outputs, [first.node_id]);
+    assert!(rolled_up.inputs.raw_data_sample_windows.is_empty());
+    let run = run_data_plane(
+        &plan_json,
+        &job_samples(),
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.outputs_built, 2);
     assert_eq!(run.answers_per_query[0].len(), 2, "one sum per job");
     assert_eq!(run.answers_per_query[1].len(), 6, "one sum per series");
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);

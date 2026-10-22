@@ -229,7 +229,9 @@ use std::rc::Rc;
 use asap_types::ir::operator::operator_properties::{
     BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind,
 };
-use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, AggIntent, Reduction, Source};
+use asap_types::ir::operator::{
+    agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction, Source,
+};
 use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
@@ -296,7 +298,9 @@ pub use measured_operation_costs::{
     OperatorCost, OperatorKind, SummaryOperation,
 };
 
-/// Groups assumed for every `by (...)` reduction, absent group-count evidence.
+/// Groups assumed for a `by (...)` reduction (or partition) with a key whose
+/// distinct-value count the data workload does not declare
+/// ([`estimated_group_count`]).
 const DEFAULT_GROUP_COUNT: u64 = 100;
 /// Used only when the data workload does not declare them.
 const DEFAULT_SERIES: u64 = 1_000;
@@ -2699,6 +2703,44 @@ fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> f64 {
         .sum()
 }
 
+/// The groups (or partitions) a `by (keys)` over rows of schema `input`
+/// from `sources` is priced at: the product of each key's distinct-value
+/// count, which each source read declares in `distinct_values_per_label`
+/// (summed over the sources: a union holds at most the sum, while a join
+/// matching on the key is over-counted), at most `series` (each group holds
+/// at least one series). A `without (...)` or a key some source read does not
+/// declare gives [`DEFAULT_GROUP_COUNT`], also at most `series`.
+fn estimated_group_count(
+    keys: &GroupKeys,
+    input: Option<&Schema>,
+    sources: &BTreeSet<&str>,
+    data: &DataWorkload,
+    series: u64,
+) -> u64 {
+    let distinct_values = |key: &usize| -> Option<u64> {
+        let label = &input?.fields.get(*key)?.name;
+        if sources.is_empty() {
+            return None;
+        }
+        sources.iter().try_fold(0u64, |total, source| {
+            let count = data
+                .sources
+                .get(*source)?
+                .distinct_values_per_label
+                .get(label)?;
+            Some(total.saturating_add(*count))
+        })
+    };
+    let declared = if keys.is_without() {
+        None
+    } else {
+        keys.keys().iter().try_fold(1u64, |product, key| {
+            Some(product.saturating_mul(distinct_values(key)?))
+        })
+    };
+    declared.unwrap_or(DEFAULT_GROUP_COUNT).min(series).max(1)
+}
+
 /// The series pricing assumes a node reading `sources` sees: the sum of
 /// their declared series counts, [`DEFAULT_SERIES`] for each source
 /// without one and for a node that reads none.
@@ -3126,10 +3168,15 @@ fn price_at_scale(
             output,
             promql: None,
         };
+        // The schema the node's group and partition keys index.
+        let input_schema = producers.first().map(|p| &nodes[p].output_schema);
+        let estimated_groups = |keys: &GroupKeys| {
+            estimated_group_count(keys, input_schema, &sources_read_by[&node.id], data, series)
+        };
         let groups = |reduction: &Reduction| {
             let groups = match reduction {
                 Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => 1,
-                Reduction::Reduce(keys) if !keys.is_without() => DEFAULT_GROUP_COUNT,
+                Reduction::Reduce(keys) if !keys.is_without() => estimated_groups(keys),
                 _ => series,
             };
             // One second of arriving rows does not bound the groups a
@@ -3205,7 +3252,7 @@ fn price_at_scale(
                     let partitions = if partition_by.keys().is_empty() {
                         1
                     } else {
-                        DEFAULT_GROUP_COUNT.min(input.rows.max(1))
+                        estimated_groups(partition_by).min(input.rows.max(1))
                     };
                     let estimate = estimate_operator(
                         PhysicalOperator::InMemoryComparisonSort {
@@ -3232,7 +3279,7 @@ fn price_at_scale(
                     let partitions = if partition_by.keys().is_empty() {
                         1
                     } else {
-                        DEFAULT_GROUP_COUNT
+                        estimated_groups(partition_by)
                     };
                     let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
                     let offset = (*offset as u64).saturating_mul(partitions);
@@ -5838,6 +5885,65 @@ mod tests {
         assert_eq!(
             joint.usage.scanned_bytes_per_second,
             2.0 * alone.usage.scanned_bytes_per_second
+        );
+    }
+
+    /// A partitioned sort and limit (`topk by (job)`) take their partition
+    /// count from `job`'s declared distinct values, and 100 when `job` is
+    /// undeclared, at most the source's series either way.
+    #[test]
+    fn a_partitioned_topk_has_one_partition_per_declared_label_value() {
+        let details = |declared: &[(&str, u64)], series: u64| {
+            let mut data = with_series(Some(series));
+            data.sources.get_mut("m").unwrap().distinct_values_per_label = declared
+                .iter()
+                .map(|(label, count)| (label.to_string(), *count))
+                .collect();
+            let cost = price(
+                &exact_dag(&["topk by (job) (3, m)"], &data),
+                &recurrences(1),
+                &data,
+                &PlanSelectionSettings::default(),
+            )
+            .unwrap();
+            node_prices(&cost)
+                .into_iter()
+                .filter(|(operator, ..)| {
+                    matches!(operator, OperatorKind::Sort | OperatorKind::Limit)
+                })
+                .map(|(_, _, detail, _)| detail)
+                .collect::<Vec<_>>()
+        };
+        let declared = details(&[("job", 10)], 10_000);
+        assert!(
+            declared.iter().any(|d| d.contains(" in 10 partitions;")),
+            "{declared:?}"
+        );
+        assert!(
+            declared.iter().any(|d| d.starts_with("limit to 30 rows;")),
+            "{declared:?}"
+        );
+        let undeclared = details(&[("instance", 10)], 10_000);
+        assert!(
+            undeclared.iter().any(|d| d.contains(" in 100 partitions;")),
+            "{undeclared:?}"
+        );
+        assert!(
+            undeclared
+                .iter()
+                .any(|d| d.starts_with("limit to 300 rows;")),
+            "{undeclared:?}"
+        );
+        // 50 series hold at most 50 groups, declared or not.
+        let few = details(&[("job", 10_000)], 50);
+        assert!(
+            few.iter().any(|d| d.contains(" in 50 partitions;")),
+            "{few:?}"
+        );
+        let few = details(&[], 50);
+        assert!(
+            few.iter().any(|d| d.contains(" in 50 partitions;")),
+            "{few:?}"
         );
     }
 

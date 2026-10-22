@@ -200,6 +200,7 @@ struct SourceFacts {
     sample_interval: Option<DurationMs>,
     stream_norms: Option<StreamNorms>,
     max_distinct_per_evaluation: Option<u64>,
+    distinct_values_per_label: BTreeMap<String, u64>,
 }
 ```
 
@@ -212,6 +213,7 @@ struct SourceFacts {
 | `values_non_negative` | Optional; default `false` | Declares every sample non-negative, for a gauge as well as a counter. It is the sign a relative-error bound needs to carry through `sum` and `avg` (a per-series DDSketch quantile under `avg by`, say); without it, and for a gauge, that bound is unknown. |
 | `sample_interval` | PromQL and MetricsQL; nonzero | How often each series of the metric is sampled. Bare instant selectors over it use it as their selection horizon; without it, such a query fails to lower. |
 | `stream_norms`, `max_distinct_per_evaluation` | Optional | Bounds that Count-Min/Count Sketch and HLL/UnivMon guarantees are bound with. |
+| `distinct_values_per_label` | Optional; default empty; each count nonzero | Distinct values each label (PromQL) or column (SQL) takes, e.g. `{"host": 1000, "job": 10}`. Plan selection prices a `by (k1, k2, ...)` aggregate or summary, and a partitioned sort or limit, at the product of its keys' counts, at most the `series_count` it reads. Over several sources a key's counts add. A key some source read does not declare gives 100 groups, also at most that `series_count`. |
 
 Every fact is declared: the planner has no clock, so a caller drops facts
 that no longer hold before planning. Unavailable data facts stay unknown. Planner does not reinterpret
