@@ -184,12 +184,15 @@ are ignored, `stage_pipeline`'s default.
     "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }]
   },
   "stage3_plan_selection": {
-    "costs": { "P1": { "cost_per_second": 7.9, "unit": "cost_per_second", "source": "...",
+    "costs": { "P1": { "cost_per_second": 7.9, "cpu_core_seconds_per_second": 0.0041,
+                       "unit": "cost_per_second", "source": "...",
                        "usage": { "cpu_ops_per_second": 4100210.0, "scanned_bytes_per_second": 38400000.0,
                                   "average_memory_bytes": 0.0, "peak_memory_bytes": 16481088,
                                   "disk_bytes": 192000000, "peak_cpu_cores": 2,
                                   "latency_per_query": [{ "compaction_ms": 0.0, "query_ms": 33.2 }] },
-                       "per_node": { "<node id>": { "cost_per_second": 2.3, "multiplier": 1, "detail": "...",
+                       "per_node": { "<node id>": { "operator": "Scan", "timing": "query_time",
+                                                     "cpu_core_seconds_per_second": 0.0012,
+                                                     "cost_per_second": 2.3, "multiplier": 1, "detail": "...",
                                                      "price_source": "analytical" } } } },
     "accepted": { "P1": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
                            "summary": "metric not set; accepted rank (Kll)" }] },
@@ -237,9 +240,14 @@ are ignored, `stage_pipeline`'s default.
   each pruned candidate of the target (`pruned`) and of its fused
   computation (`fused_pruned`) with the reason. The page does not show
   either section yet.
-- A node's `per_node` entry holds `cost_per_second`, `multiplier`,
-  `detail` and `price_source` (`measured` when `--measured-operation-costs`
-  priced it, else `analytical`).
+- A node's `per_node` entry holds its `operator` (as the measured cost
+  table names it), `timing` (`ingestion_time` or `query_time`), its
+  predicted CPU in core-seconds per second (`cpu_core_seconds_per_second`),
+  `cost_per_second`, `multiplier`, `detail` and `price_source` (`measured`
+  when `--measured-operation-costs` priced it, else `analytical`), the
+  names `plan_installable`'s predicted usage gives them. A candidate's
+  `cpu_core_seconds_per_second` is its nodes' sum. These CPU fields are
+  report-only: prices do not read them back.
 - Each `stage3_plan_selection.rejected` entry has a `cause`: a failed check
   (`failure_probability_resize_failed`, `accuracy_target_missed`,
   `count_min_weights_not_proven_non_negative`,
@@ -271,9 +279,12 @@ are ignored, `stage_pipeline`'s default.
   queries (`interchangeable_queries`, by query index), and per query its
   own candidates checked and those discarded with why.
 - `stage3_plan_selection.warnings` holds one-line warnings about the
-  selected plan, e.g. its peak memory when over 10^12 bytes and the cost
-  model declares no memory capacity; absent when there are none. The candidate
-  list's header shows them.
+  workload and the selected plan: a PromQL query applying `rate`,
+  `increase` or `irate` to a metric the data workload declares a gauge
+  (prefixed with the query id; the query still plans as written), and the
+  plan's peak memory when over 10^12 bytes and the cost model declares no
+  memory capacity; absent when there are none. The candidate list's header
+  shows them.
 - `search_rejected` lists the rejections that name no candidate the
   document holds: under the default search, the first rejection of each
   cause (their candidates are not kept), and the search's own (e.g. `q2`

@@ -232,6 +232,47 @@ pub(crate) fn metric_names(query: &str) -> Result<std::collections::BTreeSet<Str
     Ok(metrics.into_iter().collect())
 }
 
+/// Each `rate`, `increase` or `irate` call in `query` with every metric its
+/// argument reads ([`crate::counter_function_over_gauge_warnings`]).
+pub(crate) fn counter_function_metrics(
+    query: &str,
+) -> Result<std::collections::BTreeSet<(&'static str, String)>> {
+    fn collect(expr: &Expr, out: &mut std::collections::BTreeSet<(&'static str, String)>) {
+        match expr {
+            Expr::Paren(p) => collect(&p.expr, out),
+            Expr::Unary(u) => collect(&u.expr, out),
+            Expr::Subquery(s) => collect(&s.expr, out),
+            Expr::Aggregate(a) => collect(&a.expr, out),
+            Expr::Binary(b) => {
+                collect(&b.lhs, out);
+                collect(&b.rhs, out);
+            }
+            Expr::Call(c) => {
+                let function = match c.func.name {
+                    "rate" => Some("rate"),
+                    "increase" => Some("increase"),
+                    "irate" => Some("irate"),
+                    _ => None,
+                };
+                for arg in &c.args.args {
+                    if let Some(function) = function {
+                        let mut metrics = Vec::new();
+                        collect_metric_names(arg, &mut metrics);
+                        out.extend(metrics.into_iter().map(|m| (function, m)));
+                    }
+                    collect(arg, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let ast = parser::parse(query).map_err(LoweringError::Parse)?;
+    check_depth(&ast, MAX_DEPTH)?;
+    let mut calls = std::collections::BTreeSet::new();
+    collect(&ast, &mut calls);
+    Ok(calls)
+}
+
 std::thread_local! {
     static ACCURACY: std::cell::RefCell<AccuracyTarget> =
         const { std::cell::RefCell::new(AccuracyTarget::exact()) };
