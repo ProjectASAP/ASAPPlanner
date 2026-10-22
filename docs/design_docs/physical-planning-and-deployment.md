@@ -439,7 +439,8 @@ table `Scan` is read with the executor's `TableRowSelector`, the table
 counterpart of `RawDataSampleSelector`. For each window end, `window_batch`
 keeps the table rows whose time column lies in `(end - w, end]` and that the
 `Scan`'s predicates keep, in the `TimeRange`'s schema. The runtime binds that
-batch at the `TimeRange`.
+batch at the `TimeRange`. Each call reads all the rows it is given, so a
+runtime passes the rows of that window or pane, not the whole retained table.
 
 The Planner integration test executes both candidates through the shared runtime
 and reverses the selected frontier with two controlled cost fixtures. It also

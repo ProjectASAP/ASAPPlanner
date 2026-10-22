@@ -228,7 +228,7 @@ pub struct TableRowSelector {
     /// The `Scan`'s predicates, compiled over its schema.
     predicates: Vec<CompiledExpression>,
     /// The table's time column (its time index), in Unix milliseconds.
-    time_column: usize,
+    time_column_index: usize,
     /// Width of the window.
     width_ms: i64,
 }
@@ -245,7 +245,7 @@ impl TableRowSelector {
         if prepared.kind != TimeRangeKind::Range {
             return Err(Error::Invalid("a table window is a range TimeRange".into()));
         }
-        let time_column = prepared
+        let time_column_index = prepared
             .scan_schema
             .time_index
             .ok_or_else(|| Error::Invalid("the window's table has no time index".into()))?;
@@ -254,7 +254,7 @@ impl TableRowSelector {
             scan_schema: prepared.scan_schema,
             time_range_schema: prepared.time_range_schema,
             predicates: prepared.predicates,
-            time_column,
+            time_column_index,
             width_ms: window.width_ms,
         })
     }
@@ -269,8 +269,10 @@ impl TableRowSelector {
     /// the rows of `rows` whose time column lies in `(window_end_ms - width,
     /// window_end_ms]` and that the `Scan`'s predicates keep, in the
     /// `TimeRange`'s schema, bound to the window's `TimeRange`. `rows` are
-    /// the table's rows in the `Scan`'s schema and may hold other times.
-    /// Bad input when they are in another schema.
+    /// the table's rows in the `Scan`'s schema; rows at other times are
+    /// skipped, but each call reads all of `rows`, so a runtime passes the
+    /// rows of this window (or pane), not the whole retained table. Bad
+    /// input when they are in another schema.
     pub fn window_batch(&self, window_end_ms: i64, rows: &Batch) -> Result<Batch, Error> {
         if rows.schema().fields != self.scan_schema.fields {
             return Err(Error::Invalid(
@@ -279,10 +281,11 @@ impl TableRowSelector {
         }
         let start_ms = window_end_ms - self.width_ms;
         let times = rows
-            .column(self.time_column)
+            .column(self.time_column_index)
             .as_any()
             .downcast_ref::<arrow::array::TimestampMillisecondArray>()
             .ok_or_else(|| Error::Invalid("the table's time column is not a timestamp".into()))?;
+        // `start < t <= end`; a null time is in no window.
         let in_window: arrow::array::BooleanArray = times
             .iter()
             .map(|t| Some(t.is_some_and(|t| start_ms < t && t <= window_end_ms)))
@@ -529,6 +532,20 @@ mod tests {
             .collect();
         assert_eq!(values, [3.0, 5.0]);
         assert_eq!(batch.schema().fields, rows.schema().fields);
+        // Rows in another schema are refused.
+        let other = Batch::try_new(
+            Arc::new(Schema::with_time_index(
+                vec![Field::plain("ts", DataType::Timestamp, false)],
+                0,
+                vec![],
+            )),
+            vec![vec![Value::Timestamp(9_500)]],
+        )
+        .unwrap();
+        assert!(matches!(
+            selector.window_batch(10_000, &other),
+            Err(Error::Invalid(_))
+        ));
     }
 
     /// A table selector refuses a time-series window and an instant one.
