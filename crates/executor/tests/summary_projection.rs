@@ -62,6 +62,7 @@ fn summary_projection_survives_recovery() {
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                     children: vec![],
                     newest_panes: None,
+                    group_by: None,
                 }),
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
@@ -201,6 +202,7 @@ fn summary_merge_without_inputs_is_rejected() {
             payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                 children: vec![],
                 newest_panes: None,
+                group_by: None,
             }),
             output_schema: schema,
             output_state: ExecutionDataState::INGESTION_SUMMARY,

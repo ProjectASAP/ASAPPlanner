@@ -4905,6 +4905,7 @@ mod tests {
             OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![chain],
                 newest_panes: None,
+                group_by: None,
             }))
             .unwrap(),
         );

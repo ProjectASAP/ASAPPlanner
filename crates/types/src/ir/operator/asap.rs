@@ -54,9 +54,9 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         child: C,
         evaluation: PopulationStatistic,
     },
-    /// Merge compatible partial states for the same grouping and family:
-    /// every input state of a group, including each pane of a
-    /// [`PaneChain`](ASAPOp::PaneChain), into one state per group.
+    /// Merge compatible partial states of one family: every input state of
+    /// a group, including each pane of a [`PaneChain`](ASAPOp::PaneChain),
+    /// into one state per group.
     SummaryMerge {
         children: Vec<C>,
         /// Merge only the newest `n` panes of the one `PaneChain` this
@@ -66,6 +66,13 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         /// `None` merges every input state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         newest_panes: Option<u32>,
+        /// A rollup (regrouping merge): the input's plain columns the
+        /// merged states are keyed by, in output order. Every input state
+        /// whose values in these columns match goes into one output state,
+        /// so states keyed by `(region, job)` merge into one per `job`.
+        /// `None` keeps the input's groups.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_by: Option<Vec<ColumnId>>,
     },
     /// A tumbling-pane window summary (#509 Pass 2, window-composition
     /// rule): the `SummaryAgg` with these `family`, `input`, `reduction`,
@@ -198,9 +205,11 @@ impl<C> ASAPOp<C> {
             SummaryMerge {
                 children,
                 newest_panes,
+                group_by,
             } => SummaryMerge {
                 children: children.iter().map(&mut f).collect(),
                 newest_panes: *newest_panes,
+                group_by: group_by.clone(),
             },
             SummarySubtract { left, right } => SummarySubtract {
                 left: f(left),
@@ -508,9 +517,15 @@ impl ASAPOp {
                     .output_schema()?
                 }
             }
-            SummaryMerge { children, .. } => {
+            SummaryMerge {
+                children, group_by, ..
+            } => {
                 self.validate_inputs()?;
-                children[0].schema.clone()
+                let input = &children[0].schema;
+                match group_by {
+                    None => input.clone(),
+                    Some(keys) => regrouped_schema(input, keys)?,
+                }
             }
             SummarySubtract { .. }
             | SummaryDelete { .. }
@@ -554,7 +569,13 @@ impl ASAPOp {
             SummaryMerge {
                 children,
                 newest_panes,
+                group_by,
             } => {
+                if newest_panes.is_some() && group_by.is_some() {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "a rollup merges every input state, not the newest panes".into(),
+                    ));
+                }
                 if let Some(n) = newest_panes {
                     let pane_count = match children.as_slice() {
                         [chain] => match chain.asap() {
@@ -759,6 +780,38 @@ impl ASAPOp {
         }
         Ok(())
     }
+}
+
+/// The schema of a regrouping `SummaryMerge` over states of schema `input`:
+/// the key columns `keys`, in order, then the state column. Each key must
+/// be a distinct plain column of `input` other than its time column.
+fn regrouped_schema(input: &Schema, keys: &[ColumnId]) -> Result<Schema, SchemaDerivationError> {
+    let invalid = |message: &str| SchemaDerivationError::InvalidScalarSignature(message.into());
+    let mut fields = Vec::with_capacity(keys.len() + 1);
+    for (position, &key) in keys.iter().enumerate() {
+        let field = input
+            .fields
+            .get(key)
+            .ok_or_else(|| invalid("a regrouping merge key is not an input column"))?;
+        if !field.is_plain() || input.time_index == Some(key) || keys[..position].contains(&key) {
+            return Err(invalid(
+                "a regrouping merge keys by distinct plain input columns other than time",
+            ));
+        }
+        fields.push(field.clone());
+    }
+    fields.extend(input.fields.iter().find(|field| !field.is_plain()).cloned());
+    // As an aggregate's: one row per key value, and no other column.
+    Ok(Schema {
+        fields,
+        time_index: None,
+        unique_keys: if keys.is_empty() {
+            Vec::new()
+        } else {
+            vec![(0..keys.len()).collect()]
+        },
+        closed: true,
+    })
 }
 
 /// The plain value an exact accumulator finalizes to.

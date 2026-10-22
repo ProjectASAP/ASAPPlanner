@@ -377,6 +377,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                             0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                                 children: vec![],
                                 newest_panes: None,
+                                group_by: None,
                             }),
                             2 | 3 => PhysicalASAPOperatorPayload::ASAP(
                                 ASAPOp::FinalizeExactAccumulator { child: id - 2 },

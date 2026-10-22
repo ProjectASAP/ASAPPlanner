@@ -175,6 +175,7 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, SchemaDeri
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children,
         newest_panes: None,
+        group_by: None,
     }))
 }
 
@@ -579,6 +580,7 @@ fn forged_merges_fail_validation() {
         Operator::ASAP(ASAPOp::SummaryMerge {
             children: vec![us.clone(), us],
             newest_panes: None,
+            group_by: None,
         }),
         schema,
     ));
@@ -872,4 +874,159 @@ fn selections_round_trip_through_json() {
         serde_json::from_value::<SelectionBox>(json).unwrap(),
         selection
     );
+}
+
+/// A `family` build over `child`'s `latency` (a table) or `value` (a
+/// series), grouped by `reduction`.
+fn grouped(
+    child: Rc<OperatorNode>,
+    family: FieldDataType,
+    reduction: Reduction,
+) -> Rc<OperatorNode> {
+    let column = match child.schema.column_id("latency") {
+        Some(_) => "latency",
+        None => "value",
+    };
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child,
+        family,
+        input: SummaryUpdate::column(ColumnRef::Named(column.into())),
+        reduction,
+        grouping: GroupingStrategy::default(),
+        filter: None,
+    }))
+    .unwrap()
+}
+
+fn kll_family() -> FieldDataType {
+    FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+        ),
+        GroupingStrategy::default(),
+    )
+}
+
+fn rollup(state: Rc<OperatorNode>, keys: Vec<usize>) -> Result<Rc<OperatorNode>, String> {
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![state],
+        group_by: Some(keys),
+        newest_panes: None,
+    }))
+    .map_err(|error| error.to_string())
+}
+
+/// States by (job, region) over `region ∈ {us, eu}`, rolled up to region,
+/// cover what a direct build by region over those rows does: the same
+/// definition (and id) and the same selection.
+#[test]
+fn a_rollup_covers_the_coarser_build() {
+    let rows = filter(
+        table(),
+        ScalarExpr::InList {
+            expr: Box::new(ScalarExpr::Column(REGION)),
+            list: vec![
+                ScalarExpr::Literal(ScalarValue::Utf8("us".into())),
+                ScalarExpr::Literal(ScalarValue::Utf8("eu".into())),
+            ],
+            negated: false,
+        },
+    );
+    let finer = grouped(rows.clone(), kll_family(), Reduction::by(vec![JOB, REGION]));
+    let coarse = grouped(rows, kll_family(), Reduction::by(vec![REGION]));
+    let rolled = rollup(finer, vec![1]).unwrap();
+    assert_eq!(rolled.schema, coarse.schema);
+    let (rolled, coarse) = (rolled.coverage().unwrap(), coarse.coverage().unwrap());
+    assert_eq!(rolled.definition_id(), coarse.definition_id());
+    assert_eq!(rolled.selection, coarse.selection);
+    assert_eq!(
+        rolled.selection[0].columns[&column("region")],
+        utf8(&["us", "eu"])
+    );
+}
+
+/// Per-series states keep their input's columns in place, so a rollup by
+/// the `job` label covers a build by `job` over the same series.
+#[test]
+fn a_rollup_of_per_series_states_covers_the_build_by_its_labels() {
+    let rows = pane_rows(0, vec![]);
+    let job = rows.schema.column_id("job").unwrap();
+    let per_series = grouped(rows.clone(), kll_family(), Reduction::PerEntity);
+    let state_job = per_series.schema.column_id("job").unwrap();
+    let rolled = rollup(per_series, vec![state_job]).unwrap();
+    let by_job = grouped(rows, kll_family(), Reduction::by(vec![job]));
+    assert_eq!(
+        rolled.coverage().unwrap().definition_id(),
+        by_job.coverage().unwrap().definition_id()
+    );
+}
+
+/// A rollup is rejected when a key is no group key of the input's build,
+/// when its family cannot merge different groups (counter states merge
+/// consecutive windows of one series, IRate has no merge), and over no
+/// keys of a SQL relation.
+#[test]
+fn invalid_rollups_fail_construction() {
+    let without = grouped(
+        table(),
+        kll_family(),
+        Reduction::Reduce(
+            asap_types::ir::operator::operator_properties::GroupKeys::without(vec![REGION]),
+        ),
+    );
+    assert!(rollup(without, vec![0])
+        .unwrap_err()
+        .contains(&CoverageError::NotAGroupKey { key: 0 }.to_string()));
+    for (kind, params) in [
+        (ExactKind::Increase, ExactParams::Increase),
+        (ExactKind::Rate, ExactParams::Rate),
+        (ExactKind::IRate, ExactParams::IRate),
+    ] {
+        let state = grouped(
+            pane_rows(0, vec![]),
+            FieldDataType::ExactAggregate(kind.clone(), params),
+            Reduction::by(vec![2]),
+        );
+        assert!(
+            rollup(state, vec![])
+                .unwrap_err()
+                .contains(&CoverageError::FamilyCannotRegroup.to_string()),
+            "{kind:?}"
+        );
+    }
+    let by_job = grouped(table(), kll_family(), Reduction::by(vec![JOB]));
+    assert!(rollup(by_job, vec![])
+        .unwrap_err()
+        .contains(&CoverageError::GlobalRelationRegroup.to_string()));
+}
+
+/// `group_by` is left out of JSON when unset, so a merge that keeps its
+/// groups serializes as before; a rollup's keys round-trip.
+#[test]
+fn group_by_is_serialized_only_for_a_rollup() {
+    let state = grouped(table(), kll_family(), Reduction::by(vec![JOB, REGION]));
+    let merge = ASAPOp::SummaryMerge {
+        children: vec![0u32],
+        group_by: None,
+        newest_panes: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&merge).unwrap(),
+        serde_json::json!({"SummaryMerge": {"children": [0]}})
+    );
+    let rollup_op: ASAPOp<u32> = ASAPOp::SummaryMerge {
+        children: vec![0],
+        group_by: Some(vec![1]),
+        newest_panes: None,
+    };
+    let json = serde_json::to_string(&rollup_op).unwrap();
+    assert_eq!(
+        serde_json::from_str::<ASAPOp<u32>>(&json).unwrap(),
+        rollup_op
+    );
+    assert!(rollup(state, vec![1]).is_ok());
 }

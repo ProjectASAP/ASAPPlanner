@@ -28,12 +28,17 @@ fn invalid(message: &str) -> SchemaDerivationError {
 }
 
 /// The `PaneChain` a summary-state node carries merged: the chain itself,
-/// or the one chain a `SummaryMerge` reads, in full or its newest panes
-/// ([`merged_pane_count`]). `None` for any other node.
+/// or the one chain a `SummaryMerge` that keeps its groups reads, in full
+/// or its newest panes ([`merged_pane_count`]). `None` for any other node,
+/// a rollup (regrouping merge) included.
 pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     match state.asap()? {
         ASAPOp::PaneChain { .. } => Some(state),
-        ASAPOp::SummaryMerge { children, .. } => match children.as_slice() {
+        ASAPOp::SummaryMerge {
+            children,
+            group_by: None,
+            ..
+        } => match children.as_slice() {
             [child] if matches!(child.asap(), Some(ASAPOp::PaneChain { .. })) => Some(child),
             _ => None,
         },
@@ -328,6 +333,7 @@ fn expand(
         Operator::ASAP(ASAPOp::SummaryMerge {
             children,
             newest_panes,
+            group_by,
         }) => {
             let mut inputs = Vec::new();
             for child in children {
@@ -360,6 +366,7 @@ fn expand(
             let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: inputs,
                 newest_panes: None,
+                group_by: group_by.clone(),
             }))?;
             Rc::new(
                 OperatorNode::with_schema(merge.operator, node.schema.clone())

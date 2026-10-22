@@ -223,6 +223,7 @@ pub fn pass2_label(
                         Some(ASAPOp::SummaryMerge {
                             children,
                             newest_panes,
+                            ..
                         }) => *newest_panes == Some(n) && children.iter().any(|c| chain(c)),
                         _ => false,
                     };

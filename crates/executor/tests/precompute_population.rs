@@ -60,6 +60,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                     children: vec![],
                     newest_panes: None,
+                    group_by: None,
                 }),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 materialization: planner_types::physical::Materialization::MatAtIngestion(
@@ -286,6 +287,7 @@ fn try_state_dag(
         payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
             children: vec![],
             newest_panes: None,
+            group_by: None,
         }),
         output_state: ExecutionDataState::INGESTION_SUMMARY,
         materialization: planner_types::physical::Materialization::MatAtIngestion(
@@ -300,6 +302,7 @@ fn try_state_dag(
             payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                 children: vec![0],
                 newest_panes: None,
+                group_by: None,
             }),
             ..nodes[0].clone()
         });

@@ -204,6 +204,7 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
         ASAPOp::SummaryMerge {
             children: vec![],
             newest_panes: None,
+            group_by: None,
         },
         ASAPOp::PaneChain {
             child: (),

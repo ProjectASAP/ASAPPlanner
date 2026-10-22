@@ -581,7 +581,12 @@ fn fragment(
                 Operator::scope_timestamp(built, population_schema(family.clone()))?,
             )?
         }
-        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
+        Payload::ASAP(ASAPOp::SummaryMerge { group_by, .. }) => {
+            if group_by.is_some() {
+                return Err(invalid(
+                    "a precomputed population keeps one state per series: no regrouping merge",
+                ));
+            }
             let Some(input) = schemas.first() else {
                 return Err(invalid("summary merge requires inputs"));
             };
