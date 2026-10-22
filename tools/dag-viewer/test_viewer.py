@@ -561,8 +561,9 @@ class WorkloadViewTests(unittest.TestCase):
     def test_search_header_groups_discards_by_cause(self):
         text = self.js.call("searchText", self.doc)
         self.assertIn("default search · ", text)
-        # All nine queries can share nodes, so the search is one component and
-        # the header has no component count.
+        # The components' combined plan is not in the joint search space, so
+        # the workload is searched as one and the header has no component count.
+        self.assertEqual(self.doc["stage3_plan_selection"]["search"]["searched_as_one"], "not_in_joint_space")
         self.assertNotIn("independent components", text)
         self.assertIn("discarded before composition: no accuracy guarantee ×7 (q3, q4, q5, q6, q7) · ", text)
         self.assertIn("Stage 2 assignments skipped: they scan raw data at query time", text)
