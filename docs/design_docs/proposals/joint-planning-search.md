@@ -212,7 +212,7 @@ The rules above prune a search that still builds and prices whole-workload candi
 | Shared group | A group read by two or more parents. Its choice (implementation, size, materialization, pane grid) couples its parents. |
 | Coupling site | A choice several groups' costs depend on: a shared group's size (sized for its strictest reader), a shared pane chain's grid, longest window and size, a metric's scan label set, a source's raw-data horizon. |
 | Local price | One implementation candidate's usage, priced by Stage 3's per-node pricing given its context (its readers' requirements, its coupling sites' thresholds): CPU operations, scanned bytes, memory byte-seconds, peak memory, disk, each reader's latency. Cached per (group, candidate, context). |
-| Frontier | Per group and subproblem, the candidates no other dominates in usage: the cheapest under cost model 1, a Pareto front over (cost, peak memory, peak cores, disk, worst latency) under cost models 2 and 3. |
+| MILP | One mixed-integer linear program over the memo whose variables are the groups' candidate choices, their materializations and the coupling sites' thresholds, with Stage 3's prices as coefficients. It replaces enumerating whole-workload candidates. |
 
 ### How the stages and the memo work together
 
@@ -234,11 +234,11 @@ The memo keeps each stage's semantics and code, and changes what they exchange: 
 Stage 1 Pass 1   A's implementations     B's implementations     C's implementations
 Stage 1 Pass 2   transformations add implementations that read another group (capability, panes, rollup, top-k)
 Stage 2          materialization per implementation, once per group however many parents read it
-Stage 3          local price per (group, implementation, context), cached; frontier per group
+Stage 3          local price per (group, implementation, context), cached: the MILP's coefficients
 ------------------------- coupling sites of the cluster {A, B} -------------------------
-                 thresholds enumerated with bounds: a shared group's size (strictest reader),
+                 discrete threshold variables: a shared group's size (strictest reader),
                  a pane chain's grid and longest window, a metric's scan labels, a source's raw horizon;
-                 dynamic programming below them; C is solved on its own
+                 one MILP chooses them together with every group's candidate; C's choice is independent
 -------------------------------------------------------------------------------------------
 Selected plan    composed once, then Stage 3's checks and the executor's compile check
 ```
@@ -273,7 +273,7 @@ G6: exact top-k (reads G5)
 G1, G2: each reader computes its own (NotMaterialized) | built once per evaluation (MatAtQuery)
 ```
 
-Before, the same `Scan -> TimeRange(5m)` was repeated inside every per-target candidate, and Pass 2 had to discover it again; candidates multiplied across targets. In the memo, `G2` appears once, `G3` has a handful of implementations, and the search is bottom-up: `G2`'s choice is a coupling choice of the cluster `{Q1, Q2}`, and every other group keeps its frontier given it.
+Before, the same `Scan -> TimeRange(5m)` was repeated inside every per-target candidate, and Pass 2 had to discover it again; candidates multiplied across targets. In the memo, `G2` appears once, `G3` has a handful of implementations, and the MILP has one variable per (group, implementation): `G2`'s materialization is a coupling choice that both queries' costs depend on.
 
 Where each part of the stage design lives in the memo:
 
@@ -286,7 +286,7 @@ Where each part of the stage design lives in the memo:
 | Rollup and exact top-k reuse | an implementation of a coarse group (or a top-k) that reads a finer group (or a ranking) |
 | Stage 2 materialization | chosen per implementation, once per group |
 | Stage 3 pricing and checks | local price per (group, implementation, context), cached; the full plan is checked once |
-| Raw retention, cost models 2 and 3, measured table | a per-source horizon site; frontiers; a calibration factor fitted once and frozen |
+| Raw retention, cost models 2 and 3, measured table | a per-source horizon threshold; linear peak and capacity constraints; a calibration factor fitted once and frozen |
 
 ### End to end: the memo with the sharing strategies
 
@@ -329,9 +329,9 @@ Nothing here builds a whole-workload candidate; each strategy only adds alternat
 
 **4. Stage 2: materialization per implementation.** For example, the shared pane chain may be kept at ingestion time or rebuilt per evaluation; `G2` may be computed by each reader or built once per evaluation. A group with several parents chooses once.
 
-**5. Stage 3: local prices, frontiers, and clusters.** Each implementation is priced once per context and cached. Groups linked by a shared group or a coupling site form a cluster; here all nine groups form one cluster through `G1`, `G2` and the shared quantile build. A workload with another metric would form a second cluster, solved independently.
+**5. Stage 3: local prices as coefficients.** Each implementation is priced once per consumer rate, materialization and threshold, and cached; these are the MILP's coefficients. Here all nine groups are coupled through `G1`, `G2` and the shared quantile build. A second metric's groups would share no variable with them, and the solver separates such blocks on its own.
 
-**6. Joint choice in the cluster.** The coupling choices are enumerated as thresholds, with branch and bound:
+**6. One MILP chooses everything.** Threshold enumeration gives each coupling site its discrete values, which become MILP variables:
 
 ```text
 shared quantile build:  size threshold in {for G4's 0.01, for G5's 0.05, no shared build}
@@ -342,7 +342,7 @@ G2, G6:                 per reader or built once per evaluation
 raw retention of data:  horizon threshold among the readers that scan raw data
 ```
 
-For each combination that survives the bound, dynamic programming chooses every other group's implementation bottom-up from the cached frontiers. For example, it chooses between `G8` exact and `G8` rolled up from `G7`, and between `G9` exact and the fused heap, given the chosen `G2` and `G6`. The threshold enumeration replaces enumerating subsets of readers; dominance inside each group keeps the frontiers small.
+The same MILP also chooses every other group's implementation: `G8` exact or rolled up from `G7`, `G9` exact or the fused heap. The threshold variables replace subsets of readers. The lazy-cut loop (below) then prices the solver's plan with Stage 3 and adds the held-memory term back until the two agree.
 
 **7. Build late.** The selected choices are composed into one physical plan. Stage 3 checks it once (guarantees, latency against each repeat interval, capacity) and the executor's compile check runs on it alone. The runner-ups are built only if a report asks for them.
 
@@ -387,6 +387,48 @@ Threshold enumeration still turns each coupling site into discrete choices: a sh
 
 **Cost models 2 and 3.** The same variables. Peaks and capacity limits become linear constraints over the per-node peak contributions, and each objective is as specified.
 
+**Why a MILP rather than a hand-written search.** The memo is small: the whole paper workloads have 74 groups and 284 candidates (W-RangeHeavy) and 158 groups and 584 candidates (W-RollupHeavy), each built in under 0.3 s. Cost model 1 is not additive per node:
+- memory held while a query runs costs bytes × that query's latency;
+- how often a node runs depends on the materialization choices above it.
+
+A branch and bound with dynamic programming would need custom bounds for both, plus Pareto frontiers for cost models 2 and 3. In a MILP each of these is a standard exact linearization or a linear constraint, and the solver supplies the bounds, the search and an optimality certificate.
+
+This is the multi-query optimization problem. The memo is its AND-OR DAG: a group is an equivalence node and a candidate is an operation node. Greedy multi-query optimizers (for example Roy et al., SIGMOD 2000) give up optimality for speed. Exact formulations are integer programs. Our shared sizes depend on the strictest reader, accuracy guarantees compose, and time enters through panes and retention, so we need the exact form.
+
+**How each non-additive term is encoded.**
+
+| Term (cost model 1) | Encoding | Exact |
+| --- | --- | --- |
+| How often a node runs: once per consumer whose path reaches it through unmaterialized nodes | reach indicators `r[k,g]` propagated through `x` and `m`; cost on `y = r ∧ x` | linear |
+| A node built once per evaluation for readers on different grids | one indicator per distinct set of reader grids; cost at that set's union rate | linear |
+| A shared size set by the strictest reader (capability builds, pane chains, rollup state) | one indicator per threshold; a reader attaches only to a threshold it may read | linear |
+| A scan's label set | one indicator per label set | linear |
+| Raw retention: the longest horizon among query-time raw scans of a source | `R_s ≥ bytes(n) · query-time(n)` | linear |
+| Pane retention: the longest span among a chain's readers | `keep ≥ span(q) · read(q, chain)` | linear |
+| Ingestion compaction: depends on the ingest worker count, a ceiling | integer workers `≥ work / capacity` | linear |
+| Latency within the bound and the repeat interval | the sum of the reached work, over `y` | linear |
+| Memory held while a query runs: bytes × latency | omitted from the model; added back by lazy cuts | lazy |
+| Composed accuracy guarantees | checked on the incumbent; failing combinations excluded | lazy |
+| A measured table's calibration factor | fitted once before the search | constant |
+
+An exact linearization of the held-memory product needs a variable for each query and each pair of groups it reaches (about 3M on W-RollupHeavy with 8 users), so it is generated lazily instead.
+
+**The lazy-cut loop.** The model without the lazy terms never overestimates a plan's cost, so its optimum is a lower bound on the true optimum. The loop:
+1. Solve the model and take its plan `P`, with objective `c_milp`.
+2. Compose `P` and price it with Stage 3, which includes held memory and the composed guarantees, giving `c_true`.
+3. If `c_true = c_milp` and every check passes, `P` is optimal: its true cost equals a lower bound on every plan's true cost.
+4. Otherwise add a cut and go to step 1:
+   - a combination whose guarantee fails is excluded;
+   - a combination whose cost was underestimated gets "choosing this combination costs at least `c_true`".
+
+Each cut removes or corrects at least one of finitely many combinations, so the loop ends, and it ends at the optimum. For example:
+- Round 1 picks `P1` at 0.40 per second, and Stage 3 prices it at 0.47. A cut makes `P1`'s combination cost at least 0.47.
+- Round 2 picks `P2` at 0.45, and Stage 3 agrees. `P2` is optimal.
+
+(These numbers are illustrative.) The cost of the loop is the number of rounds. Tight McCormick bounds on held memory (from the memo's byte and latency ranges) and several cuts per round keep it low; the report gives the rounds per workload.
+
+**Reporting.** The result states the solver gap. A time limit that ends with a nonzero gap is reported with that gap, never as optimal.
+
 **Validation.** The brute force over the memo is a second oracle. `joint_search_equivalence` checks the MILP, the brute force and `--exhaustive` against each other on small workloads under all three cost models: a peak case, a capacity case and a raw-horizon case.
 
 ### Coupled charges
@@ -401,7 +443,7 @@ Threshold enumeration still turns each coupling site into discrete choices: a sh
 
 ## Future work
 
-- Stronger bounds from LP relaxations; separator/tree-decomposition DP or MILP as alternative search engines.
+- Stronger LP relaxations and McCormick bounds for the held-memory term; tree-decomposition dynamic programming as an alternative engine for the MILP.
 - Greedy incumbents and learned branch ordering to accelerate exact search.
 - Explicit approximate modes such as beam search, top-k candidates, capped resource frontiers, and coarser parameter domains. These may lose the optimum and must be labeled accordingly.
 - Incremental replanning and broader candidate/rewrite coverage.
