@@ -697,9 +697,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             },
         ),
     };
+    // A rate, increase or irate over a declared gauge (the query still plans).
+    let mut warnings = counter_function_over_gauge_warnings_of(&described, &data)?;
     // A selected plan's very large peak memory, when the deployment
     // declares no memory capacity to check it against.
-    let mut warnings = counter_function_over_gauge_warnings_of(&described, &data)?;
     warnings.extend(
         result
             .as_ref()
@@ -816,10 +817,12 @@ fn lowered_together(
                 Entry::Vacant(slot) => {
                     slot.insert(facts);
                 }
-                Entry::Occupied(earlier) if *earlier.get() != facts => return Err(format!(
+                Entry::Occupied(earlier) if *earlier.get() != facts => {
+                    return Err(format!(
                     "--workload {path}: source {} is declared with other facts in an earlier file",
                     earlier.key()
-                )),
+                ))
+                }
                 Entry::Occupied(_) => {}
             }
         }

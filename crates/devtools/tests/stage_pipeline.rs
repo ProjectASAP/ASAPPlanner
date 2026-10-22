@@ -1848,6 +1848,7 @@ fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
     );
     assert!(counter["stage3_plan_selection"]["selected"].is_string());
     assert!(counter["stage3_plan_selection"].get("warnings").is_none());
+}
 
 /// A PromQL file and a SQL file, each a `PlanningWorkload` in its own
 /// language.
