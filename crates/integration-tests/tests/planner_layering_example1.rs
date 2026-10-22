@@ -666,7 +666,7 @@ fn stage3_plan_selection_count_min_needs_the_counter_declaration() {
 /// floating-point rounding (the same charges summed in another grouping).
 /// Built once per evaluation (`MatAtQuery`), the shared input is read once:
 /// the shared time range (the doc's "Raw with a shared input") is selected,
-/// at 5.33 instead of 7.94 per second.
+/// at 5.39 instead of 8.00 per second.
 #[test]
 fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
     let run = pipeline();
@@ -715,7 +715,7 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
     );
     let cost = run.cost(&selected.id).unwrap();
     assert!(
-        (cost - 5.3311).abs() < 1e-3 && (base - 7.9402).abs() < 1e-3,
+        (cost - 5.3870).abs() < 1e-3 && (base - 7.9961).abs() < 1e-3,
         "{cost} vs {base}"
     );
 }

@@ -782,7 +782,7 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
     };
     assert_eq!(selected(&[])["selected"], "P2");
     let usage = &selected(&[])["costs"]["P3-m1"]["usage"];
-    assert_eq!(usage["average_memory_bytes"], 5_232_000_000.0);
+    assert_eq!(usage["average_memory_bytes"], 5_232_101_733.337_067);
     assert_eq!(
         usage["latency_per_query"],
         serde_json::json!([{ "compaction_ms": 0.0, "query_ms": 7.0 }])
@@ -809,9 +809,10 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
 
 /// `--cost-model aws-fargate-us-east-1` prices Example 4 under cost model 1
 /// at AWS Fargate's us-east-1 prices, in US dollars per second: the
-/// whole-window KLL (P2) is still selected, at $2.36124e-8/s (its 2.1
-/// CPU-ms/s at $1.1244e-8 per CPU-ms; it keeps no memory), and the panes
-/// maintained at ingestion time (P3-m1) cost about $6.0237e-6/s, almost all
+/// whole-window KLL (P2) is still selected, at $2.60278e-8/s (its 2.1
+/// CPU-ms/s at $1.1244e-8 per CPU-ms, and its states held while the query
+/// runs), and the panes
+/// maintained at ingestion time (P3-m1) cost about $6.0238e-6/s, almost all
 /// for their 5.232 GB kept in memory (six panes of 1,000,000 series, each a
 /// KLL of 872 bytes: its fixed 744 and an item array grown for its 4
 /// samples). A costlier candidate's reason shows
@@ -831,8 +832,8 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
             "{actual} != {expected}"
         )
     };
-    close(cost("P2"), 2.36124e-8, 1e-9);
-    close(cost("P3-m1"), 6.0237e-6, 1e-4);
+    close(cost("P2"), 2.602778532914e-8, 1e-9);
+    close(cost("P3-m1"), 6.0238e-6, 1e-4);
     // A dollar cost below 0.001 is shown in scientific notation, not as 0.000.
     let p1 = selection["rejected"]
         .as_array()
@@ -842,7 +843,7 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
         .unwrap();
     assert_eq!(
         p1["reason"],
-        "costlier: 2.699e-8 vs 2.361e-8 cost_per_second"
+        "costlier: 2.752e-8 vs 2.603e-8 cost_per_second"
     );
 }
 
@@ -852,7 +853,7 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
 /// query-time result retained). For Pattern B with KLL only and query-time
 /// results retained: no DDSketch candidate is offered, and Stage 1's
 /// `pass1_pruned` says why; the KLL panes gain B3, built at query time and
-/// kept (`P3-m2`, 436.53 cost/s); the whole-window KLL (`P2`) is still
+/// kept (`P3-m2`, 436.59 cost/s); the whole-window KLL (`P2`) is still
 /// selected. Without raw data, every query-time scan is invalid and B1
 /// (`P3-m1`) is selected when guarantees are enforced. A deployment with an
 /// unknown field is refused.
@@ -909,7 +910,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     let kept_cost = selection["costs"]["P3-m2"]["cost_per_second"]
         .as_f64()
         .unwrap();
-    assert!((kept_cost - 436.53).abs() < 1e-9, "{kept_cost}");
+    assert!((kept_cost - 436.587_770_004_24).abs() < 1e-9, "{kept_cost}");
 
     let no_raw = generate_example(
         "planner-layering-3b",
@@ -1003,8 +1004,8 @@ fn logical_candidate_labels_are_distinct() {
 /// (`max_over_time(m[5m])` every minute over 1M series sampled every
 /// 1.5 s) answered as the last hour at 1-minute steps
 /// (`range_evaluation`) is priced as 61 evaluations per request: the kept
-/// panes (`P2-m2`, 458.23 cost/s) beat rebuilding the window at every step
-/// (`P1`, 1,261.68), and the document reports their retention, 1 h + 5 min.
+/// panes (`P2-m2`, 460.04 cost/s) beat rebuilding the window at every step
+/// (`P1`, 1,270.52), and the document reports their retention, 1 h + 5 min.
 /// The workload section shows the range. An invalid range is refused.
 #[test]
 fn workload_file_with_a_range_evaluation_is_planned() {
@@ -1044,8 +1045,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     let selection = &document["stage3_plan_selection"];
     assert_eq!(selection["selected"], "P2-m2");
     let cost = |id: &str| selection["costs"][id]["cost_per_second"].as_f64().unwrap();
-    assert!((cost("P2-m2") - 458.2333).abs() < 1e-3, "{}", cost("P2-m2"));
-    assert!((cost("P1") - 1261.6833).abs() < 1e-3, "{}", cost("P1"));
+    assert!((cost("P2-m2") - 460.0410).abs() < 1e-3, "{}", cost("P2-m2"));
+    assert!((cost("P1") - 1270.5151).abs() < 1e-3, "{}", cost("P1"));
     assert_eq!(
         selection["pane_retention_ms"],
         serde_json::json!({"1": 3_900_000})
@@ -1499,8 +1500,8 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
 /// Two windowed quantiles over one metric (Q1 over 1 m, Q2 over 5 m, both
 /// every 10 s): with a shared scan, Stage 2 also offers the scan built once
 /// per evaluation (`query time, shared: Scan`). It reads the 5 m window
-/// once (≈0.1360/s) instead of once per reader (0.2200/s), and beats the
-/// separate scans (0.1528/s).
+/// once (≈0.1364/s) instead of once per reader (0.2203/s), and beats the
+/// separate scans (0.1530/s).
 #[test]
 fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
     let query = |q: &str| {
@@ -1561,5 +1562,5 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
         .unwrap()["id"]
         .as_str()
         .unwrap();
-    assert!((cost(separate) - 0.1528).abs() < 1e-4, "{}", cost(separate));
+    assert!((cost(separate) - 0.1530).abs() < 1e-4, "{}", cost(separate));
 }

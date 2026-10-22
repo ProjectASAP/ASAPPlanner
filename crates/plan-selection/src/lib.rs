@@ -63,15 +63,18 @@
 //!   queries are spread over the settings' `non_repeating_query_horizon_seconds`
 //!   (default 3600 s): `invocations / horizon` per second.
 //!
-//! Under cost model 1, memory is charged only as state kept between
-//! computations ([`ResourceUsage::average_memory_bytes`]), at
+//! Under cost model 1, memory is charged as bytes held per second
+//! ([`ResourceUsage::average_memory_bytes`]), at
 //! `cost_per_memory_byte_second` per byte per second. A `MatAtIngestion`
 //! node keeps its state every second: twice for a whole window (the window
 //! being built and the completed one queries read) and `N + 1` panes for a
 //! chain of `N` (the `N` the query merges and the one being built). A
 //! `MatAtQuery` node's state is reused only within one evaluation, so it is
 //! held only while that evaluation runs: its bytes times the latency of the
-//! longest query reading it, once per evaluation, which is close to nothing.
+//! longest query reading it, once per evaluation. A query-time
+//! `NotMaterialized` node's working memory (a sketch being built, an exact
+//! aggregate's values) is charged once per consumer that recomputes it:
+//! its bytes times each reading query's latency, at that query's rate.
 //! A `MatAtQueryKeptAcrossEvaluations` tumbling-pane chain (#509 Example
 //! 4's B3, offered by Stage 2 when the deployment keeps query-time results,
 //! [`asap_logical_asap_optimization::DeploymentCapabilities::query_time_results_retained`]) is kept across
@@ -103,10 +106,11 @@
 //!
 //! Latency stays per evaluation (one step). Without a range evaluation
 //! `S = 1` and the retention is the window, so every price is as above.
-//! Memory a computation
-//! holds only while it runs is not charged under cost model 1: it counts in
-//! [`ResourceUsage::peak_memory_bytes`], which cost models 2 and 3 read. A
-//! computation is charged for its CPU operations and scanned bytes only.
+//! Memory a computation holds only while it runs counts in
+//! [`ResourceUsage::peak_memory_bytes`], which cost models 2 and 3 read, and
+//! under cost model 1 for the time it is held, as above. (A `NotMaterialized`
+//! node computed at ingestion time is a streaming operator holding one row,
+//! and is not charged.)
 //!
 //! Prices come from [`crate::cost::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
@@ -3060,9 +3064,12 @@ fn price_at_scale(
     // Each node's work in ms on one core: one computation at query time,
     // one second of arriving rows at ingestion time.
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
-    // MatAtQuery state in memory, held only while one evaluation runs:
-    // (bytes, per second), counted once the evaluations' latencies are known.
-    let mut held: HashMap<PhysicalASAPNodeId, (u64, f64)> = HashMap::new();
+    // Query-time memory held only while one evaluation runs, a MatAtQuery
+    // state in memory or a NotMaterialized node's working memory: (bytes,
+    // per second, whether each reading query computes its own copy),
+    // counted once the evaluations' latencies are known, in node order so
+    // the sum is the same in every run.
+    let mut held: BTreeMap<PhysicalASAPNodeId, (u64, f64, bool)> = BTreeMap::new();
     // The raw data query-time scans read, kept on disk: per source, the
     // largest scan's (bytes, node).
     let mut raw_data: HashMap<&Source, (u64, PhysicalASAPNodeId)> = HashMap::new();
@@ -3536,11 +3543,16 @@ fn price_at_scale(
         // state is what the node holds: its output, or the values an exact
         // aggregate keeps per group when that is more. A computation that
         // keeps nothing holds its working memory while it runs, once per
-        // consumer that recomputes it.
+        // consumer that recomputes it; at query time, that is held for the
+        // evaluation too (counted below, as a MatAtQuery state is).
         let state = out.bytes.max(estimate.peak_memory_bytes());
         let (kept, medium) = match (node.materialization, &node.payload) {
             (Materialization::NotMaterialized, _) => {
-                peak_memory_bytes = estimate.peak_memory_bytes().saturating_mul(multiplier);
+                let working_memory_bytes = estimate.peak_memory_bytes();
+                peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
+                if !ingestion && working_memory_bytes > 0 {
+                    held.insert(node.id, (working_memory_bytes, per_second, true));
+                }
                 (0, Medium::Memory)
             }
             // A pane chain kept across evaluations holds the panes its
@@ -3567,7 +3579,7 @@ fn price_at_scale(
             (Materialization::MatAtQuery(medium), _) => {
                 match medium {
                     Medium::Memory => {
-                        held.insert(node.id, (state, per_second));
+                        held.insert(node.id, (state, per_second, false));
                         peak_memory_bytes = state;
                     }
                     Medium::Disk => disk_bytes = state,
@@ -3712,15 +3724,39 @@ fn price_at_scale(
     for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
         latency.query_ms += evaluation_ms;
     }
-    // A MatAtQuery state is held for one evaluation: from its build until
-    // the longest query reading it finishes, about that query's latency.
-    for (id, (state, per_second)) in held {
-        let evaluation_ms = reach
+    // Query-time memory is held for one evaluation: a MatAtQuery state from
+    // its build until the longest query reading it finishes, about that
+    // query's latency; a NotMaterialized node's copy for each reading query
+    // for that query's latency, so its rate-weighted mean.
+    for (id, (state, per_second, computed_per_reader)) in held {
+        let readers = reach
             .iter()
+            .enumerate()
             .zip(&latency)
-            .filter(|(reached, _)| reached.contains(&id))
+            .filter(|((_, reached), _)| reached.contains(&id));
+        let longest_ms = readers
+            .clone()
             .map(|(_, l)| l.total_ms())
             .fold(0.0, f64::max);
+        let mut rate_weighted_ms = 0.0;
+        let mut evaluations_per_second = 0.0;
+        if computed_per_reader {
+            for ((query, _), l) in readers {
+                let rate = evaluation_rate(
+                    recurrence
+                        .get(query)
+                        .map(|r| (r, range_evaluations.get(query).copied().flatten())),
+                    settings.non_repeating_query_horizon_seconds,
+                )
+                .map_err(|error| (id, error))?;
+                rate_weighted_ms += rate * l.total_ms();
+                evaluations_per_second += rate;
+            }
+        }
+        let evaluation_ms = match evaluations_per_second > 0.0 {
+            true => rate_weighted_ms / evaluations_per_second,
+            false => longest_ms,
+        };
         let byte_seconds = state as f64 * evaluation_ms / 1_000.0 * per_second;
         let node = per_node.get_mut(&id).expect("every node is measured");
         usage.average_memory_bytes += byte_seconds;
@@ -5320,6 +5356,50 @@ mod tests {
         assert!(stored.cost_per_second.unwrap() < cost.cost_per_second.unwrap());
     }
 
+    /// A `NotMaterialized` node two queries read is computed for each, so
+    /// its working memory is held once per query, each time for that
+    /// query's latency: `bytes · Σ rate_q · latency_q`, not the longest
+    /// latency at both rates. Query 1 is `sum(...)` over query 2's output,
+    /// so it runs longer; they repeat every 10 s and every 20 s.
+    #[test]
+    fn shared_not_materialized_memory_is_held_for_each_reading_query() {
+        let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::exact());
+        let inner = outer.children()[0].clone();
+        let candidate = optimize_physical_asap(
+            "L",
+            &[QueryRoot::Operator(outer), QueryRoot::Operator(inner)],
+            &[],
+            &data(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap()
+        .remove(0);
+        let recurrence = [repeating(10_000), repeating(20_000)];
+        let cost = |price_per_byte_second| {
+            let settings = unit_costs(|c| c.cost_per_memory_byte_second = price_per_byte_second);
+            price(&candidate.dag, &recurrence, &data(), &settings).unwrap()
+        };
+        let (with, without) = (cost(1.0), cost(0.0));
+        let [outer_ms, inner_ms] = [0, 1].map(|q| with.usage.latency_per_query[q].total_ms());
+        assert!(outer_ms > inner_ms, "{outer_ms} vs {inner_ms}");
+        let mut checked = 0;
+        for (id, node) in &with.per_node {
+            let Some(held) = node.detail.split("; holds ").nth(1) else {
+                continue;
+            };
+            if node.multiplier != 2 {
+                continue;
+            }
+            let bytes: f64 = held.split(' ').next().unwrap().parse().unwrap();
+            let term =
+                node.cost_per_second.unwrap() - without.per_node[id].cost_per_second.unwrap();
+            let expected = bytes * (0.1 * outer_ms + 0.05 * inner_ms) / 1_000.0;
+            assert!(close(term, expected), "node {id}: {term} vs {expected}");
+            checked += 1;
+        }
+        assert!(checked > 0, "a shared node holds memory");
+    }
+
     /// Every combination of Pass 1 candidates of one query, as Stage 2
     /// candidates `P1`, `P2`, ...
     fn all_candidates(query: &str, target: &AccuracyTarget) -> Vec<PhysicalCandidate> {
@@ -6522,7 +6602,7 @@ mod tests {
     /// ε = 0.01, δ = 0.01, which is selected. Over 100 groups of 100 values,
     /// fewer than the sketch's `k`, the sketch keeps every value too, in an
     /// item array grown past them, so its state is no smaller than the
-    /// exact state, which is selected. (State held only while a query runs is not charged.)
+    /// exact state, which is selected.
     #[test]
     fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
@@ -7836,14 +7916,15 @@ mod tests {
     /// every second. At query time the state is reused only within one
     /// evaluation, so it is held only while that evaluation runs: its bytes
     /// times the evaluation's latency, once per evaluation. State computed
-    /// and dropped within a query has none.
+    /// and dropped within a query (`NotMaterialized`) is held while that
+    /// query runs too, and charged the same way.
     #[test]
     fn kept_state_is_charged_per_byte_per_second() {
         let cost = |dag: &PhysicalASAPDAG, w| {
             let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
             price(dag, &recurrences(1), &data(), &settings).unwrap()
         };
-        for materialization in [AT_INGESTION, AT_QUERY] {
+        for materialization in [AT_INGESTION, AT_QUERY, Materialization::NotMaterialized] {
             let dag = kll_dag(materialization);
             let build = node_of(&dag, is_build);
             let (with, without) = (cost(&dag, 1.25e-7), cost(&dag, 0.0));
@@ -7880,25 +7961,24 @@ mod tests {
                 "{materialization:?}: {term} vs {}",
                 1.25e-7 * byte_seconds
             );
+            // The candidate's memory term covers every node's held memory,
+            // the build's included.
+            let candidate_term = with.cost_per_second.unwrap() - without.cost_per_second.unwrap();
             assert!(close(
-                with.cost_per_second.unwrap() - without.cost_per_second.unwrap(),
-                term
+                candidate_term,
+                1.25e-7 * with.usage.average_memory_bytes
             ));
+            assert!(candidate_term >= term);
         }
-        let transient = kll_dag(Materialization::NotMaterialized);
-        assert_eq!(
-            cost(&transient, 1.25e-7).cost_per_second.unwrap(),
-            cost(&transient, 0.0).cost_per_second.unwrap()
-        );
     }
 
-    /// Under cost model 1, memory is charged only as kept bytes per second
+    /// Under cost model 1, memory is charged as bytes held per second
     /// (average memory): the memory a computation holds while it runs (a
-    /// sketch being built, an exact quantile's values), counted in peak
-    /// memory, adds nothing. The memory price's term is exactly the average
-    /// memory, though peak memory is larger.
+    /// sketch being built, an exact quantile's values) counts for the time
+    /// it is held, once per evaluation. The memory price's term is exactly
+    /// the average memory, which is below the peak memory.
     #[test]
-    fn memory_held_only_while_a_query_runs_is_not_charged() {
+    fn memory_held_only_while_a_query_runs_is_charged_for_the_time_it_is_held() {
         let memory_term = |dag: &PhysicalASAPDAG| {
             let cost = |price_per_byte_second| {
                 let settings =
@@ -7944,9 +8024,10 @@ mod tests {
                 "{name}: {usage:?}"
             );
         }
-        // Not materialized, nothing is kept: the memory price changes nothing.
+        // Not materialized, nothing is kept, but the sketch being built is
+        // held while the query runs: the memory price adds to the cost.
         let (term, _) = memory_term(&kll_dag(Materialization::NotMaterialized));
-        assert_eq!(term, 0.0);
+        assert!(term > 0.0, "{term}");
     }
 
     /// Kept exact state that grows with the data is charged by the values it
@@ -9940,23 +10021,19 @@ mod tests {
     }
 
     /// Each query request pays the table's `ns_per_evaluation` once: on
-    /// the node the query reads first, in its CPU and its latency.
+    /// the node the query reads first, in its CPU and its latency. (Memory
+    /// is free here: the longer evaluation would hold its memory longer.)
     #[test]
     fn each_request_pays_the_per_evaluation_cost() {
         let (candidate, _, _) = kll_build();
-        let before = price(
-            &candidate.dag,
-            &recurrences(1),
-            &data(),
-            &PlanSelectionSettings::default(),
-        )
-        .unwrap();
+        let free_memory = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
+        let before = price(&candidate.dag, &recurrences(1), &data(), &free_memory).unwrap();
         let settings = PlanSelectionSettings {
             measured_operation_costs: MeasuredOperationCosts {
                 ns_per_evaluation: 1e6,
                 ..MeasuredOperationCosts::default()
             },
-            ..PlanSelectionSettings::default()
+            ..free_memory
         };
         let after = price(&candidate.dag, &recurrences(1), &data(), &settings).unwrap();
         // 1 ms per request, a request every 10 s.

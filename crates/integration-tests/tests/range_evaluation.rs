@@ -116,11 +116,12 @@ fn with_chain(run: &Run, wanted: Materialization) -> String {
 /// (a) The issue's acceptance example: Pattern B as a dashboard over the
 /// last hour at 1-minute steps prices 61 evaluations per request. Every
 /// query-time computation runs at every step, so the whole-window KLL
-/// (2.1 → 128.1 cost/s), the panes rebuilt per step (2.18333 → 133.18333)
-/// and the exact plan (2.4 → 146.4) cost 61 times as much. The kept panes
-/// (B3) are built once per request (one new 1-min pane) but merged at every
-/// step, and keep 64 older panes instead of 4 (1 h + 5 min of panes): 436.53
-/// → 6,983.53. B1 keeps 66 instead of 6: 654.53 → 7,201.53. The
+/// (2.3625 → 144.1125 cost/s), the panes rebuilt per step (3.6112 →
+/// 220.2852) and the exact plan (2.4576 → 149.9136) cost 61 times as much,
+/// the memory each step holds while it runs included. The kept panes (B3)
+/// are built once per request (one new 1-min pane) but merged at every
+/// step, and keep 64 older panes instead of 4 (1 h + 5 min of panes):
+/// 436.59 → 6,987.05. B1 keeps 66 instead of 6: 654.54 → 7,202.31. The
 /// whole-window KLL is still selected.
 #[test]
 fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
@@ -129,11 +130,11 @@ fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
     let range = run_promql_for(&pattern_b_with(Some(LAST_HOUR_BY_MINUTE)), &deployment);
     assert_eq!(LAST_HOUR_BY_MINUTE.evaluations_per_request(), 61);
     for (id, before, after) in [
-        ("P1", 2.4, 146.4),
-        ("P2", 2.1, 128.1),
-        ("P3", 2.183_333_333_333_333, 133.183_333_333_333_37),
-        ("P3-m1", 654.530_002_066_667, 7_201.530_002_066_7),
-        ("P3-m2", 436.53, 6_983.53),
+        ("P1", 2.457_600_019_2, 149.913_601_171_2),
+        ("P2", 2.362_500_025_2, 144.112_501_537_2),
+        ("P3", 3.611_233_350_8, 220.285_234_398_8),
+        ("P3-m1", 654.542_718_733_8, 7_202.305_718_761_8),
+        ("P3-m2", 436.587_770_004_24, 6_987.053_970_131_44),
     ] {
         assert!(close(cost(&none, id), before), "{id}: {}", cost(&none, id));
         assert!(close(cost(&range, id), after), "{id}: {}", cost(&range, id));
@@ -142,12 +143,20 @@ fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
     for id in ["P1", "P2", "P3"] {
         assert!(close(cost(&range, id), 61.0 * cost(&none, id)), "{id}");
     }
-    let memory = |run: &Run, id: &str| run.selection.costs[id].usage.average_memory_bytes;
     // B3: 4 → 64 panes kept between requests; B1: 6 → 66 panes kept.
-    assert_eq!(memory(&none, "P3-m2"), 3_488_000_000.0);
-    assert_eq!(memory(&range, "P3-m2"), 3_488_000_000.0 / 4.0 * 64.0);
-    assert_eq!(memory(&none, "P3-m1"), 5_232_000_000.0);
-    assert_eq!(memory(&range, "P3-m1"), 5_232_000_000.0 / 6.0 * 66.0);
+    let keeps = |run: &Run, id: &str, bytes: &str| {
+        assert!(
+            run.selection.costs[id]
+                .per_node
+                .values()
+                .any(|n| n.detail.contains(&format!("; keeps {bytes} bytes"))),
+            "{id} keeps {bytes} bytes"
+        )
+    };
+    keeps(&none, "P3-m2", "3488000000");
+    keeps(&range, "P3-m2", "55808000000");
+    keeps(&none, "P3-m1", "5232000000");
+    keeps(&range, "P3-m1", "57552000000");
     assert_eq!(range.selection.selected, "P2");
 }
 
@@ -216,19 +225,19 @@ fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
 }
 
 /// (d) Without a range evaluation nothing changes: Pattern B's pinned
-/// costs (#509 Example 3 and 4: whole-window KLL 2.1, panes 2.18333, B3
-/// 436.53, B1 5.232 GB kept) are as before, and a range of one step per
+/// costs (#509 Example 3 and 4: whole-window KLL 2.3625, panes 3.6112, B3
+/// 436.59, B1 5.232 GB kept) are as before, and a range of one step per
 /// request (`span_ms: 0`) prices exactly as no range.
 #[test]
 fn no_range_evaluation_leaves_every_price_unchanged() {
     let deployment = keeping_query_time_results();
     let none = run_promql_for(&pattern_b_with(None), &deployment);
-    assert!(close(cost(&none, "P2"), 2.1));
-    assert!(close(cost(&none, "P3"), 2.1 + 5e6 * 1e-6 / 60.0));
-    assert!(close(cost(&none, "P3-m2"), 436.53));
+    assert!(close(cost(&none, "P2"), 2.362_500_025_2));
+    assert!(close(cost(&none, "P3"), 3.611_233_350_8));
+    assert!(close(cost(&none, "P3-m2"), 436.587_770_004_24));
     assert_eq!(
         none.selection.costs["P3-m1"].usage.average_memory_bytes,
-        5_232_000_000.0
+        5_232_101_733.337_067
     );
     let one_step = run_promql_for(
         &pattern_b_with(Some(RangeEvaluation {
@@ -243,12 +252,12 @@ fn no_range_evaluation_leaves_every_price_unchanged() {
 
 /// The example where declaring the range makes Stage 3 prefer sharing:
 /// `max_over_time(m[5m])` every minute over 1M series. As one evaluation
-/// per minute, rebuilding the window (P1, 20.6833 cost/s) beats the kept
-/// panes (P2-m2, 32.2333: 224 MB of 56-byte per-series maxima kept) and the
-/// panes maintained at ingestion (P2-m1, 46.2333). As a dashboard over the
+/// per minute, rebuilding the window (P1, 20.8281 cost/s) beats the kept
+/// panes (P2-m2, 32.2630: 224 MB of 56-byte per-series maxima kept) and the
+/// panes maintained at ingestion (P2-m1, 46.2340). As a dashboard over the
 /// last hour at 1-minute steps, rebuilding costs 61 times as much
-/// (1,261.6833), while the kept panes add only the per-step merges and 1 h
-/// of panes (458.2333), and B1 472.2333: the kept panes are selected, and without
+/// (1,270.5151), while the kept panes add only the per-step merges and 1 h
+/// of panes (460.0410), and B1 472.2760: the kept panes are selected, and without
 /// query-time retention, the ingestion-time panes.
 #[test]
 fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
@@ -265,12 +274,12 @@ fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
     );
     let ingestion = with_chain(&range, Materialization::MatAtIngestion(Medium::Memory));
     for (run, id, expected) in [
-        (&none, "P1", 20.683_333),
-        (&none, kept.as_str(), 32.233_333),
-        (&none, ingestion.as_str(), 46.233_335),
-        (&range, "P1", 1_261.683_333),
-        (&range, kept.as_str(), 458.233_333),
-        (&range, ingestion.as_str(), 472.233_335),
+        (&none, "P1", 20.828_117),
+        (&none, kept.as_str(), 32.262_967),
+        (&none, ingestion.as_str(), 46.234_035),
+        (&range, "P1", 1_270.515_127),
+        (&range, kept.as_str(), 460.040_967),
+        (&range, ingestion.as_str(), 472.276_035),
     ] {
         assert!(
             (cost(run, id) - expected).abs() < 1e-5,
