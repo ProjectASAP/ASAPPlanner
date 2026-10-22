@@ -1569,10 +1569,10 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
 /// scan (and Q3 and Q4 one time range), each query keeping its own
 /// columns. Built once per evaluation, the shared scan reads the 5 m
 /// window once, 200,000 samples, at one per 10 s evaluation. It does not
-/// pay here (0.2064/s against 0.1700/s for separate scans): the scan
+/// pay here (0.2111/s against 0.1742/s for separate scans): the scan
 /// carries Q3's labels, and Q3 and Q4 filter the 5 m of rows for their
-/// latest samples instead of scanning 15 s. Sharing Q1 and Q2's scan alone
-/// is selected (0.1533/s).
+/// latest samples instead of scanning 15 s. Sharing Q1 and Q2's scan, with
+/// Q4's KLL rolled up from Q3's, is selected (0.1508/s).
 #[test]
 fn scans_projecting_different_labels_are_shared() {
     let query = |q: &str| {
@@ -1664,8 +1664,8 @@ fn scans_projecting_different_labels_are_shared() {
     };
     let shared = cost["cost_per_second"].as_f64().unwrap();
     let separate = cost_of("Q1 Kll · Q2 Kll · Q3 Kll · Q4 Kll");
-    assert!((shared - 0.2064).abs() < 1e-3, "{shared}");
-    assert!((separate - 0.1700).abs() < 1e-3, "{separate}");
+    assert!((shared - 0.2111).abs() < 1e-3, "{shared}");
+    assert!((separate - 0.1742).abs() < 1e-3, "{separate}");
     let selected = selection["selected"].as_str().unwrap();
     let selected_label = physical.iter().find(|c| c["id"] == selected).unwrap()["display_name"]
         .as_str()

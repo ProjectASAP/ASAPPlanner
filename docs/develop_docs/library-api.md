@@ -295,9 +295,10 @@ PromQL metric or SQL table name to `SourceFacts`: `series_count`,
 MetricsQL), `stream_norms`, `max_distinct_per_evaluation` and
 `distinct_values_per_label` (distinct values per label or column, which
 plan selection prices a `by (...)` grouping's groups at: the product of its
-keys' counts, at most the series (PromQL) and rows it reads; with a key
-undeclared, no count is assumed and the grouping is priced at those series
-or rows; over several sources a key's counts add). Every fact is declared: the planner has no
+keys' counts, at most the declared `series_count` (series or groups of
+rows) and the rows it reads; with a key undeclared, no count is assumed and
+the grouping is priced at the smaller of those two; over several sources a
+key's counts add). Every fact is declared: the planner has no
 clock, so a caller drops facts that no longer hold before planning. Plan
 selection bounds a query's number of values `G`, and its input row count,
 by the `series_count` of the sources it reads, counting each branch of an

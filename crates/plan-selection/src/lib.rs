@@ -2890,8 +2890,8 @@ fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> f64 {
 ///   read declares in `distinct_values_per_label` (summed over the
 ///   sources: a union holds at most the sum, while a join matching on the
 ///   key is over-counted), when every key has one;
-/// - the series the sources declare (`series_count`), when they are all
-///   PromQL metrics that declare one: each series is in one group;
+/// - the series (PromQL) or groups of rows (SQL) the sources declare in
+///   `series_count`, when they all do: each is in one group;
 /// - `rows_read`, the rows the grouping reads per evaluation: each row is
 ///   in at most one group.
 ///
@@ -2900,7 +2900,6 @@ fn group_count_bound(
     keys: &GroupKeys,
     input: Option<&Schema>,
     sources: &BTreeSet<&str>,
-    metrics: &HashSet<&str>,
     data: &DataWorkload,
     rows_read: Option<u64>,
 ) -> Option<u64> {
@@ -2925,12 +2924,12 @@ fn group_count_bound(
             Some(product.saturating_mul(distinct_values(key)?))
         })
     };
-    let declared_series = if !sources.is_empty() && sources.iter().all(|s| metrics.contains(s)) {
+    let declared_series = if sources.is_empty() {
+        None
+    } else {
         sources.iter().try_fold(0u64, |total, source| {
             Some(total.saturating_add(data.sources.get(*source)?.series_count?))
         })
-    } else {
-        None
     };
     [declared, declared_series, rows_read]
         .into_iter()
@@ -3237,19 +3236,6 @@ fn price_at_scale(
     };
     // The sources each node reads, filled children first.
     let mut sources_read_by: HashMap<PhysicalASAPNodeId, BTreeSet<&str>> = HashMap::new();
-    // The sources that are PromQL metrics, whose series each fall in one
-    // group of a grouping.
-    let metrics: HashSet<&str> = dag
-        .nodes
-        .iter()
-        .filter_map(|n| match &n.payload {
-            Payload::NonASAP(NonASAPOp::Scan {
-                source: source @ Source::TimeSeries { .. },
-                ..
-            }) => Some(source_name(source)),
-            _ => None,
-        })
-        .collect();
     let multipliers = computations(
         dag,
         recurrence,
@@ -3392,28 +3378,27 @@ fn price_at_scale(
             true => maintained_window_ms(node.id, nodes, &producers_of)
                 .map(|window_ms| ((rows_per_ms * window_ms as f64).round() as u64).max(1)),
         };
-        // `series` stands in only where no fact bounds the groups: an
-        // ingestion-time grouping with no window below it (Stage 2 builds
-        // none).
+        // Query time always has its input rows; an ingestion-time grouping
+        // with no window below it has no fact bounding its groups (Stage 2
+        // builds none).
         let estimated_groups = |keys: &GroupKeys| {
             group_count_bound(
                 keys,
                 input_schema,
                 &sources_read_by[&node.id],
-                &metrics,
                 data,
                 rows_read,
             )
-            .unwrap_or(series)
+            .ok_or((node.id, AnalyticalCostError::IngestionGroupingWithoutWindow))
         };
         let groups = |reduction: &Reduction| match reduction {
-            Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => 1,
+            Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => Ok(1),
             Reduction::Reduce(keys) => estimated_groups(keys),
             // One group per series.
-            Reduction::PerEntity => match ingestion {
+            Reduction::PerEntity => Ok(match ingestion {
                 true => series,
                 false => series.min(input.rows.max(1)),
-            },
+            }),
         };
         let (out, estimate, detail) = match &node.payload {
             Payload::NonASAP(operator) => match operator {
@@ -3443,7 +3428,7 @@ fn price_at_scale(
                     measures,
                     ..
                 } => {
-                    let group_count = groups(reduction);
+                    let group_count = groups(reduction)?;
                     let keys = match reduction {
                         Reduction::Reduce(keys) => keys.keys().len() as u64,
                         _ => 1,
@@ -3481,7 +3466,7 @@ fn price_at_scale(
                     let partitions = if partition_by.keys().is_empty() {
                         1
                     } else {
-                        estimated_groups(partition_by)
+                        estimated_groups(partition_by)?
                     };
                     let estimate = estimate_operator(
                         PhysicalOperator::InMemoryComparisonSort {
@@ -3508,7 +3493,7 @@ fn price_at_scale(
                     let partitions = if partition_by.keys().is_empty() {
                         1
                     } else {
-                        estimated_groups(partition_by)
+                        estimated_groups(partition_by)?
                     };
                     let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
                     let offset = (*offset as u64).saturating_mul(partitions);
@@ -3573,7 +3558,7 @@ fn price_at_scale(
             Payload::ASAP(ASAPOp::SummaryAgg {
                 family, reduction, ..
             }) => {
-                let group_count = groups(reduction);
+                let group_count = groups(reduction)?;
                 // At query time, each state sees its group's input rows; at
                 // ingestion time, the rows of a window one second of
                 // arriving rows does not bound.
@@ -3611,7 +3596,7 @@ fn price_at_scale(
                 // Each input row is kept by the one pane its time falls in,
                 // as a time range keeps it (one operation), and updates
                 // that pane.
-                let group_count = groups(reduction);
+                let group_count = groups(reduction)?;
                 let states = group_count * u64::from(*pane_count);
                 // Each pane's state sees its group's rows in one pane: of
                 // one second's rows at ingestion time, of the rows read at
@@ -3670,7 +3655,7 @@ fn price_at_scale(
                 }
                 let states = merged_states(*newest_panes, producers, &output, nodes);
                 if let Some(keys) = group_by {
-                    group_count = group_count.min(groups(&Reduction::by(keys.clone())));
+                    group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
                 }
                 let out = EdgeStatistics {
                     rows: group_count,

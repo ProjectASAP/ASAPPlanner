@@ -563,10 +563,10 @@ pub struct SourceFacts {
     /// source takes, keyed by its name (default: none declared), e.g.
     /// `{"host": 1000, "job": 10}`. Plan selection prices the groups of a
     /// `by (k1, k2, ...)` at the product of its keys' counts, at most the
-    /// series a PromQL grouping reads and the rows it reads. No count is
-    /// assumed for an undeclared key: such a grouping is priced at the
-    /// series it reads (PromQL, when declared), or else the rows it reads
-    /// per evaluation. When every key of a
+    /// `series_count` (series or groups of rows) of the sources it reads
+    /// and the rows it reads per evaluation. No count is assumed for an
+    /// undeclared key: such a grouping is priced at the smaller of those
+    /// two. When every key of a
     /// grouped result declares a count, their product (at most the series
     /// read) also bounds the values one evaluation returns (`G`), which a
     /// whole-result accuracy target splits its failure probability over:
