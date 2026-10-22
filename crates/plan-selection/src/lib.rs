@@ -2891,18 +2891,17 @@ fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> f64 {
 ///   sources: a union holds at most the sum, while a join matching on the
 ///   key is over-counted), when every key has one;
 /// - the series (PromQL) or groups of rows (SQL) the sources declare in
-///   `series_count`, when they all do: each is in one group;
+///   `series_count`, when they all do (their product over several
+///   sources): each is in one group;
 /// - `rows_read`, the rows the grouping reads per evaluation: each row is
 ///   in at most one group.
-///
-/// `None` when none applies; no count is invented.
 fn group_count_bound(
     keys: &GroupKeys,
     input: Option<&Schema>,
     sources: &BTreeSet<&str>,
     data: &DataWorkload,
-    rows_read: Option<u64>,
-) -> Option<u64> {
+    rows_read: u64,
+) -> u64 {
     let distinct_values = |key: &usize| -> Option<u64> {
         let label = &input?.fields.get(*key)?.name;
         if sources.is_empty() {
@@ -2924,18 +2923,21 @@ fn group_count_bound(
             Some(product.saturating_mul(distinct_values(key)?))
         })
     };
+    // Over several sources a group combines one series (or group of rows)
+    // of each at most, as a join does; a union's groups are fewer.
     let declared_series = if sources.is_empty() {
         None
     } else {
-        sources.iter().try_fold(0u64, |total, source| {
-            Some(total.saturating_add(data.sources.get(*source)?.series_count?))
+        sources.iter().try_fold(1u64, |product, source| {
+            Some(product.saturating_mul(data.sources.get(*source)?.series_count?))
         })
     };
-    [declared, declared_series, rows_read]
+    [declared, declared_series, Some(rows_read)]
         .into_iter()
         .flatten()
         .min()
-        .map(|groups| groups.max(1))
+        .unwrap_or(rows_read)
+        .max(1)
 }
 
 /// The series pricing assumes a node reading `sources` sees: the sum of
@@ -3379,17 +3381,18 @@ fn price_at_scale(
                 .map(|window_ms| ((rows_per_ms * window_ms as f64).round() as u64).max(1)),
         };
         // Query time always has its input rows; an ingestion-time grouping
-        // with no window below it has no fact bounding its groups (Stage 2
-        // builds none).
+        // with no window below it is an error (Stage 2 builds none).
+
         let estimated_groups = |keys: &GroupKeys| {
-            group_count_bound(
+            let rows_read =
+                rows_read.ok_or((node.id, AnalyticalCostError::IngestionGroupingWithoutWindow))?;
+            Ok(group_count_bound(
                 keys,
                 input_schema,
                 &sources_read_by[&node.id],
                 data,
                 rows_read,
-            )
-            .ok_or((node.id, AnalyticalCostError::IngestionGroupingWithoutWindow))
+            ))
         };
         let groups = |reduction: &Reduction| match reduction {
             Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => Ok(1),
@@ -6886,14 +6889,16 @@ mod tests {
 
     /// Kept exact quantile state keeps every value of its group: over one
     /// group of 10 000 values it costs more than a quantile sketch sized for
-    /// ε = 0.01, δ = 0.01, which is selected. Over small groups (`by (job)`
-    /// with `job` undeclared is priced at one group per series: 10 000
-    /// groups of one value), fewer values than the sketch's `k`, the sketch
-    /// keeps every value too, in an item array grown past them, so its
-    /// state is no smaller than the exact state, which is selected.
+    /// ε = 0.01, δ = 0.01, which is selected. Over 100 groups of 100 values
+    /// (100 jobs declared), fewer than the sketch's `k`, the sketch keeps
+    /// every value too, in an item array grown past them, so its state is
+    /// no smaller than the exact state, which is selected.
     #[test]
     fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+        let mut data = data();
+        data.sources.get_mut("x").unwrap().distinct_values_per_label =
+            [("job".to_string(), 100)].into();
         for (query, large_groups) in [
             ("quantile(0.99, rate(x[5m]))", true),
             ("quantile by (job) (0.99, rate(x[5m]))", false),
@@ -6905,7 +6910,7 @@ mod tests {
                     target.clone().accuracy_metric(AccuracyMetric::Rank),
                     repeating(10_000),
                 )],
-                &data(),
+                &data,
                 PlanningModels::builtin(),
             )
             .unwrap();

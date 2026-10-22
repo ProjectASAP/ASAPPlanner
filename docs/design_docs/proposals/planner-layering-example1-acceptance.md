@@ -136,8 +136,8 @@ Invariants:
 | Id | Outcome | Reason |
 |---|---|---|
 | P3-m1 | selected | all exact over one time range built once per evaluation for both queries, at 4.38 per second (cost model 1) |
-| P2-m1 | valid · costlier | all exact over one scan built once per evaluation, at 5.79 per second: each query still reads its own 1 m time range |
-| P1, P2, P3 | valid · costlier | all exact at 8.00 per second, with separate inputs (P1) or a `NotMaterialized` shared scan (P2) or scan and range (P3), charged once per query; they tie with each other up to rounding |
+| P2-m1 | valid · costlier | all exact over one scan built once per evaluation, at 4.78 per second: each query still reads its own 1 m time range |
+| P1, P2, P3 | valid · costlier | all exact at 7.01 per second, with separate inputs (P1) or a `NotMaterialized` shared scan (P2) or scan and range (P3), charged once per query; they tie with each other up to rounding |
 | P10 | invalid | Count-Min + heap: a top-*k* output has no guarantee (a heap's bound is per item frequency, not top-*k* membership), and the deployment has no evidence that it meets the target |
 | P19 | invalid | CountSketch + heap: the same reason |
 
@@ -146,8 +146,8 @@ with or without a shared input built once) are invalid for that reason; the
 other 23 exact candidates are valid but costlier. Count-Min's weights are the raw samples of `http_requests_total`,
 which the workload declares a counter, so they are proven non-negative;
 without that declaration Count-Min is also rejected on its weights. Exact
-panes rebuilt at every refresh cost 8.76, and maintaining a query's exact
-panes at ingestion time costs 54.98.
+panes rebuilt at every refresh cost 7.79, and maintaining a query's exact
+panes at ingestion time costs about 54.0.
 
 Invariants:
 
