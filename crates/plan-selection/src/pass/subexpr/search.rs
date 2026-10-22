@@ -12,7 +12,9 @@ use std::rc::Rc;
 use asap_logical_asap_optimization::asap_aware_cse::{
     share_identical_expressions, sharing_candidates,
 };
-use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
+use asap_logical_asap_optimization::per_computation_candidates::{
+    recompose_guarantees, PerComputationCandidates,
+};
 use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
@@ -335,6 +337,12 @@ pub(crate) fn brute_force<Id: Clone>(
         }
         for plan in at_thresholds(&memo, choice) {
             let Some(roots) = composed_roots(&memo, per_computation, &plan) else {
+                continue;
+            };
+            // Each candidate's guarantees were composed over its own
+            // children's Pass 1 choice: compose them again over the chosen
+            // implementations.
+            let Ok(roots) = recompose_guarantees(&roots) else {
                 continue;
             };
             let shareable = sharing_candidates(&roots);
