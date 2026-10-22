@@ -767,8 +767,8 @@ fails with at most the shared state's failure probability. Stage 3 prices
 each merge by the panes it reads, at its query's rate. The per-query chains
 stay candidates too. A chain read at different intervals is not kept across
 evaluations from query time: that option needs every reader to build one
-new pane per evaluation. Long-window segments, sliding windows and Exponential Histograms are
-not implemented yet.
+new pane per evaluation. Long-window segments, sliding windows and
+Exponential Histograms are not implemented yet.
 
 ### 2. Physical ASAP-aware optimization
 

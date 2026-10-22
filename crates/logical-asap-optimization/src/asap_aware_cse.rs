@@ -1092,7 +1092,8 @@ pub struct WindowCompositionPass2Candidate {
     /// The builds built as tumbling panes, in [`pane_candidates`] order.
     pub pane_candidates: Vec<PaneCandidate>,
     /// The chains each shared by several of `pane_candidates`
-    /// ([`nested_window_groups`]); empty when each build has its own chain.
+    /// ([`nested_window_groups`] or [`gcd_window_groups`]); empty when each
+    /// build has its own chain.
     pub shared_chains: Vec<SharedPaneChain>,
     /// The candidate's roots with those builds in panes.
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
@@ -1113,7 +1114,8 @@ pub struct SharedPaneChain {
 }
 
 /// The most pane candidates one candidate may have: every non-empty subset
-/// is a Pass 2 candidate, about a million at 20.
+/// is a Pass 2 candidate, and with shared grids up to three, about three
+/// million at 20.
 pub const MAX_PANE_CANDIDATES: usize = 20;
 
 /// The pane candidates of the candidate with query roots `roots`, children
@@ -1203,10 +1205,15 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
 /// ([`pane_candidates`]): one per non-empty subset of them, in
 /// binary-counter order (the first candidate the lowest bit). Each build in
 /// the subset becomes a `SummaryMerge` over one [`ASAPOp::PaneChain`] of
-/// its panes; every other build is untouched. A subset with groups of
-/// nested windows ([`nested_window_groups`]) is followed by a second Pass 2
-/// candidate in which each group reads one shared chain, each member
-/// merging its newest panes. An error only for more than
+/// its panes; every other build is untouched. A subset whose builds can
+/// share chains is followed by one Pass 2 candidate per shared grid, in
+/// which each group reads one shared chain, each member merging its newest
+/// panes: the finest member's panes ([`nested_window_groups`]), then the
+/// gcd of the members' widths when that groups them differently
+/// ([`gcd_window_groups`]); and by one error candidate per group whose
+/// sizing fails. Each grid groups every build of a subset at once: a
+/// shared gcd grid over only some of the builds that could share it is not
+/// listed. An error only for more than
 /// [`MAX_PANE_CANDIDATES`] pane candidates; a Pass 2 candidate whose
 /// composition fails carries its own error.
 pub fn window_composition_pass2_candidates(
@@ -1231,8 +1238,8 @@ pub fn window_composition_pass2_candidates(
             pane_candidates: chosen.clone(),
             shared_chains: Vec::new(),
         });
-        // Shared chains on the members' own finest panes, then, when that
-        // leaves some build unshared or differs, on the gcd of their widths.
+        // Shared chains on the members' own finest panes, then, when it
+        // groups them differently, on the gcd of their widths.
         let on_member_panes = nested_window_groups(&chosen);
         let on_gcd_panes = gcd_window_groups(&chosen);
         push_shared_chains(roots, &chosen, &on_member_panes, &mut pass2_candidates);

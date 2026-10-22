@@ -9671,8 +9671,8 @@ mod tests {
     /// A 1-hour quantile every minute (60 × 1-min panes) and every 45 s
     /// (80 × 45-s panes) can share only a chain at their gcd, 240 × 15-s
     /// panes. Maintained at ingestion time it keeps more states than both
-    /// per-query chains together, so it costs more and plan selection keeps
-    /// the per-query chains.
+    /// per-query chains together, so it is priced higher than the
+    /// per-query chains maintained at ingestion time.
     #[test]
     fn a_shared_chain_at_a_fine_gcd_is_offered_but_costs_more() {
         let rows_per_s = 10_000.0;
