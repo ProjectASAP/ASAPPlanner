@@ -2243,7 +2243,7 @@ fn counter_topk_workload(function: &str) -> PlanningWorkload {
               "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
             "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100000.0}}}},
               "sources": {{"data_total": {{"series_count": 10000, "metric_type": "counter",
-                  "sample_interval": 100}}}}}}}}"#
+                  "sample_interval": 100, "distinct_values_per_label": {{"job": 12}}}}}}}}}}"#
     ))
     .unwrap()
 }

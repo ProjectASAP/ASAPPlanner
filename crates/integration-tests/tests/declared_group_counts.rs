@@ -86,13 +86,22 @@ fn a_grouping_has_at_most_one_group_per_series() {
     );
 }
 
-/// A grouping with an undeclared label keeps the default of 100 groups:
-/// `by (host, job)` with only `host` declared, and both with none.
+/// A grouping with an undeclared label gets no invented count: each of the
+/// 10,000 series is in one group, and each of the 10,000 samples the
+/// instant selector reads in at most one, so `by (host, job)` with only
+/// `host` declared, and both groupings with nothing declared, are priced at
+/// 10,000 groups.
 #[test]
-fn a_grouping_with_an_undeclared_label_falls_back_to_100_groups() {
+fn a_grouping_with_an_undeclared_label_is_bound_by_the_series_read() {
     let run = run_promql(&workload(serde_json::json!({"host": 1000})));
-    assert_eq!(priced_groups(&run, Q3_BY_HOST_JOB), BTreeSet::from([100]));
-    assert_eq!(priced_groups(&run, Q4_BY_JOB), BTreeSet::from([100]));
+    assert_eq!(
+        priced_groups(&run, Q3_BY_HOST_JOB),
+        BTreeSet::from([10_000])
+    );
+    assert_eq!(priced_groups(&run, Q4_BY_JOB), BTreeSet::from([10_000]));
     let run = run_promql(&workload(serde_json::json!({})));
-    assert_eq!(priced_groups(&run, Q3_BY_HOST_JOB), BTreeSet::from([100]));
+    assert_eq!(
+        priced_groups(&run, Q3_BY_HOST_JOB),
+        BTreeSet::from([10_000])
+    );
 }

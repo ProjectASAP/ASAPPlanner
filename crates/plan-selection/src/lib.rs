@@ -306,10 +306,6 @@ pub use measured_operation_costs::{
     OperatorCost, OperatorKind, SummaryOperation,
 };
 
-/// Groups assumed for a `by (...)` reduction (or partition) with a key whose
-/// distinct-value count the data workload does not declare
-/// ([`estimated_group_count`]).
-const DEFAULT_GROUP_COUNT: u64 = 100;
 /// Used only when the data workload does not declare them.
 const DEFAULT_SERIES: u64 = 1_000;
 const DEFAULT_ROWS_PER_SECOND: f64 = 1_000.0;
@@ -2888,18 +2884,23 @@ fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> f64 {
 }
 
 /// The groups (or partitions) a `by (keys)` over rows of schema `input`
-/// from `sources` is priced at: the product of each key's distinct-value
-/// count, which each source read declares in `distinct_values_per_label`
-/// (summed over the sources: a union holds at most the sum, while a join
-/// matching on the key is over-counted), at most `series` (each group holds
-/// at least one series). A `without (...)` or a key some source read does not
-/// declare gives [`DEFAULT_GROUP_COUNT`], also at most `series`.
-fn estimated_group_count(
+/// from `sources` is priced at, from declared or derivable facts only: the
+/// smallest of
+/// - the product of each key's distinct-value count, which each source
+///   read declares in `distinct_values_per_label` (summed over the
+///   sources: a union holds at most the sum, while a join matching on the
+///   key is over-counted), when every key has one;
+/// - the series (PromQL) or groups of rows (SQL) the sources declare in
+///   `series_count`, when they all do (their product over several
+///   sources): each is in one group;
+/// - `rows_read`, the rows the grouping reads per evaluation: each row is
+///   in at most one group.
+fn group_count_bound(
     keys: &GroupKeys,
     input: Option<&Schema>,
     sources: &BTreeSet<&str>,
     data: &DataWorkload,
-    series: u64,
+    rows_read: u64,
 ) -> u64 {
     let distinct_values = |key: &usize| -> Option<u64> {
         let label = &input?.fields.get(*key)?.name;
@@ -2922,7 +2923,21 @@ fn estimated_group_count(
             Some(product.saturating_mul(distinct_values(key)?))
         })
     };
-    declared.unwrap_or(DEFAULT_GROUP_COUNT).min(series).max(1)
+    // Over several sources a group combines one series (or group of rows)
+    // of each at most, as a join does; a union's groups are fewer.
+    let declared_series = if sources.is_empty() {
+        None
+    } else {
+        sources.iter().try_fold(1u64, |product, source| {
+            Some(product.saturating_mul(data.sources.get(*source)?.series_count?))
+        })
+    };
+    [declared, declared_series, Some(rows_read)]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(rows_read)
+        .max(1)
 }
 
 /// The series pricing assumes a node reading `sources` sees: the sum of
@@ -3357,21 +3372,36 @@ fn price_at_scale(
         };
         // The schema the node's group and partition keys index.
         let input_schema = producers.first().map(|p| &nodes[p].output_schema);
-        let estimated_groups = |keys: &GroupKeys| {
-            estimated_group_count(keys, input_schema, &sources_read_by[&node.id], data, series)
+        // The rows a grouping reads per evaluation: its input at query
+        // time; at ingestion time, the arriving rows of the window it
+        // maintains (one second of them does not bound its groups).
+        let rows_read = match ingestion {
+            false => Some(input.rows.max(1)),
+            true => maintained_window_ms(node.id, nodes, &producers_of)
+                .map(|window_ms| ((rows_per_ms * window_ms as f64).round() as u64).max(1)),
         };
-        let groups = |reduction: &Reduction| {
-            let groups = match reduction {
-                Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => 1,
-                Reduction::Reduce(keys) if !keys.is_without() => estimated_groups(keys),
-                _ => series,
-            };
-            // One second of arriving rows does not bound the groups a
-            // maintained state holds.
-            match ingestion {
-                true => groups,
-                false => groups.min(input.rows.max(1)),
-            }
+        // Query time always has its input rows; an ingestion-time grouping
+        // with no window below it is an error (Stage 2 builds none).
+
+        let estimated_groups = |keys: &GroupKeys| {
+            let rows_read =
+                rows_read.ok_or((node.id, AnalyticalCostError::IngestionGroupingWithoutWindow))?;
+            Ok(group_count_bound(
+                keys,
+                input_schema,
+                &sources_read_by[&node.id],
+                data,
+                rows_read,
+            ))
+        };
+        let groups = |reduction: &Reduction| match reduction {
+            Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => Ok(1),
+            Reduction::Reduce(keys) => estimated_groups(keys),
+            // One group per series.
+            Reduction::PerEntity => Ok(match ingestion {
+                true => series,
+                false => series.min(input.rows.max(1)),
+            }),
         };
         let (out, estimate, detail) = match &node.payload {
             Payload::NonASAP(operator) => match operator {
@@ -3401,7 +3431,7 @@ fn price_at_scale(
                     measures,
                     ..
                 } => {
-                    let group_count = groups(reduction);
+                    let group_count = groups(reduction)?;
                     let keys = match reduction {
                         Reduction::Reduce(keys) => keys.keys().len() as u64,
                         _ => 1,
@@ -3439,7 +3469,7 @@ fn price_at_scale(
                     let partitions = if partition_by.keys().is_empty() {
                         1
                     } else {
-                        estimated_groups(partition_by).min(input.rows.max(1))
+                        estimated_groups(partition_by)?
                     };
                     let estimate = estimate_operator(
                         PhysicalOperator::InMemoryComparisonSort {
@@ -3466,7 +3496,7 @@ fn price_at_scale(
                     let partitions = if partition_by.keys().is_empty() {
                         1
                     } else {
-                        estimated_groups(partition_by)
+                        estimated_groups(partition_by)?
                     };
                     let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
                     let offset = (*offset as u64).saturating_mul(partitions);
@@ -3531,7 +3561,7 @@ fn price_at_scale(
             Payload::ASAP(ASAPOp::SummaryAgg {
                 family, reduction, ..
             }) => {
-                let group_count = groups(reduction);
+                let group_count = groups(reduction)?;
                 // At query time, each state sees its group's input rows; at
                 // ingestion time, the rows of a window one second of
                 // arriving rows does not bound.
@@ -3569,7 +3599,7 @@ fn price_at_scale(
                 // Each input row is kept by the one pane its time falls in,
                 // as a time range keeps it (one operation), and updates
                 // that pane.
-                let group_count = groups(reduction);
+                let group_count = groups(reduction)?;
                 let states = group_count * u64::from(*pane_count);
                 // Each pane's state sees its group's rows in one pane: of
                 // one second's rows at ingestion time, of the rows read at
@@ -3628,7 +3658,7 @@ fn price_at_scale(
                 }
                 let states = merged_states(*newest_panes, producers, &output, nodes);
                 if let Some(keys) = group_by {
-                    group_count = group_count.min(groups(&Reduction::by(keys.clone())));
+                    group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
                 }
                 let out = EdgeStatistics {
                     rows: group_count,
@@ -4291,6 +4321,37 @@ fn query_reach(
             seen
         })
         .collect()
+}
+
+/// The window an ingestion-time grouping `node` maintains: a pane chain's
+/// panes, or the time range below it (through filters, projections and
+/// time shifts). `None` when there is none.
+fn maintained_window_ms(
+    node: PhysicalASAPNodeId,
+    nodes: &NodeMap<'_>,
+    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+) -> Option<u64> {
+    match &nodes[&node].payload {
+        Payload::ASAP(ASAPOp::PaneChain {
+            pane_width_ms,
+            pane_count,
+            ..
+        }) => return Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
+        Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+            return Some(range.as_millis() as u64)
+        }
+        _ => {}
+    }
+    let producer = *producers_of.get(&node)?.first()?;
+    match &nodes[&producer].payload {
+        Payload::NonASAP(
+            NonASAPOp::TimeRange { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::TimeShift { .. },
+        ) => maintained_window_ms(producer, nodes, producers_of),
+        _ => None,
+    }
 }
 
 /// The raw data the query-time scan `scan` reads, in milliseconds back from
@@ -5353,7 +5414,11 @@ mod tests {
         let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
         let root =
             asap_types::ir::schema::schema_support::with_promql_series_identity(&root).unwrap();
-        let data = with_metric_types(with_series(Some(10_000_000)), &[("m", MetricType::Counter)]);
+        let mut data =
+            with_metric_types(with_series(Some(10_000_000)), &[("m", MetricType::Counter)]);
+        // 10 jobs: one Count-Min per job is cheaper than the exact per-series sums.
+        data.sources.get_mut("m").unwrap().distinct_values_per_label =
+            [("job".to_string(), 10)].into();
         let run = crate::pass::run_stage1_to_stage3_with(
             vec![(0, QueryRoot::Operator(root))],
             &[entry_with(target, repeating(10_000))],
@@ -6158,8 +6223,10 @@ mod tests {
     }
 
     /// A partitioned sort and limit (`topk by (job)`) take their partition
-    /// count from `job`'s declared distinct values, and 100 when `job` is
-    /// undeclared, at most the source's series either way.
+    /// count from `job`'s declared distinct values. With `job` undeclared,
+    /// no count is invented: each series is in one partition and each row
+    /// read in at most one, so the partitions are at most the series and
+    /// at most the rows the sort reads.
     #[test]
     fn a_partitioned_topk_has_one_partition_per_declared_label_value() {
         let details = |declared: &[(&str, u64)], series: u64| {
@@ -6192,15 +6259,18 @@ mod tests {
             declared.iter().any(|d| d.starts_with("limit to 30 rows;")),
             "{declared:?}"
         );
+        // Undeclared: the 2,000 rows read, fewer than the 10,000 series.
         let undeclared = details(&[("instance", 10)], 10_000);
         assert!(
-            undeclared.iter().any(|d| d.contains(" in 100 partitions;")),
+            undeclared
+                .iter()
+                .any(|d| d.starts_with("sort 2000 rows in 2000 partitions;")),
             "{undeclared:?}"
         );
         assert!(
             undeclared
                 .iter()
-                .any(|d| d.starts_with("limit to 300 rows;")),
+                .any(|d| d.starts_with("limit to 2000 rows;")),
             "{undeclared:?}"
         );
         // 50 series hold at most 50 groups, declared or not.
@@ -6819,13 +6889,16 @@ mod tests {
 
     /// Kept exact quantile state keeps every value of its group: over one
     /// group of 10 000 values it costs more than a quantile sketch sized for
-    /// ε = 0.01, δ = 0.01, which is selected. Over 100 groups of 100 values,
-    /// fewer than the sketch's `k`, the sketch keeps every value too, in an
-    /// item array grown past them, so its state is no smaller than the
-    /// exact state, which is selected.
+    /// ε = 0.01, δ = 0.01, which is selected. Over 100 groups of 100 values
+    /// (100 jobs declared), fewer than the sketch's `k`, the sketch keeps
+    /// every value too, in an item array grown past them, so its state is
+    /// no smaller than the exact state, which is selected.
     #[test]
     fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+        let mut data = data();
+        data.sources.get_mut("x").unwrap().distinct_values_per_label =
+            [("job".to_string(), 100)].into();
         for (query, large_groups) in [
             ("quantile(0.99, rate(x[5m]))", true),
             ("quantile by (job) (0.99, rate(x[5m]))", false),
@@ -6837,7 +6910,7 @@ mod tests {
                     target.clone().accuracy_metric(AccuracyMetric::Rank),
                     repeating(10_000),
                 )],
-                &data(),
+                &data,
                 PlanningModels::builtin(),
             )
             .unwrap();
@@ -8276,7 +8349,11 @@ mod tests {
             let id = aggregate.id;
             let cost = |w| {
                 let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
-                price(&dag, &recurrences(1), &arriving(10_000.0), &settings)
+                // 10 jobs, so each group keeps many values.
+                let mut data = arriving(10_000.0);
+                data.sources.get_mut("m").unwrap().distinct_values_per_label =
+                    [("job".to_string(), 10)].into();
+                price(&dag, &recurrences(1), &data, &settings)
                     .unwrap()
                     .per_node[&id]
                     .cost_per_second

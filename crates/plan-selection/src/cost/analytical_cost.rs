@@ -1516,6 +1516,11 @@ pub enum AnalyticalCostError {
         "measured_operation_costs needs a positive ms_per_cpu_op to count measured times as operations, got {0}"
     )]
     MeasuredCostsWithoutCpuSpeed(f64),
+    /// Internal bug: an ingestion-time grouping with no window below it, so
+    /// no declared or derivable fact bounds its groups (Stage 2 builds
+    /// none).
+    #[error("an ingestion-time grouping has no window below it, so no fact bounds its groups")]
+    IngestionGroupingWithoutWindow,
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {

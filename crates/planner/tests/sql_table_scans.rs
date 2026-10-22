@@ -46,7 +46,7 @@ fn http_schema() -> Schema {
 }
 
 /// Repeating SQL `queries`, each every minute with `accuracy`, over `http`
-/// ingesting 100 rows per second.
+/// ingesting 100 rows per second, whose 3 services are declared.
 fn workload(queries: &[&str], accuracy: &str) -> PlanningWorkload {
     let entries: Vec<String> = queries
         .iter()
@@ -61,7 +61,8 @@ fn workload(queries: &[&str], accuracy: &str) -> PlanningWorkload {
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": {{"sql": "datafusion_sql"}},
               "repeating_queries": [{}]}},
-            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100.0}}}}}}}}"#,
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100.0}}}},
+              "sources": {{"http": {{"distinct_values_per_label": {{"service": 3}}}}}}}}}}"#,
         entries.join(",")
     ))
     .unwrap()
