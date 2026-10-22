@@ -32,6 +32,17 @@ what it checked. With `--exhaustive` it instead composes and prices every
 candidate and the document lists them all, for small workloads or to compare;
 the tabs' examples are written that way.
 
+Unlike `plan_installable` with its default settings, `stage_pipeline`
+ignores accuracy guarantees unless you pass `--enforce-accuracy-guarantees`:
+Stage 3 accepts every query output whatever its guarantee and compares the
+plans on cost alone (executability checks, such as the executor's compile
+check, still apply). The Stage 3 header says `accuracy guarantees ignored`
+or `accuracy guarantees enforced`. The example tabs and the workload sets
+enforce guarantees, since their stories are about which plans meet their
+accuracy targets. Plans from the query editor and from a `PlanningWorkload`
+file you open ignore them; on the command line, pass the flag to enforce
+them.
+
 ## Start the viewer
 
 Run from the repository root, with Rust/Cargo and Python 3 installed:
@@ -86,8 +97,8 @@ and open them with **Open stage document…**:
 
 | Example | Command options | What to look for |
 | --- | --- | --- |
-| 2 · SQL flow statistics | `--example planner-layering-2 --exhaustive` | Distinct sources, entropy and L2 of per-source counts over the last minute of flows. All 82 logical plans compose; none is pruned. The SQL frontend recognizes Q2 as entropy and Q3 (its counts cast to DOUBLE) as L2, each with an exact or UnivMon option and an exact population count for the empty-input NULL. 16 plans come from Pass 1. Pass 2 adds the plans that share identical nodes and, by the summary-capability rule, the plans in which one UnivMon serves two of the queries or all three, sized with each parameter's largest value among them. Stage 2 adds 102 plans in which a node that two queries read is built once per evaluation at query time and read by both (`query time, shared: …` in the label), 184 physical plans in all. 164 plans are invalid: HLL or UnivMon for Q1 (120) because its bound has "failure probability None" (both need the source's distinct bound, which this example does not declare), and UnivMon for Q2 (44) because entropy has no certified bound. 20 are valid: Q1 exact or KMV, Q2 exact, and Q3 exact or UnivMon, each alone, sharing identical nodes, or with the shared node built once at query time. Q3's UnivMon keeps its L2 guarantee through the exact population count joined beside it and the `CASE` that decides the empty-input NULL on that count. Theta is not offered: `asap_sketchlib` has no Theta sketch. P1 (all exact) is selected at 6.08 per second; KMV on Q1 costs the same to three decimals, and UnivMon on Q3 costs 8.08. The shared plans cost 7.44 or more when the shared node is not materialized, because it is then charged once per query that reads it, and 7.04 when it is built once at query time |
-| 4 · one workload, three cost models | `--example planner-layering-3b --exhaustive` with `--cost-model` | Example 3b's live p99 panel under each cost model. Cost model 1 (`usage-over-time`, the default) selects P2, the whole-window KLL, at 2.100 per second. Cost model 2 (`provisioned-capacity`) selects P1, exact, at 1024.0 per second against 1125.0 for P2, because it prices peak memory, and the KLL states, each grown for its 20 samples, hold 1 GB against the exact plan's 192 MB. Cost model 3 (`cluster-capacity --cluster-memory-bytes 256000000000 --cluster-disk-bytes 1000000000000`) selects by `--cluster-objective`: `lowest-latency` selects P3-m1, the KLL panes maintained at ingestion time (7 ms per evaluation); `least-memory` selects P1; `pareto-front` lists P1, P2 and P3-m1 and selects P3-m1. With 4 GB of memory (`--cluster-memory-bytes 4000000000`), the plans with KLL panes are over the limit and invalid, `lowest-latency` selects P2, and the front is P1 and P2. Under cost model 3 the plans have no price. With `--deployment-capabilities '{"query_time_results_retained": true}'`, Stage 2 adds P3-m2, the KLL panes built at query time and kept across evaluations, at 436.53 per second under cost model 1; with `'{"raw_data_retained": false}'`, every plan that scans raw data at query time is invalid and P3-m1, the panes maintained at ingestion time, is selected at 654.53 |
+| 2 · SQL flow statistics | `--example planner-layering-2 --exhaustive --enforce-accuracy-guarantees` | Distinct sources, entropy and L2 of per-source counts over the last minute of flows. All 82 logical plans compose; none is pruned. The SQL frontend recognizes Q2 as entropy and Q3 (its counts cast to DOUBLE) as L2, each with an exact or UnivMon option and an exact population count for the empty-input NULL. 16 plans come from Pass 1. Pass 2 adds the plans that share identical nodes and, by the summary-capability rule, the plans in which one UnivMon serves two of the queries or all three, sized with each parameter's largest value among them. Stage 2 adds 102 plans in which a node that two queries read is built once per evaluation at query time and read by both (`query time, shared: …` in the label), 184 physical plans in all. 164 plans are invalid: HLL or UnivMon for Q1 (120) because its bound has "failure probability None" (both need the source's distinct bound, which this example does not declare), and UnivMon for Q2 (44) because entropy has no certified bound. 20 are valid: Q1 exact or KMV, Q2 exact, and Q3 exact or UnivMon, each alone, sharing identical nodes, or with the shared node built once at query time. Q3's UnivMon keeps its L2 guarantee through the exact population count joined beside it and the `CASE` that decides the empty-input NULL on that count. Theta is not offered: `asap_sketchlib` has no Theta sketch. P1 (all exact) is selected at 6.08 per second; KMV on Q1 costs the same to three decimals, and UnivMon on Q3 costs 8.08. The shared plans cost 7.44 or more when the shared node is not materialized, because it is then charged once per query that reads it, and 7.04 when it is built once at query time |
+| 4 · one workload, three cost models | `--example planner-layering-3b --exhaustive --enforce-accuracy-guarantees` with `--cost-model` | Example 3b's live p99 panel under each cost model. Cost model 1 (`usage-over-time`, the default) selects P2, the whole-window KLL, at 2.100 per second. Cost model 2 (`provisioned-capacity`) selects P1, exact, at 1024.0 per second against 1125.0 for P2, because it prices peak memory, and the KLL states, each grown for its 20 samples, hold 1 GB against the exact plan's 192 MB. Cost model 3 (`cluster-capacity --cluster-memory-bytes 256000000000 --cluster-disk-bytes 1000000000000`) selects by `--cluster-objective`: `lowest-latency` selects P3-m1, the KLL panes maintained at ingestion time (7 ms per evaluation); `least-memory` selects P1; `pareto-front` lists P1, P2 and P3-m1 and selects P3-m1. With 4 GB of memory (`--cluster-memory-bytes 4000000000`), the plans with KLL panes are over the limit and invalid, `lowest-latency` selects P2, and the front is P1 and P2. Under cost model 3 the plans have no price. With `--deployment-capabilities '{"query_time_results_retained": true}'`, Stage 2 adds P3-m2, the KLL panes built at query time and kept across evaluations, at 436.53 per second under cost model 1; with `'{"raw_data_retained": false}'`, every plan that scans raw data at query time is invalid and P3-m1, the panes maintained at ingestion time, is selected at 654.53 |
 
 The workload statistics in the examples (series counts, ingestion rates) are
 illustrative. Read the costs as a ranking, not as a prediction of real
@@ -257,7 +268,8 @@ seconds.
 
 Each query's target is ε = 0.05 (1 − its accuracy SLA) with δ = 0.3 and no
 metric set. The sets are planned as the MVP deployment: raw data not
-retained, priced at AWS Fargate us-east-1 rates. Without the server (for
+retained, priced at AWS Fargate us-east-1 rates, accuracy guarantees
+enforced. Without the server (for
 example, when the page is served as static files), workload-01 of each set
 opens its precomputed document, which is also an example tab, and the other
 rows say they need the server.
@@ -285,8 +297,9 @@ or PromQL queries, and click **Plan**:
 The editor plans the checked queries as one batch that runs once, with no
 failure probability δ. It declares a 15 s sample interval for every metric
 the PromQL queries read and no other data facts, so the planner uses
-default statistics for everything else. For δ, another sample interval or
-another cost model, use the command below.
+default statistics for everything else. It ignores accuracy guarantees,
+`stage_pipeline`'s default. For δ, another sample interval, another cost
+model or enforced guarantees, use the command below.
 
 ### From the command line
 
@@ -307,12 +320,13 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | `--max-error`, `--failure-probability` | Accuracy (ε, δ) for every query; without them the queries are exact |
 | `--accuracy-metric <metric>` | The error metric of that accuracy: `absolute`, `absolute_stream_l1`, `absolute_stream_l2`, `relative` or `rank`. Without it, a plan is accepted in whatever metric meets ε (and δ). |
 | `--sample-interval-ms <ms>` | Sample interval of every metric the PromQL queries read (default 15000) |
-| `--example <name>` | A built-in example instead of queries: `planner-layering-1`, `-2`, `-3a` or `-3b`; add `--exhaustive` to see every plan its story describes |
+| `--example <name>` | A built-in example instead of queries: `planner-layering-1`, `-2`, `-3a` or `-3b`; add `--exhaustive --enforce-accuracy-guarantees` to see every plan its story describes and the plans it rejects for their guarantees |
 | `--cost-model <model>` | How plan selection compares valid plans: `usage-over-time` (cost model 1, the default: CPU, scanned bytes and memory over time, priced per second), `provisioned-capacity` (cost model 2: peak memory, peak CPU cores and disk, priced) or `cluster-capacity` (cost model 3: no prices) |
 | `--cluster-memory-bytes <n>`, `--cluster-disk-bytes <n>`, `--cluster-cpu-cores <n>` | Cost model 3 only: the cluster's limits; a plan over one is invalid. The CPU limit is optional. |
 | `--cluster-objective <objective>` | Cost model 3 only: `lowest-latency`, `least-memory` or `pareto-front` (the plans no other plan beats on latency, memory and disk; the lowest-latency one is selected) |
 | `--deployment-capabilities '<json>'` | What the executor supports, for example `{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}], "raw_data_retained": true, "query_time_results_retained": true}`. `supported_summaries` (default: every summary the planner can build) lists the sketch families and the statistics each may answer; a summary outside it is not offered. With `raw_data_retained: false` (default `true`), a plan that scans raw data at query time is invalid. With `query_time_results_retained: true` (default `false`), tumbling panes built at query time may be kept for the next evaluations (`query time, kept` in the label). The document repeats the inputs under `deployment_capabilities`; the page does not show them yet. |
 | `--measured-operation-costs <file>` | A JSON table of measured CPU time per sketch operation (`[{"sketch": …, "operation": "update", "cpu_ns_per_operation": …}]`, as `convert_rqe_atomic_costs` writes it). A sketch node whose parameters match an entry exactly is priced from it; each node's `price_source` in the document says `measured` or `analytical`. |
+| `--enforce-accuracy-guarantees` | Reject a plan whose accuracy guarantee does not meet its query's target, as `plan_installable` does with the default settings. Without it (the default), every query output is accepted regardless of its guarantee, the plans are compared on cost alone, and each output's line says `regardless of guarantee`, plus `ignoring a failed guarantee check (<cause>)` when its guarantee would not have met the target; the document's `accuracy_guarantees` is `ignored` or `enforced`. With `--plan-selection-settings`, this flag decides, whatever the file's `ignore_accuracy_guarantees` says. |
 | `--exhaustive` | Compose and price every candidate instead of running the default search, and list them all. Use it for small workloads or to compare with the default search. |
 | `--max-displayed <n>` | With `--exhaustive`, how many plans the document shows (default 64), in enumeration order, plus the selected plan. The planner still optimizes and prices every plan, so the selection does not depend on it. |
 | `--max-combinations <n>` | With `--exhaustive` only: the most candidates a run plans (default 10000), counted at Stage 1 and again at Stage 2; a larger workload is refused with exit status 3 and no document. The default search has no limit. |

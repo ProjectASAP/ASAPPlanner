@@ -10,8 +10,8 @@
 //! read only here). The deployment's accuracy model may instead accept the
 //! output directly, whatever its guarantee says
 //! (`AccuracyModel::accepts_output_regardless_of_guarantee`); the settings'
-//! `ignore_accuracy_guarantees` accepts every output so
-//! ([`IgnoreAccuracyGuarantees`]), and the report records each one the
+//! `ignore_accuracy_guarantees` (the one built-in way) accepts every
+//! output so, and the report records each one the
 //! guarantee check would have rejected. Before that, for
 //! a query with a target, Count-Min is admitted only over weights proven
 //! non-negative, which the executor needs to run it; a query without one
@@ -261,8 +261,7 @@ use asap_physical_asap_optimization::PhysicalCandidate;
 
 pub mod accuracy;
 pub use accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
-    NoAccuracyEvidence,
+    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
 };
 pub mod cost;
 /// Costed reuse of compatible physical pane producers.
@@ -519,8 +518,9 @@ pub struct PlanSelectionSettings {
     /// Default empty: every node is priced from the formulas.
     pub measured_operation_costs: MeasuredOperationCosts,
     /// Accept every query output regardless of its accuracy guarantee:
-    /// planning uses [`IgnoreAccuracyGuarantees`] in place of
-    /// [`PlanningModels::accuracy`] ([`PlanningModels::effective_accuracy`]).
+    /// planning uses an accuracy model that accepts every output in place
+    /// of [`PlanningModels::accuracy`]. This field is the one built-in way
+    /// to ignore guarantees.
     /// For comparing candidates on cost alone, e.g. a benchmark of sketch
     /// plans with no analytical guarantee. Executability checks still apply.
     /// Each output accepted only because of it, i.e. whose guarantee check
@@ -822,8 +822,9 @@ pub struct AcceptedAccuracy {
     pub accepted_metric: Option<AccuracyMetric>,
     /// Whether the deployment's accuracy model accepted the output directly,
     /// whatever its guarantee says
-    /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]); `false`
-    /// when a guarantee met the target.
+    /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]), as
+    /// every output is with `ignore_accuracy_guarantees`; `false` when its
+    /// guarantee was checked and met the target.
     pub accepted_regardless_of_guarantee: bool,
     /// When accepted regardless of its guarantee, the cause the guarantee
     /// check would have rejected it with

@@ -23,9 +23,17 @@
     return parts.join(', ') || 'default deployment capabilities';
   }
 
+  // How a set's workloads are planned: the search, its deployment
+  // capabilities, cost model and accuracy guarantee mode (ignored, as
+  // stage_pipeline does by default, unless the set says "enforced").
+  function plannedWith(set) {
+    return `default search, ${capabilitiesText(set.deployment_capabilities)}${set.cost_model ? `, cost model ${set.cost_model}` : ''}` +
+      `, accuracy guarantees ${set.accuracy_guarantees === 'enforced' ? 'enforced' : 'ignored'}`;
+  }
+
   function renderSet(set) {
     $('setMeta').innerHTML = `${esc(set.description || '')}<br><span>Source: ${esc(set.source || 'not given')}</span><br>` +
-      `<span>Planned with: default search, ${esc(capabilitiesText(set.deployment_capabilities))}${set.cost_model ? `, cost model ${esc(set.cost_model)}` : ''}.</span>`;
+      `<span>Planned with: ${esc(plannedWith(set))}.</span>`;
     const rows = set.workloads.map((entry, index) => {
       const workload = workloads.get(entry.file);
       if (!workload) {
@@ -53,14 +61,14 @@
   function openWorkload(set, entry) {
     const workload = workloads.get(entry.file);
     const source = `${set.id} / ${entry.id}`;
-    const story = `${set.name || set.id}, ${entry.id}: planned with the default search, ${capabilitiesText(set.deployment_capabilities)}${set.cost_model ? `, cost model ${set.cost_model}` : ''}.`;
+    const story = `${set.name || set.id}, ${entry.id}: planned with the ${plannedWith(set)}.`;
     if (!serverUp) {
       if (entry.document) window.StageViewer.loadDocument(entry.document, `${source} (precomputed)`, story);
       else $('setsServer').textContent = `${entry.id} needs the server: start server.py`;
       return;
     }
     $('setsServer').textContent = `planning ${entry.id}…`;
-    window.StageViewer.planWorkload(workload, set.deployment_capabilities || null, source, story, set.cost_model || null)
+    window.StageViewer.planWorkload(workload, set.deployment_capabilities || null, source, story, set.cost_model || null, set.accuracy_guarantees || null)
       .then(() => { $('setsServer').textContent = 'planned by the local server'; })
       .catch((err) => {
         // Fall back to the precomputed document when the server cannot plan.

@@ -1,4 +1,5 @@
 {
+  "accuracy_guarantees": "enforced",
   "deployment_capabilities": {
     "query_time_results_retained": false,
     "raw_data_retained": false,
