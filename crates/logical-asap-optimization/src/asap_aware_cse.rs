@@ -101,19 +101,33 @@
 //! A coarse grouped computation can be answered from a finer one the
 //! candidate already computes over the same rows: `sum by (job)` from
 //! `sum by (job, instance)`. The rule never introduces a finer grouping
-//! nobody asked for. A *rollup candidate* ([`rollup_candidates`]) is a coarse exact
-//! accumulator build whose family merges across disjoint groups in the
-//! family-capability table with an exact merged value ([`rollup_kind`]:
-//! sums, counts, minima and maxima; counter states merge only in time, and
-//! a sketch's states would need a merge that regroups them, which the IR
-//! does not have), and a finer build of the same family over the same rows
-//! (a PromQL scan may project other labels), whose group keys include the
-//! coarse ones. The coarse build becomes an exact accumulator over the
-//! finer one's finalized values, grouped by the coarse keys (a count sums
-//! the finer counts), so the value stays exact. [`rollup_pass2_candidates`]
-//! returns one Pass 2 candidate per non-empty subset of the rollup
-//! candidates, each read from
-//! its coarsest finer build.
+//! nobody asked for. A *rollup candidate* ([`rollup_candidates`]) is a
+//! coarse build and a finer build of the same family over the same rows (a
+//! PromQL scan may project other labels), whose group keys include the
+//! coarse ones:
+//! - An exact accumulator whose family merges across disjoint groups with
+//!   an exact merged value ([`rollup_kind`]: sums, counts, minima and
+//!   maxima; counter states merge only in time). The coarse build becomes
+//!   an exact accumulator over its coarsest finer build's finalized values,
+//!   grouped by the coarse keys (a count sums the finer counts), so the
+//!   value stays exact.
+//! - A per-group sketch (KMV, HLL, KLL, DDSketch, Count-Min, Count Sketch,
+//!   UnivMon, at any size) read only by estimates whose merged readouts
+//!   keep a guarantee (not a heap's top-k or UnivMon's entropy). The coarse build becomes a rollup (a regrouping
+//!   `SummaryMerge`) of its finest finer build's states by the coarse
+//!   keys. The groups of one build partition its rows, so the rolled-up
+//!   state keeps the family's merged guarantee: the direct coarse build's
+//!   for KMV, HLL, DDSketch and the linear sketches, the same rank bound
+//!   for KLL.
+//!
+//! [`rollup_pass2_candidates`] returns one Pass 2 candidate per non-empty
+//! subset of the rollup *choices* ([`rollup_choices`]): each exact rollup
+//! alone, and every sketch rollup of one finest build together, since they
+//! share its size. A chosen sketch choice sizes the finest build for every
+//! reader, its own and each coarse one's (the strictest consumer, as the
+//! summary-capability rule sizes a shared build), and composes every
+//! guarantee above it again. So 15 groupings of one window are one choice,
+//! not 2^14 subsets.
 //!
 //! # Exact top-k reuse rule
 //!
@@ -131,8 +145,8 @@ use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{
-    ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergeInputRule, Schema,
-    SketchKind, PROMQL_SERIES_IDENTITY,
+    ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergeInputRule, MergedError,
+    Schema, SketchKind, PROMQL_SERIES_IDENTITY,
 };
 use asap_types::ir::SortKey;
 use asap_types::ir::{
@@ -1573,18 +1587,26 @@ fn rebuild(
 }
 
 /// One coarse build the rollup rule can answer from a finer one: the
-/// coarse `SummaryAgg`, the finalized finer build it reads, and the value
-/// that replaces the coarse build's finalized value.
+/// coarse `SummaryAgg`, the finer node it reads, and the node that replaces
+/// the coarse value or state.
 #[derive(Debug, Clone)]
 pub struct RollupCandidate {
-    /// The coarse exact accumulator build (`SummaryAgg`); every reader of
-    /// it is a `FinalizeExactAccumulator`, which the rollup replaces.
+    /// The coarse build (`SummaryAgg`). An exact accumulator's every
+    /// reader is a `FinalizeExactAccumulator`, which the rollup replaces; a
+    /// sketch's every reader is an estimate its family answers, and the
+    /// rollup replaces the build itself.
     pub coarse: Rc<OperatorNode>,
-    /// The finer build's `FinalizeExactAccumulator`, already in the
-    /// candidate, whose values the rollup reads.
+    /// For an exact accumulator, the finer build's
+    /// `FinalizeExactAccumulator`, whose values the rollup reads; for a
+    /// sketch, the finest build of the same algorithm over the same rows
+    /// (a `SummaryAgg`), whose states the rollup merges. Both are already
+    /// in the candidate.
     pub finer: Rc<OperatorNode>,
-    /// The finalized exact accumulator over `finer`'s values, grouped by
-    /// the coarse keys, with the coarse value's column names.
+    /// For an exact accumulator, the finalized exact accumulator over
+    /// `finer`'s values, grouped by the coarse keys, with the coarse value's
+    /// column names; for a sketch, the regrouping `SummaryMerge` of
+    /// `finer`'s states by the coarse keys, at `finer`'s size (a Pass 2
+    /// candidate resizes `finer` for every reader).
     pub rollup: Rc<OperatorNode>,
 }
 
@@ -1631,7 +1653,9 @@ pub fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
 /// The rollup candidates of the candidate with query roots `roots`, children
 /// first: each coarse exact accumulator build read only through its
 /// finalized value, with its coarsest finer build of the same family over
-/// the same rows that the candidate finalizes.
+/// the same rows that the candidate finalizes; then each coarse sketch build
+/// read only by estimates, with the finest build of its algorithm over the
+/// same rows whose keys include its own ([`sketch_rollup_candidates`]).
 pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1687,7 +1711,142 @@ pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
         }
         candidates.extend(best.map(|(_, candidate)| candidate));
     }
+    candidates.extend(sketch_rollup_candidates(&nodes, &readers));
     candidates
+}
+
+/// The sketch rollup candidates among `nodes` (children first), whose
+/// readers are `readers`: each per-group sketch build grouped by listed keys
+/// and read only by estimates its family answers, answered from the finest
+/// build ([`finer_keys`] with the most keys, and no build finer than it) of
+/// the same algorithm (at any size), update and filter over the same rows,
+/// whose family's states merge into a state with a guarantee
+/// ([`regroupable`]). Every coarse build of one finest build is one
+/// choice in [`rollup_pass2_candidates`], so the choices stay few however
+/// many groupings a workload asks for.
+fn sketch_rollup_candidates(
+    nodes: &[Rc<OperatorNode>],
+    readers: &HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>>,
+) -> Vec<RollupCandidate> {
+    let builds: Vec<&Rc<OperatorNode>> = nodes.iter().filter(|n| regroupable(n)).collect();
+    // The finer build with the most keys; among several (groupings that
+    // are not nested), the one whose sorted key names come first, so the
+    // choice does not depend on query order.
+    let key_names = |build: &OperatorNode| -> Vec<ColumnName> {
+        let mut names: Vec<ColumnName> = build
+            .schema
+            .fields
+            .iter()
+            .filter(|field| field.is_plain())
+            .map(column_name)
+            .collect();
+        names.sort();
+        names
+    };
+    let finest = |coarse: &OperatorNode| {
+        builds
+            .iter()
+            .filter_map(|&fine| Some((finer_keys(coarse, fine)?, fine)))
+            .min_by(|(keys, fine), (other_keys, other)| {
+                other_keys
+                    .cmp(keys)
+                    .then_with(|| key_names(fine).cmp(&key_names(other)))
+            })
+            .map(|(_, fine)| fine)
+    };
+    let mut candidates = Vec::new();
+    for &coarse in &builds {
+        let Some(ASAPOp::SummaryAgg { family, .. }) = coarse.asap() else {
+            continue;
+        };
+        // Every reader is an estimate whose merged readout keeps a
+        // guarantee: not a heap's top-k or a UnivMon's entropy.
+        let capability = FamilyCapability::of(family);
+        let read_with_guarantee = readers.get(&Rc::as_ptr(coarse)).is_some_and(|readers| {
+            readers.iter().all(|reader| match reader.asap() {
+                Some(ASAPOp::SummaryEstimate { query, .. }) => {
+                    capability.answers(query)
+                        && matches!(
+                            capability.merged_error(query),
+                            Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
+                        )
+                }
+                _ => false,
+            })
+        });
+        if !read_with_guarantee {
+            continue;
+        }
+        // A build finer than the one with the most keys would have more.
+        let Some(fine) = finest(coarse) else {
+            continue;
+        };
+        if let Some(rollup) = regrouped(coarse, fine) {
+            candidates.push(RollupCandidate {
+                coarse: Rc::clone(coarse),
+                finer: Rc::clone(fine),
+                rollup,
+            });
+        }
+    }
+    candidates
+}
+
+/// Whether `node` is a per-group sketch build grouped by listed keys whose
+/// states a rollup may merge across groups
+/// ([`FamilyCapability::merges_groups`]).
+fn regroupable(node: &OperatorNode) -> bool {
+    matches!(
+        node.asap(),
+        Some(ASAPOp::SummaryAgg {
+            family: family @ FieldDataType::Sketch(..),
+            reduction: Reduction::Reduce(by),
+            ..
+        }) if !by.is_without() && FamilyCapability::merges_groups(family)
+    )
+}
+
+/// The regrouping `SummaryMerge` of `fine`'s states by `coarse`'s keys, in
+/// `coarse`'s order and with its column names; `None` when a key is not in
+/// `fine`'s state.
+fn regrouped(coarse: &OperatorNode, fine: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+    let Some(ASAPOp::SummaryAgg {
+        reduction: Reduction::Reduce(by),
+        ..
+    }) = coarse.asap()
+    else {
+        return None;
+    };
+    let keys = (0..by.keys().len())
+        .map(|key| {
+            let name = column_name(&coarse.schema.fields[key]);
+            fine.schema
+                .fields
+                .iter()
+                .position(|field| field.is_plain() && column_name(field) == name)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    regroup_merge(fine, keys, coarse).ok()
+}
+
+/// `SummaryMerge { [state], group_by: keys }`, its columns named as
+/// `named`'s (the coarse build it stands for).
+fn regroup_merge(
+    state: &Rc<OperatorNode>,
+    keys: Vec<usize>,
+    named: &OperatorNode,
+) -> Result<Rc<OperatorNode>, asap_types::ir::SchemaDerivationError> {
+    let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![Rc::clone(state)],
+        group_by: Some(keys),
+        newest_panes: None,
+    }))?;
+    let mut schema = merge.schema.clone();
+    for (field, coarse) in schema.fields.iter_mut().zip(&named.schema.fields) {
+        field.name = coarse.name.clone();
+        field.table = coarse.table.clone();
+    }
+    Ok(Rc::new(OperatorNode::with_schema(merge.operator, schema)))
 }
 
 /// Whether `node` is an exact accumulator build grouped by listed keys whose
@@ -1705,8 +1864,9 @@ fn grouped_exact(node: &OperatorNode) -> bool {
 }
 
 /// The number of group keys of `fine` when it can answer `coarse`: the same
-/// family, update and filter over the same rows, and group keys (by column)
-/// that strictly include the coarse ones.
+/// family (a sketch's algorithm at any size), update and filter over the
+/// same rows, and group keys (by column) that strictly include the coarse
+/// ones.
 fn finer_keys(coarse: &OperatorNode, fine: &OperatorNode) -> Option<usize> {
     let (
         Some(ASAPOp::SummaryAgg {
@@ -1741,7 +1901,7 @@ fn finer_keys(coarse: &OperatorNode, fine: &OperatorNode) -> Option<usize> {
         // A filter indexes its input's columns: equal only over equal rows.
         (a, b) => a == b && (Rc::ptr_eq(child, fine_child) || child == fine_child),
     };
-    (family == fine_family
+    (same_family(family, fine_family)
         && input == fine_input
         && same_filter
         && fine_keys.len() > coarse_keys.len()
@@ -1887,25 +2047,61 @@ fn rolled_up(
     Some(finalized)
 }
 
+/// The independent choices among rollup candidates `candidates`
+/// ([`rollup_candidates`]), in order: each exact accumulator's alone, and
+/// every sketch candidate of one finest build together, since they share
+/// that build's size.
+pub fn rollup_choices(candidates: &[RollupCandidate]) -> Vec<Vec<RollupCandidate>> {
+    let mut choices: Vec<Vec<RollupCandidate>> = Vec::new();
+    for candidate in candidates {
+        let sketch = is_sketch_build(&candidate.finer);
+        match choices.iter_mut().find(|choice| {
+            sketch
+                && is_sketch_build(&choice[0].finer)
+                && Rc::ptr_eq(&choice[0].finer, &candidate.finer)
+        }) {
+            Some(choice) => choice.push(candidate.clone()),
+            None => choices.push(vec![candidate.clone()]),
+        }
+    }
+    choices
+}
+
+fn is_sketch_build(node: &OperatorNode) -> bool {
+    matches!(
+        node.asap(),
+        Some(ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(..),
+            ..
+        })
+    )
+}
+
 /// Every Pass 2 candidate of the rollup rule for the candidate with query
 /// roots `roots` and rollup candidates `candidates` ([`rollup_candidates`]):
-/// one per non-empty subset of them, in binary-counter order (the first
-/// the lowest bit). An error only for more than [`MAX_REUSE_CANDIDATES`]
-/// of them; a Pass 2 candidate
-/// whose composition fails carries its own error.
+/// one per non-empty subset of their choices ([`rollup_choices`]), in
+/// binary-counter order (the first the lowest bit). A chosen sketch choice
+/// resizes its finest build for every reader, its own and each coarse
+/// build's ([`sized_for_all`]: the strictest consumer's size), and each
+/// coarse build becomes the regrouping merge of the resized build's
+/// states. An error only for more than [`MAX_REUSE_CANDIDATES`] choices; a
+/// Pass 2 candidate whose composition fails carries its own error.
 pub fn rollup_pass2_candidates(
     roots: &[QueryRoot],
     candidates: &[RollupCandidate],
 ) -> Result<Vec<RollupPass2Candidate>, PerComputationCandidateError> {
-    Ok(subsets(candidates, "rollup")?
+    Ok(subsets(&rollup_choices(candidates), "rollup")?
         .into_iter()
-        .map(|chosen| {
+        .map(|choices| {
+            let chosen: Vec<RollupCandidate> = choices.iter().flatten().cloned().collect();
             let values: HashMap<*const OperatorNode, &RollupCandidate> = chosen
                 .iter()
+                .filter(|candidate| !is_sketch_build(&candidate.finer))
                 .map(|candidate| (Rc::as_ptr(&candidate.coarse), candidate))
                 .collect();
-            // Every finalized value of a chosen coarse build is replaced.
-            let replaced = roots
+            // Every finalized value of a chosen coarse exact build is
+            // replaced.
+            let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = roots
                 .iter()
                 .flat_map(root_operators)
                 .flat_map(OperatorNode::reachable)
@@ -1917,12 +2113,54 @@ pub fn rollup_pass2_candidates(
                     _ => None,
                 })
                 .collect();
+            let roots = sketch_rollups(&choices).and_then(|sketches| {
+                replaced.extend(sketches);
+                replace_all(roots, &replaced)
+            });
             RollupPass2Candidate {
-                roots: replace_all(roots, &replaced),
+                roots,
                 rollup_candidates: chosen,
             }
         })
         .collect())
+}
+
+/// The replacements of the sketch rollup choices among `choices`
+/// ([`rollup_choices`]): each finest build by the build sized for it and
+/// every coarse build it serves, and each coarse build by the regrouping
+/// merge of that build's states. An error when a finest build and its
+/// coarse builds have no shared size, or a node does not derive.
+fn sketch_rollups(
+    choices: &[Vec<RollupCandidate>],
+) -> Result<Vec<(*const OperatorNode, Rc<OperatorNode>)>, PerComputationCandidateError> {
+    let unsupported = || {
+        PerComputationCandidateError::Unsupported(
+            "a sketch rollup whose finest and coarse builds have no shared size",
+        )
+    };
+    let mut replaced = Vec::new();
+    for choice in choices {
+        let fine = &choice[0].finer;
+        if !is_sketch_build(fine) {
+            continue;
+        }
+        let mut members = vec![fine];
+        members.extend(choice.iter().map(|candidate| &candidate.coarse));
+        let sized = sized_for_all(&members)?.ok_or_else(unsupported)?;
+        replaced.push((Rc::as_ptr(fine), Rc::clone(&sized)));
+        for candidate in choice {
+            let Some(ASAPOp::SummaryMerge {
+                group_by: Some(keys),
+                ..
+            }) = candidate.rollup.asap()
+            else {
+                unreachable!("a sketch rollup candidate's rollup is a regrouping merge");
+            };
+            let merge = regroup_merge(&sized, keys.clone(), &candidate.coarse)?;
+            replaced.push((Rc::as_ptr(&candidate.coarse), merge));
+        }
+    }
+    Ok(replaced)
 }
 
 /// Every non-empty subset of `candidates`, in binary-counter order (the
@@ -1935,7 +2173,7 @@ fn subsets<T: Clone>(
     if n > MAX_REUSE_CANDIDATES {
         return Err(PerComputationCandidateError::TooManyCandidates {
             counted: match rule {
-                "rollup" => "rollup candidates",
+                "rollup" => "rollup choices",
                 _ => "top-k reuse candidates",
             },
             found: n,
@@ -2824,7 +3062,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "found {} rollup candidates, more than {MAX_REUSE_CANDIDATES}",
+                "found {} rollup choices, more than {MAX_REUSE_CANDIDATES}",
                 MAX_REUSE_CANDIDATES + 1
             )
         );
@@ -3523,15 +3761,164 @@ mod tests {
         ] {
             assert_eq!(rollup_kind(&family), None, "{family:?}");
         }
-        // A grouped KLL beside a finer one is no site.
+    }
+
+    /// #840's `quantile by (host, job)` and `quantile by (job)`, both KLL,
+    /// the coarse one at a tighter ε: the coarse query reads the regrouping
+    /// merge of the finer KLL's states by `job`, so one KLL is built, sized
+    /// for its strictest reader (the larger `k`), and the coarse query keeps
+    /// a guarantee within its own target.
+    #[test]
+    fn a_coarse_sketch_rolls_up_from_the_finer_build() {
+        let roots = chose(
+            &[
+                ("quantile by (host, job) (0.5, data)", 0.01),
+                ("quantile by (job) (0.5, data)", 0.001),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let ks: Vec<u32> = kll_builds(&roots).into_iter().map(|(_, k)| k).collect();
+        let rule_candidates = rollup_candidates(&roots);
+        let [rule_candidate] = rule_candidates.as_slice() else {
+            panic!("one candidate: {rule_candidates:?}")
+        };
+        assert!(Rc::ptr_eq(&rule_candidate.coarse, &builds(&roots[1])[0]));
+        assert!(Rc::ptr_eq(&rule_candidate.finer, &builds(&roots[0])[0]));
+        let pass2_candidates = rollup_pass2_candidates(&roots, &rule_candidates).unwrap();
+        let [pass2_candidate] = pass2_candidates.as_slice() else {
+            panic!("one Pass 2 candidate")
+        };
+        let rolled = pass2_candidate.roots.as_ref().unwrap();
+        // One KLL, at the larger k, read by both queries.
+        assert_eq!(
+            kll_builds(rolled)
+                .into_iter()
+                .map(|(_, k)| k)
+                .collect::<Vec<_>>(),
+            [*ks.iter().max().unwrap()]
+        );
+        let merge = OperatorNode::reachable(operator(&rolled[1]))
+            .into_iter()
+            .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryMerge { .. })))
+            .expect("the coarse query reads a rollup");
+        let Some(ASAPOp::SummaryMerge {
+            children, group_by, ..
+        }) = merge.asap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(group_by, &Some(vec![1]));
+        assert!(Rc::ptr_eq(&children[0], &builds(&rolled[0])[0]));
+        for (before, after) in roots.iter().zip(rolled) {
+            let (before, after) = (operator(before), operator(after));
+            after.validate_structure().unwrap();
+            assert_eq!(before.schema, after.schema);
+        }
+        // Each query's guarantee is the shared KLL's, within its target.
+        assert!(
+            root_bound(&rolled[1]) <= 0.001,
+            "{}",
+            root_bound(&rolled[1])
+        );
+        assert!(root_bound(&rolled[0]) <= 0.001);
+    }
+
+    /// Every coarser grouping of one finest build is one choice: two coarse
+    /// builds of a three-grouping chain give one Pass 2 candidate, in which
+    /// both read the finest build's states. A finer build that is itself
+    /// coarse is not a source.
+    #[test]
+    fn coarse_groupings_of_one_finest_build_roll_up_together() {
         let roots = chose(
             &[
                 ("quantile by (job) (0.9, m)", 0.01),
                 ("quantile by (job, instance) (0.9, m)", 0.01),
+                ("quantile by (job, instance, zone) (0.9, m)", 0.01),
             ],
             SketchAlgorithm::Kll,
         );
-        assert!(rollup_candidates(&roots).is_empty());
+        let rule_candidates = rollup_candidates(&roots);
+        assert_eq!(rule_candidates.len(), 2);
+        let finest = &builds(&roots[2])[0];
+        assert!(rule_candidates
+            .iter()
+            .all(|candidate| Rc::ptr_eq(&candidate.finer, finest)));
+        assert_eq!(rollup_choices(&rule_candidates).len(), 1);
+        let pass2_candidates = rollup_pass2_candidates(&roots, &rule_candidates).unwrap();
+        let [pass2_candidate] = pass2_candidates.as_slice() else {
+            panic!("one Pass 2 candidate")
+        };
+        let rolled = pass2_candidate.roots.as_ref().unwrap();
+        assert_eq!(kll_builds(rolled).len(), 1);
+    }
+
+    /// A quantile over every series rolls up from the KLLs by job: a
+    /// rollup to no keys.
+    #[test]
+    fn a_global_quantile_rolls_up_to_no_keys() {
+        let roots = chose(
+            &[
+                ("quantile(0.9, m)", 0.01),
+                ("quantile by (job) (0.9, m)", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let rule_candidates = rollup_candidates(&roots);
+        let [rule_candidate] = rule_candidates.as_slice() else {
+            panic!("one candidate: {rule_candidates:?}")
+        };
+        assert!(matches!(
+            rule_candidate.rollup.asap(),
+            Some(ASAPOp::SummaryMerge { group_by: Some(keys), .. }) if keys.is_empty()
+        ));
+        let pass2 = rollup_pass2_candidates(&roots, &rule_candidates).unwrap();
+        let rolled = pass2[0].roots.as_ref().unwrap();
+        assert_eq!(kll_builds(rolled).len(), 1);
+        operator(&rolled[0]).validate_structure().unwrap();
+    }
+
+    /// Groupings that are not nested: `by (job)` rolls up from `by (job,
+    /// instance)` or `by (job, zone)`; the source is the one whose sorted
+    /// key names come first, whatever the query order.
+    #[test]
+    fn the_rollup_source_does_not_depend_on_query_order() {
+        for queries in [
+            [
+                "quantile by (job) (0.9, m)",
+                "quantile by (job, zone) (0.9, m)",
+                "quantile by (job, instance) (0.9, m)",
+            ],
+            [
+                "quantile by (job) (0.9, m)",
+                "quantile by (job, instance) (0.9, m)",
+                "quantile by (job, zone) (0.9, m)",
+            ],
+        ] {
+            let roots = chose(&queries.map(|q| (q, 0.01)), SketchAlgorithm::Kll);
+            let rule_candidates = rollup_candidates(&roots);
+            let [rule_candidate] = rule_candidates.as_slice() else {
+                panic!("one candidate: {rule_candidates:?}")
+            };
+            let instance = queries.iter().position(|q| q.contains("instance")).unwrap();
+            assert!(Rc::ptr_eq(
+                &rule_candidate.finer,
+                &builds(&roots[instance])[0]
+            ));
+        }
+    }
+
+    /// A rollup needs the same rows: a coarse KLL over another metric is
+    /// none.
+    #[test]
+    fn sketch_rollup_needs_the_same_rows() {
+        let other_metric = chose(
+            &[
+                ("quantile by (job) (0.9, n)", 0.01),
+                ("quantile by (job, instance) (0.9, m)", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        assert!(rollup_candidates(&other_metric).is_empty());
     }
 
     /// Two exact top-k over the same per-job sums: both read one ranking,

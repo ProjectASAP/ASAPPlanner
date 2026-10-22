@@ -2095,6 +2095,11 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
                     .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. }))
         }
         Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => global(reduction),
+        // A rollup to no keys gives one state.
+        Operator::ASAP(ASAPOp::SummaryMerge {
+            group_by: Some(keys),
+            ..
+        }) => keys.is_empty(),
         // A merge gives one state per group, whatever the panes it merges.
         Operator::ASAP(ASAPOp::SummaryMerge { .. }) => matches!(
             node.summary_build(),
@@ -3601,10 +3606,16 @@ fn price_at_scale(
                     ),
                 )
             }
-            Payload::ASAP(ASAPOp::SummaryMerge { newest_panes, .. }) => {
+            Payload::ASAP(ASAPOp::SummaryMerge {
+                newest_panes,
+                group_by,
+                ..
+            }) => {
                 // One operation per input state read; one state per group
                 // out, each pane of a chain being a state of its group. A
-                // merge of a chain's newest `n` panes reads `n` per group.
+                // merge of a chain's newest `n` panes reads `n` per group. A
+                // rollup's groups are those of its keys, at most its input
+                // groups.
                 let mut group_count = 0;
                 for producer in producers {
                     let panes = match &nodes[producer].payload {
@@ -3616,6 +3627,9 @@ fn price_at_scale(
                     group_count = group_count.max(output[producer].rows / panes.max(1));
                 }
                 let states = merged_states(*newest_panes, producers, &output, nodes);
+                if let Some(keys) = group_by {
+                    group_count = group_count.min(groups(&Reduction::by(keys.clone())));
+                }
                 let out = EdgeStatistics {
                     rows: group_count,
                     bytes: input.bytes.div_ceil(input.rows.max(1)) * group_count,

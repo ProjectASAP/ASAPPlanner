@@ -12,7 +12,7 @@ use asap_types::workload::QueryWorkloadEntry;
 
 use crate::asap_aware_cse::{
     capability_sharing_candidates, identical_expression_pass2_candidates, pane_candidates,
-    rollup_candidates, rollup_pass2_candidates, sharing_candidates,
+    rollup_candidates, rollup_choices, rollup_pass2_candidates, sharing_candidates,
     summary_capability_pass2_candidates, topk_reuse_candidates, topk_reuse_pass2_candidates,
     window_composition_pass2_candidates, with_union_scan_labels, PaneCandidate, RollupCandidate,
     SharedPaneChain, SharingCandidate, TopKReuseCandidate, MAX_REUSE_CANDIDATES,
@@ -423,17 +423,18 @@ impl Pass2List<'_> {
     /// computation rolls up its merged state); each followed by its
     /// identical-expression Pass 2 candidates. They are listed eagerly,
     /// like every Pass 2 rule's: more than [`MAX_REUSE_CANDIDATES`] rollup
-    /// and top-k reuse candidates together list one error.
+    /// choices ([`rollup_choices`]) and top-k reuse candidates together list
+    /// one error.
     fn reuse(&mut self, rules: &Rules, roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) {
         let candidates = rollup_candidates(roots);
         // Every rollup subset is combined with every top-k subset: cap the
         // product, not each factor.
-        let found = candidates.len() + topk_reuse_candidates(roots).len();
+        let found = rollup_choices(&candidates).len() + topk_reuse_candidates(roots).len();
         if found > MAX_REUSE_CANDIDATES {
             self.out.push(Pass2::failed(
                 rules,
                 PerComputationCandidateError::TooManyCandidates {
-                    counted: "rollup and top-k reuse candidates together",
+                    counted: "rollup choices and top-k reuse candidates together",
                     found,
                     max: MAX_REUSE_CANDIDATES,
                 },
@@ -683,7 +684,7 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            format!("found 21 rollup and top-k reuse candidates together, more than {MAX_REUSE_CANDIDATES}")
+            format!("found 21 rollup choices and top-k reuse candidates together, more than {MAX_REUSE_CANDIDATES}")
         );
     }
 }
