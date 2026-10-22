@@ -1524,7 +1524,7 @@ pub enum AnalyticalCostError {
     /// Bad input: no declared fact bounds what a node reads from `source`
     /// (`missing` names the facts that would), so pricing refuses rather
     /// than assume one.
-    #[error("source {source_name} declares none of the facts pricing needs: {missing}")]
+    #[error("pricing source {source_name} needs {missing}, and none is declared")]
     MissingSourceFact {
         source_name: String,
         missing: &'static str,

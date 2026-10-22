@@ -165,8 +165,12 @@ def plan_args(payload: object, out: str) -> list[str]:
         value = payload.get(key)
         if value is None:
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or (kind is int and (value != int(value) or value <= 0)):
-            raise ValueError(f"{key} must be a {'positive integer' if kind is int else 'non-negative number'}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a number")
+        if kind is int and (value != int(value) or value <= 0):
+            raise ValueError(f"{key} must be a positive integer")
+        if kind is float and value < 0:
+            raise ValueError(f"{key} must be a non-negative number")
         args.extend([flag, str(kind(value))])
     interval = payload.get("interval_ms", 15_000)
     if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:

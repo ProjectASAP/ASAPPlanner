@@ -2866,27 +2866,28 @@ fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<f
     let mut every_source: BTreeSet<&str> = data.sources.keys().map(String::as_str).collect();
     every_source.extend(sources.iter().copied());
     let every_source_series = declared_series(&every_source, data);
-    sources
-        .iter()
-        .map(|source| {
-            let facts = data.sources.get(*source);
-            match facts.and_then(|facts| facts.series_count.zip(facts.sample_interval)) {
-                Some((series, interval)) if interval.0 > 0 => {
-                    Some(series as f64 / interval.0 as f64)
-                }
-                _ => {
-                    let workload_rows_per_ms = workload_rows_per_ms?;
-                    let series = facts.and_then(|facts| facts.series_count);
-                    Some(match (series, every_source_series) {
-                        (Some(series), Some(every)) => {
-                            workload_rows_per_ms * series as f64 / every.max(1) as f64
-                        }
-                        _ => workload_rows_per_ms,
-                    })
-                }
+    // Sources with a rate of their own, and the share of the workload's
+    // rate the others receive together (all of it at most).
+    let (mut own, mut shared) = (0.0, 0.0);
+    for source in sources {
+        let facts = data.sources.get(*source);
+        match facts.and_then(|facts| facts.series_count.zip(facts.sample_interval)) {
+            Some((series, interval)) if interval.0 > 0 => {
+                own += series as f64 / interval.0 as f64;
             }
-        })
-        .sum()
+            _ => {
+                let workload_rows_per_ms = workload_rows_per_ms?;
+                let series = facts.and_then(|facts| facts.series_count);
+                shared += match (series, every_source_series) {
+                    (Some(series), Some(every)) => {
+                        workload_rows_per_ms * series as f64 / every.max(1) as f64
+                    }
+                    _ => workload_rows_per_ms,
+                };
+            }
+        }
+    }
+    Some(own + workload_rows_per_ms.map_or(shared, |all| shared.min(all)))
 }
 
 /// The groups (or partitions) a `by (keys)` over rows of schema `input`
@@ -3300,7 +3301,8 @@ fn price_at_scale(
                 node.id,
                 AnalyticalCostError::MissingSourceFact {
                     source_name: source.to_string(),
-                    missing: "rows_per_second, or series_count with sample_interval",
+                    missing: "an arrival rate (the arrival's rows_per_second, or the \
+                              source's series_count with sample_interval)",
                 },
             )
         };
@@ -3392,8 +3394,12 @@ fn price_at_scale(
             true => {
                 let window_ms = maintained_window_ms(node.id, nodes, &producers_of)
                     .ok_or((node.id, AnalyticalCostError::IngestionGroupingWithoutWindow))?;
+                // Name a source with no rate of its own.
                 let rows_per_ms = rows_per_ms.ok_or_else(|| {
-                    missing_rate(sources_read_by[&node.id].first().copied().unwrap_or("?"))
+                    let unrated = sources_read_by[&node.id]
+                        .iter()
+                        .find(|source| source_rows_per_ms(&[**source].into(), data).is_none());
+                    missing_rate(unrated.copied().unwrap_or("(none)"))
                 })?;
                 Ok(((rows_per_ms * window_ms as f64).round() as u64).max(1))
             }
@@ -3411,14 +3417,14 @@ fn price_at_scale(
         let groups = |reduction: &Reduction| match reduction {
             Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => Ok(1),
             Reduction::Reduce(keys) => estimated_groups(keys),
-            // One group per series: at most the declared series and the
-            // rows read, each series having at least one.
-            Reduction::PerEntity => {
-                let rows_read = rows_read()?;
-                Ok(series
-                    .map_or(rows_read, |series| series.min(rows_read))
-                    .max(1))
-            }
+            // One group per series: the declared series (at query time at
+            // most the rows read), else the rows read, each series having at
+            // least one.
+            Reduction::PerEntity => match (ingestion, series) {
+                (true, Some(series)) => Ok(series.max(1)),
+                (false, Some(series)) => Ok(series.min(input.rows).max(1)),
+                (_, None) => Ok(rows_read()?),
+            },
         };
         let (out, estimate, detail) = match &node.payload {
             Payload::NonASAP(operator) => match operator {
@@ -3446,9 +3452,11 @@ fn price_at_scale(
                                     source_name: source.to_string(),
                                     missing: match lookback {
                                         Some(_) => {
-                                            "rows_per_second, series_count with sample_interval, or rows_held"
+                                            "an arrival rate (the arrival's rows_per_second, or the \
+                                             source's series_count with sample_interval) or its \
+                                             rows_held"
                                         }
-                                        None => "rows_held (the scan has no window, so it reads every row held)",
+                                        None => "its rows_held (the scan has no window, so it reads every row held)",
                                     },
                                 },
                             )

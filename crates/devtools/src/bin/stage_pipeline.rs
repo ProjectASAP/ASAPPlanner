@@ -415,6 +415,15 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
+    if (series_count.is_some() || rows_per_second.is_some() || rows_held.is_some())
+        && (workload_path.is_some() || example.is_some())
+    {
+        return Err(
+            "--series-count, --rows-per-second and --rows-held declare facts for --promql/--sql \
+             queries; a --workload or --example declares its own"
+                .into(),
+        );
+    }
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
     }

@@ -441,8 +441,9 @@ pub enum DataArrival {
     Ingesting {
         /// Rows (PromQL samples) arriving per second over all sources.
         /// Plan selection prices a source's scans with its share of it, by
-        /// series count, when the source does not declare both its
-        /// `series_count` and its `sample_interval` ([`SourceFacts`]).
+        /// series count when every source declares one, else with all of
+        /// it, when the source does not declare both its `series_count` and
+        /// its `sample_interval` ([`SourceFacts`]).
         rows_per_second: f64,
     },
     /// Older rows are stored and new rows keep arriving.

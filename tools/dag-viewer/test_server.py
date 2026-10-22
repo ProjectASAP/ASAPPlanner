@@ -350,7 +350,7 @@ class PlanEndpointTests(unittest.TestCase):
         document = post_plan({"queries": [{"language": "promql", "text": "sum(rate(m[1m]))"}]})
         selection = document["stage3_plan_selection"]
         self.assertIsNone(selection["selected"])
-        self.assertIn("source m declares none of the facts pricing needs", json.dumps(selection))
+        self.assertIn("pricing source m needs an arrival rate", json.dumps(selection))
 
     def test_a_quantile_query_plans_with_or_without_a_metric(self):
         """A quantile target may set its metric or leave it unset: either
