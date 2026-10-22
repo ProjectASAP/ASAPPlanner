@@ -1092,14 +1092,18 @@ fn sized_for_all(
 /// whose merged readouts are only approximate), read only by queries that
 /// repeat at a fixed interval. Its panes are `pane_count = W / w` back-to-back
 /// windows of `w = gcd(W, E)` over the queries' intervals `E` (and, for a
-/// query with a range evaluation, its step), at least two.
+/// query with a range evaluation, its step). A build of one pane (its
+/// window divides every reader's interval) is a candidate only to read the
+/// newest panes of a chain another build keeps
+/// ([`window_composition_pass2_candidates`]), never in a chain of its own.
 #[derive(Debug, Clone)]
 pub struct PaneCandidate {
     /// The `SummaryAgg` over `TimeRange(W)` built as panes.
     pub build: Rc<OperatorNode>,
     /// The width `w` of one pane.
     pub pane_width_ms: u64,
-    /// The number of panes, `W / w`, at least two.
+    /// The number of panes, `W / w`; 1 for a build that may only read a
+    /// chain another build keeps.
     pub pane_count: u32,
 }
 
@@ -1187,7 +1191,7 @@ pub fn pane_candidates(
                 );
             }
             let pane_count = u32::try_from(window_ms / width).ok()?;
-            (!readers.is_empty() && pane_count >= 2).then_some(PaneCandidate {
+            (!readers.is_empty() && pane_count >= 1).then_some(PaneCandidate {
                 build,
                 pane_width_ms: width,
                 pane_count,
@@ -1245,13 +1249,18 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
 /// ([`gcd_window_groups`]); and by one error candidate per group whose
 /// sizing fails. Each grid groups every build of a subset at once: a
 /// shared gcd grid over only some of the builds that could share it is not
-/// listed. An error only for more than
-/// [`MAX_PANE_CANDIDATES`] pane candidates; a Pass 2 candidate whose
-/// composition fails carries its own error.
+/// listed. A single-pane build (`pane_count` 1) only joins a shared chain
+/// with a build of two or more panes, reading its newest panes: a subset
+/// leaving it in a chain of its own, or in a chain no build of several
+/// panes keeps, is not listed, and a single-pane build no such chain could
+/// take is dropped first ([`joinable`]). An error only for more than
+/// [`MAX_PANE_CANDIDATES`] pane candidates (after that drop); a Pass 2
+/// candidate whose composition fails carries its own error.
 pub fn window_composition_pass2_candidates(
     roots: &[QueryRoot],
     candidates: &[PaneCandidate],
 ) -> Result<Vec<WindowCompositionPass2Candidate>, PerComputationCandidateError> {
+    let candidates = &joinable(roots, candidates);
     if candidates.len() > MAX_PANE_CANDIDATES {
         return Err(PerComputationCandidateError::TooManyCandidates {
             counted: "summary builds that could be built in tumbling panes",
@@ -1266,11 +1275,14 @@ pub fn window_composition_pass2_candidates(
             .filter(|&i| mask >> i & 1 == 1)
             .map(|i| candidates[i].clone())
             .collect();
-        pass2_candidates.push(WindowCompositionPass2Candidate {
-            roots: in_panes(roots, &chosen, &[]),
-            pane_candidates: chosen.clone(),
-            shared_chains: Vec::new(),
-        });
+        // A single-pane build has no chain of its own.
+        if chosen.iter().all(|c| c.pane_count >= 2) {
+            pass2_candidates.push(WindowCompositionPass2Candidate {
+                roots: in_panes(roots, &chosen, &[]),
+                pane_candidates: chosen.clone(),
+                shared_chains: Vec::new(),
+            });
+        }
         // Shared chains on the members' own finest panes, then, when it
         // groups them differently, on the gcd of their widths.
         let on_member_panes = nested_window_groups(&chosen);
@@ -1292,6 +1304,34 @@ pub fn window_composition_pass2_candidates(
         );
     }
     Ok(pass2_candidates)
+}
+
+/// `candidates` without the single-pane builds no shared chain could
+/// take: one of a build of several panes over the same input
+/// ([`same_build_over_one_input`]), or, for a build a rollup may read
+/// ([`rollable_pane_candidates`]), of a finer grouping's build over a window
+/// at least its own whose panes divide its window.
+fn joinable(roots: &[QueryRoot], candidates: &[PaneCandidate]) -> Vec<PaneCandidate> {
+    if candidates.iter().all(|c| c.pane_count >= 2) {
+        return candidates.to_vec();
+    }
+    let rollable = rollable_pane_candidates(roots, candidates);
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|&(i, single)| {
+            single.pane_count >= 2
+                || candidates.iter().any(|host| {
+                    host.pane_count >= 2
+                        && (same_build_over_one_input(single, host)
+                            || (rollable[i]
+                                && host.window_ms() >= single.window_ms()
+                                && single.pane_width_ms.is_multiple_of(host.pane_width_ms)
+                                && rolls_up_into(single, host)))
+                })
+        })
+        .map(|(_, c)| c.clone())
+        .collect()
 }
 
 /// Push the Pass 2 candidate in which each of `groups` reads its one shared
@@ -1316,7 +1356,14 @@ fn push_shared_chains(
             }),
         }
     }
-    if !shared.is_empty() {
+    // Every single-pane build reads a chain a build of several panes keeps.
+    let joined = |i: usize| {
+        shared.iter().any(|(group, _)| {
+            group.members.contains(&i) && group.members.iter().any(|&m| chosen[m].pane_count >= 2)
+        })
+    };
+    let singles_joined = (0..chosen.len()).all(|i| chosen[i].pane_count >= 2 || joined(i));
+    if !shared.is_empty() && singles_joined {
         pass2_candidates.push(WindowCompositionPass2Candidate {
             roots: in_panes(roots, chosen, &shared),
             pane_candidates: chosen.to_vec(),
@@ -3352,8 +3399,9 @@ mod tests {
     }
 
     /// A 5-min window evaluated every 2 min, 90 s or 1 min is built in panes
-    /// of gcd(window, interval); a query evaluated once per window, or not
-    /// at a fixed interval, has no panes.
+    /// of gcd(window, interval); a query evaluated once per window is one
+    /// pane (which may only join another build's chain), and one not at a
+    /// fixed interval has no panes.
     #[test]
     fn pane_width_is_the_gcd_of_the_window_and_the_interval() {
         let roots = chose(
@@ -3363,7 +3411,7 @@ mod tests {
         assert_eq!(panes(&roots, &[Some(120_000)]), [(60_000, 5)]);
         assert_eq!(panes(&roots, &[Some(90_000)]), [(30_000, 10)]);
         assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)]);
-        assert!(panes(&roots, &[Some(300_000)]).is_empty());
+        assert_eq!(panes(&roots, &[Some(300_000)]), [(300_000, 1)]);
         assert!(panes(&roots, &[None]).is_empty());
     }
 
@@ -3660,6 +3708,72 @@ mod tests {
             .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty())
             .expect("both builds in their own panes");
         assert_eq!(chains(separate.roots.as_ref().unwrap()).len(), 2);
+    }
+
+    /// A 5-min quantile every 5 min is one pane: alone it is no pane
+    /// candidate's own chain (no Pass 2 candidate builds it in one pane),
+    /// but with a 15-min quantile every minute (15 × 1-min panes) it reads
+    /// the newest 5 panes of that chain. A single-pane build no chain could
+    /// take is not a pane candidate of the rule.
+    #[test]
+    fn a_single_pane_window_reads_the_newest_panes_of_a_shared_chain() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.9, m[5m])", 0.01),
+                ("quantile_over_time(0.9, m[15m])", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let grids = [Some(300_000), Some(60_000)];
+        assert_eq!(panes(&roots, &grids), [(300_000, 1), (60_000, 15)]);
+        let rule_candidates = pane_candidates(&roots, &grids);
+        let pass2_candidates =
+            window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
+        // The single-pane build never has a chain of its own.
+        for candidate in &pass2_candidates {
+            let single = candidate
+                .pane_candidates
+                .iter()
+                .position(|p| p.pane_count == 1);
+            if let Some(single) = single {
+                assert!(
+                    candidate
+                        .shared_chains
+                        .iter()
+                        .any(|chain| chain.members.contains(&single)),
+                    "{candidate:?}"
+                );
+            }
+        }
+        let joined = pass2_candidates
+            .iter()
+            .find(|c| c.pane_candidates.len() == 2 && !c.shared_chains.is_empty())
+            .expect("the 5-min window joins the 1-min chain");
+        assert_eq!(
+            joined.shared_chains,
+            [SharedPaneChain {
+                members: vec![0, 1],
+                pane_width_ms: 60_000,
+                pane_count: 15
+            }]
+        );
+        let joined_roots = joined.roots.as_ref().unwrap();
+        assert_eq!(chains(joined_roots).len(), 1);
+        assert_eq!(newest_panes(&joined_roots[0]), Some(5));
+        assert_eq!(newest_panes(&joined_roots[1]), None);
+        for root in joined_roots {
+            let root = operator(root);
+            root.validate_structure().unwrap();
+            assert!(root.guarantee.is_some());
+        }
+        // Alone, the 5-min window is no candidate of the rule.
+        let alone = &roots[..1];
+        let alone_candidates = pane_candidates(alone, &grids[..1]);
+        assert!(
+            window_composition_pass2_candidates(alone, &alone_candidates)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A 15-min quantile every minute and the same quantile every 5 min
