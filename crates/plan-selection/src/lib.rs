@@ -1028,6 +1028,30 @@ pub struct SearchReport {
     /// candidate costs the same, under cost model 3, or for a combination
     /// of components.
     pub runner_up_cost_per_second: Option<f64>,
+    /// The size of the sub-expression memo the search built; `None` when
+    /// the search built none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo: Option<MemoStats>,
+}
+
+/// The size of a sub-expression memo (joint-planning-search design,
+/// "Memo-group search"), for the selection report.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemoStats {
+    /// Its groups: the workload's distinct logical sub-expressions.
+    pub groups: usize,
+    /// The groups two or more parents, or two or more queries' roots, read.
+    pub shared_groups: usize,
+    /// Its implementation candidates, over every group.
+    pub candidates: usize,
+    /// The candidates by how they were made (`Pass1`, `SharedBuild`,
+    /// `Panes`, `Rollup`, `TopKReuse`).
+    pub candidates_by_origin: BTreeMap<String, usize>,
+    /// The distinct coupling sites by kind (`SharedBuildSize`, `PaneChain`,
+    /// `ScanLabels`, `RawHorizon`).
+    pub coupling_sites_by_kind: BTreeMap<String, usize>,
+    /// The time building it took, in milliseconds.
+    pub build_ms: f64,
 }
 
 /// One independent component of the workload: queries that can read no
