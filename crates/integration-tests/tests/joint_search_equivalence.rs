@@ -503,6 +503,7 @@ fn a_known_bound_that_misses_is_not_discarded_before_composition() {
         Stage1ToStage3Search {
             keep_every_candidate: true,
             exhaustive: false,
+            memo_groups: false,
         },
     )
     .unwrap();
@@ -1156,4 +1157,87 @@ fn queries_over_other_windows_or_with_a_latency_bound_are_in_no_class() {
     );
     let search = &run.stage3_plan_selection.as_ref().unwrap().search;
     assert!(search.interchangeable_queries.is_empty());
+}
+
+/// The memo-group search (not the default yet) on seeded random workloads
+/// over one or two gauges, with raw data kept or not, under cost model 1:
+/// it selects a plan of the exhaustive search's price, or both find none.
+#[test]
+fn memo_group_search_selects_the_exhaustive_price() {
+    let mut searched = 0;
+    let mut mismatches = Vec::new();
+    for seed in 1..=60u64 {
+        let gauges: &[&str] = match seed % 3 {
+            0 => &["m", "n"],
+            _ => &["m"],
+        };
+        let workload = random_workload_over(seed, gauges);
+        let roots = lower_promql_roots(&workload).unwrap();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                roots.iter().cloned().enumerate().collect(),
+            )
+            .unwrap();
+        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
+            continue;
+        }
+        searched += 1;
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap();
+        let deployment = match seed % 2 {
+            0 => no_raw_data(),
+            _ => asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        };
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        let indexed = || roots.iter().cloned().enumerate().collect::<Vec<_>>();
+        let exhaustive = run_stage1_to_stage3_with(
+            indexed(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search::exhaustive(),
+        )
+        .unwrap();
+        let memo = run_stage1_to_stage3_with(
+            indexed(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search {
+                memo_groups: true,
+                ..Stage1ToStage3Search::default()
+            },
+        )
+        .unwrap();
+        let price = |run: &Stage1ToStage3Run<usize>| {
+            run.stage3_plan_selection
+                .as_ref()
+                .ok()
+                .map(|s| s.costs[&s.selected].cost_per_second.unwrap())
+        };
+        let (all, found) = (price(&exhaustive), price(&memo));
+        let same = match (all, found) {
+            (Some(a), Some(f)) => (a - f).abs() <= 1e-9 * a.abs(),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            mismatches.push(format!(
+                "seed {seed}: exhaustive {all:?}, memo {found:?}: {:?}",
+                workload
+                    .query_workload
+                    .repeating_queries
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e.query.0.clone())
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(
+        searched >= 20,
+        "only {searched} workloads were small enough"
+    );
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
