@@ -159,6 +159,12 @@ pub struct Stage1ToStage3Search {
     /// own candidates first: the exhaustive search the pruned one is tested
     /// against; default `false`.
     pub exhaustive: bool,
+    /// Search memo groups (joint-planning-search design, "Memo-group
+    /// search") instead of whole-workload candidates, under cost model 1
+    /// without a measured cost table or a disk price; otherwise, or with
+    /// `exhaustive`, the current search runs. Default `false` until it
+    /// selects the exhaustive search's price on every equivalence test.
+    pub memo_groups: bool,
 }
 
 impl Stage1ToStage3Search {
@@ -168,6 +174,7 @@ impl Stage1ToStage3Search {
         Self {
             keep_every_candidate: true,
             exhaustive: true,
+            memo_groups: false,
         }
     }
 }
@@ -228,6 +235,39 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
+    if search.memo_groups && !search.exhaustive {
+        let pruned = per_computation
+            .clone()
+            .without_unsupported_summaries(models.deployment_capabilities);
+        if let Some(found) = super::memo::search(&pruned, entries, data, models) {
+            let combinations = pruned.combinations();
+            let (selection, selected, logical) = match found {
+                Ok((selection, selected, logical)) => {
+                    (Ok(selection), Some(selected), Some(logical))
+                }
+                Err(error) => (Err(error), None, None),
+            };
+            let selected_logical = logical
+                .as_ref()
+                .and_then(|roots| selected_logical(roots, entries, data));
+            return Stage1ToStage3Run {
+                stage1_pass1_per_computation: pruned,
+                combinations,
+                stage1_logical_asap_optimization: Vec::new(),
+                stage2_physical_asap_optimization: Vec::new(),
+                stage2_pruned: Vec::new(),
+                stage3_plan_selection: selection,
+                stage3_selected: selected,
+                stage3_selected_logical: selected_logical,
+                stage1_selected: logical.map(|roots| LogicalCandidate {
+                    id: "L1".to_string(),
+                    choice: Vec::new(),
+                    roots: Ok(roots),
+                    pass2: None,
+                }),
+            };
+        }
+    }
     let components = super::components::sharing_components(&per_computation, entries, &models);
     let searched_as_one = match super::components::searched_as_one(&components, &models, search) {
         Some(reason) => reason,

@@ -96,7 +96,77 @@ pub(crate) struct ClusterSelection {
     pub groups: Vec<usize>,
     /// Per group of [`Self::groups`], the index of its selected candidate.
     pub selected: Vec<usize>,
+    /// The cluster's queries, by index in the workload, in workload order.
+    pub queries: Vec<usize>,
+    /// Their logical roots, in the order of [`Self::queries`]: what Stage 2
+    /// implemented.
+    pub roots: Vec<QueryRoot>,
     /// The cluster's physical candidate, as Stage 2 built it, priced by
     /// Stage 3.
     pub physical: PhysicalCandidate,
+}
+
+/// The memo-group search's selection over the workload of
+/// `per_computation` (the Pass 1 inventory, already pruned for the
+/// deployment's capabilities): the selection Stage 3 makes of the composed
+/// plan, the plan as Stage 2 built it, and its logical roots. `None` when
+/// its preconditions do not hold (only cost model 1 without a measured cost
+/// table or a disk price); the caller then runs the current search.
+pub(crate) fn search<Id: Clone>(
+    per_computation: &asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates<Id>,
+    entries: &[asap_types::workload::QueryWorkloadEntry],
+    data: &asap_types::workload::DataWorkload,
+    models: crate::PlanningModels<'_>,
+) -> Option<Result<(crate::Selection, PhysicalCandidate, Vec<QueryRoot>), crate::SelectionError>> {
+    let crate::CostModel::UsageOverTime(prices) = &models.plan_selection.cost_model else {
+        return None;
+    };
+    if prices.cost_per_disk_byte_second != 0.0
+        || !models
+            .plan_selection
+            .measured_operation_costs
+            .operators
+            .is_empty()
+    {
+        return None;
+    }
+    let memo = groups::memo_groups(per_computation, entries, &models);
+    let mut cache = pricing::LocalPriceCache::default();
+    let mut kept = Vec::with_capacity(memo.groups.len());
+    for (g, group) in memo.groups.iter().enumerate() {
+        let candidates = groups::group_candidates(per_computation, &memo, g, entries, data, models);
+        let priced = match pricing::priced(group, candidates, entries, data, models, &mut cache) {
+            Ok(priced) => priced,
+            Err(error) => return Some(Err(error)),
+        };
+        kept.push(pricing::keep_undominated(priced));
+    }
+    let selections = match clusters::select_clusters(&memo, &kept, entries, data, models) {
+        Ok(selections) => selections,
+        Err(error) => return Some(Err(error)),
+    };
+    let mut roots: Vec<Option<QueryRoot>> = vec![None; entries.len()];
+    for selection in &selections {
+        for (&q, root) in selection.queries.iter().zip(&selection.roots) {
+            roots[q] = Some(root.clone());
+        }
+    }
+    let Some(roots) = roots.into_iter().collect::<Option<Vec<_>>>() else {
+        return Some(Err(crate::SelectionError::NoValidCandidate(Vec::new())));
+    };
+    let Some(mut physical) = clusters::composed(&selections, entries.len(), entries, data, models)
+    else {
+        return Some(Err(crate::SelectionError::NoValidCandidate(Vec::new())));
+    };
+    physical.id = "M1".to_string();
+    physical.from_logical = "L1".to_string();
+    let finished =
+        crate::PlanSelector::new(entries, data, models, false).and_then(|mut selector| {
+            selector.offer(&physical)?;
+            selector.finish()
+        });
+    Some(finished.map(|(mut selection, selected)| {
+        selection.search.candidates_checked += cache.misses + cache.hits;
+        (selection, selected, roots)
+    }))
 }
