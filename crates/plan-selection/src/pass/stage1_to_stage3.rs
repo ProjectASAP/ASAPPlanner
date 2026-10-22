@@ -228,6 +228,16 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
+    if std::env::var("JP_MEMO_STATS").is_ok() {
+        let started = std::time::Instant::now();
+        let memo = super::subexpr::search::memo(&per_computation, entries);
+        eprintln!(
+            "JPMEMO {} in {:?}",
+            super::subexpr::search::stats(&memo),
+            started.elapsed()
+        );
+        std::process::exit(0);
+    }
     let components = super::components::sharing_components(&per_computation, entries, &models);
     let searched_as_one = match super::components::searched_as_one(&components, &models, search) {
         Some(reason) => reason,

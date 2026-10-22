@@ -214,6 +214,9 @@ pub(crate) fn widened_at_threshold(
         children: child_groups(&mut Boundary::of(memo, candidate), node),
         origin: CandidateOrigin::WidenedScans,
         coupling_sites: candidate.coupling_sites.clone(),
+        budget_share: candidate.budget_share,
+        requires_exact_children: candidate.requires_exact_children.clone(),
+        rollup_of: candidate.rollup_of.clone(),
     }))
 }
 
