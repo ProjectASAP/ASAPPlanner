@@ -143,15 +143,50 @@ pub mod physical_export {
 /// query, with the built-in models.
 pub mod planning {
     use asap_types::ir::properties::AccuracyTarget;
-    use asap_types::ir::{OperatorNode, QueryRoot};
-    use asap_types::workload::DataWorkload;
+    use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
+    use asap_types::workload::{DataArrival, DataWorkload, SourceFacts};
     use std::rc::Rc;
+
+    /// The data these tests plan over, declared: 1,000 rows arriving per
+    /// second, each source `root` scans holding 1,000 series, and each SQL
+    /// table a minute of rows (60,000), which bounds a scan with no window.
+    pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
+        let sources = OperatorNode::reachable(root)
+            .into_iter()
+            .filter_map(|node| match node.non_asap() {
+                Some(NonASAPOp::Scan { source, .. }) => Some(match source {
+                    asap_types::ir::operator::Source::TimeSeries { metric } => {
+                        (metric.clone(), None)
+                    }
+                    asap_types::ir::operator::Source::Table { table_ref } => {
+                        (table_ref.clone(), Some(60_000))
+                    }
+                }),
+                _ => None,
+            })
+            .map(|(source, rows_held)| {
+                let facts = SourceFacts {
+                    series_count: Some(1_000),
+                    rows_held,
+                    ..SourceFacts::default()
+                };
+                (source, facts)
+            })
+            .collect();
+        DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+            },
+            sources,
+        }
+    }
 
     /// Every planning stage's output for the single query `root`.
     pub fn run_stage1_to_stage3(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+        let data = declared_data(&root);
         asap_plan_selection::run_stage1_to_stage3_with(
             vec![(0, QueryRoot::Operator(root))],
             &[asap_types::workload::QueryWorkloadEntry {
@@ -164,7 +199,7 @@ pub mod planning {
                 recurrence: Default::default(),
                 range_evaluation: None,
             }],
-            &DataWorkload::default(),
+            &data,
             asap_plan_selection::PlanningModels::builtin(),
             asap_plan_selection::Stage1ToStage3Search::exhaustive(),
         )

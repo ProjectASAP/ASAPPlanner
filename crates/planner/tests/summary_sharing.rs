@@ -79,6 +79,7 @@ fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
                     .flat_map(|(query, _)| promql_metric_names(query).unwrap_or_default()),
                 DurationMs(15_000),
             )
+            .with_series_count(1_000)
         }),
     }
 }
@@ -136,9 +137,17 @@ async fn plan_sql(queries: &[&str]) -> PlanOutput {
             query_batch: None,
             repeating_queries: Some(queries.iter().map(|query| repeating(query, 0.01)).collect()),
         },
+        // `lineitem` at rest, holding a million rows.
         data_workload: Some(DataWorkload {
             arrival: DataArrival::AtRest,
-            ..Default::default()
+            sources: [(
+                "lineitem".to_string(),
+                asap_types::workload::SourceFacts {
+                    rows_held: Some(1_000_000),
+                    ..Default::default()
+                },
+            )]
+            .into(),
         }),
     };
     let catalog = SqlCatalog::new().with_table(

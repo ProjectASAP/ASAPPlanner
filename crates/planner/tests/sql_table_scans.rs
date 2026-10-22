@@ -46,7 +46,8 @@ fn http_schema() -> Schema {
 }
 
 /// Repeating SQL `queries`, each every minute with `accuracy`, over `http`
-/// ingesting 100 rows per second, whose 3 services are declared.
+/// ingesting 100 rows per second, whose 3 services and 100,000 rows held
+/// are declared.
 fn workload(queries: &[&str], accuracy: &str) -> PlanningWorkload {
     let entries: Vec<String> = queries
         .iter()
@@ -62,7 +63,8 @@ fn workload(queries: &[&str], accuracy: &str) -> PlanningWorkload {
         r#"{{"query_workload": {{"language": {{"sql": "datafusion_sql"}},
               "repeating_queries": [{}]}},
             "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100.0}}}},
-              "sources": {{"http": {{"distinct_values_per_label": {{"service": 3}}}}}}}}}}"#,
+              "sources": {{"http": {{"distinct_values_per_label": {{"service": 3}},
+                  "rows_held": 100000}}}}}}}}"#,
         entries.join(",")
     ))
     .unwrap()

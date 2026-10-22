@@ -34,6 +34,14 @@ class PlanArgsTests(unittest.TestCase):
             ["--promql", "sum(rate(m[1m]))", "--name", "q1", "--max-error", "0.01", "--sample-interval-ms", "15000", "--out", "out.json"],
         )
 
+    def test_declared_source_facts_become_flags(self):
+        query = {"language": "promql", "text": "sum(rate(m[1m]))"}
+        args = server.plan_args({"queries": [query], "series_count": 1000, "rows_per_second": 66.5, "rows_held": 5000}, "out.json")
+        self.assertEqual(args[5:11], ["--series-count", "1000", "--rows-per-second", "66.5", "--rows-held", "5000"])
+        for bad in ({"series_count": 0}, {"rows_held": 1.5}, {"rows_per_second": -1}, {"series_count": True}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                server.plan_args({"queries": [query], **bad}, "out.json")
+
     def test_metric_names_the_targets_error_metric(self):
         query = {"language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
         for metric in ("absolute", "relative", "rank"):
@@ -328,22 +336,32 @@ class PlanEndpointTests(unittest.TestCase):
         self.assertTrue(document["stage3_plan_selection"]["stored_outputs"])
 
     def test_plan_endpoint_returns_the_stage_pipeline_document(self):
-        document = post_plan({"queries": [{"name": "job_rate", "language": "promql", "text": "sum by (job) (rate(m[1m]))"}]})
+        document = post_plan({"queries": [{"name": "job_rate", "language": "promql", "text": "sum by (job) (rate(m[1m]))"}],
+                              "series_count": 1000})
         self.assertEqual(document["format"], "asap-stage-pipeline/v1")
         self.assertEqual(document["workload"]["queries"][0]["text"], "sum by (job) (rate(m[1m]))")
         self.assertEqual(document["workload"]["queries"][0]["id"], "job_rate")
         self.assertIsNotNone(document["stage3_plan_selection"]["selected"])
 
+    def test_a_plan_without_a_rate_fact_names_the_missing_fact(self):
+        """Pricing uses only declared facts: with no series count (and no
+        arrival rate or rows held), no plan is selected, and the document
+        says which source lacks which fact."""
+        document = post_plan({"queries": [{"language": "promql", "text": "sum(rate(m[1m]))"}]})
+        selection = document["stage3_plan_selection"]
+        self.assertIsNone(selection["selected"])
+        self.assertIn("source m declares none of the facts pricing needs", json.dumps(selection))
+
     def test_a_quantile_query_plans_with_or_without_a_metric(self):
         """A quantile target may set its metric or leave it unset: either
         way a plan is selected, and Stage 3 reports the metric it accepted."""
         query = {"name": "p99", "language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
-        named = post_plan({"queries": [query], "max_error": 0.01, "accuracy_metric": "rank"})
+        named = post_plan({"queries": [query], "max_error": 0.01, "accuracy_metric": "rank", "series_count": 1000})
         self.assertEqual(named["workload"]["queries"][0]["requirements"]["accuracy"]["accuracy_metric"], "rank")
         selected = named["stage3_plan_selection"]["selected"]
         self.assertIsNotNone(selected)
         self.assertTrue(named["stage3_plan_selection"]["accepted"][selected][0]["summary"].startswith("metric rank; accepted "))
-        unnamed = post_plan({"queries": [query], "max_error": 0.01})
+        unnamed = post_plan({"queries": [query], "max_error": 0.01, "series_count": 1000})
         self.assertNotIn("accuracy_metric", unnamed["workload"]["queries"][0]["requirements"]["accuracy"])
         selected = unnamed["stage3_plan_selection"]["selected"]
         self.assertIsNotNone(selected)

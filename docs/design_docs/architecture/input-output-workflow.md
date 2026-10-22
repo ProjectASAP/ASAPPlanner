@@ -201,23 +201,29 @@ struct SourceFacts {
     stream_norms: Option<StreamNorms>,
     max_distinct_per_evaluation: Option<u64>,
     distinct_values_per_label: BTreeMap<String, u64>,
+    rows_held: Option<u64>,
 }
 ```
 
 | Field | Required | Purpose and behavior when unavailable |
 |---|---:|---|
 | `arrival` | Present; may be `Unknown` | Distinguishes data at rest, ingesting data, and mixed data. Ingestion-time builds are possible only for ingesting or mixed data. |
-| `rows_per_second` | With `Ingesting`/`Mixed` | Rows arriving per second over all sources, used to price scans and continuous maintenance. It must be finite and non-negative. |
+| `rows_per_second` | With `Ingesting`/`Mixed` | Rows arriving per second over all sources, used to price scans and continuous maintenance. It must be finite and non-negative. A source with no `series_count` + `sample_interval` of its own is priced at its series share of it when every source declares `series_count`, else at all of it. |
 | `series_count` | Optional | Series in the source. Plan selection bounds a query's number of values `G`, and its input row count, by the series counts of the sources it reads (each branch of an `or` counted); unknown, they stay unbound. |
 | `metric_type` | Optional | Declared Prometheus type; a counter proves samples non-negative. Never inferred from a name. |
 | `values_non_negative` | Optional; default `false` | Declares every sample non-negative, for a gauge as well as a counter. It is the sign a relative-error bound needs to carry through `sum` and `avg` (a per-series DDSketch quantile under `avg by`, say); without it, and for a gauge, that bound is unknown. |
 | `sample_interval` | PromQL and MetricsQL; nonzero | How often each series of the metric is sampled. Bare instant selectors over it use it as their selection horizon; without it, such a query fails to lower. |
 | `stream_norms`, `max_distinct_per_evaluation` | Optional | Bounds that Count-Min/Count Sketch and HLL/UnivMon guarantees are bound with. |
 | `distinct_values_per_label` | Optional; default empty; each count nonzero | Distinct values each label (PromQL) or column (SQL) takes, e.g. `{"host": 1000, "job": 10}`. Plan selection prices a `by (k1, k2, ...)` aggregate or summary, and a partitioned sort or limit, at the product of its keys' counts, at most the `series_count` (series, or groups of rows) of the sources it reads and the rows it reads per evaluation. Over several sources a key's counts add. No count is assumed for a key some source read does not declare: the grouping is priced at the smaller of that `series_count` and those rows. Each count must be an upper bound, counting a missing label (or a NULL) as one more value: when every key of a grouped result declares one, their product (at most the series read) also bounds `G`, which sizes per-group sketches for a whole-result target; otherwise `G` keeps its series bound, or none for SQL. |
+| `rows_held` | Optional; nonzero | Rows the source holds at rest. A query-time scan reads at most these; a scan with no window above it (a SQL query without a time predicate) reads all of them. |
 
 Every fact is declared: the planner has no clock, so a caller drops facts
 that no longer hold before planning. Unavailable data facts stay unknown. Planner does not reinterpret
-them as zero ingestion, zero cardinality, or a favorable distribution.
+them as zero ingestion, zero cardinality, or a favorable distribution, and
+pricing assumes no default: a scan whose source declares neither an arrival
+rate (`rows_per_second`, or `series_count` with `sample_interval`) nor
+`rows_held` (required when it has no window) fails planning with an error
+naming the source and the missing fact.
 
 ### Frontend-specific dependencies
 

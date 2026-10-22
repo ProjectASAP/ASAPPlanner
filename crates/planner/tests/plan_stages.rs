@@ -27,10 +27,13 @@ fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
             }]),
             repeating_queries: None,
         },
-        data_workload: Some(DataWorkload::sampled_every(
-            asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
-            DurationMs(15_000),
-        )),
+        data_workload: Some(
+            DataWorkload::sampled_every(
+                asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
+                DurationMs(15_000),
+            )
+            .with_series_count(1_000),
+        ),
     };
     let roots = lower_promql_query_workload(&workload).expect("lowers");
     run_stage1_to_stage3_with(

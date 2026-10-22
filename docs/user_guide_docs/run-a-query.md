@@ -31,9 +31,16 @@ ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
 ```sh
 cargo run -p asap-devtools --bin stage_pipeline -- \
     --promql "topk by (job) (10, sum_over_time(http_requests_total[1m]))" \
-    --max-error 0.01 --failure-probability 0.001 \
+    --series-count 1000 --max-error 0.01 --failure-probability 0.001 \
     --enforce-accuracy-guarantees --out plan.json
 ```
+
+Plan selection prices only from declared facts. `--series-count` (with
+the sample interval) or `--rows-per-second` gives each source's arrival
+rate; `--rows-held` bounds data at rest and a scan with no window (a SQL
+query without a time predicate reads every row held). Without the fact a
+scan needs, planning fails with an error that names the source and the
+missing fact.
 
 Without `--enforce-accuracy-guarantees`, `stage_pipeline` ignores accuracy
 guarantees: every output is accepted whatever its guarantee, and plans are

@@ -109,6 +109,34 @@ pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
     }
 }
 
+/// The data these tests plan over, declared: 1,000 rows arriving per
+/// second, and each metric `root` reads holding 1,000 series.
+#[allow(dead_code)]
+pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
+    let sources = OperatorNode::reachable(root)
+        .into_iter()
+        .filter_map(|node| match node.non_asap() {
+            Some(NonASAPOp::Scan {
+                source: asap_types::ir::operator::Source::TimeSeries { metric },
+                ..
+            }) => Some((
+                metric.clone(),
+                asap_types::workload::SourceFacts {
+                    series_count: Some(1_000),
+                    ..Default::default()
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    DataWorkload {
+        arrival: asap_types::workload::DataArrival::Ingesting {
+            rows_per_second: 1_000.0,
+        },
+        sources,
+    }
+}
+
 /// Every planning stage's output for the single query `root` at `accuracy`,
 /// with the built-in models.
 #[allow(dead_code)]
@@ -116,6 +144,7 @@ pub fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: AccuracyTarget,
 ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+    let data = declared_data(&root);
     asap_plan_selection::run_stage1_to_stage3_with(
         vec![(0, asap_types::ir::QueryRoot::Operator(root))],
         &[asap_types::workload::QueryWorkloadEntry {
@@ -128,7 +157,7 @@ pub fn run_stage1_to_stage3(
             recurrence: Default::default(),
             range_evaluation: None,
         }],
-        &DataWorkload::default(),
+        &data,
         asap_plan_selection::PlanningModels::builtin(),
         asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
@@ -177,6 +206,7 @@ pub fn logical_candidates(
 /// compose (a candidate its input cannot feed), and selection skips it.
 #[allow(dead_code)]
 pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String> {
+    let data = declared_data(root);
     let run = asap_plan_selection::run_stage1_to_stage3_with(
         vec![(0, asap_types::ir::QueryRoot::Operator(Rc::clone(root)))],
         &[asap_types::workload::QueryWorkloadEntry {
@@ -189,7 +219,7 @@ pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String>
             recurrence: Default::default(),
             range_evaluation: None,
         }],
-        &DataWorkload::default(),
+        &data,
         asap_plan_selection::PlanningModels::builtin(),
         asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )

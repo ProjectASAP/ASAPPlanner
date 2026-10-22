@@ -306,11 +306,6 @@ pub use measured_operation_costs::{
     OperatorCost, OperatorKind, SummaryOperation,
 };
 
-/// Used only when the data workload does not declare them.
-const DEFAULT_SERIES: u64 = 1_000;
-const DEFAULT_ROWS_PER_SECOND: f64 = 1_000.0;
-const DEFAULT_LOOKBACK_MS: u64 = 60_000;
-
 /// Cost per second of wall time; one unit is one CPU-millisecond under
 /// [`ResourceUnitCost::illustrative`].
 pub const COST_UNIT: &str = "cost_per_second";
@@ -2859,31 +2854,35 @@ fn family_name(family: &FieldDataType) -> String {
 /// Rows per millisecond the sources in `sources` receive together, each
 /// at its own rate: `series_count` series each sampled every
 /// `sample_interval`, or, for a source that does not declare both, its
-/// share of the workload's `rows_per_second` ([`DEFAULT_ROWS_PER_SECOND`]
-/// when the data is not ingesting) by [`priced_series`] among every source
-/// the workload declares and those in `sources`. A node reading no source
-/// sees the whole `rows_per_second`.
-fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> f64 {
-    let workload_rows_per_ms = data
-        .arrival
-        .rows_per_second()
-        .unwrap_or(DEFAULT_ROWS_PER_SECOND)
-        / 1_000.0;
+/// share of the workload's `rows_per_second` by series count when every
+/// source declares one, else all of it (no source receives more). A node
+/// reading no source sees the whole `rows_per_second`. `None` when a
+/// source's rate has neither (the arrival declares no rate).
+fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<f64> {
+    let workload_rows_per_ms = data.arrival.rows_per_second().map(|rows| rows / 1_000.0);
     if sources.is_empty() {
         return workload_rows_per_ms;
     }
     let mut every_source: BTreeSet<&str> = data.sources.keys().map(String::as_str).collect();
     every_source.extend(sources.iter().copied());
-    let every_source_series = priced_series(&every_source, data) as f64;
+    let every_source_series = declared_series(&every_source, data);
     sources
         .iter()
         .map(|source| {
             let facts = data.sources.get(*source);
             match facts.and_then(|facts| facts.series_count.zip(facts.sample_interval)) {
-                Some((series, interval)) if interval.0 > 0 => series as f64 / interval.0 as f64,
+                Some((series, interval)) if interval.0 > 0 => {
+                    Some(series as f64 / interval.0 as f64)
+                }
                 _ => {
-                    let series = priced_series(&[*source].into(), data) as f64;
-                    workload_rows_per_ms * series / every_source_series
+                    let workload_rows_per_ms = workload_rows_per_ms?;
+                    let series = facts.and_then(|facts| facts.series_count);
+                    Some(match (series, every_source_series) {
+                        (Some(series), Some(every)) => {
+                            workload_rows_per_ms * series as f64 / every.max(1) as f64
+                        }
+                        _ => workload_rows_per_ms,
+                    })
                 }
             }
         })
@@ -2947,23 +2946,16 @@ fn group_count_bound(
         .max(1)
 }
 
-/// The series pricing assumes a node reading `sources` sees: the sum of
-/// their declared series counts, [`DEFAULT_SERIES`] for each source
-/// without one and for a node that reads none.
-fn priced_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> u64 {
+/// The series (or groups of rows) the sources in `sources` declare
+/// together, when every one declares `series_count`; `None` otherwise and
+/// for a node that reads no source.
+fn declared_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<u64> {
     if sources.is_empty() {
-        return DEFAULT_SERIES;
+        return None;
     }
-    sources
-        .iter()
-        .map(|source| {
-            data.sources
-                .get(*source)
-                .and_then(|facts| facts.series_count)
-                .unwrap_or(DEFAULT_SERIES)
-        })
-        .sum::<u64>()
-        .max(1)
+    sources.iter().try_fold(0u64, |total, source| {
+        Some(total.saturating_add(data.sources.get(*source)?.series_count?))
+    })
 }
 
 /// Evaluations per second of a node computed once for `queries` together,
@@ -3297,10 +3289,21 @@ fn price_at_scale(
                 .flat_map(|p| sources_read_by[p].iter().copied())
                 .collect(),
         };
-        let series = priced_series(&sources, data);
+        // The series its sources declare, when they all do.
+        let series = declared_series(&sources, data);
         // The rows per ms its sources receive, which its scans and time
-        // ranges read.
+        // ranges read, when the data declares an arrival rate.
         let rows_per_ms = source_rows_per_ms(&sources, data);
+        // The fact a rate needs, named when it is missing.
+        let missing_rate = |source: &str| {
+            (
+                node.id,
+                AnalyticalCostError::MissingSourceFact {
+                    source_name: source.to_string(),
+                    missing: "rows_per_second, or series_count with sample_interval",
+                },
+            )
+        };
         sources_read_by.insert(node.id, sources);
         let family = match &node.payload {
             Payload::ASAP(
@@ -3382,17 +3385,21 @@ fn price_at_scale(
         // The rows a grouping reads per evaluation: its input at query
         // time; at ingestion time, the arriving rows of the window it
         // maintains (one second of them does not bound its groups).
-        let rows_read = match ingestion {
-            false => Some(input.rows.max(1)),
-            true => maintained_window_ms(node.id, nodes, &producers_of)
-                .map(|window_ms| ((rows_per_ms * window_ms as f64).round() as u64).max(1)),
-        };
         // Query time always has its input rows; an ingestion-time grouping
         // with no window below it is an error (Stage 2 builds none).
-
+        let rows_read = || match ingestion {
+            false => Ok(input.rows.max(1)),
+            true => {
+                let window_ms = maintained_window_ms(node.id, nodes, &producers_of)
+                    .ok_or((node.id, AnalyticalCostError::IngestionGroupingWithoutWindow))?;
+                let rows_per_ms = rows_per_ms.ok_or_else(|| {
+                    missing_rate(sources_read_by[&node.id].first().copied().unwrap_or("?"))
+                })?;
+                Ok(((rows_per_ms * window_ms as f64).round() as u64).max(1))
+            }
+        };
         let estimated_groups = |keys: &GroupKeys| {
-            let rows_read =
-                rows_read.ok_or((node.id, AnalyticalCostError::IngestionGroupingWithoutWindow))?;
+            let rows_read = rows_read()?;
             Ok(group_count_bound(
                 keys,
                 input_schema,
@@ -3404,22 +3411,50 @@ fn price_at_scale(
         let groups = |reduction: &Reduction| match reduction {
             Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => Ok(1),
             Reduction::Reduce(keys) => estimated_groups(keys),
-            // One group per series.
-            Reduction::PerEntity => Ok(match ingestion {
-                true => series,
-                false => series.min(input.rows.max(1)),
-            }),
+            // One group per series: at most the declared series and the
+            // rows read, each series having at least one.
+            Reduction::PerEntity => {
+                let rows_read = rows_read()?;
+                Ok(series
+                    .map_or(rows_read, |series| series.min(rows_read))
+                    .max(1))
+            }
         };
         let (out, estimate, detail) = match &node.payload {
             Payload::NonASAP(operator) => match operator {
-                NonASAPOp::Scan { .. } => {
+                NonASAPOp::Scan { source, .. } => {
                     // At ingestion time, one second of arriving rows; at
-                    // query time, the longest window read above it.
+                    // query time, the arriving rows of the longest window
+                    // read above it, at most the rows the source holds (all
+                    // of them without a window).
+                    let source = source_name(source);
+                    let rows_held = data.sources.get(source).and_then(|facts| facts.rows_held);
                     let lookback = match ingestion {
-                        true => 1_000,
+                        true => Some(1_000),
                         false => query_time_lookback_ms(dag, nodes, node.id, kept_chains),
                     };
-                    let out = edge(((rows_per_ms * lookback as f64).round() as u64).max(1));
+                    let by_rate = rows_per_ms.zip(lookback).map(|(rows_per_ms, lookback)| {
+                        (rows_per_ms * lookback as f64).round() as u64
+                    });
+                    let rows = match (ingestion, by_rate, rows_held) {
+                        (true, by_rate, _) => by_rate.ok_or_else(|| missing_rate(source))?,
+                        (false, Some(by_rate), Some(rows_held)) => by_rate.min(rows_held),
+                        (false, by_rate, rows_held) => by_rate.or(rows_held).ok_or_else(|| {
+                            (
+                                node.id,
+                                AnalyticalCostError::MissingSourceFact {
+                                    source_name: source.to_string(),
+                                    missing: match lookback {
+                                        Some(_) => {
+                                            "rows_per_second, series_count with sample_interval, or rows_held"
+                                        }
+                                        None => "rows_held (the scan has no window, so it reads every row held)",
+                                    },
+                                },
+                            )
+                        })?,
+                    };
+                    let out = edge(rows.max(1));
                     let estimate = estimate_operator(
                         PhysicalOperator::Scan,
                         OperatorStatistics::Scan {
@@ -3527,11 +3562,12 @@ fn price_at_scale(
                 NonASAPOp::TimeRange { range, kind, .. } => {
                     // A range keeps its window's samples; an instant
                     // selector the latest sample of each series.
+                    // Unknown rate or series: no fewer than its input.
                     let kept = match kind {
-                        TimeRangeKind::Range => {
+                        TimeRangeKind::Range => rows_per_ms.map_or(input.rows, |rows_per_ms| {
                             (rows_per_ms * range.as_millis() as f64).round() as u64
-                        }
-                        TimeRangeKind::Instant => series,
+                        }),
+                        TimeRangeKind::Instant => series.unwrap_or(input.rows),
                     };
                     let out = edge(input.rows.min(kept.max(1)));
                     let out = EdgeStatistics {
@@ -4362,18 +4398,17 @@ fn maintained_window_ms(
 }
 
 /// The raw data the query-time scan `scan` reads, in milliseconds back from
-/// the evaluation: the longest window read above it ([`windows_read`]), or
-/// [`DEFAULT_LOOKBACK_MS`] without one.
+/// the evaluation: the longest window read above it ([`windows_read`]);
+/// `None` without one (the scan reads every row its source holds).
 fn query_time_lookback_ms(
     dag: &PhysicalASAPDAG,
     nodes: &NodeMap<'_>,
     scan: PhysicalASAPNodeId,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
-) -> u64 {
+) -> Option<u64> {
     windows_read(dag, nodes, scan, kept_chains)
         .into_iter()
         .max()
-        .unwrap_or(DEFAULT_LOOKBACK_MS)
 }
 
 /// The nodes of `dag` by id.
@@ -4425,11 +4460,12 @@ fn raw_data_violation(
             Payload::NonASAP(NonASAPOp::Scan { source, .. })
                 if node.output_state.timing != ExecutionTiming::IngestionTime =>
             {
-                Some(format!(
-                    "{} ms of raw {}",
-                    query_time_lookback_ms(dag, nodes, node.id, kept_chains),
-                    source_name(source)
-                ))
+                Some(
+                    match query_time_lookback_ms(dag, nodes, node.id, kept_chains) {
+                        Some(lookback) => format!("{lookback} ms of raw {}", source_name(source)),
+                        None => format!("all raw {}", source_name(source)),
+                    },
+                )
             }
             _ => None,
         })
@@ -6092,13 +6128,10 @@ mod tests {
         assert_eq!(series_read(&both, &declared), Some(30));
         assert_eq!(values_of(&both, &series(&[("x", 10)])), None);
         // Pricing sums the series of the sources a node reads; an
-        // undeclared source counts the default.
-        assert_eq!(priced_series(&["x", "m"].into(), &declared), 30);
-        assert_eq!(
-            priced_series(&["x", "y"].into(), &declared),
-            10 + DEFAULT_SERIES
-        );
-        assert_eq!(priced_series(&BTreeSet::new(), &declared), DEFAULT_SERIES);
+        // undeclared source, or none, leaves them unknown.
+        assert_eq!(declared_series(&["x", "m"].into(), &declared), Some(30));
+        assert_eq!(declared_series(&["x", "y"].into(), &declared), None);
+        assert_eq!(declared_series(&BTreeSet::new(), &declared), None);
     }
 
     /// A source's rows per ms: its series over its sample interval when it
@@ -6122,15 +6155,15 @@ mod tests {
                 .collect(),
         };
         // 1 000 series every 100 ms; 3 000 series every 300 ms.
-        assert_eq!(source_rows_per_ms(&["a"].into(), &data), 10.0);
-        assert_eq!(source_rows_per_ms(&["a", "b"].into(), &data), 20.0);
+        assert_eq!(source_rows_per_ms(&["a"].into(), &data), Some(10.0));
+        assert_eq!(source_rows_per_ms(&["a", "b"].into(), &data), Some(20.0));
         // No interval: 3 000 of the 7 000 declared series, of 4 rows per ms.
         assert_eq!(
             source_rows_per_ms(&["c"].into(), &data),
-            4.0 * 3_000.0 / 7_000.0
+            Some(4.0 * 3_000.0 / 7_000.0)
         );
         // A node reading no source sees the whole rate.
-        assert_eq!(source_rows_per_ms(&BTreeSet::new(), &data), 4.0);
+        assert_eq!(source_rows_per_ms(&BTreeSet::new(), &data), Some(4.0));
     }
 
     /// The exact physical DAG of `queries` planned together, over `data`.
@@ -6174,6 +6207,89 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// No fact bounds the rows of a scan whose source declares neither an
+    /// arrival rate (`rows_per_second`, or `series_count` with
+    /// `sample_interval`) nor `rows_held`: pricing refuses, naming the
+    /// source and the missing fact, instead of assuming a rate.
+    #[test]
+    fn a_scan_without_a_row_fact_is_refused_naming_its_source() {
+        let data = DataWorkload::default();
+        let error = price(
+            &exact_dag(&["sum(rate(m[5m]))"], &data),
+            &recurrences(1),
+            &data,
+            &PlanSelectionSettings::default(),
+        )
+        .unwrap_err()
+        .1;
+        assert!(
+            matches!(&error, AnalyticalCostError::MissingSourceFact { source_name, .. } if source_name == "m"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("rows_held"), "{error}");
+    }
+
+    /// Data at rest is bounded by the rows its source holds: a 5-minute
+    /// window of `m`, which holds 5,000 rows and declares no arrival rate,
+    /// reads at most those 5,000.
+    #[test]
+    fn rows_held_bound_a_scan_of_data_at_rest() {
+        let data = DataWorkload {
+            arrival: DataArrival::AtRest,
+            sources: [(
+                "m".to_string(),
+                SourceFacts {
+                    rows_held: Some(5_000),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into(),
+        };
+        let cost = price(
+            &exact_dag(&["sum(rate(m[5m]))"], &data),
+            &recurrences(1),
+            &data,
+            &PlanSelectionSettings::default(),
+        )
+        .unwrap();
+        let details: Vec<String> = node_prices(&cost)
+            .into_iter()
+            .map(|(_, _, d, _)| d)
+            .collect();
+        assert!(
+            details.iter().any(|d| d.starts_with("scan 5000 samples;")),
+            "{details:?}"
+        );
+    }
+
+    /// With no declared `series_count`, a per-series reduction is priced at
+    /// one state per row read (each series has at least one), not at an
+    /// assumed series count: 1,000 rows per second over 5 minutes.
+    #[test]
+    fn undeclared_series_are_bound_by_the_rows_read() {
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0,
+            },
+            sources: [("m".to_string(), SourceFacts::default())].into(),
+        };
+        let cost = price(
+            &exact_dag(&["sum(rate(m[5m]))"], &data),
+            &recurrences(1),
+            &data,
+            &PlanSelectionSettings::default(),
+        )
+        .unwrap();
+        let details: Vec<String> = node_prices(&cost)
+            .into_iter()
+            .map(|(_, _, d, _)| d)
+            .collect();
+        assert!(
+            details.iter().any(|d| d.contains("into 300000 states")),
+            "{details:?}"
+        );
     }
 
     /// Each scan is priced at its own source's rate, `series_count` series
@@ -8871,10 +8987,15 @@ mod tests {
             ..DeploymentCapabilities::default()
         };
         let select = |arrival: DataArrival| {
+            // Each source's own rate, so an unknown arrival is priced too.
+            let mut data = DataWorkload { arrival, ..data() };
+            for facts in data.sources.values_mut() {
+                facts.sample_interval = Some(asap_types::workload::DurationMs(1_000));
+            }
             select_plan(
                 &candidates,
                 &[every_minute()],
-                &DataWorkload { arrival, ..data() },
+                &data,
                 PlanningModels::builtin().with_deployment_capabilities(&no_raw_data),
             )
         };
