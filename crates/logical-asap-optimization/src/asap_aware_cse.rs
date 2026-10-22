@@ -1055,7 +1055,7 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
         let candidate = &candidates[i];
         match groups.iter_mut().find(|group| {
             let finest = &candidates[group[0]];
-            candidate.pane_width_ms % finest.pane_width_ms == 0
+            candidate.pane_width_ms.is_multiple_of(finest.pane_width_ms)
                 && same_build_over_one_input(finest, candidate)
         }) {
             Some(group) => group.push(i),
