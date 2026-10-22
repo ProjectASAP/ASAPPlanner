@@ -415,7 +415,7 @@ fn raw_reader(node: &Rc<OperatorNode>) -> Option<RawReader> {
         return None;
     };
     Some(RawReader {
-        key: hash_of(&("RawHorizon", format!("{source:?}"))),
+        key: raw_horizon_key(source),
         horizon_ms: u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
     })
 }
@@ -477,6 +477,11 @@ fn child_groups(boundary: &mut Boundary, node: &Rc<OperatorNode>) -> Vec<GroupId
         }
     }
     out
+}
+
+/// The [`CouplingKind::RawHorizon`] site key of `source`'s raw data.
+pub(crate) fn raw_horizon_key(source: &Source) -> u64 {
+    hash_of(&("RawHorizon", format!("{source:?}")))
 }
 
 fn hash_of<T: Hash>(value: &T) -> u64 {

@@ -151,6 +151,11 @@ impl PriceCache {
             ..Self::default()
         }
     }
+
+    /// The interned structural node keys.
+    pub(super) fn keys_mut(&mut self) -> &mut HashMap<String, u32> {
+        &mut self.keys
+    }
 }
 
 /// A candidate's sub-DAG as Stage 2 builds it, with its nodes' keys.
@@ -162,9 +167,9 @@ struct Part {
 
 /// A child group's sub-DAG's node keys, and its root's.
 #[derive(Debug, Default)]
-struct ChildKeys {
-    nodes: HashSet<u32>,
-    root: Option<u32>,
+pub(super) struct ChildKeys {
+    pub(super) nodes: HashSet<u32>,
+    pub(super) root: Option<u32>,
 }
 
 /// The usage of `candidate`'s private nodes (from its node down to,
@@ -427,7 +432,7 @@ fn built(
 
 /// The node keys of `child`'s own sub-DAG (one reader, nothing
 /// materialized) and its root's key, cached by the child's node.
-fn child_keys(
+pub(super) fn child_keys(
     memo: &Memo,
     child: GroupId,
     entries: &[QueryWorkloadEntry],
@@ -470,7 +475,7 @@ fn child_keys(
 /// producers' keys, and its output schema; placement (timing,
 /// materialization) left out, so a child's nodes match whatever is chosen
 /// for them.
-fn keys_of(dag: &PhysicalASAPDAG, interned: &mut HashMap<String, u32>) -> Vec<u32> {
+pub(super) fn keys_of(dag: &PhysicalASAPDAG, interned: &mut HashMap<String, u32>) -> Vec<u32> {
     let mut key_of: HashMap<PhysicalASAPNodeId, u32> = HashMap::new();
     dag.nodes
         .iter()
@@ -632,7 +637,7 @@ fn price_part(
 /// The raw data a query-time scan group priced on its own reads: the
 /// longest window its parent groups' nodes put on it (through time
 /// shifts); `None` when it is not a scan or no window bounds it.
-fn scan_lookback_ms(memo: &Memo, group: GroupId) -> Option<u64> {
+pub(super) fn scan_lookback_ms(memo: &Memo, group: GroupId) -> Option<u64> {
     let scan = &memo.groups[group.0 as usize];
     if !matches!(scan.node.non_asap(), Some(NonASAPOp::Scan { .. })) {
         return None;
