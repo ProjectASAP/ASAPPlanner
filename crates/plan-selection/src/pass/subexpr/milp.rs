@@ -60,6 +60,23 @@ pub(crate) struct ChoiceCoefficients {
     pub slots: Vec<SlotCoefficients>,
     /// Per child group of the candidate, in order.
     pub child_via: Vec<Via>,
+    /// The shareable nodes of the direct part (an ASAP node, or one whose
+    /// schema has a unique key) of a group two or more queries read, other
+    /// than its own node: each may be one node for every copy of the group
+    /// (the identical-expression rule), and then built once at query time.
+    pub shared_nodes: Vec<SharedNodeCoefficients>,
+}
+
+/// A shareable node of a choice's direct part ([`ChoiceCoefficients::shared_nodes`]).
+/// Its price is in `direct.cost_per_unit_rate`, charged per consumer; built
+/// once at query time it costs `cost_per_unit_rate` per unit of the union
+/// rate of the queries reaching it instead, and holds `state_bytes` while
+/// its longest reader runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SharedNodeCoefficients {
+    pub cost_per_unit_rate: f64,
+    pub work_ms: f64,
+    pub state_bytes: u64,
 }
 
 /// One choice of a group: a candidate and an option per private slot.
@@ -571,6 +588,7 @@ mod tests {
                 },
                 slots: Vec::new(),
                 child_via: children.iter().map(|_| Via::Direct).collect(),
+                shared_nodes: Vec::new(),
             },
             copy_of: None,
             scan_children: Vec::new(),

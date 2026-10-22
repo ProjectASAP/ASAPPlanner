@@ -44,7 +44,9 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
 use asap_types::physical::{Materialization, Medium};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use super::milp::{Choice, ChoiceCoefficients, PartCoefficients, SlotCoefficients, Via};
+use super::milp::{
+    Choice, ChoiceCoefficients, PartCoefficients, SharedNodeCoefficients, SlotCoefficients, Via,
+};
 use super::pricing::{child_keys, keys_of, scan_lookback_ms, PriceCache};
 use super::{CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo};
 use crate::{
@@ -88,6 +90,8 @@ pub(crate) struct HeldTerm {
     pub per_reader: bool,
     /// Whether it is the group's own node (replaced when it is built once).
     pub own_node: bool,
+    /// Its node's shallow key ([`shallow_keys`]).
+    pub node_key: u32,
 }
 
 /// Every choice of `group` with its lazy terms, in candidate order and,
@@ -120,6 +124,9 @@ pub(super) struct ChoiceParts {
     pub root_key: u32,
     /// The shallow keys of the candidate node's private producers.
     pub root_producer_keys: Vec<u32>,
+    /// Per shared node of the coefficients, the shallow keys of the nodes
+    /// it computes when built once, itself first.
+    pub shared_node_keys: Vec<Vec<u32>>,
     /// Per slot of the coefficients, the shallow key of its build.
     pub slot_keys: Vec<u32>,
     /// The shallow keys of the private builds, in assignment order.
@@ -166,9 +173,12 @@ pub(super) fn choice_parts(
         })
         .collect();
     for copy_of in modes {
-        let built_for: Vec<usize> = match copy_of {
-            Some(q) => vec![q],
-            None => queries.clone(),
+        // A copy for one query is built for it twice, so that Stage 2
+        // offers its builds built once for several readers (`MatAtQuery`):
+        // another group's or copy's identical build may share it.
+        let built_for: Vec<usize> = match (copy_of, queries.as_slice()) {
+            (Some(q), _) | (None, &[q]) => vec![q, q],
+            (None, _) => queries.clone(),
         };
         let part_entries: Vec<QueryWorkloadEntry> =
             built_for.iter().map(|&q| entries[q].clone()).collect();
@@ -280,10 +290,6 @@ pub(super) fn choice_parts(
                         }
                         seen.push(assignment.clone());
                         let Some(parts) = coefficients_of(
-                            memo,
-                            group,
-                            index,
-                            candidate,
                             physical,
                             &keys,
                             &shallow,
@@ -320,6 +326,7 @@ pub(super) fn choice_parts(
                             },
                             root_key: parts.root_key,
                             root_producer_keys: parts.root_producer_keys,
+                            shared_node_keys: parts.shared_node_keys,
                             slot_keys: parts.slot_keys,
                             build_keys: builds.iter().map(|&i| shallow[i]).collect(),
                             part_keys: parts.part_keys,
@@ -510,6 +517,7 @@ struct Coefficients {
     lazy: LazyTerms,
     root_key: u32,
     root_producer_keys: Vec<u32>,
+    shared_node_keys: Vec<Vec<u32>>,
     slot_keys: Vec<u32>,
     part_keys: Vec<HashSet<u32>>,
 }
@@ -602,10 +610,6 @@ pub(super) fn shallow_keys(dag: &PhysicalASAPDAG, interned: &mut HashMap<String,
 
 #[allow(clippy::too_many_arguments)]
 fn coefficients_of(
-    memo: &Memo,
-    group: GroupId,
-    _index: usize,
-    candidate: &ImplementationCandidate,
     physical: &PhysicalCandidate,
     keys: &[u32],
     shallow: &[u32],
@@ -695,6 +699,7 @@ fn coefficients_of(
                     bytes,
                     per_reader,
                     own_node: id == root,
+                    node_key: shallow[position[&id]],
                 });
             }
             if let Some((source, bytes)) = p.raw_scan {
@@ -708,6 +713,42 @@ fn coefficients_of(
         cost_per_unit_rate: direct.iter().map(|&id| per_rate(id) + kept_state(id)).sum(),
         work_ms: work(&direct),
     };
+    // Shareable nodes of the direct part (another copy's or group's
+    // identical node may be one with it), each with what it computes when
+    // built once: itself and the direct nodes only it reaches.
+    let mut shared_nodes = Vec::new();
+    let mut shared_node_keys = Vec::new();
+    let direct_set: HashSet<PhysicalASAPNodeId> = direct.iter().copied().collect();
+    for &id in &direct {
+        let node = &dag.nodes[position[&id]];
+        let shareable =
+            matches!(node.payload, Operator::ASAP(_)) || !node.output_schema.unique_keys.is_empty();
+        if id == root || !shareable || is_build(&node.payload) || !query_time(id) {
+            continue;
+        }
+        let below: Vec<PhysicalASAPNodeId> = walk(id)
+            .0
+            .into_iter()
+            .filter(|n| direct_set.contains(n))
+            .collect();
+        let mut once = dag.clone();
+        once.nodes[position[&id]].materialization = Materialization::MatAtQuery(Medium::Memory);
+        let state_bytes = per_computation(&once, entries, scan_lookback, horizons, data, models)?
+            [&id]
+            .held
+            .map_or(0, |(bytes, _, _)| bytes);
+        shared_nodes.push(SharedNodeCoefficients {
+            cost_per_unit_rate: below.iter().map(|&n| per_rate(n)).sum(),
+            work_ms: work(&below),
+            state_bytes,
+        });
+        shared_node_keys.push(
+            below
+                .iter()
+                .map(|n| shallow[position[n]])
+                .collect::<Vec<u32>>(),
+        );
+    }
     let mut part_keys = vec![direct.iter().map(|id| keys[position[id]]).collect()];
     let mut slots = Vec::new();
     let mut slot_keys = Vec::new();
@@ -792,12 +833,12 @@ fn coefficients_of(
             per_computation(&once_dag, entries, scan_lookback, horizons, data, models)?;
         once_priced[&root].held.map_or(0, |(bytes, _, _)| bytes)
     };
-    let _ = candidate;
     Ok(Some(Coefficients {
         coefficients: ChoiceCoefficients {
             direct: direct_coefficients,
             slots,
             child_via,
+            shared_nodes,
         },
         lazy: LazyTerms {
             held,
@@ -807,6 +848,7 @@ fn coefficients_of(
             thresholds: Vec::new(),
         },
         root_key: shallow[position[&root]],
+        shared_node_keys,
         root_producer_keys: producers_of
             .get(&root)
             .into_iter()
@@ -838,6 +880,7 @@ pub(crate) fn held_cost(
         bytes: lazy.built_once_state_bytes,
         per_reader: false,
         own_node: true,
+        node_key: u32::MAX,
     };
     let terms = lazy
         .held
@@ -974,7 +1017,22 @@ mod tests {
             })
             .collect();
         let mut checked = Vec::new();
+        let mut unplaced: Vec<Vec<Materialization>> = Vec::new();
         for choice in group_choices(&memo).unwrap() {
+            // The plans the brute force prices: requirements met, scans
+            // widened only through the identical-expression variants.
+            let chosen: Vec<(GroupId, &ImplementationCandidate)> = choice
+                .iter()
+                .enumerate()
+                .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
+                .collect();
+            if !crate::pass::subexpr::windows::requirements_met(&chosen)
+                || chosen
+                    .iter()
+                    .any(|(_, c)| c.origin == crate::pass::subexpr::CandidateOrigin::WidenedScans)
+            {
+                continue;
+            }
             for plan in at_thresholds(&memo, &choice) {
                 let Some(roots) = composed_roots(&memo, &per_computation, &plan) else {
                     continue;
@@ -983,7 +1041,18 @@ mod tests {
                     &roots,
                     &resized_builds(&memo, &choice, &plan),
                 );
-                for roots in identical_expression_variants(roots) {
+                // Widened variants (every metric's scans widened to one
+                // label set) come after the others; they have no choices
+                // yet (TODO: choices of widened candidates), and are only
+                // priced exactly.
+                let unwidened = 1 + asap_logical_asap_optimization::asap_aware_cse::identical_expression_pass2_candidates(
+                    &roots,
+                    &asap_logical_asap_optimization::asap_aware_cse::sharing_candidates(&roots),
+                )
+                .len();
+                for (variant, roots) in identical_expression_variants(roots).into_iter().enumerate()
+                {
+                    let widened = variant >= unwidened;
                     let Ok(physicals) = optimize_physical_asap(
                         "L",
                         &roots,
@@ -994,21 +1063,37 @@ mod tests {
                         continue;
                     };
                     for physical in physicals {
-                        if let Some((expected, actual)) = priced_both(
+                        match priced_both(
                             &memo, &choice, &parts, &physical, &entries, &data, &models, prices,
                             &mut cache,
                         ) {
-                            assert!(
-                                (actual - expected).abs() <= 1e-9 * expected.abs(),
-                                "{queries:?} {:?}: {actual} vs {expected}",
-                                physical.assignment
-                            );
-                            checked.push(physical.assignment.clone());
+                            Some((expected, model, full)) => {
+                                // The model's terms are a lower bound, and
+                                // with the lazy terms the price itself.
+                                assert!(
+                                    model <= expected * (1.0 + 1e-9),
+                                    "{queries:?} {:?}: model {model} over {expected}",
+                                    physical.assignment
+                                );
+                                assert!(
+                                    (full - expected).abs() <= 1e-9 * expected.abs(),
+                                    "{queries:?} {:?}: {full} vs {expected}",
+                                    physical.assignment
+                                );
+                                checked.push(physical.assignment.clone());
+                            }
+                            None if widened => {}
+                            None => unplaced.push(physical.assignment.clone()),
                         }
                     }
                 }
             }
         }
+        assert!(
+            unplaced.is_empty(),
+            "{queries:?}: {} plans whose choices are not found",
+            unplaced.len()
+        );
         checked
     }
 
@@ -1016,7 +1101,7 @@ mod tests {
     /// a group's choice is not found in it).
     #[allow(clippy::too_many_arguments)]
     fn priced_both(
-        _memo: &Memo,
+        memo: &Memo,
         choice: &[Option<usize>],
         parts: &[Vec<ChoiceParts>],
         physical: &PhysicalCandidate,
@@ -1025,7 +1110,7 @@ mod tests {
         models: &PlanningModels<'_>,
         prices: &crate::ResourceUnitCost,
         cache: &mut PriceCache,
-    ) -> Option<(f64, f64)> {
+    ) -> Option<(f64, f64, f64)> {
         let settings = models.plan_selection;
         let dag = &physical.dag;
         let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
@@ -1043,19 +1128,6 @@ mod tests {
         )
         .ok()?;
         let expected = cost.cost_per_second?;
-        let debug = std::env::var("W2DBG").is_ok();
-        if debug {
-            for (id, n) in &cost.per_node {
-                eprintln!(
-                    "stage3 {id} {:?} {:?} {:?} x{} {}",
-                    n.cost_per_second,
-                    nodes[id].output_state.timing,
-                    nodes[id].materialization,
-                    n.multiplier,
-                    n.detail
-                );
-            }
-        }
 
         let rates = computations(
             dag,
@@ -1158,37 +1230,38 @@ mod tests {
         }
         for g in (0..chosen.len()).rev() {
             let Some(c) = chosen[g] else { continue };
-            let Some(sample) = parts[g].iter().find(|p| p.choice.candidate == c) else {
-                return None;
-            };
+            let sample = parts[g].iter().find(|p| p.choice.candidate == c)?;
             // The plan's copies of its node: equal shallow keys, reading
             // equal private producers.
-            let copies: Vec<PhysicalASAPNodeId> = by_key(sample.root_key)
-                .into_iter()
-                .filter(|id| !used.contains(id))
-                .filter(|id| {
-                    let keys_below: Vec<u32> = producers(*id)
-                        .iter()
-                        .map(|p| keys[position_of[p]])
-                        .collect();
-                    sample
-                        .root_producer_keys
-                        .iter()
-                        .all(|k| keys_below.contains(k))
-                })
-                .collect();
+            let group_queries = &memo.groups[g].queries;
+            // The plan's copies of its node, by any of its candidate's
+            // versions (thresholds): equal shallow keys, reading equal
+            // private producers.
+            let mut copies: Vec<PhysicalASAPNodeId> = Vec::new();
+            for part in parts[g].iter().filter(|p| p.choice.candidate == c) {
+                for id in by_key(part.root_key) {
+                    let keys_below: Vec<u32> =
+                        producers(id).iter().map(|p| keys[position_of[p]]).collect();
+                    if !used.contains(&id)
+                        && !copies.contains(&id)
+                        && (part.choice.scan_horizon_ms.is_some()
+                            || reaches_at_all(id).iter().any(|q| group_queries.contains(q)))
+                        && part
+                            .root_producer_keys
+                            .iter()
+                            .all(|k| keys_below.contains(k))
+                    {
+                        copies.push(id);
+                    }
+                }
+            }
             if copies.is_empty() {
-                // A scan every reader has apart.
-                if sample.choice.group.0 as usize == g
-                    && parts[g]
-                        .iter()
-                        .all(|p| p.choice.scan_horizon_ms.is_some() || p.choice.copy_of.is_none())
-                {
+                // A scan every reader has apart (its readers').
+                if sample.choice.scan_horizon_ms.is_some() {
                     continue;
                 }
                 return None;
             }
-            used.extend(copies.iter().copied());
             let timing = |id: &PhysicalASAPNodeId| nodes[id].output_state.timing;
             let query_time: Vec<PhysicalASAPNodeId> = copies
                 .iter()
@@ -1207,7 +1280,11 @@ mod tests {
             };
             for (k, &(root, at_query_time)) in roots.iter().enumerate() {
                 let copy_of = match apart {
-                    true => Some(*reaches_at_all(root).first()?),
+                    true => Some(
+                        *reaches_at_all(root)
+                            .iter()
+                            .find(|q| group_queries.contains(q))?,
+                    ),
                     false => None,
                 };
                 let mine = below(root);
@@ -1240,12 +1317,11 @@ mod tests {
                         && match p.choice.scan_horizon_ms {
                             None => true,
                             Some(h) => {
-                                scan_variant(root).unwrap_or(h) == h
-                                    || windows_read(dag, &nodes, root, &kept).into_iter().max()
-                                        == Some(h)
+                                windows_read(dag, &nodes, root, &kept).into_iter().max() == Some(h)
                             }
                         }
-                })?;
+                });
+                let part = part?;
                 // Apart scans below are this choice's.
                 for (_, v) in &part.choice.scan_children {
                     if v.is_none() {
@@ -1268,7 +1344,8 @@ mod tests {
                             .copied()
                             .find(|id| keys[position_of[id]] == *key)
                     })
-                    .collect::<Option<Vec<_>>>()?;
+                    .collect::<Option<Vec<_>>>();
+                let slots = slots?;
                 placed.push(Placed {
                     part,
                     root,
@@ -1287,9 +1364,15 @@ mod tests {
         };
         // Latency: each query's sum of the work of the parts it reaches.
         let mut latency = vec![0.0; entries.len()];
+        let mut counted_slots: HashSet<PhysicalASAPNodeId> = HashSet::new();
         for p in &placed {
             let vias = std::iter::once(Via::Direct).chain((0..p.slots.len()).map(Via::Slot));
             for via in vias {
+                // A part's node several copies or groups share is one
+                // node, its work counted once.
+                if !counted_slots.insert(part_root(p, via)) {
+                    continue;
+                }
                 let work = match via {
                     Via::Direct if !p.at_query_time => 0.0,
                     Via::Direct => p.part.choice.coefficients.direct.work_ms,
@@ -1304,30 +1387,107 @@ mod tests {
         }
         let mut actual = 0.0;
         let mut scans = Vec::new();
+        // Shared nodes built once at query time: charged once, at their
+        // rate, in place of each copy's per-consumer charge.
+        let mut built_once_nodes: HashSet<PhysicalASAPNodeId> = HashSet::new();
+        let mut held_extra = 0.0;
+        let mut charged_slots: HashSet<PhysicalASAPNodeId> = HashSet::new();
+        let mut charged_roots: HashSet<PhysicalASAPNodeId> = HashSet::new();
         for p in &placed {
-            if debug {
-                eprintln!("placed g{} c{} copy {:?} scans {:?} h {:?} root {} qt {} ing {:?} slots {:?} direct {:?} slotsc {:?} ingc {:?} rate {}", p.part.choice.group.0, p.part.choice.candidate, p.part.choice.copy_of, p.part.choice.scan_children, p.part.choice.scan_horizon_ms, p.root, p.at_query_time, p.at_ingestion, p.slots, p.part.choice.coefficients.direct, p.part.choice.coefficients.slots, p.part.lazy.direct_at_ingestion, rates[&p.root].1);
-            }
             let coefficients = &p.part.choice.coefficients;
-            if p.at_query_time {
+            let mut lazy = p.part.lazy.clone();
+            // Two groups whose chosen nodes are one node (identical after a
+            // shared build is resized): its consumers' rate is both groups',
+            // charged once.
+            let first_root = charged_roots.insert(p.root);
+            if !first_root {
+                lazy.held.retain(|term| term.via != Via::Direct);
+                lazy.raw_scans.retain(|(_, _, via)| *via != Via::Direct);
+            }
+            if p.at_query_time && first_root {
                 actual += coefficients.direct.cost_per_unit_rate * rates[&p.root].1;
+                let mine = below(p.root);
+                for (shared, sub) in coefficients
+                    .shared_nodes
+                    .iter()
+                    .zip(&p.part.shared_node_keys)
+                {
+                    let Some(node) = mine.iter().copied().find(|id| {
+                        keys[position_of[id]] == sub[0]
+                            && nodes[id].materialization != Materialization::NotMaterialized
+                    }) else {
+                        continue;
+                    };
+                    actual -= shared.cost_per_unit_rate * rates[&p.root].1;
+                    // Its nodes' held memory, at the shared node's rate.
+                    let below_held: Vec<HeldTerm> = lazy
+                        .held
+                        .iter()
+                        .filter(|t| sub[1..].contains(&t.node_key))
+                        .copied()
+                        .collect();
+                    lazy.held.retain(|term| !sub.contains(&term.node_key));
+                    if built_once_nodes.insert(node) {
+                        actual += shared.cost_per_unit_rate * rates[&node].1;
+                        let readers: Vec<(usize, f64)> = reach
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, r)| r.contains(&node))
+                            .map(|(q, _)| (q, query_rate(q)))
+                            .collect();
+                        let rate: f64 = readers.iter().map(|(_, r)| r).sum();
+                        for term in below_held {
+                            let evaluation_ms = match term.per_reader && rate > 0.0 {
+                                true => {
+                                    readers.iter().map(|&(q, r)| r * latency[q]).sum::<f64>() / rate
+                                }
+                                false => {
+                                    readers.iter().map(|&(q, _)| latency[q]).fold(0.0, f64::max)
+                                }
+                            };
+                            held_extra += prices.cost_per_memory_byte_second
+                                * term.bytes as f64
+                                * rates[&node].1
+                                * evaluation_ms
+                                / 1_000.0;
+                        }
+                        let longest = reach
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, r)| r.contains(&node))
+                            .map(|(q, _)| latency[q])
+                            .fold(0.0, f64::max);
+                        held_extra += prices.cost_per_memory_byte_second
+                            * shared.state_bytes as f64
+                            * rates[&node].1
+                            * longest
+                            / 1_000.0;
+                    }
+                }
             }
             for copy in &p.at_ingestion {
                 let at_ingestion = p.part.lazy.direct_at_ingestion?;
                 actual += at_ingestion.cost_per_unit_rate * rates[copy].1;
             }
+            // A slot two copies share is one node, charged once, its held
+            // memory too.
             for (i, slot) in coefficients.slots.iter().enumerate() {
-                actual += slot.fixed_cost + slot.cost_per_unit_rate * rates[&p.slots[i]].1;
+                if charged_slots.insert(p.slots[i]) {
+                    actual += slot.fixed_cost + slot.cost_per_unit_rate * rates[&p.slots[i]].1;
+                } else {
+                    lazy.held.retain(|term| term.via != Via::Slot(i));
+                    lazy.raw_scans.retain(|(_, _, via)| *via != Via::Slot(i));
+                }
             }
             let built_once = nodes[&p.root].materialization != Materialization::NotMaterialized
-                && !is_build(&nodes[&p.root].payload);
+                && !is_build(&nodes[&p.root].payload)
+                && first_root;
             // Only a query-time direct part holds memory or scans raw data.
-            let mut lazy = p.part.lazy.clone();
             if !p.at_query_time {
                 lazy.held.retain(|term| term.via != Via::Direct);
                 lazy.raw_scans.retain(|(_, _, via)| *via != Via::Direct);
             }
-            actual += held_cost(
+            held_extra += held_cost(
                 &lazy,
                 built_once,
                 |via| rates[&part_root(p, via)].1,
@@ -1348,11 +1508,14 @@ mod tests {
                 }
             }
         }
-        actual += raw_data_bytes(&scans)
-            .values()
-            .map(|&bytes| prices.cost_per_disk_byte_second * bytes as f64)
-            .sum::<f64>();
-        Some((expected, actual))
+        let model = actual;
+        let full = model
+            + held_extra
+            + raw_data_bytes(&scans)
+                .values()
+                .map(|&bytes| prices.cost_per_disk_byte_second * bytes as f64)
+                .sum::<f64>();
+        Some((expected, model, full))
     }
 
     #[test]
@@ -1392,6 +1555,21 @@ mod tests {
             &[60_000, 60_000],
         );
         assert!(checked.len() > 2);
+    }
+
+    /// Three queries over one metric: a shared rate under two
+    /// aggregations, and a sum over a longer window of the same scan.
+    #[test]
+    fn coefficients_reproduce_stage_3_on_a_mixed_workload() {
+        let checked = check(
+            &[
+                "sum by (job) (rate(m[5m]))",
+                "max(rate(m[5m]))",
+                "sum_over_time(m[10m])",
+            ],
+            &[60_000, 30_000, 60_000],
+        );
+        assert!(!checked.is_empty());
     }
 
     /// Two quantiles within 1% and 2% sharing one KLL build at a size
