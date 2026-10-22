@@ -66,59 +66,19 @@ impl RawDataSampleSelector {
     /// are not a time-series `Scan` and a `TimeRange` of `dag` with the same
     /// columns, or a predicate does not compile.
     pub fn new(dag: &PhysicalASAPDAG, window: &RawDataSampleWindow) -> Result<Self, Error> {
-        let node = |id| {
-            dag.nodes
-                .iter()
-                .find(|n| n.id == id)
-                .ok_or_else(|| Error::Invalid(format!("window names unknown node {id}")))
-        };
-        let (scan, time_range) = (node(window.scan_node_id)?, node(window.time_range_node_id)?);
-        let Operator::NonASAP(NonASAPOp::Scan {
-            source: ScanSource::TimeSeries { metric },
-            ..
-        }) = &scan.payload
-        else {
+        let prepared = PreparedWindow::new(dag, window)?;
+        let ScanSource::TimeSeries { metric } = prepared.source else {
             return Err(Error::Invalid(
                 "window's scan is not a time-series Scan".into(),
             ));
         };
-        let Operator::NonASAP(NonASAPOp::TimeRange { kind, .. }) = &time_range.payload else {
-            return Err(Error::Invalid(
-                "window's time range is not a TimeRange".into(),
-            ));
-        };
-        if time_range.output_schema.fields != scan.output_schema.fields {
-            return Err(Error::Invalid(
-                "window's TimeRange changes its Scan's columns".into(),
-            ));
-        }
-        let scan_schema = Arc::new(scan.output_schema.clone());
-        // The Scan's predicates over its own columns. A Scan has no inputs,
-        // so its predicates name no operator and compile from the payload.
-        let Operator::NonASAP(NonASAPOp::Scan { predicates, .. }) = &scan.payload else {
-            unreachable!("matched above");
-        };
-        let predicates = predicates
-            .iter()
-            .map(|predicate| {
-                if !predicate.0.operator_refs().is_empty() {
-                    return Err(Error::Invalid(
-                        "a Scan predicate reads another operator".into(),
-                    ));
-                }
-                let expression = predicate.0.map_operator_refs(&mut |_| -> Rc<OperatorNode> {
-                    unreachable!("checked: no operator references")
-                });
-                CompiledExpression::compile(&expression, &scan_schema)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             metric: metric.clone(),
-            scan_schema,
-            time_range_schema: Arc::new(time_range.output_schema.clone()),
-            predicates,
+            scan_schema: prepared.scan_schema,
+            time_range_schema: prepared.time_range_schema,
+            predicates: prepared.predicates,
             width_ms: window.width_ms,
-            latest_sample_per_series: *kind == TimeRangeKind::Instant,
+            latest_sample_per_series: prepared.kind == TimeRangeKind::Instant,
         })
     }
 
@@ -162,23 +122,174 @@ impl RawDataSampleSelector {
         kept.retain(|s| s.value.to_bits() != STALE_MARKER);
         // Columns first, with each series' labels and identity built once;
         // then each predicate (label matcher) once per distinct label value.
-        let mut batch = series_batch(
+        let batch = series_batch(
             &self.scan_schema,
             Arc::clone(&self.time_range_schema),
             &kept,
         )?;
-        for predicate in &self.predicates {
-            if batch.num_rows() == 0 {
-                break;
-            }
-            let keep = predicate.evaluate_batch(&batch)?;
-            let keep = keep
-                .as_any()
-                .downcast_ref::<arrow::array::BooleanArray>()
-                .ok_or_else(|| Error::Invalid("Scan predicate is not boolean".into()))?;
-            batch = batch.filter(keep)?;
+        filtered(batch, &self.predicates)
+    }
+}
+
+/// What both selectors read of one raw-data-sample window: its `Scan`'s
+/// source, schema and compiled predicates, and its `TimeRange`'s schema and
+/// kind.
+struct PreparedWindow<'a> {
+    source: &'a ScanSource,
+    scan_schema: SchemaRef,
+    time_range_schema: SchemaRef,
+    predicates: Vec<CompiledExpression>,
+    kind: TimeRangeKind,
+}
+
+impl<'a> PreparedWindow<'a> {
+    /// Bad input when the window's nodes are not a `Scan` and a `TimeRange`
+    /// of `dag` with the same columns, or a predicate does not compile.
+    fn new(dag: &'a PhysicalASAPDAG, window: &RawDataSampleWindow) -> Result<Self, Error> {
+        let node = |id| {
+            dag.nodes
+                .iter()
+                .find(|n| n.id == id)
+                .ok_or_else(|| Error::Invalid(format!("window names unknown node {id}")))
+        };
+        let (scan, time_range) = (node(window.scan_node_id)?, node(window.time_range_node_id)?);
+        let Operator::NonASAP(NonASAPOp::Scan {
+            source, predicates, ..
+        }) = &scan.payload
+        else {
+            return Err(Error::Invalid("window's scan is not a Scan".into()));
+        };
+        let Operator::NonASAP(NonASAPOp::TimeRange { kind, .. }) = &time_range.payload else {
+            return Err(Error::Invalid(
+                "window's time range is not a TimeRange".into(),
+            ));
+        };
+        if time_range.output_schema.fields != scan.output_schema.fields {
+            return Err(Error::Invalid(
+                "window's TimeRange changes its Scan's columns".into(),
+            ));
         }
-        Ok(batch)
+        let scan_schema = Arc::new(scan.output_schema.clone());
+        // The Scan's predicates over its own columns. A Scan has no inputs,
+        // so its predicates name no operator and compile from the payload.
+        let predicates = predicates
+            .iter()
+            .map(|predicate| {
+                if !predicate.0.operator_refs().is_empty() {
+                    return Err(Error::Invalid(
+                        "a Scan predicate reads another operator".into(),
+                    ));
+                }
+                let expression = predicate.0.map_operator_refs(&mut |_| -> Rc<OperatorNode> {
+                    unreachable!("checked: no operator references")
+                });
+                CompiledExpression::compile(&expression, &scan_schema)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            source,
+            scan_schema,
+            time_range_schema: Arc::new(time_range.output_schema.clone()),
+            predicates,
+            kind: *kind,
+        })
+    }
+}
+
+/// `batch` with only the rows each of `predicates` keeps.
+fn filtered(mut batch: Batch, predicates: &[CompiledExpression]) -> Result<Batch, Error> {
+    for predicate in predicates {
+        if batch.num_rows() == 0 {
+            break;
+        }
+        let keep = predicate.evaluate_batch(&batch)?;
+        let keep = keep
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .ok_or_else(|| Error::Invalid("Scan predicate is not boolean".into()))?;
+        batch = batch.filter(keep)?;
+    }
+    Ok(batch)
+}
+
+/// One raw-data-sample window over a SQL table (a range `TimeRange` over a
+/// table `Scan`, e.g. `WHERE ts >= now() - INTERVAL '5 minutes'` or one
+/// tumbling pane of it), prepared to turn the table's rows into its input
+/// rows: the table counterpart of [`RawDataSampleSelector`]. Built once per
+/// window ([`TableRowSelector::new`]), then called for each window end
+/// ([`TableRowSelector::window_batch`]).
+pub struct TableRowSelector {
+    /// The table the window's `Scan` reads.
+    table: String,
+    /// The `Scan`'s output schema: the table's rows as the plan reads them.
+    scan_schema: SchemaRef,
+    /// The `TimeRange`'s output schema, which the rows are returned in.
+    time_range_schema: SchemaRef,
+    /// The `Scan`'s predicates, compiled over its schema.
+    predicates: Vec<CompiledExpression>,
+    /// The table's time column (its time index), in Unix milliseconds.
+    time_column: usize,
+    /// Width of the window.
+    width_ms: i64,
+}
+
+impl TableRowSelector {
+    /// The selector of `window` of `dag`. Bad input when the window's nodes
+    /// are not a table `Scan` with a time index and a range `TimeRange` of
+    /// `dag` with the same columns, or a predicate does not compile.
+    pub fn new(dag: &PhysicalASAPDAG, window: &RawDataSampleWindow) -> Result<Self, Error> {
+        let prepared = PreparedWindow::new(dag, window)?;
+        let ScanSource::Table { table_ref } = prepared.source else {
+            return Err(Error::Invalid("window's scan is not a table Scan".into()));
+        };
+        if prepared.kind != TimeRangeKind::Range {
+            return Err(Error::Invalid("a table window is a range TimeRange".into()));
+        }
+        let time_column = prepared
+            .scan_schema
+            .time_index
+            .ok_or_else(|| Error::Invalid("the window's table has no time index".into()))?;
+        Ok(Self {
+            table: table_ref.clone(),
+            scan_schema: prepared.scan_schema,
+            time_range_schema: prepared.time_range_schema,
+            predicates: prepared.predicates,
+            time_column,
+            width_ms: window.width_ms,
+        })
+    }
+
+    /// The table whose rows the window reads; a runtime passes only its
+    /// rows to [`Self::window_batch`].
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    /// The window's input batch for the window ending at `window_end_ms`:
+    /// the rows of `rows` whose time column lies in `(window_end_ms - width,
+    /// window_end_ms]` and that the `Scan`'s predicates keep, in the
+    /// `TimeRange`'s schema, bound to the window's `TimeRange`. `rows` are
+    /// the table's rows in the `Scan`'s schema and may hold other times.
+    /// Bad input when they are in another schema.
+    pub fn window_batch(&self, window_end_ms: i64, rows: &Batch) -> Result<Batch, Error> {
+        if rows.schema().fields != self.scan_schema.fields {
+            return Err(Error::Invalid(
+                "the table's rows are not in the window Scan's schema".into(),
+            ));
+        }
+        let start_ms = window_end_ms - self.width_ms;
+        let times = rows
+            .column(self.time_column)
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            .ok_or_else(|| Error::Invalid("the table's time column is not a timestamp".into()))?;
+        let in_window: arrow::array::BooleanArray = times
+            .iter()
+            .map(|t| Some(t.is_some_and(|t| start_ms < t && t <= window_end_ms)))
+            .collect();
+        let batch = filtered(rows.filter(&in_window)?, &self.predicates)?;
+        let columns: Vec<usize> = (0..self.time_range_schema.fields.len()).collect();
+        batch.project(Arc::clone(&self.time_range_schema), &columns)
     }
 }
 
@@ -366,6 +477,76 @@ mod tests {
             sample("latency_ms", "a", 9_900, stale),
         ];
         assert_eq!(selector.window_batch(10_000, &ended).unwrap().num_rows(), 0);
+    }
+
+    /// A table window keeps the rows in `(end - width, end]` that its
+    /// `Scan`'s predicates keep: the start is exclusive and the end
+    /// inclusive, as for a range selector's samples.
+    #[test]
+    fn a_table_window_keeps_its_rows_in_the_window_that_the_scan_keeps() {
+        let table = Source::Table {
+            table_ref: "metrics".into(),
+        };
+        let (dag, window) = window_over(table, 1_000, TimeRangeKind::Range);
+        let selector = TableRowSelector::new(&dag, &window).unwrap();
+        assert_eq!(selector.table(), "metrics");
+        let schema = Arc::new(
+            dag.nodes
+                .iter()
+                .find(|n| n.id == window.scan_node_id)
+                .unwrap()
+                .output_schema
+                .clone(),
+        );
+        let row = |ts: i64, value: f64, instance: &str| {
+            vec![
+                Value::Utf8("".into()),
+                Value::Timestamp(ts),
+                Value::Float64(value),
+                Value::Utf8(instance.into()),
+            ]
+        };
+        let rows = Batch::try_new(
+            schema,
+            vec![
+                row(8_999, 1.0, "a"),
+                row(9_000, 2.0, "a"),
+                row(9_001, 3.0, "a"),
+                row(9_500, 4.0, "b"),
+                row(10_000, 5.0, "a"),
+                row(10_001, 6.0, "a"),
+            ],
+        )
+        .unwrap();
+        let batch = selector.window_batch(10_000, &rows).unwrap();
+        let values: Vec<f64> = batch
+            .to_rows()
+            .into_iter()
+            .map(|r| match r[2] {
+                Value::Float64(v) => v,
+                ref other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(values, [3.0, 5.0]);
+        assert_eq!(batch.schema().fields, rows.schema().fields);
+    }
+
+    /// A table selector refuses a time-series window and an instant one.
+    #[test]
+    fn a_table_selector_refuses_a_series_window_and_an_instant_one() {
+        let (dag, window) = window_over(latency_ms(), 1_000, TimeRangeKind::Range);
+        assert!(matches!(
+            TableRowSelector::new(&dag, &window),
+            Err(Error::Invalid(_))
+        ));
+        let table = Source::Table {
+            table_ref: "metrics".into(),
+        };
+        let (dag, window) = window_over(table, 1_000, TimeRangeKind::Instant);
+        assert!(matches!(
+            TableRowSelector::new(&dag, &window),
+            Err(Error::Invalid(_))
+        ));
     }
 
     /// A window over a table `Scan` has no metric to route samples by.
