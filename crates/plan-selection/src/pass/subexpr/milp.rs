@@ -19,7 +19,7 @@ use good_lp::{
 };
 
 use super::{GroupId, Memo};
-use crate::{CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
+use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
 use asap_physical_asap_optimization::PhysicalCandidate;
 use asap_types::ir::QueryRoot;
@@ -131,6 +131,9 @@ pub(crate) struct ModelSolution {
     pub built_once: BTreeSet<GroupId>,
     /// The model's objective: a lower bound on the plan's price.
     pub objective: f64,
+    /// The model's size.
+    pub variables: u64,
+    pub constraints: u64,
 }
 
 /// A consumer of the model: a query, a materialized private slot of a
@@ -307,11 +310,13 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         objective += e;
     }
 
-    let mut model = vars.minimise(objective.clone()).using(highs);
+    let variable_count = vars.len() as u64;
+    let model = vars.minimise(objective.clone()).using(highs);
+    let mut constraints = Vec::new();
     // Needed groups: every query's roots; children of chosen choices.
     for query in &input.queries {
         for root in &query.roots {
-            model = model.with(constraint!(need[root.0 as usize] == 1));
+            constraints.push(constraint!(need[root.0 as usize] == 1));
         }
     }
     for (g, &needed) in need.iter().enumerate() {
@@ -323,18 +328,18 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                 implementing += x[c];
             }
         }
-        model = model.with(constraint!(implementing == needed));
+        constraints.push(constraint!(implementing == needed));
     }
     for (c, choice) in input.choices.iter().enumerate() {
         for child in &choice.children {
-            model = model.with(constraint!(need[child.0 as usize] >= x[c]));
+            constraints.push(constraint!(need[child.0 as usize] >= x[c]));
         }
     }
     for (&g, &v) in &once {
-        model = model.with(constraint!(v <= need[g.0 as usize]));
+        constraints.push(constraint!(v <= need[g.0 as usize]));
         let slot = input.group_slots.iter().find(|s| s.group == g).unwrap();
         if !slot.may_recompute {
-            model = model.with(constraint!(v == need[g.0 as usize]));
+            constraints.push(constraint!(v == need[g.0 as usize]));
         }
     }
     // Reach at all: a query reaches its roots, and every child of a chosen
@@ -342,7 +347,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
     for (q, query) in input.queries.iter().enumerate() {
         for root in &query.roots {
             if let Some(&v) = reaches_at_all.get(&(q, root.0 as usize)) {
-                model = model.with(constraint!(v == 1));
+                constraints.push(constraint!(v == 1));
             }
         }
     }
@@ -354,7 +359,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                     reaches_at_all.get(&(q, g)),
                     reaches_at_all.get(&(q, child.0 as usize)),
                 ) {
-                    model = model.with(constraint!(below >= above + x[c] - 1));
+                    constraints.push(constraint!(below >= above + x[c] - 1));
                 }
             }
         }
@@ -367,7 +372,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         for (_, selector) in sets {
             any += *selector;
         }
-        model = model.with(constraint!(any <= 1));
+        constraints.push(constraint!(any <= 1));
         for class in classes_of(g) {
             let mut containing = Expression::from(0.0);
             for (set, selector) in sets {
@@ -377,7 +382,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
             }
             for &q in &input.group_queries[g] {
                 if input.schedule[q] == class {
-                    model = model.with(constraint!(containing.clone() >= reaches_at_all[&(q, g)]));
+                    constraints.push(constraint!(containing.clone() >= reaches_at_all[&(q, g)]));
                 }
             }
             let mut members = Expression::from(0.0);
@@ -386,34 +391,34 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                     members += reaches_at_all[&(q, g)];
                 }
             }
-            model = model.with(constraint!(containing <= members));
+            constraints.push(constraint!(containing <= members));
         }
     }
     // Consumer reach.
     for (q, query) in input.queries.iter().enumerate() {
         for root in &query.roots {
             if let Some(&v) = reach.get(&(Consumer::Query(q), root.0 as usize)) {
-                model = model.with(constraint!(v >= need[root.0 as usize]));
+                constraints.push(constraint!(v >= need[root.0 as usize]));
             }
         }
     }
     for (&(k, g), &p) in &passes {
         match k {
             Consumer::Group(own) if own.0 as usize == g => {
-                model = model.with(constraint!(p >= once[&own]));
+                constraints.push(constraint!(p >= once[&own]));
             }
             _ => {
                 let r = reach[&(k, g)];
                 match once.get(&GroupId(g as u32)) {
-                    Some(&o) => model = model.with(constraint!(p >= r - o)),
-                    None => model = model.with(constraint!(p >= r)),
+                    Some(&o) => constraints.push(constraint!(p >= r - o)),
+                    None => constraints.push(constraint!(p >= r)),
                 }
             }
         }
     }
     for (&(k, c), &v) in &y {
         let g = input.choices[c].group.0 as usize;
-        model = model.with(constraint!(v >= passes[&(k, g)] + x[c] - 1));
+        constraints.push(constraint!(v >= passes[&(k, g)] + x[c] - 1));
     }
     for (c, choice) in input.choices.iter().enumerate() {
         for (child, via) in choice.children.iter().zip(&choice.coefficients.child_via) {
@@ -425,7 +430,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                             continue;
                         }
                         if let Some(&r) = reach.get(&(k, h)) {
-                            model = model.with(constraint!(r >= y[&(k, c)]));
+                            constraints.push(constraint!(r >= y[&(k, c)]));
                         }
                     }
                 }
@@ -435,14 +440,14 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                         slot: *slot,
                     };
                     if let Some(&r) = reach.get(&(k, h)) {
-                        model = model.with(constraint!(r >= x[c]));
+                        constraints.push(constraint!(r >= x[c]));
                     }
                 }
             }
         }
     }
     for &(z, a, b) in &products {
-        model = model.with(constraint!(z >= a + b - 1));
+        constraints.push(constraint!(z >= a + b - 1));
     }
     // Latency bounds: the work each query reaches at query time.
     for (q, query) in input.queries.iter().enumerate() {
@@ -455,7 +460,7 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
                 latency += input.choices[c].coefficients.direct.work_ms * v;
             }
         }
-        model = model.with(constraint!(latency <= bound));
+        constraints.push(constraint!(latency <= bound));
     }
     // Cuts.
     for (set, bound) in &input.excluded {
@@ -463,18 +468,20 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         for &c in set {
             chosen += x[c];
         }
-        model = model.with(constraint!(chosen <= *bound));
+        constraints.push(constraint!(chosen <= *bound));
     }
     for ((set, bound), &e) in input.extra_bounds.iter().zip(&extra) {
         let mut chosen = Expression::from(0.0);
         for &c in set {
             chosen += x[c];
         }
-        model = model.with(constraint!(
+        constraints.push(constraint!(
             e >= *bound * (chosen - (set.len() as f64 - 1.0))
         ));
     }
+    let constraint_count = constraints.len() as u64;
     let model = model
+        .with_all(constraints)
         .with_mip_gap(0.0)
         .map_err(|e| format!("MIP gap: {e:?}"))?;
     let solution = match model.solve() {
@@ -497,6 +504,8 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
         chosen,
         built_once,
         objective: solution.eval(&objective),
+        variables: variable_count,
+        constraints: constraint_count,
     }))
 }
 
@@ -554,8 +563,7 @@ pub(crate) type MemoSearchResult =
     Result<(Selection, PhysicalCandidate, Vec<QueryRoot>), SelectionError>;
 
 /// The cheapest valid plan of `per_computation`'s memo under cost model 1
-/// (`None` under cost models 2 and 3, which the caller routes to the
-/// legacy search).
+/// (the caller routes cost models 2 and 3 to the legacy search).
 ///
 /// Lazy loop: solve the model (a lower bound: it omits memory held while a
 /// query runs, and checks composed guarantees only on its incumbents);
@@ -566,21 +574,6 @@ pub(crate) type MemoSearchResult =
 /// reaches the incumbent. Each group choice is priced at most once, so the
 /// loop ends, and the incumbent is the reference search's optimum.
 pub(crate) fn search<Id: Clone>(
-    per_computation: &PerComputationCandidates<Id>,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    models: PlanningModels<'_>,
-) -> Option<MemoSearchResult> {
-    if !matches!(
-        models.plan_selection.cost_model,
-        CostModel::UsageOverTime(_)
-    ) {
-        return None;
-    }
-    Some(solve_memo(per_computation, entries, data, models))
-}
-
-fn solve_memo<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -610,12 +603,20 @@ fn solve_memo<Id: Clone>(
     let mut number = 0usize;
     let mut iterations = 0u32;
     let mut bound = None;
+    let mut first_bound = None;
+    let mut solver_ms = 0.0;
+    let mut size = (0, 0);
     loop {
         iterations += 1;
-        let Some(solution) = solve(&input).map_err(SelectionError::Solver)? else {
+        let solve_started = std::time::Instant::now();
+        let solved = solve(&input).map_err(SelectionError::Solver)?;
+        solver_ms += solve_started.elapsed().as_secs_f64() * 1e3;
+        let Some(solution) = solved else {
             break;
         };
         bound = Some(solution.objective);
+        first_bound.get_or_insert(solution.objective);
+        size = (solution.variables, solution.constraints);
         if let Some(incumbent) = selector.cheapest_price() {
             if solution.objective >= incumbent - 1e-9 * incumbent.abs() {
                 break;
@@ -653,7 +654,12 @@ fn solve_memo<Id: Clone>(
     let price = selection.costs[&selection.selected].cost_per_second;
     selection.search.memo = Some(memo_stats);
     selection.search.solver_iterations = iterations;
-    selection.search.solver_time_ms = started.elapsed().as_millis() as u64;
+    selection.search.solver_time_ms = solver_ms as u64;
+    (
+        selection.search.solver_variables,
+        selection.search.solver_constraints,
+    ) = size;
+    selection.search.solver_first_bound_cost_per_second = first_bound;
     selection.search.solver_gap = match (price, bound) {
         (Some(price), Some(bound)) if price > 0.0 => Some(((price - bound) / price).max(0.0)),
         (Some(_), Some(_)) => Some(0.0),

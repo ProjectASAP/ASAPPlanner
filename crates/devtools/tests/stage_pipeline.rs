@@ -1749,9 +1749,14 @@ fn search_flag_picks_the_search_algorithm() {
     let milp = run(&["--search", "memo-milp"]);
     assert_eq!(milp["search"], "memo-milp");
     let report = &milp["stage3_plan_selection"]["search"];
-    assert!(report.get("algorithm").is_none(), "{report}");
-    assert_eq!(report["routed_to_legacy"], "milp_not_built");
-    assert_eq!(price(&milp), price(&legacy));
+    assert_eq!(report["algorithm"], "memo-milp");
+    assert!(report.get("routed_to_legacy").is_none(), "{report}");
+    assert!(
+        report["solver_iterations"].as_u64().unwrap() >= 1,
+        "{report}"
+    );
+    assert!(report["solver_gap"].as_f64().unwrap() <= 1e-9, "{report}");
+    assert!((price(&milp) - price(&legacy)).abs() <= 1e-9 * price(&legacy));
 
     let cost_model_2 = run(&[
         "--search",

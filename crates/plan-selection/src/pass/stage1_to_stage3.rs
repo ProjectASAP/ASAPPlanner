@@ -268,12 +268,8 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
                 let pruned = per_computation
                     .clone()
                     .without_unsupported_summaries(models.deployment_capabilities);
-                match super::subexpr::milp::search(&pruned, entries, data, models) {
-                    Some(found) => {
-                        return memo_run(pruned, found, entries, data, SearchAlgorithm::MemoMilp)
-                    }
-                    None => Some(RoutedToLegacy::MilpNotBuilt),
-                }
+                let found = super::subexpr::milp::search(&pruned, entries, data, models);
+                return memo_run(pruned, found, entries, data, SearchAlgorithm::MemoMilp);
             }
         }
     };

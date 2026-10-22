@@ -1040,14 +1040,26 @@ pub struct SearchReport {
     /// proven optimal. `None` for every other search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver_gap: Option<f64>,
-    /// The MILP solver's simplex iterations; 0 (omitted in JSON) for every
-    /// other search.
+    /// The MILP solves of the lazy loop (one per round: a solve, the exact
+    /// price of its plan, a cut); 0 (omitted in JSON) for every other
+    /// search.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub solver_iterations: u32,
-    /// The MILP solver's wall time in milliseconds; 0 (omitted in JSON) for
-    /// every other search.
+    /// The wall time in milliseconds spent in the MILP solver, every round
+    /// together; 0 (omitted in JSON) for every other search.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub solver_time_ms: u64,
+    /// The MILP's variables and constraints in its last round; 0 (omitted
+    /// in JSON) for every other search.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub solver_variables: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub solver_constraints: u64,
+    /// The first round's lower bound on the cost per second, before any
+    /// cut: how tight the model is against the selected price; `None` for
+    /// every other search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_first_bound_cost_per_second: Option<f64>,
 }
 
 /// The size of a sub-expression memo (joint-planning-search design,
@@ -1110,8 +1122,6 @@ pub enum RoutedToLegacy {
     /// The MILP's objective is cost model 1's sum of local prices; cost
     /// models 2 and 3 are searched by the legacy search.
     CostModelNotSupported,
-    /// The MILP model is not built yet.
-    MilpNotBuilt,
 }
 
 /// One independent component of the workload: queries that can read no

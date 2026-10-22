@@ -1461,11 +1461,15 @@ fn three_way(
     };
     let report = &selection.search;
     if report.algorithm == SearchAlgorithm::Legacy {
-        let expected = match cost_model {
-            CostModel::UsageOverTime(_) => RoutedToLegacy::MilpNotBuilt,
-            _ => RoutedToLegacy::CostModelNotSupported,
-        };
-        assert_eq!(report.routed_to_legacy, Some(expected), "{label}");
+        assert!(
+            !matches!(cost_model, CostModel::UsageOverTime(_)),
+            "{label}: cost model 1 is searched by the MILP"
+        );
+        assert_eq!(
+            report.routed_to_legacy,
+            Some(RoutedToLegacy::CostModelNotSupported),
+            "{label}"
+        );
         return Ok(false);
     }
     assert_eq!(report.algorithm, SearchAlgorithm::MemoMilp, "{label}");
