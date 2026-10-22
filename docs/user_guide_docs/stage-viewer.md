@@ -127,12 +127,15 @@ planner must meet:
 Beside the queries, the facts the planner was given about the data: how it
 arrives (`ingesting · 200000 rows/s`, `at rest`, `mixed`) and, per source
 (a PromQL metric or a SQL table), its series count, metric type, whether
-its values are non-negative, its sample interval, its stream-norm bounds and
-its distinct-count bound, `—` for a fact the workload does not declare. The
+its values are non-negative, its sample interval, its stream-norm bounds,
+its distinct-count bound, the distinct values per label (`service 25,
+endpoint 625`) and per label set (`(service, endpoint) 625`, for labels that
+depend on each other, such as endpoints that each belong to one service),
+`—` for a fact the workload does not declare. The planner prices a grouping
+at the smallest product of these counts covering its keys. The
 **read by** column lists the queries whose text names the source. The line
 above the table shows the deployment capabilities the plan was made for
-(for example `raw data not retained`). A workload cannot declare labels,
-their hierarchy or their cardinalities, so the panel shows none.
+(for example `raw data not retained`).
 
 The line under the queries counts the candidates at each stage, for example,
 in Example 1, `Candidates per stage: 1 logical DAG → 27 logical ASAP → 72

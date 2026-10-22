@@ -298,7 +298,12 @@ plan selection prices a `by (...)` grouping's groups at: the product of its
 keys' counts, at most the declared `series_count` (series or groups of
 rows) and the rows it reads; with a key undeclared, no count is assumed and
 the grouping is priced at the smaller of those two; over several sources a
-key's counts add), and `rows_held` (the rows the source holds at rest,
+key's counts add), `distinct_values_per_label_set` (distinct combinations
+a set of dependent labels takes together, e.g.
+`[{"labels": ["service", "endpoint"], "distinct_values": 625}]` when each
+endpoint is in one service: a grouping over one source is priced at the
+smallest product of declared set and label counts covering its keys, so
+`by (service, endpoint)` is 625 groups rather than 25 x 625), and `rows_held` (the rows the source holds at rest,
 which bound a scan with no window and data at rest). Every fact is declared: the planner has no
 clock, so a caller drops facts that no longer hold before planning, and
 pricing assumes no default: a scan whose source declares no arrival rate
