@@ -661,13 +661,16 @@ fn compile_internal(
 /// A `TimeRange(w)` over shifts summing to `s` keeps the rows whose time
 /// column lies in `(T - s - w, T - s]` at evaluation time `T`, the window a
 /// PromQL range selector reads: a filter on the time column against `now()`.
-/// A `TimeShift` only moves the window its `TimeRange` reads, so it passes
-/// the rows through.
+/// A `TimeShift` only moves the window its `TimeRange` reads (the range
+/// above applies its offset), so it passes the rows through; a shift is
+/// meaningful only under a range, the shape Pass 2's tumbling panes build.
+/// An `@` anchor has no table lowering, so a shift with one gets `None`
+/// and the node fails compilation.
 fn table_time_operator(
     id: NodeId,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-    inputs: &[SchemaRef],
+    input_schemas: &[SchemaRef],
 ) -> Result<Option<Operator>, Error> {
     let child = |id: NodeId| dependencies.get(&id).and_then(|d| d.first()).copied();
     // The shifts' total offset below `id` (`id` included), and whether the
@@ -702,8 +705,8 @@ fn table_time_operator(
     if below.is_none() {
         return Ok(None);
     }
-    let [input] = inputs else {
-        return Err(invalid("a table time range reads one input"));
+    let [input] = input_schemas else {
+        return Err(invalid("a table time range or shift reads one input"));
     };
     let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[&id].payload else {
         // A shift passes its rows through.

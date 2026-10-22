@@ -342,3 +342,24 @@ async fn distinct_counts_over_5_and_15_minute_windows_run_from_panes() {
         .collect();
     assert_eq!(by_key(run_query(&plan, 1).1), expected);
 }
+
+/// Exact row counts over 5 and 15 minutes: a count tells a row read twice
+/// or missed at a pane's edge, which a distinct count cannot. Each pane is
+/// `(T - s - w, T - s]`, so the 15-minute panes read every row after
+/// `T - 15m` exactly once: 300 per service (the row at `T - 15m` is not
+/// read), and 100 in the last 5 minutes.
+#[tokio::test]
+async fn row_counts_over_5_and_15_minute_windows_read_each_row_once() {
+    let five = "SELECT service, COUNT(*) AS value FROM http \
+                WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
+    let fifteen = five.replace("5 minutes", "15 minutes");
+    let plan = plan_all(&[five, &fifteen], EXACT).await;
+    let selected = format!("{:?}", plan.dag.dag.nodes);
+    assert!(selected.contains("TimeShift"), "panes: {selected}");
+    for (query, rows_per_service) in [(0, 100), (1, 300)] {
+        let expected: BTreeMap<String, String> = (0..3)
+            .map(|s| (format!("s{s}"), shown(&Value::Int64(rows_per_service))))
+            .collect();
+        assert_eq!(by_key(run_query(&plan, query).1), expected, "query {query}");
+    }
+}

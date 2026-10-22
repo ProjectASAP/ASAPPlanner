@@ -241,9 +241,8 @@ fn example3a_selects_the_cheapest_of_all_candidates() {
     assert!(physical.iter().any(|p| p["id"] == expected.as_str()));
 }
 
-/// Example 2 plans its three SQL queries: Stage 1 lists a candidate in
-/// which one UnivMon build serves all three, and plan selection selects a
-/// plan.
+/// Example 2 plans its three SQL queries with the default search and
+/// selects a plan.
 #[test]
 fn example2_plans_the_sql_workload() {
     // The default search: its SQL windows get tumbling panes, so an
