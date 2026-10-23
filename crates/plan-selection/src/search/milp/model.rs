@@ -2022,6 +2022,69 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             unevaluated_bound: None,
             decode_failures: 0,
         })
+        .map(|mut cluster| {
+            cluster.offer_independent_plan();
+            cluster
+        })
+    }
+
+    /// Offer the selector the warm-start incumbent before round 1: each
+    /// query planned alone by the legacy search, with no sharing between
+    /// queries, the plans side by side. It only sets the starting
+    /// incumbent: certification still compares the MILP lower bound with
+    /// the incumbent, and a time-limited loop has a plan to report. A
+    /// query the legacy search finds no plan for leaves no warm start.
+    fn offer_independent_plan(&mut self) {
+        const ID: &str = "L0";
+        let mut roots = Vec::with_capacity(self.entries.len());
+        let mut assignments = Vec::with_capacity(self.entries.len());
+        for (q, (_, root)) in self.per_computation.roots.iter().enumerate() {
+            let Ok(inventory) =
+                asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                    vec![(q, root.clone())],
+                )
+            else {
+                return;
+            };
+            let run = crate::search::legacy::stage1_to_stage3::run_stage1_to_stage3_from_pass1(
+                inventory,
+                &self.entries[q..=q],
+                self.data,
+                self.models,
+                crate::Stage1ToStage3Search::default(),
+            );
+            let (Some(selected), Some(Ok(alone))) =
+                (run.stage3_selected, run.stage1_selected.map(|l| l.roots))
+            else {
+                return;
+            };
+            roots.extend(alone);
+            assignments.push(selected.assignment.into_iter());
+        }
+        // Each build is read by the one query whose plan it is in, and
+        // takes that plan's materialization.
+        let mut choose = |readers: &[usize]| assignments[*readers.first()?].next();
+        let Ok(Some(mut candidate)) =
+            asap_physical_asap_optimization::optimize_physical_asap_assigned(
+                ID,
+                &roots,
+                self.entries,
+                self.data,
+                self.models.deployment_capabilities,
+                &mut choose,
+            )
+        else {
+            return;
+        };
+        // Every query's assignment taken whole, or the composed plan is not
+        // the per-query plans.
+        if assignments.iter_mut().any(|rest| rest.next().is_some()) {
+            return;
+        }
+        candidate.id = "P0".to_string();
+        if self.selector.offer(&candidate).is_ok() && self.selector.keeps_from_logical(ID) {
+            self.logical.insert(ID.to_string(), roots);
+        }
     }
 
     /// Whether the loop has another round; `false` when it has stopped.
