@@ -1074,6 +1074,10 @@ pub struct MilpReport {
     /// solver limit (iterations, memory, interrupt): the plan is then
     /// proven optimal only if `gap` is 0.
     pub time_limit_reached: bool,
+    /// Solutions solution decoding could not compose into a plan: each
+    /// keeps its objective as a lower bound, so the gap stays honest.
+    #[serde(default)]
+    pub decode_failures: u32,
     /// Each independent cluster's search, ordered by its first query: one
     /// cluster when the memo was searched as one. The fields above are
     /// their totals: bounds, rounds, model sizes and solver time summed,
@@ -1103,6 +1107,9 @@ pub struct MilpClusterReport {
     pub solver_time_ms: u64,
     /// Whether it stopped at the search's time limit.
     pub time_limit_reached: bool,
+    /// Solutions solution decoding could not compose into a plan.
+    #[serde(default)]
+    pub decode_failures: u32,
 }
 
 /// The size of a sub-expression memo (planner-layering design, "The

@@ -253,6 +253,7 @@ fn milp_report(
         constraint_count: reports.iter().map(|r| r.constraint_count).sum(),
         solver_time_ms: reports.iter().map(|r| r.solver_time_ms).sum(),
         time_limit_reached: reports.iter().any(|r| r.time_limit_reached),
+        decode_failures: reports.iter().map(|r| r.decode_failures).sum(),
         clusters: found.iter().map(|(_, _, _, c)| c.clone()).collect(),
     }
 }

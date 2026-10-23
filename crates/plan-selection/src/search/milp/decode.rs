@@ -47,16 +47,22 @@ use crate::PlanningModels;
 pub(super) struct Decoded {
     pub roots: Vec<QueryRoot>,
     pub physical: PhysicalCandidate,
-    /// Nodes whose materialization the solution set but Stage 2 does not
-    /// offer, left `NotMaterialized` instead (0 when the plan is exactly
-    /// the solution's).
-    pub deviations: usize,
+}
+
+/// A solution's decoded plans.
+pub(super) struct Decoding {
+    pub plans: Vec<Decoded>,
+    /// Whether every combination of the free nodes' Stage 2 options was
+    /// evaluated: otherwise the choice set has plans incumbent evaluation
+    /// did not see, and the solution's objective stays a lower bound.
+    pub every_combination: bool,
 }
 
 /// The plan the solution with `chosen` choices (indices into `choices`,
 /// whose candidates at their thresholds are `versions`) and `built_once`
-/// groups describes, named `id`; `None` when it cannot be composed or
-/// implemented.
+/// groups describes, named `id`, with up to `max_free_combinations`
+/// combinations of its free nodes' options; `None` when it cannot be
+/// composed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn decode<Id>(
     memo: &Memo,
@@ -69,7 +75,8 @@ pub(super) fn decode<Id>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
     id: &str,
-) -> Vec<Decoded> {
+    max_free_combinations: usize,
+) -> Option<Decoding> {
     let n = memo.groups.len();
     let mut choice_of: Vec<Option<usize>> = vec![None; n];
     for &c in chosen {
@@ -97,13 +104,9 @@ pub(super) fn decode<Id>(
         .iter()
         .map(|c| c.map(|c| versions[c].clone()))
         .collect();
-    let Some(composed) = compose(memo, per_computation, &plan, &one_node, &apart_scans) else {
-        return Vec::new();
-    };
+    let composed = compose(memo, per_computation, &plan, &one_node, &apart_scans)?;
     // Each node's guarantee composed again over the chosen implementations.
-    let Ok(recomposed) = recompose_guarantees(&composed.roots) else {
-        return Vec::new();
-    };
+    let recomposed = recompose_guarantees(&composed.roots).ok()?;
     let mut table = composed.table;
     remap(&mut table, &composed.roots, &recomposed);
     // Shared builds resized to one size are one build.
@@ -120,7 +123,7 @@ pub(super) fn decode<Id>(
     // already one node. Shared and not built once, a node costs what its
     // copies cost (recomputed per consumer); the model's shared slots and
     // nodes assume one node.
-    let mut decoded = implemented(
+    let (mut plans, mut every_combination) = implemented(
         &resized_shared,
         &table,
         Some(false),
@@ -130,6 +133,7 @@ pub(super) fn decode<Id>(
         data,
         models,
         id,
+        max_free_combinations,
     );
     // Scan widening is no model variable yet (a decoding gap): the model
     // charges a metric's scans as one widened scan may cost, so the plan
@@ -139,7 +143,7 @@ pub(super) fn decode<Id>(
         let mut widened_table = table.clone();
         remap(&mut widened_table, &resized_shared, &widened);
         for share_scans in [true, false] {
-            decoded.extend(implemented(
+            let (widened_plans, every) = implemented(
                 &widened,
                 &widened_table,
                 Some(share_scans),
@@ -149,15 +153,22 @@ pub(super) fn decode<Id>(
                 data,
                 models,
                 &format!("{id}w{}", u8::from(share_scans)),
-            ));
+                max_free_combinations,
+            );
+            plans.extend(widened_plans);
+            every_combination &= every;
         }
     }
-    decoded
+    Some(Decoding {
+        plans,
+        every_combination,
+    })
 }
 
-/// The physical plan of `roots` with identical nodes one node (scans too
+/// The physical plans of `roots` with identical nodes one node (scans too
 /// when `share_scans`), each node materialized as `table` says the
-/// solution chose.
+/// solution chose, and whether every combination of the free nodes'
+/// options is among them.
 #[allow(clippy::too_many_arguments)]
 fn implemented(
     roots: &[QueryRoot],
@@ -169,7 +180,8 @@ fn implemented(
     data: &DataWorkload,
     models: PlanningModels<'_>,
     id: &str,
-) -> Vec<Decoded> {
+    max_free_combinations: usize,
+) -> (Vec<Decoded>, bool) {
     let shared = match share_scans {
         Some(share_scans) => {
             let candidates = sharing_candidates(roots);
@@ -216,12 +228,13 @@ fn implemented(
         },
     );
     // Every combination of the free nodes' options, up to
-    // `MAX_FREE_COMBINATIONS`; beyond, each free node recomputed or each
+    // `max_free_combinations`; beyond, each free node recomputed or each
     // built once.
     let count = free
         .iter()
         .try_fold(1usize, |n, options| n.checked_mul(options.len()))
-        .filter(|&n| n <= MAX_FREE_COMBINATIONS);
+        .filter(|&n| n <= max_free_combinations);
+    let every_combination = count.is_some();
     let combinations: Vec<Vec<Materialization>> = match count {
         Some(n) => (0..n)
             .map(|mut k| {
@@ -248,7 +261,6 @@ fn implemented(
     };
     let mut out = Vec::new();
     for (k, combination) in combinations.into_iter().enumerate() {
-        let mut deviations = 0usize;
         let mut next_free = 0usize;
         let physical = optimize_physical_asap_chosen(
             &format!("{id}-{k}"),
@@ -258,10 +270,7 @@ fn implemented(
             models.deployment_capabilities,
             &mut |logical, _readers, options| match wanted_of(logical) {
                 Some(wanted) if options.contains(&wanted) => wanted,
-                Some(_) => {
-                    deviations += 1;
-                    Materialization::NotMaterialized
-                }
+                Some(_) => Materialization::NotMaterialized,
                 None if options.len() > 1 => {
                     next_free += 1;
                     combination[next_free - 1]
@@ -273,16 +282,15 @@ fn implemented(
             out.push(Decoded {
                 roots: shared.clone(),
                 physical,
-                deviations,
             });
         }
     }
-    out
+    (out, every_combination)
 }
 
 /// The most combinations of Stage 2 options of the nodes no solution
 /// variable sets that incumbent evaluation runs on.
-const MAX_FREE_COMBINATIONS: usize = 16;
+pub(super) const MAX_FREE_COMBINATIONS: usize = 16;
 
 /// What a node of the decoded plan is to the solution.
 #[derive(Debug, Clone, Copy)]
@@ -463,11 +471,11 @@ fn build(
         );
         index += 1;
     }
+    // Built once (the model's `once[g]`) overrides the slot assignment of
+    // a group's own node that is a build. The model builds a group once
+    // only through its own choice (`owner == g`).
     if one_node[g] && owner == g {
-        state
-            .table
-            .entry(Rc::as_ptr(&node))
-            .or_insert(Role::BuiltOnce);
+        state.table.insert(Rc::as_ptr(&node), Role::BuiltOnce);
     }
     for implemented in &candidate.implements {
         state.built[scope].insert(implemented.0 as usize, Rc::clone(&node));
@@ -549,4 +557,111 @@ fn remap(
         }
     }
     *table = moved;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::milp::model::{model_input_of, solve, tests::workload};
+    use asap_types::ir::properties::AccuracyTarget;
+
+    const QUERIES: [&str; 2] = ["sum_over_time(m[5m]) * 2", "sum_over_time(m[5m]) / 3"];
+
+    fn targets() -> [AccuracyTarget; 2] {
+        [AccuracyTarget::exact(), AccuracyTarget::exact()]
+    }
+
+    /// The model's optimum over a shared sum decodes to plans, every
+    /// combination of its free nodes' options among them.
+    #[test]
+    fn a_solution_decodes_to_its_plans() {
+        let (per_computation, entries, data) = workload(&QUERIES, &targets(), None);
+        let models = PlanningModels::builtin();
+        let memo = crate::search::memo::brute_force::memo(&per_computation, &entries);
+        let (input, versions) = model_input_of(&memo, &entries, &data, models).unwrap();
+        let solution = solve(&input).unwrap().unwrap();
+        let decoding = decode(
+            &memo,
+            &per_computation,
+            &input.choices,
+            &versions,
+            &solution.chosen,
+            &solution.built_once,
+            &entries,
+            &data,
+            models,
+            "t",
+            MAX_FREE_COMBINATIONS,
+        )
+        .expect("the optimum decodes");
+        assert!(!decoding.plans.is_empty());
+        assert!(decoding.every_combination);
+        for plan in &decoding.plans {
+            assert_eq!(plan.physical.roots.len(), QUERIES.len());
+        }
+    }
+
+    /// A group built once whose own node is a build: its node is built
+    /// once (the model's `once`), not materialized as the choice's slot.
+    #[test]
+    fn a_group_built_once_whose_node_is_a_build_is_built_once() {
+        let (per_computation, entries, _) = workload(&QUERIES, &targets(), None);
+        let memo = crate::search::memo::brute_force::memo(&per_computation, &entries);
+        // The shared sum's group, and a candidate of it cut down to its
+        // build: a group whose own node is a build.
+        let g = memo
+            .groups
+            .iter()
+            .position(|group| group.parents.len() > 1)
+            .expect("a shared group");
+        fn build_below(
+            node: &Rc<OperatorNode>,
+            children: &[*const OperatorNode],
+        ) -> Option<Rc<OperatorNode>> {
+            if children.contains(&Rc::as_ptr(node)) {
+                return None;
+            }
+            if is_build(node) {
+                return Some(Rc::clone(node));
+            }
+            node.children()
+                .into_iter()
+                .find_map(|child| build_below(child, children))
+        }
+        let mut plan: Vec<Option<ImplementationCandidate>> = memo
+            .candidates
+            .iter()
+            .map(|candidates| candidates.first().cloned())
+            .collect();
+        let (candidate, build) = memo.candidates[g]
+            .iter()
+            .find_map(|candidate| {
+                let children: Vec<*const OperatorNode> = candidate
+                    .children
+                    .iter()
+                    .map(|c| Rc::as_ptr(&memo.groups[c.0 as usize].node))
+                    .collect();
+                Some((candidate, build_below(&candidate.node, &children)?))
+            })
+            .expect("a candidate with a build");
+        plan[g] = Some(ImplementationCandidate {
+            node: build,
+            ..candidate.clone()
+        });
+        let mut one_node = vec![false; memo.groups.len()];
+        one_node[g] = true;
+        let composed =
+            compose(&memo, &per_computation, &plan, &one_node, &BTreeSet::new()).unwrap();
+        let roles: Vec<Role> = composed.table.values().copied().collect();
+        assert!(
+            roles.iter().any(|r| matches!(r, Role::BuiltOnce)),
+            "{roles:?}"
+        );
+        assert!(
+            !roles
+                .iter()
+                .any(|r| matches!(r, Role::Slot { group, .. } if *group == g)),
+            "{roles:?}"
+        );
+    }
 }
