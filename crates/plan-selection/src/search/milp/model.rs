@@ -3497,6 +3497,142 @@ fn guarantee_requirements(
     requires
 }
 
+/// Which pairs of approximate inputs a query's root may not combine
+/// ([`guarantee_requirements`] tries one approximate child at a time): for
+/// a root group's choice with exactly two children that may approximate
+/// (each child candidate reading only exact groups), each pair of child
+/// candidates whose composed root fails one of the group's queries'
+/// targets (Stage 3's guarantee check) at every size threshold of the
+/// three and at the largest size Stage 3 can give its summaries (e.g. two
+/// quantiles each within 5% under a ratio that must be within 5%). As
+/// rules for [`ModelInput::rollup_rules`] (not all three chosen). A plan
+/// with that root fails its query whatever else it chooses, so no valid
+/// plan is ruled out. Nothing is ruled out unless the built-in model's
+/// semantics hold, as in [`guarantee_requirements`].
+fn pair_guarantee_rules(
+    memo: &Memo,
+    choices: &[Choice],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Vec<(Vec<Vec<usize>>, Vec<usize>)> {
+    use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
+    use std::rc::Rc;
+    if models
+        .effective_accuracy()
+        .may_accept_regardless_of_guarantee()
+        || models.evidence.may_provide_evidence()
+    {
+        return Vec::new();
+    }
+    let mut exact_only = vec![false; memo.groups.len()];
+    let Some(order) = memo.topological_order() else {
+        return Vec::new();
+    };
+    for GroupId(h) in order {
+        let h = h as usize;
+        exact_only[h] = memo.candidates[h].iter().all(|candidate| {
+            crate::search::memo::rules::windows::is_exact(candidate)
+                && candidate.children.iter().all(|c| exact_only[c.0 as usize])
+        });
+    }
+    let mut choices_of: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for (c, choice) in choices.iter().enumerate() {
+        choices_of
+            .entry((choice.group.0 as usize, choice.candidate))
+            .or_default()
+            .push(c);
+    }
+    let versions = |g: usize, c: usize| -> Vec<Rc<asap_types::ir::OperatorNode>> {
+        crate::search::milp::coefficients::at_site_thresholds(memo, &memo.candidates[g][c])
+            .into_iter()
+            .map(|(version, _)| version.node)
+            .collect()
+    };
+    // Whether `node`, a root of the queries `queries`, fails one of them at
+    // its own size and at the largest size.
+    let fails = |node: &Rc<asap_types::ir::OperatorNode>, queries: &[usize]| -> bool {
+        let Ok(own) = recompose_guarantees(&[QueryRoot::Operator(Rc::clone(node))]) else {
+            return false;
+        };
+        let Ok(largest) = crate::resized_to_the_largest(&own) else {
+            return false;
+        };
+        queries.iter().any(|&q| {
+            let target = &entries[q].requirements.accuracy;
+            [&own[0], &largest[0]]
+                .iter()
+                .all(|root| crate::guarantee_check(q, root, target, data, &models).is_err())
+        })
+    };
+    let mut rules = Vec::new();
+    for (&(g, c), own) in &choices_of {
+        let queries = &memo.groups[g].roots_of;
+        if queries.is_empty() {
+            continue;
+        }
+        let candidate = &memo.candidates[g][c];
+        let open: Vec<usize> = candidate
+            .children
+            .iter()
+            .map(|h| h.0 as usize)
+            .filter(|&h| !exact_only[h])
+            .collect();
+        let [h1, h2] = open[..] else {
+            continue;
+        };
+        let of_child = |h: usize| -> Vec<usize> {
+            choices_of
+                .keys()
+                .filter(|&&(k, d)| {
+                    k == h
+                        && memo.candidates[h][d]
+                            .children
+                            .iter()
+                            .all(|k| exact_only[k.0 as usize])
+                })
+                .map(|&(_, d)| d)
+                .collect()
+        };
+        let own_versions = versions(g, c);
+        let (node1, node2) = (
+            Rc::as_ptr(&memo.groups[h1].node),
+            Rc::as_ptr(&memo.groups[h2].node),
+        );
+        for d1 in of_child(h1) {
+            let versions1 = versions(h1, d1);
+            for d2 in of_child(h2) {
+                let versions2 = versions(h2, d2);
+                let every_version_fails = own_versions.iter().all(|node| {
+                    versions1.iter().all(|v1| {
+                        versions2.iter().all(|v2| {
+                            let replaced =
+                                HashMap::from([(node1, Rc::clone(v1)), (node2, Rc::clone(v2))]);
+                            let composed = crate::search::memo::brute_force::substituted(
+                                node,
+                                &replaced,
+                                &mut HashMap::new(),
+                            );
+                            fails(&composed, queries)
+                        })
+                    })
+                });
+                if every_version_fails {
+                    rules.push((
+                        vec![
+                            own.clone(),
+                            choices_of[&(h1, d1)].clone(),
+                            choices_of[&(h2, d2)].clone(),
+                        ],
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
+    }
+    rules
+}
+
 /// The model's input for `memo`'s `choices`.
 fn model_input(
     memo: &Memo,
@@ -3618,18 +3754,20 @@ fn model_input(
             .push(c);
     }
     let present: BTreeSet<(usize, usize)> = choices_of.keys().copied().collect();
-    let rollup_rules = crate::search::memo::rules::windows::rollup_rules(memo, &present)
-        .into_iter()
-        .map(|rule| {
-            (
-                rule.all_of.iter().map(|k| choices_of[k].clone()).collect(),
-                rule.one_of
-                    .iter()
-                    .flat_map(|k| choices_of[k].clone())
-                    .collect(),
-            )
-        })
-        .collect();
+    let mut rollup_rules: Vec<(Vec<Vec<usize>>, Vec<usize>)> =
+        crate::search::memo::rules::windows::rollup_rules(memo, &present)
+            .into_iter()
+            .map(|rule| {
+                (
+                    rule.all_of.iter().map(|k| choices_of[k].clone()).collect(),
+                    rule.one_of
+                        .iter()
+                        .flat_map(|k| choices_of[k].clone())
+                        .collect(),
+                )
+            })
+            .collect();
+    rollup_rules.extend(pair_guarantee_rules(memo, &choices, entries, data, models));
     let of_origin = |origin: crate::search::memo::CandidateOrigin| -> Vec<usize> {
         (0..choices.len())
             .filter(|&c| candidate_of(&choices[c]).origin == origin)
@@ -3904,6 +4042,55 @@ pub(crate) mod tests {
         }
         let input = model_input(&memo, choices, &entries, &data, models).unwrap();
         (memo, input)
+    }
+
+    /// Two quantiles of one metric and their ratio, each within 5%: the
+    /// ratio of two summaries each within 5% is not, so the model rules
+    /// that pair out under the ratio ([`pair_guarantee_rules`]) and its
+    /// first solution is a plan Stage 3 accepts, rather than one of the
+    /// many it rejects for the ratio's target, each cut one per round.
+    #[test]
+    fn the_first_solution_for_a_ratio_of_two_quantiles_meets_its_target() {
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.01);
+        let queries = [
+            "quantile_over_time(0.9, m[1h])",
+            "quantile_over_time(0.5, m[1h])",
+            "quantile_over_time(0.9, m[1h]) / quantile_over_time(0.5, m[1h])",
+        ];
+        let targets = vec![target; queries.len()];
+        let (per_computation, entries, data) = workload(&queries, &targets, None);
+        let models = PlanningModels::builtin();
+        let memo = crate::search::memo::brute_force::memo(&per_computation, &entries);
+        let (input, versions) = model_input_of(&memo, &entries, &data, models).unwrap();
+        let solution = solve(&input).unwrap().unwrap();
+        let decoded = crate::search::milp::decode::decode(
+            &memo,
+            &per_computation,
+            &input.choices,
+            &versions,
+            &solution.chosen,
+            &solution.built_once,
+            &entries,
+            &data,
+            models,
+            "L1",
+            crate::search::milp::decode::MAX_FREE_COMBINATIONS,
+        )
+        .unwrap();
+        let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
+        for plan in &decoded.plans {
+            selector.offer(&plan.physical).unwrap();
+        }
+        let group_choice: Vec<(u32, usize)> = solution
+            .chosen
+            .iter()
+            .map(|&c| (input.choices[c].group.0, input.choices[c].candidate))
+            .collect();
+        assert!(
+            selector.cheapest_price().is_some(),
+            "{group_choice:?}: {:?}",
+            selector.rejected.last()
+        );
     }
 
     /// `queries`' workload: each query every minute, at `targets`, over a

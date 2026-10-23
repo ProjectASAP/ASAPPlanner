@@ -2105,6 +2105,23 @@ mod tests {
         }
     }
 
+    /// Two quantiles of one metric and their ratio, each within 5%: the
+    /// ratio's pair rule (`pair_guarantee_rules`) rules out no group choice
+    /// with a valid plan, and the model stays a lower bound of each.
+    #[test]
+    fn the_model_is_a_lower_bound_for_a_ratio_of_two_quantiles() {
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.01);
+        assert_model_is_a_lower_bound(
+            &[
+                "quantile_over_time(0.9, m[1h])",
+                "quantile_over_time(0.5, m[1h])",
+                "quantile_over_time(0.9, m[1h]) / quantile_over_time(0.5, m[1h])",
+            ],
+            &[60_000, 60_000, 60_000],
+            &[target.clone(), target.clone(), target],
+        );
+    }
+
     /// Three quantiles of one metric over a 1-minute, a 5-minute and an
     /// instant window (#840's shape), every 10 s; and a shared group with
     /// a rollup.
