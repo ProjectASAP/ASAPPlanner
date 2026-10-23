@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use good_lp::solvers::highs::highs;
 use good_lp::{
-    constraint, variable, Expression, ProblemVariables, Solution, SolverModel, Variable, WithMipGap,
+    constraint, variable, Expression, ProblemVariables, Solution, SolverModel, Variable,
 };
 
 use crate::search::memo::{GroupId, ImplementationCandidate, Memo};
@@ -330,9 +330,50 @@ pub(crate) struct ModelSolution {
     /// Whether the solver proved it optimal (not stopped at its time
     /// limit): only then is `objective` a lower bound.
     pub optimal: bool,
+    /// When stopped at its time limit, the solver's proven lower bound on
+    /// every plan's price (its dual bound), when it has one.
+    pub proven_bound: Option<f64>,
     /// The model's size.
     pub variables: u64,
     pub constraints: u64,
+}
+
+/// Why [`solve`] returned no solution and no proof of infeasibility.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SolveError {
+    /// The solver stopped at its time limit before finding a solution; its
+    /// proven lower bound on every plan's price, when it has one.
+    StoppedWithoutSolution { proven_bound: Option<f64> },
+    /// The solver failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for SolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StoppedWithoutSolution { .. } => {
+                write!(f, "the solver stopped at its time limit without a solution")
+            }
+            Self::Failed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+/// A solve's column values, as a [`good_lp::Solution`].
+struct Columns {
+    status: good_lp::solvers::SolutionStatus,
+    /// Each variable's column, in the order the problem added them.
+    column_of: HashMap<Variable, usize>,
+    values: Vec<f64>,
+}
+
+impl good_lp::Solution for Columns {
+    fn status(&self) -> good_lp::solvers::SolutionStatus {
+        self.status
+    }
+    fn value(&self, variable: Variable) -> f64 {
+        self.values[self.column_of[&variable]]
+    }
 }
 
 /// A consumer of the model: a query, a materialized private slot of a
@@ -345,15 +386,23 @@ enum Consumer {
 }
 
 /// Build and solve the model. `None` when it is infeasible.
-pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
+pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError> {
     // Prices per second are tiny (1e-6 and less) next to the solver's
     // feasibility tolerance (1e-7): solve in units where the largest
     // per-choice charge is about 1, and convert the objective back.
     let scale = price_scale(input);
     let scaled = scaled(input, scale);
-    let solution = solve_scaled(&scaled)?;
+    let solution = match solve_scaled(&scaled) {
+        Err(SolveError::StoppedWithoutSolution { proven_bound }) => {
+            return Err(SolveError::StoppedWithoutSolution {
+                proven_bound: proven_bound.map(|bound| bound / scale),
+            })
+        }
+        solution => solution?,
+    };
     Ok(solution.map(|mut solution| {
         solution.objective /= scale;
+        solution.proven_bound = solution.proven_bound.map(|bound| bound / scale);
         solution
     }))
 }
@@ -429,7 +478,7 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
     scaled
 }
 
-fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
+fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError> {
     let mut vars = ProblemVariables::new();
     let n = input.group_count;
     let relaxed = input.relaxed;
@@ -1031,6 +1080,11 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         objective += v;
     }
     let variable_count = vars.len() as u64;
+    let column_of: HashMap<Variable, usize> = vars
+        .iter_variables_with_def()
+        .enumerate()
+        .map(|(column, (variable, _))| (variable, column))
+        .collect();
     let model = vars.minimise(objective.clone()).using(highs);
     let mut constraints = Vec::new();
     for &v in &not_at_ingestion {
@@ -1629,19 +1683,64 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         }
     }
     let constraint_count = constraints.len() as u64;
-    let mut model = model
+    let mut highs_model = model
         .with_all(constraints)
-        .with_mip_gap(0.0)
-        .map_err(|e| format!("MIP gap: {e:?}"))?;
-    // No absolute gap either: prices are scaled to about 1.
-    model = model.set_option("mip_abs_gap", 0.0);
+        .try_into_inner()
+        .map_err(|e| SolveError::Failed(e.to_string()))?;
+    // No relative or absolute gap: prices are scaled to about 1.
+    highs_model.set_option("mip_rel_gap", 0.0);
+    highs_model.set_option("mip_abs_gap", 0.0);
     if let Some(limit) = input.time_limit_s {
-        model = model.set_time_limit(limit.max(0.001));
+        highs_model.set_option("time_limit", limit.max(0.001));
     }
-    let solution = match model.solve() {
-        Ok(solution) => solution,
-        Err(good_lp::ResolutionError::Infeasible) => return Ok(None),
-        Err(error) => return Err(error.to_string()),
+    let solved = highs_model
+        .try_solve()
+        .map_err(|e| SolveError::Failed(format!("HiGHS error while solving model: {e:?}")))?;
+    use highs::HighsModelStatus as Status;
+    let stopped_early = match solved.status() {
+        Status::Infeasible | Status::UnboundedOrInfeasible => return Ok(None),
+        Status::Optimal | Status::ObjectiveBound | Status::ObjectiveTarget => false,
+        Status::ReachedTimeLimit
+        | Status::ReachedSolutionLimit
+        | Status::ReachedInterrupt
+        | Status::ReachedIterationLimit
+        | Status::ReachedMemoryLimit => true,
+        status => {
+            return Err(SolveError::Failed(format!(
+                "HiGHS stopped with status {status:?}"
+            )))
+        }
+    };
+    // The solver's proven lower bound when it stopped early (the
+    // relaxation's optimum in a relaxed solve): every plan costs at least
+    // this much, solution found or not.
+    let proven_bound = || {
+        if relaxed {
+            None
+        } else {
+            solved
+                .double_info_value(c"mip_dual_bound")
+                .ok()
+                .filter(|bound| bound.is_finite())
+                // HiGHS leaves out the objective's constant.
+                .map(|bound| bound + good_lp::IntoAffineExpression::constant(&objective))
+        }
+    };
+    if solved.primal_solution_status() != highs::HighsSolutionStatus::Feasible {
+        return Err(SolveError::StoppedWithoutSolution {
+            proven_bound: proven_bound(),
+        });
+    }
+    let gap = solved.mip_gap();
+    let status = match stopped_early {
+        true => good_lp::solvers::SolutionStatus::TimeLimit,
+        false if gap.is_finite() && gap > 0.0 => good_lp::solvers::SolutionStatus::GapLimit,
+        false => good_lp::solvers::SolutionStatus::Optimal,
+    };
+    let solution = Columns {
+        status,
+        column_of,
+        values: solved.get_solution().columns().to_vec(),
     };
     let chosen: Vec<usize> = x
         .iter()
@@ -1670,6 +1769,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             solution.status(),
             good_lp::solvers::SolutionStatus::Optimal | good_lp::solvers::SolutionStatus::GapLimit
         ),
+        proven_bound: if stopped_early { proven_bound() } else { None },
         variables: variable_count,
         constraints: constraint_count,
     }))
@@ -1906,7 +2006,9 @@ fn run_rounds<Id: Clone>(loops: &mut [ClusterLoop<'_, Id>]) -> Result<(), Select
                         let solved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             solve(&input)
                         }))
-                        .unwrap_or_else(|_| Err("the solver panicked".to_string()));
+                        .unwrap_or_else(|_| {
+                            Err(SolveError::Failed("the solver panicked".to_string()))
+                        });
                         // The receiver is gone only once the search failed.
                         let _ = sender.send((k, input, solved, solve_started.elapsed()));
                     })
@@ -1971,6 +2073,9 @@ struct ClusterLoop<'a, Id> {
     solver_ms: f64,
     size: (u64, u64),
     time_limit_reached: bool,
+    /// The solver's proven lower bound from the solve stopped at the time
+    /// limit, on every plan not cut before it.
+    proven_bound: Option<f64>,
     /// The loop has stopped: certified, out of plans, or out of time.
     done: bool,
     /// The most combinations of free nodes' options decoding evaluates
@@ -2017,6 +2122,7 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             solver_ms: 0.0,
             size: (0, 0),
             time_limit_reached: false,
+            proven_bound: None,
             done: false,
             max_free_combinations: crate::search::milp::decode::MAX_FREE_COMBINATIONS,
             unevaluated_bound: None,
@@ -2117,26 +2223,33 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
     /// incumbent evaluation and its cut, or the end of the loop.
     fn take_solution(
         &mut self,
-        solved: Result<Option<ModelSolution>, String>,
+        solved: Result<Option<ModelSolution>, SolveError>,
     ) -> Result<(), SelectionError> {
         let memo = &self.memo;
         let input = self.input.as_mut().expect("the loop's input");
         let solved = match solved {
             Ok(solved) => solved,
             // The solver stopped at the time limit before finding any
-            // solution: the incumbent so far stands.
-            Err(error) if input.time_limit_s.is_some() && error.contains("NoSolutionFound") => {
+            // solution: the incumbent so far stands, and the solver's
+            // proven bound bounds every plan not cut.
+            Err(SolveError::StoppedWithoutSolution { proven_bound })
+                if input.time_limit_s.is_some() =>
+            {
+                self.proven_bound = proven_bound;
                 self.time_limit_reached = true;
                 self.done = true;
                 return Ok(());
             }
-            Err(error) => return Err(SelectionError::Solver(error)),
+            Err(error) => return Err(SelectionError::Solver(error.to_string())),
         };
         // The solver stopped at the time limit: its plan is no bound, but
         // it is still evaluated, as a last round, and may become the
-        // incumbent.
+        // incumbent; the solver's proven bound bounds every plan not cut.
         let last_round = solved.as_ref().is_some_and(|s| !s.optimal);
         self.time_limit_reached |= last_round;
+        if last_round {
+            self.proven_bound = solved.as_ref().and_then(|s| s.proven_bound);
+        }
         let Some(solution) = solved else {
             // No plan left below the incumbent: it is optimal.
             if let Some(incumbent) = self.selector.cheapest_price() {
@@ -2258,9 +2371,17 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             time_limit_reached,
             unevaluated_bound,
             decode_failures,
+            proven_bound,
             ..
         } = self;
         let mut input = input.expect("the loop's input");
+        // The last solve's proven bound covers every plan not cut before it,
+        // an earlier optimal round's every plan not cut before that: both
+        // hold for the plans not cut at the end, the rest are evaluated or
+        // floored below.
+        if let Some(proven) = proven_bound {
+            bound = Some(bound.map_or(proven, |bound| bound.max(proven)));
+        }
         if time_limit_reached && bound.is_none() {
             // No round solved to optimality: the relaxation's optimum (all
             // cuts kept) is still a lower bound for the gap.
@@ -2283,7 +2404,10 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
                         query.roots.clear();
                     }
                 }
-                if solve(&alone).map_err(SelectionError::Solver)?.is_none() {
+                if solve(&alone)
+                    .map_err(|e| SelectionError::Solver(e.to_string()))?
+                    .is_none()
+                {
                     without_plan.push(format!("query {} ({})", queries[q], entry.query.0));
                 }
             }
@@ -2572,7 +2696,7 @@ pub(crate) fn lower_bound_check<Id: Clone>(
             .collect();
         restricted.excluded.push((outside, Vec::new(), 0.0));
         let value = solve(&restricted)
-            .map_err(SelectionError::Solver)?
+            .map_err(|e| SelectionError::Solver(e.to_string()))?
             .map(|s| s.objective);
         out.push((group_choice, exact, value));
     }

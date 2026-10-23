@@ -449,6 +449,7 @@ dependencies = [
  "asap-types",
  "asap_sketchlib",
  "good_lp",
+ "highs",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
