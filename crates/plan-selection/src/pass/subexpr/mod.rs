@@ -39,6 +39,9 @@
 //! materialization and priced by Stage 3. [`coefficients`] turns Stage 3's per-node
 //! prices into the coefficients of [`milp`], the memo solved as a
 //! mixed-integer linear program ([`crate::SearchAlgorithm::MemoMilp`]).
+//! [`clusters`] splits the memo into independent clusters (queries no
+//! plan's cost links), each solved with its own model and lazy loop, their
+//! plans combined into the workload's.
 
 #![allow(dead_code)]
 
