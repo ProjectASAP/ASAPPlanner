@@ -725,7 +725,18 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
     // then stands for no work beyond that node's charge: with a sharer
     // with a dearer scan of its source chosen, it is waived by
     // `pass_waived` (per choice, absorbed scan and shared key), at most
-    // the node's charge over all its waivers.
+    // the node's charge (`cross_charged`) over all its waivers. A lower
+    // bound in every plan:
+    // - no dearer sharer chosen: nothing is waived;
+    // - the sharers' nodes apart: the narrower choice reads its own scan,
+    //   whose price (at least its pass) the source's largest charge
+    //   leaves out, so waiving its pass stays below;
+    // - one node: Stage 3 prices that node at least its charge, and its
+    //   one scan at the source's largest excess plus the dearest's pass.
+    //   The model charges the node's charge plus the narrower passes
+    //   less the waivers: at most the node's charge when the passes are
+    //   waived in full, else the passes, each at most the node's price
+    //   (a pass is one operation per row of the scan it reads).
     let mut pass_waived: Vec<(usize, usize, u64, Variable)> = Vec::new();
     let mut constraints_early = Vec::new();
     let fastest_rate = input
@@ -1658,9 +1669,18 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
     }
     // Each query's latency: the work of each node it computes at query
     // time, counted once per node key at the most work of the choices it
-    // reaches with that key (a lower bound: one node of a key is a
-    // choice's own or, shared, at least as wide as each sharer's;
-    // compaction is left out).
+    // reaches with that key. A lower bound in every plan:
+    // - `work_reached[q, c]` is forced to 1 only when `c` is chosen and
+    //   `q` reaches its group at query time in the plan (the reach flows
+    //   pass only into chosen choices, and nothing pushes them up), so a
+    //   choice outside the plan, or of a group `q` does not reach, adds
+    //   nothing, even under a key `q` reaches through another choice.
+    // - `q` then computes that choice's node of the key. Several chosen
+    //   choices with one key are either apart (`q` computes each, at
+    //   least the most) or one node, the widest of theirs (a scan of a
+    //   source at the longest horizon, a node over a widened scan at the
+    //   union of labels), whose work is at least each one's.
+    // - A key with no work adds nothing; compaction is left out.
     let latency_of = |q: usize| {
         let mut latency = Expression::from(0.0);
         for (&(r, _), &v) in &key_work_ms {
@@ -3201,40 +3221,64 @@ pub(crate) fn lower_bound_check<Id: Clone>(
 > {
     let mut out = Vec::new();
     for group_choice in crate::search::memo::brute_force::group_choices(memo).unwrap_or_default() {
-        let mut one = PlanSelector::new(entries, data, models, false)?;
-        let mut scratch = HashMap::new();
-        let mut k = 0usize;
-        crate::search::memo::brute_force::offer_group_choice(
+        if let Some((exact, value)) = lower_bound_of_group_choice(
             memo,
             per_computation,
-            &group_choice,
+            input,
             entries,
             data,
             models,
-            &mut one,
-            &mut scratch,
-            &mut k,
-        )?;
-        let Some(exact) = one.cheapest_price() else {
-            continue;
-        };
-        let mut restricted = model_input_clone(input);
-        restricted.excluded.clear();
-        restricted.objective_cutoff = None;
-        restricted.excluded_once.clear();
-        let outside: Vec<usize> = (0..restricted.choices.len())
-            .filter(|&c| {
-                group_choice[restricted.choices[c].group.0 as usize]
-                    != Some(restricted.choices[c].candidate)
-            })
-            .collect();
-        restricted.excluded.push((outside, Vec::new(), 0.0));
-        let value = solve(&restricted)
-            .map_err(|e| SelectionError::Solver(e.to_string()))?
-            .map(|s| s.objective);
-        out.push((group_choice, exact, value));
+            &group_choice,
+        )? {
+            out.push((group_choice, exact, value));
+        }
     }
     Ok(out)
+}
+
+/// One group choice's exact price and the model restricted to it (see
+/// [`lower_bound_check`]); `None` when the group choice has no valid plan.
+pub(crate) fn lower_bound_of_group_choice<Id: Clone>(
+    memo: &Memo,
+    per_computation: &PerComputationCandidates<Id>,
+    input: &ModelInput,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    group_choice: &crate::search::memo::brute_force::GroupChoice,
+) -> Result<Option<(f64, Option<f64>)>, SelectionError> {
+    let mut one = PlanSelector::new(entries, data, models, false)?;
+    let mut scratch = HashMap::new();
+    let mut k = 0usize;
+    crate::search::memo::brute_force::offer_group_choice(
+        memo,
+        per_computation,
+        group_choice,
+        entries,
+        data,
+        models,
+        &mut one,
+        &mut scratch,
+        &mut k,
+    )?;
+    let Some(exact) = one.cheapest_price() else {
+        return Ok(None);
+    };
+    let mut restricted = model_input_clone(input);
+    restricted.excluded.clear();
+    restricted.objective_cutoff = None;
+    restricted.excluded_once.clear();
+    let outside: Vec<usize> = (0..restricted.choices.len())
+        .filter(|&c| {
+            group_choice[restricted.choices[c].group.0 as usize]
+                != Some(restricted.choices[c].candidate)
+        })
+        .collect();
+    restricted.excluded.push((outside, Vec::new(), 0.0));
+    let value = solve(&restricted)
+        .map_err(|e| SelectionError::Solver(e.to_string()))?
+        .map(|s| s.objective);
+    Ok(Some((exact, value)))
 }
 
 /// `input` with every term cut ([`crate::search::milp::cuts`]) the lazy

@@ -2098,6 +2098,182 @@ mod tests {
         );
     }
 
+    /// The exact price of the plan choosing `candidates` (group, candidate)
+    /// and the model restricted to it, under `settings` with raw data
+    /// retained; with `candidates` empty, every group choice's, cheapest
+    /// first.
+    fn prices_and_bounds(
+        queries: &[&str],
+        intervals_ms: &[u32],
+        targets: &[AccuracyTarget],
+        data: &DataWorkload,
+        settings: &crate::PlanSelectionSettings,
+        candidates: &[(usize, usize)],
+    ) -> Vec<(f64, f64)> {
+        let roots: Vec<(usize, QueryRoot)> = queries
+            .iter()
+            .zip(targets)
+            .map(|(q, target)| {
+                let root = lower_promql(q, target.clone());
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
+            })
+            .enumerate()
+            .collect();
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let entries = entries(intervals_ms, targets);
+        let models = PlanningModels {
+            plan_selection: settings,
+            ..PlanningModels::builtin()
+        };
+        let memo = memo(&per_computation, &entries);
+        let input = crate::search::milp::model::model_input_of(&memo, &entries, data, models)
+            .unwrap()
+            .0;
+        let rows: Vec<(f64, Option<f64>)> = match candidates.is_empty() {
+            true => crate::search::milp::model::lower_bound_check(
+                &memo,
+                &per_computation,
+                &input,
+                &entries,
+                data,
+                models,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(_, exact, value)| (exact, value))
+            .collect(),
+            false => {
+                let mut group_choice = vec![None; input.group_count];
+                for &(group, candidate) in candidates {
+                    group_choice[group] = Some(candidate);
+                }
+                vec![crate::search::milp::model::lower_bound_of_group_choice(
+                    &memo,
+                    &per_computation,
+                    &input,
+                    &entries,
+                    data,
+                    models,
+                    &group_choice,
+                )
+                .unwrap()
+                .expect("a valid plan")]
+            }
+        };
+        let mut rows: Vec<(f64, f64)> = rows
+            .into_iter()
+            .map(|(exact, value)| (exact, value.expect("a feasible model")))
+            .collect();
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        rows
+    }
+
+    /// #840's workload (guarantees not enforced, as the search ran it):
+    /// the model is at most the price of every group choice, the optimal
+    /// one among them.
+    #[test]
+    fn the_model_is_a_lower_bound_of_840_s_optimal_plan() {
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 666.67,
+            },
+            sources: [(
+                "data".to_string(),
+                SourceFacts {
+                    series_count: Some(10_000),
+                    sample_interval: Some(asap_types::workload::DurationMs(15_000)),
+                    metric_type: Some(asap_types::workload::MetricType::Gauge),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        let settings = crate::PlanSelectionSettings {
+            ignore_accuracy_guarantees: true,
+            ..crate::PlanSelectionSettings::default()
+        };
+        let rows = prices_and_bounds(
+            &[
+                "quantile_over_time(0.5, data[1m])",
+                "quantile_over_time(0.9, data[5m])",
+                "quantile by (host, job) (0.5, data)",
+            ],
+            &[10_000, 10_000, 10_000],
+            &[target.clone(), target.clone(), target],
+            &data,
+            &settings,
+            &[],
+        );
+        // Built from PromQL here rather than through the pipeline, the
+        // workload prices its plans a little lower (cheapest 0.1371).
+        assert!(rows.len() > 100 && (rows[0].0 - 0.1371211).abs() < 1e-6);
+        for (exact, model) in rows {
+            assert!(model <= exact * (1.0 + 1e-9), "model {model} over {exact}");
+        }
+    }
+
+    /// q24h60 (six 24-hour quantiles every minute within 5% for the whole
+    /// result, at AWS Fargate prices, guarantees enforced) and its optimal
+    /// plan (8.739e-05): the model is at most its price.
+    #[test]
+    fn the_model_is_a_lower_bound_of_q24h60_s_optimal_plan() {
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 2_000_000.0,
+            },
+            sources: [(
+                "data".to_string(),
+                SourceFacts {
+                    series_count: Some(10_000),
+                    sample_interval: Some(asap_types::workload::DurationMs(5)),
+                    metric_type: Some(asap_types::workload::MetricType::Gauge),
+                    values_non_negative: true,
+                    distinct_values_per_label: [
+                        ("label_0".to_string(), 10_000),
+                        ("job".to_string(), 10),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let defaults = crate::PlanSelectionSettings::default();
+        let settings = crate::PlanSelectionSettings {
+            cost_model: crate::CostModel::UsageOverTime(
+                crate::ResourceUnitCost::aws_fargate_us_east_1(defaults.resource_speed),
+            ),
+            ignore_accuracy_guarantees: false,
+            ..defaults
+        };
+        let target = AccuracyTarget::max_error(0.05)
+            .failure_probability(0.01)
+            .accuracy_scope(asap_types::ir::properties::AccuracyScope::WholeResult);
+        let [(exact, model)] = prices_and_bounds(
+            &[
+                "quantile_over_time(0.5, data[24h])",
+                "quantile_over_time(0.75, data[24h])",
+                "quantile_over_time(0.9, data[24h])",
+                "quantile_over_time(0.9, data[24h]) / quantile_over_time(0.5, data[24h])",
+                "quantile_over_time(0.99, data[24h])",
+                "quantile_over_time(0.95, data[24h])",
+            ],
+            &[60_000; 6],
+            &vec![target; 6],
+            &data,
+            &settings,
+            &[(2, 16), (3, 7), (4, 16), (5, 0), (6, 7), (7, 7)],
+        )[..] else {
+            panic!("one group choice")
+        };
+        assert!((exact - 8.739e-5).abs() < 1e-8, "price {exact}");
+        assert!(model <= exact * (1.0 + 1e-9), "model {model} over {exact}");
+    }
+
     /// An exact top-k of 5-minute sums every 5 minutes over 1,000 series
     /// sampled every 15 s, without raw data: only a summary maintained at
     /// ingestion time is valid. Its scan and window are read only through
