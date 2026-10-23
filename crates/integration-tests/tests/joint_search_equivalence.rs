@@ -1853,3 +1853,112 @@ fn dump_random_workload() {
     let workload = random_workload(seed);
     std::fs::write(&out, serde_json::to_string_pretty(&workload).unwrap()).unwrap();
 }
+
+/// `workload` in `deployment` under cost model 1: the memo MILP leaves out
+/// some choices for `reason` before building its model (validity before
+/// cost), and still selects the exhaustive search's price, as the memo
+/// brute force does ([`assert_three_way`]).
+fn assert_pruned_and_three_way(
+    label: &str,
+    workload: &PlanningWorkload,
+    deployment: &asap_logical_asap_optimization::DeploymentCapabilities,
+    reason: &str,
+) {
+    let roots = lower_promql_roots(workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let models = PlanningModels::builtin().with_deployment_capabilities(deployment);
+    let milp = run_stage1_to_stage3_with(
+        roots.iter().cloned().enumerate().collect(),
+        &entries,
+        &data,
+        models,
+        Stage1ToStage3Search::with_algorithm(SearchAlgorithm::MemoMilp),
+    )
+    .unwrap();
+    let selection = milp
+        .stage3_plan_selection
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+    let pruned = &selection.search.memo.as_ref().unwrap().pruned_by_reason;
+    assert!(
+        pruned.get(reason).is_some_and(|&n| n > 0),
+        "{label}: {pruned:?}"
+    );
+    assert!(
+        assert_three_way(label, &roots, &entries, &data, models),
+        "{label}: the MILP ran"
+    );
+}
+
+/// Rule (d), raw data not retained: without raw data, the choices that scan
+/// it at query time are left out; the panes built at ingestion time stay.
+#[test]
+fn validity_raw_data_not_retained_selects_the_exhaustive_price() {
+    let workload = workload_at_rate(
+        &["sum_over_time(m[5m])", "quantile_over_time(0.99, m[5m])"],
+        10_000,
+    );
+    assert_pruned_and_three_way(
+        "raw data not retained",
+        &workload,
+        &no_raw_data(),
+        "raw_data_not_retained",
+    );
+}
+
+/// Rule (b), not executable: a top-k over sums of a gauge's samples, which
+/// are not proven non-negative, cannot use a Count-Min heap; its exact
+/// candidates stay.
+#[test]
+fn validity_not_executable_selects_the_exhaustive_price() {
+    let workload = workload_of(
+        &[
+            ("topk by (job) (5, sum_over_time(m[1m]))", 60_000),
+            ("sum by (job) (sum_over_time(m[1m]))", 60_000),
+        ],
+        AccuracyTarget::max_error(0.05).failure_probability(0.01),
+    );
+    assert_pruned_and_three_way(
+        "not executable",
+        &workload,
+        &asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        "not_executable",
+    );
+}
+
+/// Rule (a), no accuracy guarantee: a top-k over rates, some of whose
+/// candidates' outputs have no guarantee at any size.
+#[test]
+fn validity_no_accuracy_guarantee_selects_the_exhaustive_price() {
+    let workload = workload_of(
+        &[
+            ("topk(5, sum by (job) (rate(c_total[5m])))", 60_000),
+            ("sum by (job) (rate(c_total[5m]))", 60_000),
+        ],
+        AccuracyTarget::max_error(0.05).failure_probability(0.01),
+    );
+    assert_pruned_and_three_way(
+        "no accuracy guarantee",
+        &workload,
+        &asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        "no_accuracy_guarantee",
+    );
+}
+
+/// Rule (c), latency bound exceeded: at 100 million rows per second,
+/// scanning 5 minutes of raw data at query time takes longer than the
+/// one-minute repeat interval; the panes built at ingestion time stay.
+#[test]
+fn validity_latency_bound_exceeded_selects_the_exhaustive_price() {
+    let workload = workload_at_rate(
+        &["sum_over_time(m[5m])", "quantile_over_time(0.99, m[5m])"],
+        100_000_000,
+    );
+    assert_pruned_and_three_way(
+        "latency bound exceeded",
+        &workload,
+        &asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        "latency_bound_exceeded",
+    );
+}

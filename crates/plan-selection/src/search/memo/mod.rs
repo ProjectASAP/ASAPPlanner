@@ -38,7 +38,8 @@
 //! shared, equal resized builds made one), implemented by Stage 2 in every
 //! materialization and priced by Stage 3. [`coefficients`](crate::search::milp::coefficients) turns Stage 3's per-node
 //! prices into the coefficients of [`milp`](crate::search::milp::model), the memo solved as a
-//! mixed-integer linear program ([`crate::SearchAlgorithm::MemoMilp`]).
+//! mixed-integer linear program ([`crate::SearchAlgorithm::MemoMilp`]),
+//! after [`validity`](crate::search::milp::validity) leaves out the choices invalid in every plan.
 
 #![allow(dead_code)]
 

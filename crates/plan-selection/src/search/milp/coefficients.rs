@@ -400,7 +400,7 @@ pub(crate) fn choice_parts(
 /// candidates, with the index of each threshold. A raw-horizon site has
 /// no threshold here: scan sharing is part of each choice
 /// ([`Choice::scan_children`]). A candidate without sites is itself.
-fn at_site_thresholds(
+pub(super) fn at_site_thresholds(
     memo: &Memo,
     candidate: &ImplementationCandidate,
 ) -> Vec<(ImplementationCandidate, Vec<(CouplingSite, usize)>)> {
@@ -1880,7 +1880,7 @@ mod tests {
             };
         let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         let memo = memo(&per_computation, &entries);
-        let input =
+        let (input, _) =
             crate::search::milp::model::model_input_of(&memo, &entries, &data, models).unwrap();
         let checked = crate::search::milp::model::lower_bound_check(
             &memo,

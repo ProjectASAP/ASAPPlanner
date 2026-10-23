@@ -5,3 +5,4 @@
 
 pub(crate) mod coefficients;
 pub(crate) mod model;
+pub(crate) mod validity;

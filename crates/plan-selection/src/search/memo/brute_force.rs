@@ -67,6 +67,7 @@ pub(crate) fn stats(memo: &Memo, build_ms: f64) -> MemoStats {
         candidates_by_origin,
         coupling_sites_by_kind,
         build_ms,
+        pruned_by_reason: BTreeMap::new(),
     }
 }
 
@@ -772,6 +773,7 @@ mod tests {
                 ]
                 .into(),
                 build_ms: 1.5,
+                pruned_by_reason: BTreeMap::new(),
             }
         );
     }

@@ -1507,9 +1507,10 @@ pub(crate) fn search<Id: Clone>(
 ) -> MemoSearchResult {
     let started = std::time::Instant::now();
     let memo = crate::search::memo::brute_force::memo(per_computation, entries);
-    let memo_stats =
+    let mut memo_stats =
         crate::search::memo::brute_force::stats(&memo, started.elapsed().as_secs_f64() * 1e3);
-    let mut input = model_input_of(&memo, entries, data, models)?;
+    let (mut input, pruned_by_reason) = model_input_of(&memo, entries, data, models)?;
+    memo_stats.pruned_by_reason = pruned_by_reason;
     let mut selector = PlanSelector::new(entries, data, models, false)?;
     let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
     let mut number = 0usize;
@@ -1681,13 +1682,14 @@ pub(crate) fn search<Id: Clone>(
 
 /// The model's input for `memo`: each group's shared choices (copies and
 /// widened scans are left to the exact pricing) with their lazy lower
-/// bounds, and the raw scans.
+/// bounds, and the raw scans, without the choices invalid in every plan
+/// ([`super::validity`]), whose counts by reason it returns too.
 pub(crate) fn model_input_of(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
-) -> Result<ModelInput, SelectionError> {
+) -> Result<(ModelInput, BTreeMap<String, usize>), SelectionError> {
     let scale = crate::cost::per_node::frozen_calibration(memo, entries, data, models)?;
     let mut cache = crate::cost::per_node::PriceCache::new(scale);
     let mut choices: Vec<Choice> = Vec::new();
@@ -1729,6 +1731,29 @@ pub(crate) fn model_input_of(
             choices.push(choice);
         }
     }
+    // Validity before cost: leave out the choices invalid in every plan.
+    let mut raw_scan_parts: Vec<Vec<Via>> = vec![Vec::new(); choices.len()];
+    for (c, _, _, via) in &raw_scans {
+        raw_scan_parts[*c].push(*via);
+    }
+    let pruned =
+        super::validity::invalid_choices(memo, &choices, &raw_scan_parts, entries, data, models);
+    let mut new_index: Vec<Option<usize>> = Vec::with_capacity(choices.len());
+    let mut kept = 0usize;
+    for reason in &pruned {
+        new_index.push(reason.is_none().then(|| {
+            kept += 1;
+            kept - 1
+        }));
+    }
+    let mut index = new_index.iter();
+    choices.retain(|_| index.next().is_some_and(Option::is_some));
+    let mut index = new_index.iter();
+    lazies.retain(|_| index.next().is_some_and(Option::is_some));
+    let raw_scans: Vec<(usize, String, u64, Via)> = raw_scans
+        .into_iter()
+        .filter_map(|(c, source, bytes, via)| Some((new_index[c]?, source, bytes, via)))
+        .collect();
     let mut input = model_input(memo, choices, entries, models)?;
     let mut sources: Vec<String> = Vec::new();
     for (c, source, bytes, via) in raw_scans {
@@ -1801,7 +1826,7 @@ pub(crate) fn model_input_of(
         .zip(&lazies)
         .map(|(choice, lazy)| held_at_query_time(choice, lazy, prices, &shared_keys))
         .collect();
-    Ok(input)
+    Ok((input, super::validity::counts(&pruned)))
 }
 
 /// Every group choice of `memo` with its exact price (the cheapest plan

@@ -1094,6 +1094,13 @@ pub struct MemoStats {
     pub coupling_sites_by_kind: BTreeMap<String, usize>,
     /// The time building it took, in milliseconds.
     pub build_ms: f64,
+    /// The memo MILP's choices (a candidate in one Stage 2 materialization)
+    /// left out before the model is built because they are invalid in
+    /// every plan, by rule (`no_accuracy_guarantee`,
+    /// `not_executable`, `latency_bound_exceeded`,
+    /// `raw_data_not_retained`); empty for the brute force.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pruned_by_reason: BTreeMap<String, usize>,
 }
 
 /// How the Stage 1 to Stage 3 search explores the plans
@@ -2952,6 +2959,23 @@ pub fn resize_for_failure_probability(
 /// source (Stage 1 had no rule, and the evidence has none) is rejected as
 /// [`RejectionCause::NoAccuracyGuarantee`], and any other miss as
 /// [`RejectionCause::AccuracyTargetMissed`].
+/// Whether a summary of `family` over update weights `weight_domain` is a
+/// Count-Min (plain or CmsWithHeap) over weights `data` does not prove
+/// non-negative, which the executor cannot run
+/// ([`RejectionCause::CountMinWeightsNotProvenNonNegative`]).
+fn count_min_over_unproven_weights(
+    family: &FieldDataType,
+    weight_domain: &WeightDomain,
+    data: &DataWorkload,
+) -> bool {
+    matches!(family, FieldDataType::Sketch(kind, _)
+            if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
+        && !matches!(
+            confirmed_weights(weight_domain, data),
+            WeightDomain::NonNegative { .. }
+        )
+}
+
 fn accuracy_check(
     candidate: &PhysicalCandidate,
     targets: &[AccuracyTarget],
@@ -2978,13 +3002,7 @@ fn accuracy_check(
                     sketches.push(name);
                 }
             }
-            if matches!(family, FieldDataType::Sketch(kind, _)
-                    if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
-                && !matches!(
-                    confirmed_weights(&input.weight_domain, data),
-                    WeightDomain::NonNegative { .. }
-                )
-            {
+            if count_min_over_unproven_weights(family, &input.weight_domain, data) {
                 let unconfirmed = match &input.weight_domain {
                     WeightDomain::RawDataSamplesOfMetric { metric } => format!(
                         " (samples of `{metric}`, which is not declared a counter or \
@@ -5515,27 +5533,33 @@ fn raw_data_violation(
 /// filter and no `HAVING`.
 fn per_entity_aggregate_violation(dag: &PhysicalASAPDAG) -> Option<String> {
     dag.nodes.iter().find_map(|node| match &node.payload {
-        Payload::NonASAP(NonASAPOp::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures,
-            filters,
-            having,
-            ..
-        }) => {
-            let one_kernel = match measures.as_slice() {
-                [measure] => agg_has_exact_per_entity_kernel(measure),
-                _ => false,
-            };
-            let executable = one_kernel && filters.iter().all(Option::is_none) && having.is_none();
-            (!executable).then(|| {
-                format!(
-                    "node {}: the executor has no exact per-series aggregate {measures:?} \
-                     over raw samples",
-                    node.id
-                )
-            })
-        }
+        Payload::NonASAP(aggregate) => per_entity_aggregate_violation_of(aggregate)
+            .map(|reason| format!("node {}: {reason}", node.id)),
         _ => None,
+    })
+}
+
+/// Why the executor cannot run `aggregate`, an exact per-series aggregate
+/// over raw samples with no kernel (one measure with a kernel, no filter
+/// and no `HAVING`), or `None` (also for any other operator).
+fn per_entity_aggregate_violation_of<C>(aggregate: &NonASAPOp<C>) -> Option<String> {
+    let NonASAPOp::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures,
+        filters,
+        having,
+        ..
+    } = aggregate
+    else {
+        return None;
+    };
+    let one_kernel = match measures.as_slice() {
+        [measure] => agg_has_exact_per_entity_kernel(measure),
+        _ => false,
+    };
+    let executable = one_kernel && filters.iter().all(Option::is_none) && having.is_none();
+    (!executable).then(|| {
+        format!("the executor has no exact per-series aggregate {measures:?} over raw samples")
     })
 }
 
