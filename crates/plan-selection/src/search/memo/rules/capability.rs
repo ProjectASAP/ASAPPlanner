@@ -35,8 +35,10 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::QueryRoot;
 use asap_types::ir::{ASAPOp, OperatorNode};
 
-use super::groups::NodeKeys;
-use super::{CandidateOrigin, CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo};
+use crate::search::memo::groups::NodeKeys;
+use crate::search::memo::{
+    CandidateOrigin, CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo,
+};
 
 /// One size a shared build may take: the per-parameter maximum
 /// ([`size_for_all_readers`]) of the requirements of the readers it admits.
@@ -267,7 +269,7 @@ pub(crate) fn share_equal_builds(
 ) -> Vec<QueryRoot> {
     // Equal by node key: guarantees, composed again over a plan, may differ
     // from the resized candidate's.
-    let mut keys = super::groups::NodeKeys::default();
+    let mut keys = crate::search::memo::groups::NodeKeys::default();
     let resized: Vec<u64> = resized.iter().map(|r| keys.key(r)).collect();
     let mut kept: Vec<(u64, Rc<OperatorNode>)> = Vec::new();
     let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
@@ -452,7 +454,7 @@ fn reader_build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass::subexpr::MemoGroup;
+    use crate::search::memo::MemoGroup;
     use asap_logical_asap_optimization::test_support::{metric_scan, time_range};
     use asap_types::ir::scalar::ColumnRef;
     use asap_types::ir::schema::sketch::{SketchAlgorithm, SketchKind, SketchStatistic};
@@ -515,20 +517,21 @@ mod tests {
     fn memo(readers: &[(SketchAlgorithm, SketchParams)]) -> Memo {
         let scan = metric_scan(&[]);
         let window = time_range(Duration::from_secs(300), Rc::clone(&scan));
-        let group = |node: &Rc<OperatorNode>, children: Vec<GroupId>| super::super::MemoGroup {
-            node: Rc::clone(node),
-            children,
-            parents: Vec::new(),
-            queries: Vec::new(),
-            roots_of: Vec::new(),
-        };
+        let group =
+            |node: &Rc<OperatorNode>, children: Vec<GroupId>| crate::search::memo::MemoGroup {
+                node: Rc::clone(node),
+                children,
+                parents: Vec::new(),
+                queries: Vec::new(),
+                roots_of: Vec::new(),
+            };
         let mut memo = Memo {
             groups: vec![group(&scan, vec![]), group(&window, vec![GroupId(0)])],
             candidates: vec![Vec::new(), Vec::new()],
         };
         for (q, (algorithm, params)) in readers.iter().enumerate() {
             let node = estimate(build(algorithm.clone(), params.clone(), &window));
-            memo.groups.push(super::super::MemoGroup {
+            memo.groups.push(crate::search::memo::MemoGroup {
                 roots_of: vec![q],
                 queries: vec![q],
                 ..group(&node, vec![GroupId(1)])
@@ -636,7 +639,7 @@ mod tests {
     /// for it.
     #[test]
     fn identical_sub_expressions_are_one_group_with_two_parents() {
-        use crate::pass::subexpr::groups::memo_of;
+        use crate::search::memo::groups::memo_of;
         use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::test_support::lower_promql;
         use asap_types::ir::properties::AccuracyTarget;
@@ -676,7 +679,7 @@ mod tests {
     /// thresholds are the two sizes.
     #[test]
     fn kll_readers_of_equal_windows_share_a_site_on_a_real_memo() {
-        use crate::pass::subexpr::groups::memo_of;
+        use crate::search::memo::groups::memo_of;
         use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::test_support::lower_promql;
         use asap_types::ir::properties::AccuracyTarget;

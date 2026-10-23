@@ -3,7 +3,7 @@
 //! frontends' roots; Stage 0 runs before it in the facade.
 //!
 //! This is the planner pipeline (#509 MVP). [`Stage1ToStage3Pass`] is the
-//! [`OptimizationPass`](super::OptimizationPass) that runs it.
+//! [`OptimizationPass`](crate::search::OptimizationPass) that runs it.
 //!
 //! [`run_stage1_to_stage3`] runs, for one workload:
 //! 1. Stage 1, logical ASAP-aware optimization: Pass 1 per-computation candidate
@@ -40,7 +40,7 @@
 //!
 //! The search follows `docs/design_docs/proposals/joint-planning-search.md`.
 //! Each query's own candidates are checked before composition (step 2,
-//! [`query_candidates`](super::query_candidates)), and a whole-workload
+//! [`query_candidates`](crate::search::legacy::query_candidates)), and a whole-workload
 //! choice that picks a discarded one is not composed. Every other
 //! candidate is priced as it is built and only the best so far is kept
 //! (step 6; under cost model 3's `pareto-front`, the front so far), unless
@@ -52,9 +52,9 @@ use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 
-use super::interchangeable::Classes;
-use super::query_candidates::QueryCandidates;
-use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
+use crate::search::legacy::interchangeable::Classes;
+use crate::search::legacy::query_candidates::QueryCandidates;
+use crate::search::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::PlanningModels;
 use crate::{
     CalibrationFit, CostModel, PlanSelector, QuerySearchReport, Rejection, RejectionCause,
@@ -256,7 +256,8 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
         (false, SearchAlgorithm::MemoBruteForce) => {
             let pruned =
                 per_computation.without_unsupported_summaries(models.deployment_capabilities);
-            let found = super::subexpr::search::brute_force(&pruned, entries, data, models);
+            let found =
+                crate::search::memo::brute_force::brute_force(&pruned, entries, data, models);
             return memo_run(
                 pruned,
                 found,
@@ -275,7 +276,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
                 let pruned = per_computation
                     .clone()
                     .without_unsupported_summaries(models.deployment_capabilities);
-                let found = super::subexpr::milp::search(
+                let found = crate::search::milp::model::search(
                     &pruned,
                     entries,
                     data,
@@ -299,7 +300,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
 /// and its logical roots, or why none is valid.
 fn memo_run<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
-    found: super::subexpr::milp::MemoSearchResult,
+    found: crate::search::milp::model::MemoSearchResult,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     algorithm: SearchAlgorithm,
@@ -348,20 +349,22 @@ fn legacy_search<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
-    let components = super::components::sharing_components(&per_computation, entries, &models);
-    let searched_as_one = match super::components::searched_as_one(&components, &models, search) {
-        Some(reason) => reason,
-        None => match super::components::search_components(
-            &per_computation,
-            &components,
-            entries,
-            data,
-            models,
-        ) {
-            Ok(run) => return run,
-            Err(reason) => reason,
-        },
-    };
+    let components =
+        crate::search::legacy::components::sharing_components(&per_computation, entries, &models);
+    let searched_as_one =
+        match crate::search::legacy::components::searched_as_one(&components, &models, search) {
+            Some(reason) => reason,
+            None => match crate::search::legacy::components::search_components(
+                &per_computation,
+                &components,
+                entries,
+                data,
+                models,
+            ) {
+                Ok(run) => return run,
+                Err(reason) => reason,
+            },
+        };
     let mut run = search_as_one(per_computation, entries, data, models, search);
     if let Ok(selection) = &mut run.stage3_plan_selection {
         selection.search.searched_as_one = Some(searched_as_one);
@@ -502,7 +505,7 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
 /// not when every Stage 2 assignment of it scans raw data at query time,
 /// which Stage 3 rejects (`RawDataNotRetained`); identical-expression
 /// sharing cannot change that ([`stage1_logical_asap_optimization_skipping`]).
-pub(super) fn viable(
+pub(crate) fn viable(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -794,7 +797,7 @@ fn search_stage2_and_stage3<Id>(
 /// `roots`, the selected candidate's Stage 1 roots, as Stage 3 sized them
 /// for their queries' failure probabilities, with the weight requirements
 /// it confirmed made proofs.
-pub(super) fn selected_logical(
+pub(crate) fn selected_logical(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,

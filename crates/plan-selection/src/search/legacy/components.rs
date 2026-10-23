@@ -43,8 +43,8 @@ use asap_types::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use super::query_candidates::{next_digits, query_digits};
-use super::stage1_to_stage3::{
+use crate::search::legacy::query_candidates::{next_digits, query_digits};
+use crate::search::legacy::stage1_to_stage3::{
     run_stage1_to_stage3_from_pass1, selected_logical, LogicalCandidate, Stage1ToStage3Run,
     Stage1ToStage3Search,
 };

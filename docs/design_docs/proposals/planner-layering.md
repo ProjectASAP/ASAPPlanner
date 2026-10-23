@@ -279,9 +279,9 @@ Stage 2 and Stage 3. The reference search enumerates every such choice
 search that replaces it enumerates thresholds with bounds and chooses the
 rest per group.
 
-**Code interface.** `crates/plan-selection/src/pass/subexpr/`: `Memo`,
+**Code interface.** `crates/plan-selection/src/search/memo/`: `Memo`,
 `MemoGroup`, `ImplementationCandidate`, `CouplingSite` and `CouplingKind`
-in `mod.rs`; `search::memo` builds the memo and `search::brute_force` is
+in `mod.rs`; `brute_force::memo` builds the memo and `brute_force::brute_force` is
 the reference search, run by `run_stage1_to_stage3_from_pass1` when
 `Stage1ToStage3Search::memo_groups` is set.
 

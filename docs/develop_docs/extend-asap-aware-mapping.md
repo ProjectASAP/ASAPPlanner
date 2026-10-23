@@ -28,7 +28,7 @@ A new sketch that Pass 1 can offer for an intent.
    rejected.
 5. **Cost.** Give it a state size and per-operation CPU in
    `crates/plan-selection/src/lib.rs` (and accept its parameters in
-   `crates/plan-selection/src/measured_operation_costs.rs` if deployments
+   `crates/plan-selection/src/cost/measured.rs` if deployments
    measure it).
 6. **Executor.** Wrap the `asap_sketchlib` implementation in
    `crates/executor/src/summary_kernels/` and register it in

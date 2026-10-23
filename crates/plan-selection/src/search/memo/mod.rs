@@ -3,53 +3,48 @@
 //! workload's distinct sub-expressions instead of whole-workload
 //! candidates.
 //!
-//! [`search::memo`] builds the [`Memo`] in this order:
+//! [`brute_force::memo`] builds the [`Memo`] in this order:
 //!
 //! 1. [`groups::memo_of`]: the workload's logical DAG hash-consed into
 //!    groups (equal scans one group, keyless nodes such as range windows one
 //!    per reader), children first, with each group's Pass 1 candidates.
-//! 2. [`capability::add_shared_builds`]: summary capability. A reader of a
+//! 2. [`rules::capability::add_shared_builds`]: summary capability. A reader of a
 //!    build shared with other groups (one family over equal inputs), with a
 //!    [`CouplingKind::SharedBuildSize`] site; identical expression is group
 //!    identity and adds nothing.
-//! 3. [`windows::add_pass2_candidates`]: window composition (panes, and
+//! 3. [`rules::windows::add_pass2_candidates`]: window composition (panes, and
 //!    newest-pane reads of a shared chain with a [`CouplingKind::PaneChain`]
 //!    site), rollup and exact top-k reuse (candidates reading another
 //!    group).
-//! 4. [`scans::add_scan_widening`]: readers of a metric's scans widened to
+//! 4. [`rules::scans::add_scan_widening`]: readers of a metric's scans widened to
 //!    a shared label set, with a [`CouplingKind::ScanLabels`] site.
-//! 5. [`scans::add_raw_horizons`]: a [`CouplingKind::RawHorizon`] site on
+//! 5. [`rules::scans::add_raw_horizons`]: a [`CouplingKind::RawHorizon`] site on
 //!    every candidate that reads a raw window of a source read by two or
 //!    more groups.
-//! 6. [`scans::scan_materializations`]: a scan read through one window is
+//! 6. [`rules::scans::scan_materializations`]: a scan read through one window is
 //!    only built once; through different windows, also per reader.
 //!
 //! Each site kind has its thresholds and reader check, and a candidate's
-//! node at a threshold: [`capability::size_thresholds`] and
-//! [`capability::resized_at_threshold`]; [`windows::chain_thresholds`] and
-//! [`windows::read_at_threshold`]; [`scans::label_thresholds`] and
-//! [`scans::widened_at_threshold`]; [`scans::horizon_thresholds`] (no
+//! node at a threshold: [`rules::capability::size_thresholds`] and
+//! [`rules::capability::resized_at_threshold`]; [`rules::windows::chain_thresholds`] and
+//! [`rules::windows::read_at_threshold`]; [`rules::scans::label_thresholds`] and
+//! [`rules::scans::widened_at_threshold`]; [`rules::scans::horizon_thresholds`] (no
 //! rewrite: Stage 3 prices the horizon).
 //!
-//! [`search::brute_force`] is the reference search, run for
+//! [`brute_force::brute_force`] is the reference search, run for
 //! [`crate::SearchAlgorithm::MemoBruteForce`]: every
 //! consistent choice of one candidate per needed group and one threshold
 //! per site its candidates read, composed into one plan (identical nodes
 //! shared, equal resized builds made one), implemented by Stage 2 in every
-//! materialization and priced by Stage 3. [`coefficients`] turns Stage 3's per-node
-//! prices into the coefficients of [`milp`], the memo solved as a
+//! materialization and priced by Stage 3. [`coefficients`](crate::search::milp::coefficients) turns Stage 3's per-node
+//! prices into the coefficients of [`milp`](crate::search::milp::model), the memo solved as a
 //! mixed-integer linear program ([`crate::SearchAlgorithm::MemoMilp`]).
 
 #![allow(dead_code)]
 
-pub(crate) mod capability;
-pub(crate) mod coefficients;
+pub(crate) mod brute_force;
 pub(crate) mod groups;
-pub(crate) mod milp;
-pub(crate) mod pricing;
-pub(crate) mod scans;
-pub(crate) mod search;
-pub(crate) mod windows;
+pub(crate) mod rules;
 
 use std::rc::Rc;
 
@@ -116,7 +111,7 @@ pub(crate) struct ImplementationCandidate {
     /// Stage 2 allows. A scan group whose readers all read one window is
     /// only built once (`MatAtQuery`); one read through different windows
     /// may also be read per reader (`NotMaterialized`)
-    /// ([`scans::scan_materializations`]).
+    /// ([`rules::scans::scan_materializations`]).
     pub materializations: Vec<Materialization>,
     /// Sites other groups' chosen implementations must carry for this one
     /// to be valid: a sketch rollup's finer group exposing its state, a
@@ -193,9 +188,9 @@ pub(crate) struct Context {
 }
 
 /// One candidate's usage priced in a context: Stage 3's per-node pricing of
-/// its private nodes ([`pricing::private_usage`]). The charges Stage 3 makes
+/// its private nodes ([`crate::cost::per_node::private_usage`]). The charges Stage 3 makes
 /// only once the whole plan is known are kept apart and added by
-/// [`pricing::plan_cost`]: memory held for an evaluation (which needs the
+/// [`crate::cost::per_node::plan_cost`]: memory held for an evaluation (which needs the
 /// readers' whole latency) and the raw data query-time scans keep on disk
 /// (each source's longest scan, once).
 #[derive(Debug, Clone, PartialEq)]

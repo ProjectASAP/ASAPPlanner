@@ -12,11 +12,9 @@
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
-mod components;
-mod interchangeable;
-mod query_candidates;
-mod stage1_to_stage3;
-mod subexpr;
+pub(crate) mod legacy;
+pub(crate) mod memo;
+pub(crate) mod milp;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -38,7 +36,7 @@ use crate::{PlanSelectionSettings, Selection, SelectionError};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 
-pub use stage1_to_stage3::{
+pub use legacy::stage1_to_stage3::{
     run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage1_to_stage3_with,
     run_stage2_and_stage3, LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass,
     Stage1ToStage3Run, Stage1ToStage3Search,

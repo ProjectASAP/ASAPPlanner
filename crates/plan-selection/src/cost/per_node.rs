@@ -36,6 +36,8 @@
 //! query-time scan group priced on its own reads the longest window its
 //! parent groups' logical nodes put on it.
 
+#![allow(dead_code)]
+
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -45,8 +47,8 @@ use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use super::{GroupId, ImplementationCandidate, LocalUsage, Memo};
-use crate::cost::physical_operator_statistics::EdgeStatistics;
+use crate::cost::operator_statistics::EdgeStatistics;
+use crate::search::memo::{GroupId, ImplementationCandidate, LocalUsage, Memo};
 use crate::{
     accuracy_targets, price_each_node, price_private_nodes, shared_evaluation_rate,
     sized_for_failure_probability, CalibrationFit, CostModel, NodeConsumer, PlanningModels,
@@ -139,7 +141,7 @@ pub(crate) struct PriceCache {
     prices: HashMap<PriceKey, Option<(LocalUsage, EdgeStatistics)>>,
     /// The raw windows of each scan horizon key of the memo
     /// (`coefficients::raw_windows`), computed once per memo.
-    pub(super) raw_windows: Option<Rc<HashMap<u64, std::collections::BTreeSet<u64>>>>,
+    pub(crate) raw_windows: Option<Rc<HashMap<u64, std::collections::BTreeSet<u64>>>>,
     /// Local prices found in the cache.
     pub hits: u64,
     /// Local prices computed.
@@ -156,7 +158,7 @@ impl PriceCache {
     }
 
     /// The interned structural node keys.
-    pub(super) fn keys_mut(&mut self) -> &mut HashMap<String, u32> {
+    pub(crate) fn keys_mut(&mut self) -> &mut HashMap<String, u32> {
         &mut self.keys
     }
 }
@@ -170,9 +172,9 @@ struct Part {
 
 /// A child group's sub-DAG's node keys, and its root's.
 #[derive(Debug, Default)]
-pub(super) struct ChildKeys {
-    pub(super) nodes: HashSet<u32>,
-    pub(super) root: Option<u32>,
+pub(crate) struct ChildKeys {
+    pub(crate) nodes: HashSet<u32>,
+    pub(crate) root: Option<u32>,
 }
 
 /// The usage of `candidate`'s private nodes (from its node down to,
@@ -435,7 +437,7 @@ fn built(
 
 /// The node keys of `child`'s own sub-DAG (one reader, nothing
 /// materialized) and its root's key, cached by the child's node.
-pub(super) fn child_keys(
+pub(crate) fn child_keys(
     memo: &Memo,
     child: GroupId,
     entries: &[QueryWorkloadEntry],
@@ -478,7 +480,7 @@ pub(super) fn child_keys(
 /// producers' keys, and its output schema; placement (timing,
 /// materialization) left out, so a child's nodes match whatever is chosen
 /// for them.
-pub(super) fn keys_of(dag: &PhysicalASAPDAG, interned: &mut HashMap<String, u32>) -> Vec<u32> {
+pub(crate) fn keys_of(dag: &PhysicalASAPDAG, interned: &mut HashMap<String, u32>) -> Vec<u32> {
     let mut key_of: HashMap<PhysicalASAPNodeId, u32> = HashMap::new();
     dag.nodes
         .iter()
@@ -640,7 +642,7 @@ fn price_part(
 /// The raw data a query-time scan group priced on its own reads: the
 /// longest window its parent groups' nodes put on it (through time
 /// shifts); `None` when it is not a scan or no window bounds it.
-pub(super) fn scan_lookback_ms(memo: &Memo, group: GroupId) -> Option<u64> {
+pub(crate) fn scan_lookback_ms(memo: &Memo, group: GroupId) -> Option<u64> {
     let scan = &memo.groups[group.0 as usize];
     if !matches!(scan.node.non_asap(), Some(NonASAPOp::Scan { .. })) {
         return None;
@@ -780,7 +782,7 @@ pub(crate) fn frozen_calibration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass::subexpr::groups::memo_of;
+    use crate::search::memo::groups::memo_of;
     use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
@@ -1143,8 +1145,8 @@ mod tests {
     /// every minute: its local price is Stage 3's price of the plan.
     #[test]
     fn a_pane_chain_at_ingestion_is_priced_as_stage_3_prices_it() {
-        use crate::pass::subexpr::windows::add_window_composition;
-        use crate::pass::subexpr::{CandidateOrigin, MemoGroup};
+        use crate::search::memo::rules::windows::add_window_composition;
+        use crate::search::memo::{CandidateOrigin, MemoGroup};
         use asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_optimization;
         use asap_types::ir::schema::schema_support::with_promql_series_identity;
         use asap_types::workload::Predictability;

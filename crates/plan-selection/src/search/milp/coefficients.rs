@@ -1,4 +1,4 @@
-//! Each group's choices and their coefficients for the MILP ([`super::milp`]),
+//! Each group's choices and their coefficients for the MILP ([`crate::search::milp::model`]),
 //! from Stage 3's per-node pricing.
 //!
 //! A choice is one candidate of a group with an option for each of its
@@ -44,11 +44,11 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
 use asap_types::physical::{Materialization, Medium};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use super::milp::{
+use crate::cost::per_node::{child_keys, keys_of, scan_lookback_ms, PriceCache};
+use crate::search::memo::{CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo};
+use crate::search::milp::model::{
     Choice, ChoiceCoefficients, PartCoefficients, SharedNodeCoefficients, SlotCoefficients, Via,
 };
-use super::pricing::{child_keys, keys_of, scan_lookback_ms, PriceCache};
-use super::{CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo};
 use crate::{
     kept_pane_chains, maintained_window_ms, node_map, pane_retention_ms, price_node, query_reach,
     retained_panes, source_name, windows_read, CostModel, PlanningModels, PricedNode,
@@ -117,7 +117,7 @@ type SiteThresholds = Vec<(CouplingSite, usize)>;
 
 /// A choice with the shallow keys ([`shallow_keys`]) of its nodes, by
 /// which a composed plan's nodes are found (tests).
-pub(super) struct ChoiceParts {
+pub(crate) struct ChoiceParts {
     pub choice: Choice,
     pub lazy: LazyTerms,
     /// The shallow key of the candidate's node.
@@ -135,7 +135,7 @@ pub(super) struct ChoiceParts {
     pub part_keys: Vec<HashSet<u32>>,
 }
 
-pub(super) fn choice_parts(
+pub(crate) fn choice_parts(
     memo: &Memo,
     group: GroupId,
     entries: &[QueryWorkloadEntry],
@@ -161,7 +161,7 @@ pub(super) fn choice_parts(
     // per horizon a reader may read.
     let own_horizons: Vec<Option<u64>> = match node.non_asap() {
         Some(NonASAPOp::Scan { source, .. }) => windows_of_raw
-            .get(&super::scans::raw_horizon_key(source))
+            .get(&crate::search::memo::rules::scans::raw_horizon_key(source))
             .map(|windows| windows.iter().map(|&w| Some(w)).collect())
             .unwrap_or_else(|| vec![None]),
         _ => vec![None],
@@ -201,7 +201,7 @@ pub(super) fn choice_parts(
                 continue;
             };
             let child_groups = children_of(memo, group, candidate);
-            let child_key_sets: Vec<Rc<super::pricing::ChildKeys>> = child_groups
+            let child_key_sets: Vec<Rc<crate::cost::per_node::ChildKeys>> = child_groups
                 .iter()
                 .map(|&child| child_keys(memo, child, entries, data, &models, cache))
                 .collect();
@@ -213,7 +213,7 @@ pub(super) fn choice_parts(
                 .filter_map(
                     |(i, child)| match memo.groups[child.0 as usize].node.non_asap() {
                         Some(NonASAPOp::Scan { source, .. }) => {
-                            let key = super::scans::raw_horizon_key(source);
+                            let key = crate::search::memo::rules::scans::raw_horizon_key(source);
                             let mut variants = vec![None];
                             variants.extend(
                                 windows_of_raw
@@ -277,7 +277,9 @@ pub(super) fn choice_parts(
                             let kept = kept_pane_chains(dag);
                             let too_short = dag.nodes.iter().any(|n| match &n.payload {
                                 Operator::NonASAP(NonASAPOp::Scan { source, .. }) => horizons
-                                    .get(&super::scans::raw_horizon_key(source))
+                                    .get(&crate::search::memo::rules::scans::raw_horizon_key(
+                                        source,
+                                    ))
                                     .is_some_and(|&h| {
                                         windows_read(dag, &nodes, n.id, &kept)
                                             .into_iter()
@@ -367,9 +369,9 @@ pub(super) fn choice_parts(
                                     .collect(),
                                 scan_horizon_ms: *own_horizon,
                                 scan_source: match node.non_asap() {
-                                    Some(NonASAPOp::Scan { source, .. }) => {
-                                        Some(super::scans::raw_horizon_key(source))
-                                    }
+                                    Some(NonASAPOp::Scan { source, .. }) => Some(
+                                        crate::search::memo::rules::scans::raw_horizon_key(source),
+                                    ),
                                     _ => None,
                                 },
                                 scan_project_cost_per_unit_rate: parts.scan_project_cost,
@@ -402,7 +404,7 @@ fn at_site_thresholds(
     memo: &Memo,
     candidate: &ImplementationCandidate,
 ) -> Vec<(ImplementationCandidate, Vec<(CouplingSite, usize)>)> {
-    use super::{capability, scans, windows};
+    use crate::search::memo::rules::{capability, scans, windows};
     let mut versions = vec![(candidate.clone(), Vec::new())];
     for site in &candidate.coupling_sites {
         let mut next = Vec::new();
@@ -498,7 +500,7 @@ fn raw_windows(memo: &Memo) -> HashMap<u64, BTreeSet<u64>> {
         loop {
             match node.non_asap() {
                 Some(NonASAPOp::Scan { source, .. }) => {
-                    return Some(super::scans::raw_horizon_key(source))
+                    return Some(crate::search::memo::rules::scans::raw_horizon_key(source))
                 }
                 Some(NonASAPOp::TimeShift { child, .. }) => node = Rc::clone(child),
                 _ => return None,
@@ -662,7 +664,7 @@ fn per_computation<'a>(
             .collect();
         let lookback_ms = match (&node.payload, node.output_state.timing) {
             (Operator::NonASAP(NonASAPOp::Scan { source, .. }), ExecutionTiming::QueryTime) => {
-                match horizons.get(&super::scans::raw_horizon_key(source)) {
+                match horizons.get(&crate::search::memo::rules::scans::raw_horizon_key(source)) {
                     Some(&horizon) => Some(horizon),
                     None => windows_read(dag, &nodes, node.id, &kept)
                         .into_iter()
@@ -698,7 +700,7 @@ fn per_computation<'a>(
 /// Each node's shallow key, by position: its payload with its producers
 /// left out, and its output schema. Unlike [`keys_of`] it does not depend
 /// on the implementations below a node.
-pub(super) fn shallow_keys(dag: &PhysicalASAPDAG, interned: &mut HashMap<String, u32>) -> Vec<u32> {
+pub(crate) fn shallow_keys(dag: &PhysicalASAPDAG, interned: &mut HashMap<String, u32>) -> Vec<u32> {
     dag.nodes
         .iter()
         .map(|node| {
@@ -822,7 +824,7 @@ fn coefficients_of(
         .filter(|&&id| query_time(id))
         .filter_map(|&id| match &dag.nodes[position[&id]].payload {
             Operator::NonASAP(NonASAPOp::Scan { source, .. }) => Some((
-                super::scans::raw_horizon_key(source),
+                crate::search::memo::rules::scans::raw_horizon_key(source),
                 per_rate(id) + kept_state(id),
                 prices.cost_per_cpu_op * priced[&id].output.rows as f64,
             )),
@@ -920,7 +922,7 @@ fn coefficients_of(
                 .filter(|&&id| query_time(id))
                 .filter_map(|&id| match &dag.nodes[position[&id]].payload {
                     Operator::NonASAP(NonASAPOp::Scan { source, .. }) => Some((
-                        super::scans::raw_horizon_key(source),
+                        crate::search::memo::rules::scans::raw_horizon_key(source),
                         per_rate(id),
                         prices.cost_per_cpu_op * priced[&id].output.rows as f64,
                     )),
@@ -1118,7 +1120,7 @@ pub(crate) fn raw_data_bytes<'s>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass::subexpr::search::{
+    use crate::search::memo::brute_force::{
         at_thresholds, composed_roots, group_choices, identical_expression_variants, memo,
         resized_builds,
     };
@@ -1223,10 +1225,10 @@ mod tests {
                 .enumerate()
                 .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
                 .collect();
-            if !crate::pass::subexpr::windows::requirements_met(&chosen)
+            if !crate::search::memo::rules::windows::requirements_met(&chosen)
                 || chosen
                     .iter()
-                    .any(|(_, c)| c.origin == crate::pass::subexpr::CandidateOrigin::WidenedScans)
+                    .any(|(_, c)| c.origin == crate::search::memo::CandidateOrigin::WidenedScans)
             {
                 continue;
             }
@@ -1234,7 +1236,7 @@ mod tests {
                 let Some(roots) = composed_roots(&memo, &per_computation, &plan) else {
                     continue;
                 };
-                let roots = crate::pass::subexpr::capability::share_equal_builds(
+                let roots = crate::search::memo::rules::capability::share_equal_builds(
                     &roots,
                     &resized_builds(&memo, &choice, &plan),
                 );
@@ -1839,7 +1841,7 @@ mod tests {
         .is_empty());
     }
 
-    /// The model restricted to each group choice ([`super::super::milp::lower_bound_check`])
+    /// The model restricted to each group choice ([`crate::search::milp::model::lower_bound_check`])
     /// is a lower bound of the group choice's exact price.
     fn assert_model_is_a_lower_bound(
         queries: &[&str],
@@ -1878,8 +1880,9 @@ mod tests {
             };
         let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         let memo = memo(&per_computation, &entries);
-        let input = super::super::milp::model_input_of(&memo, &entries, &data, models).unwrap();
-        let checked = super::super::milp::lower_bound_check(
+        let input =
+            crate::search::milp::model::model_input_of(&memo, &entries, &data, models).unwrap();
+        let checked = crate::search::milp::model::lower_bound_check(
             &memo,
             &per_computation,
             &input,

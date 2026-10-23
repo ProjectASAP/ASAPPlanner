@@ -60,7 +60,7 @@ use asap_types::ir::schema::SketchStatistic;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::workload::QueryWorkloadEntry;
 
-use super::query_candidates::{next_digits, query_digits};
+use crate::search::legacy::query_candidates::{next_digits, query_digits};
 use crate::{CostModel, PlanningModels};
 
 /// The classes of interchangeable queries of one workload, each of two or

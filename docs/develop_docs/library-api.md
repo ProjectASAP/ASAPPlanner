@@ -358,7 +358,7 @@ cargo doc -p asap-logical-asap-optimization -p asap-physical-asap-optimization \
 ## Source references
 
 - [Frontend PromQL](../../crates/frontend-promql/src/lib.rs), [SQL](../../crates/frontend-sql/src/lib.rs), [MetricsQL](../../crates/frontend-metricsql/src/lib.rs)
-- [Planner facade](../../crates/planner/src/lib.rs), [planning stages](../../crates/plan-selection/src/pass/stage1_to_stage3.rs), [plan selection and cost models 1–3](../../crates/plan-selection/src/lib.rs)
+- [Planner facade](../../crates/planner/src/lib.rs), [planning stages](../../crates/plan-selection/src/search/legacy/stage1_to_stage3.rs), [plan selection and cost models 1–3](../../crates/plan-selection/src/lib.rs)
 - [Deployment capabilities](../../crates/logical-asap-optimization/src/deployment_capabilities.rs)
 - [Workload types](../../crates/types/src/workload/mod.rs)
 - [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)
