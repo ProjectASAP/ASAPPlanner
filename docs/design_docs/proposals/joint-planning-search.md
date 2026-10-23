@@ -1,23 +1,6 @@
 # Joint planning search and exact pruning
 
-Status: proposal; this document does not implement new pruning. Audience: planner designers and implementers.
-
-ASAPPlanner searches per-query alternatives, sharing choices, and materializations to select a whole-workload plan. The design preserves the stages in [planner-layering.md](planner-layering.md) while reducing redundant search. It follows the [survey in #671](https://github.com/ProjectASAP/ASAPPlanner/issues/671#issuecomment-6137638876).
-
 ## Contents
-
-- [Problem](#problem)
-- [Goals and non-goals](#goals-and-non-goals)
-- [Where the search space comes from](#where-the-search-space-comes-from)
-- [Optimizer search survey](#optimizer-search-survey)
-- [Exactness contract](#exactness-contract)
-- [Design overview](#design-overview)
-- [Exact pruning methods](#exact-pruning-methods)
-- [Interfaces](#interfaces)
-- [Worked example](#worked-example)
-- [Search and validation](#search-and-validation)
-- [Memo-group search](#memo-group-search): how the stages and the memo work together, and an end-to-end walk-through with the sharing strategies
-- [Future work](#future-work)
 
 ## Problem
 
@@ -68,15 +51,11 @@ Most combinations cannot be selected. Either a cheaper alternative replaces them
 | [MILP](https://arxiv.org/abs/1511.02071) | Encodes plan choices and constraints for a solver. | Optimality applies to the encoded alternatives and objective, including any cost approximations. |
 | [Bounded/randomized search](https://www.postgresql.org/docs/17/runtime-config-query.html#RUNTIME-CONFIG-QUERY-GEQO) | Limits exploration to control planning time. | Can miss the exhaustive optimum. |
 
-For ASAPPlanner, retain equivalent search states, reject impossible branches, and prune only with a valid workload-level bound or replacement proof. Sharing prevents a simple “keep the cheapest plan per query” DP from being exact.
+ 
+ 
+A memo group is standard optimizer terminology for logically equivalent expressions; see [Cascades, Section 2](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf) and [CockroachDB's optimizer documentation](https://github.com/cockroachdb/cockroach/blob/master/pkg/sql/opt/doc.go#memo). Memorization group was proposed in the paper *[The Cascades Framework for Query Optimization](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf)*, which is the central data structure used to compactly represent and explore the huge search space of equivalent query execution plans. The Memo group data structure is compact representation of the search space as a DAG, instead of building the full DAG(s) of a batch of input queries. It can reuse the common sub-expressions and tracks their costs and physical properties. Each Group represents a set of logically equivalent relational expressions (sub-queries or relations) that all produce the same output result.
 
-## Exactness contract
-
-“Exact” means preserving the optimum of the existing finite candidate space under the configured cost, accuracy, and capability models. It does not guarantee the fastest measured runtime or cover alternatives the generator never offers. Freeze the workload, rule/parameter inventory, and model/evidence inputs for each search.
-
-A memo group is standard optimizer terminology for logically equivalent expressions; see [Cascades, Section 2](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf) and [CockroachDB's optimizer documentation](https://github.com/cockroachdb/cockroach/blob/master/pkg/sql/opt/doc.go#memo). Approximate alternatives must also carry their output-accuracy obligations.
-
-A reusable search state must expose everything later choices can observe: source and expression semantics, schema, summary parameters and guarantees, consumers, windows, recurrence, retention, materialization, physical properties, and resource obligations. Unknown interactions remain connected; a matching hash alone never proves equivalent states.
+ 
 
 ## Design overview
 
@@ -270,8 +249,6 @@ The number of rounds depends on the strength of the master and the cuts, so the 
 For a small cluster whose costs depend heavily on the reader set, column generation prices each sharing pattern exactly and needs no cuts for it. It is a complement for those clusters, not a replacement for the master. No heuristic replaces the exact search; a run that hits its time limit reports its gap.
 
 ## Memo-group search
-
-The rules above prune a search that still builds and prices whole-workload candidates, one at a time, at about a millisecond each: RangeHeavy's 24-hour quantiles component checks 153,086 of them in 92 s, and whole workloads link most queries over one source into one component (shared scans, SQL windows as time ranges, sketch rollup). The memo-group search replaces whole-candidate enumeration with a Cascades-style memo over the workload's logical sub-expressions. The stages keep their semantics and code boundaries; what changes is the unit they exchange.
 
 ### Components
 
