@@ -1722,8 +1722,10 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
                 .double_info_value(c"mip_dual_bound")
                 .ok()
                 .filter(|bound| bound.is_finite())
-                // HiGHS leaves out the objective's constant.
+                // HiGHS leaves out the objective's constant; lowered by
+                // the solver's tolerance, as a gap-limit objective is.
                 .map(|bound| bound + good_lp::IntoAffineExpression::constant(&objective))
+                .map(|bound| bound - bound.abs() * GAP_TOLERANCE)
         }
     };
     if solved.primal_solution_status() != highs::HighsSolutionStatus::Feasible {
