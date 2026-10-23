@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use asap_types::ir::OperatorNode;
-use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage};
+use asap_types::workload::{DataWorkload, DurationMs, MetricType, PlanningWorkload, QueryLanguage};
 
 pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};
@@ -50,6 +50,32 @@ pub fn lower_promql_workload_with_histograms(
 /// lowering rejects, such as one with no metric name, are skipped.
 pub fn promql_metric_names(query: &str) -> Result<BTreeSet<String>, PromqlError> {
     promql::metric_names(query)
+}
+
+/// One warning per `rate`, `increase` or `irate` call in `query` (one per
+/// function and metric) whose argument reads a metric `data` declares a
+/// gauge ([`MetricType::Gauge`]): those functions assume a counter, so a
+/// gauge's drop reads as a reset. The query still plans as written; a
+/// counter or a metric of undeclared type gets none.
+pub fn counter_function_over_gauge_warnings(
+    query: &str,
+    data: &DataWorkload,
+) -> Result<Vec<String>, PromqlError> {
+    let declared_gauge = |metric: &str| {
+        data.sources
+            .get(metric)
+            .is_some_and(|facts| facts.metric_type == Some(MetricType::Gauge))
+    };
+    Ok(promql::counter_function_metrics(query)?
+        .into_iter()
+        .filter(|(_, metric)| declared_gauge(metric))
+        .map(|(function, metric)| {
+            format!(
+                "{function} over {metric}, which the data workload declares a gauge: \
+                 {function} assumes a counter (a drop is a reset); planned as written"
+            )
+        })
+        .collect())
 }
 
 /// Lower scalar and vector query roots without introducing constant operators.
@@ -278,5 +304,44 @@ mod tests {
                 lower_promql_workload(&with("sum(data)")).unwrap();
             }
         }
+    }
+
+    // `rate`, `increase` and `irate` assume a counter: over a metric the
+    // data workload declares a gauge each call warns once, naming the
+    // function and the metric; a counter or an undeclared type does not.
+    #[test]
+    fn counter_functions_over_a_declared_gauge_warn() {
+        use asap_types::workload::MetricType;
+        let typed = |metric_type| SourceFacts {
+            metric_type,
+            ..SourceFacts::default()
+        };
+        let data = DataWorkload {
+            arrival: DataArrival::Unknown,
+            sources: [
+                ("g".to_string(), typed(Some(MetricType::Gauge))),
+                ("c".to_string(), typed(Some(MetricType::Counter))),
+                ("u".to_string(), typed(None)),
+            ]
+            .into(),
+        };
+        let warnings = |query: &str| counter_function_over_gauge_warnings(query, &data).unwrap();
+        assert_eq!(
+            warnings("sum by (job) (rate(g[5m])) / sum(irate(g[1m])) + increase(c[5m])"),
+            [
+                "irate over g, which the data workload declares a gauge: irate assumes a \
+                 counter (a drop is a reset); planned as written",
+                "rate over g, which the data workload declares a gauge: rate assumes a \
+                 counter (a drop is a reset); planned as written",
+            ]
+        );
+        assert_eq!(
+            warnings("rate(g[5m]) + rate(g[5m] offset 1h)").len(),
+            1,
+            "one warning per function and metric"
+        );
+        assert!(warnings("increase(c[5m]) + rate(u[5m]) + delta(g[5m]) + g").is_empty());
+        assert!(warnings("rate(max_over_time(g[1m])[5m:1m])").len() == 1);
+        assert!(counter_function_over_gauge_warnings("rate(", &data).is_err());
     }
 }

@@ -31,7 +31,9 @@ To run it, see [RUNNING.md](RUNNING.md).
   labels, the queries (text, how often, accuracy) and the sources they
   read. Clicking a row plans it with the local server (`/api/plan-workload`:
   `stage_pipeline --workload`, default search, the set's
-  `deployment_capabilities`, `cost_model` and `accuracy_guarantees`). Without the server, a row
+  `deployment_capabilities`, `cost_model` and `accuracy_guarantees`, and
+  for a SQL workload the tables in the `tables.json` next to its file).
+  Without the server, a row
   with a precomputed `document` opens it and the others say they need the
   server. `#workload-sets` in the URL opens the section.
 - **Query workload** with each query's accuracy, latency, recurrence,
@@ -51,7 +53,11 @@ To run it, see [RUNNING.md](RUNNING.md).
   says how many candidates Stage 1 enumerated, how many the document shows
   when it caps them, and why Stage 1 or plan selection failed when it did.
   Clicking a row shows it in the lanes. The header also names the search and
-  what it checked; under the default search the list has the selected plan
+  what it checked, why the workload was searched as one when it was
+  (`searched_as_one`, e.g. "searched as one: not in joint space") and the
+  classes of interchangeable queries that took one shared choice
+  (`interchangeable_queries`, e.g. "interchangeable queries: (p50, p90,
+  p99)"); under the default search the list has the selected plan
   and the rejections Stage 3 recorded, which are not clickable.
 - **Three lanes**, stacked top to bottom so each is as wide as the page:
   Stage 0, the chosen Stage 1 candidate, and its Stage 2 candidate
@@ -114,8 +120,14 @@ deployment capabilities and cost model.
 (`ignored`, the default, or `enforced`: the server then passes
 `--enforce-accuracy-guarantees`), `query_labels` (one per
 query, in entry order) and `document` (a precomputed stage document) are
-optional. A new set is a directory of files and an index entry; no code
-changes. `crates/devtools/tests/stage_pipeline.rs` checks that every file
+optional. A PlanningWorkload declares no SQL tables, so a set of SQL
+workloads puts them in `workloads/<set>/tables.json`, a JSON array of
+`stage_pipeline --table` declarations (`{"name": "flows", "time_index": 0,
+"columns": [{"name": "ts", "type": "timestamp", "nullable": false}, ...]}`);
+the page sends them with the workload (`/api/plan-workload`'s `tables`) and
+the server passes one `--table` each. An `examples.json` entry planned from
+a workload file reads the same file. A new set is a directory of files and
+an index entry; no code changes. `crates/devtools/tests/stage_pipeline.rs` checks that every file
 parses and passes `PlanningWorkload::validate`.
 
 The three ASAPQuery sets (seed-862, seed-862-x5, seed-862-long; 10
@@ -172,12 +184,15 @@ are ignored, `stage_pipeline`'s default.
     "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }]
   },
   "stage3_plan_selection": {
-    "costs": { "P1": { "cost_per_second": 7.9, "unit": "cost_per_second", "source": "...",
+    "costs": { "P1": { "cost_per_second": 7.9, "cpu_core_seconds_per_second": 0.0041,
+                       "unit": "cost_per_second", "source": "...",
                        "usage": { "cpu_ops_per_second": 4100210.0, "scanned_bytes_per_second": 38400000.0,
                                   "average_memory_bytes": 0.0, "peak_memory_bytes": 16481088,
                                   "disk_bytes": 192000000, "peak_cpu_cores": 2,
                                   "latency_per_query": [{ "compaction_ms": 0.0, "query_ms": 33.2 }] },
-                       "per_node": { "<node id>": { "cost_per_second": 2.3, "multiplier": 1, "detail": "...",
+                       "per_node": { "<node id>": { "operator": "Scan", "timing": "query_time",
+                                                     "cpu_core_seconds_per_second": 0.0012,
+                                                     "cost_per_second": 2.3, "multiplier": 1, "detail": "...",
                                                      "price_source": "analytical" } } } },
     "accepted": { "P1": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
                            "summary": "metric not set; accepted rank (Kll)" }] },
@@ -225,9 +240,14 @@ are ignored, `stage_pipeline`'s default.
   each pruned candidate of the target (`pruned`) and of its fused
   computation (`fused_pruned`) with the reason. The page does not show
   either section yet.
-- A node's `per_node` entry holds `cost_per_second`, `multiplier`,
-  `detail` and `price_source` (`measured` when `--measured-operation-costs`
-  priced it, else `analytical`).
+- A node's `per_node` entry holds its `operator` (as the measured cost
+  table names it), `timing` (`ingestion_time` or `query_time`), its
+  predicted CPU in core-seconds per second (`cpu_core_seconds_per_second`),
+  `cost_per_second`, `multiplier`, `detail` and `price_source` (`measured`
+  when `--measured-operation-costs` priced it, else `analytical`), the
+  names `plan_installable`'s predicted usage gives them. A candidate's
+  `cpu_core_seconds_per_second` is its nodes' sum. These CPU fields are
+  report-only: prices do not read them back.
 - Each `stage3_plan_selection.rejected` entry has a `cause`: a failed check
   (`failure_probability_resize_failed`, `accuracy_target_missed`,
   `count_min_weights_not_proven_non_negative`,
@@ -254,12 +274,17 @@ are ignored, `stage_pipeline`'s default.
   Stage 1 and Stage 2 hold the selected candidate only (none when selection
   fails), `combinations` is 1, and `stage3_plan_selection.search` is
   Stage 3's `SearchReport`: the physical candidates checked, the components
-  searched separately with their selections, and per query its own
-  candidates checked and those discarded with why.
+  searched separately with their selections or why the workload was
+  searched as one (`searched_as_one`), the classes of interchangeable
+  queries (`interchangeable_queries`, by query index), and per query its
+  own candidates checked and those discarded with why.
 - `stage3_plan_selection.warnings` holds one-line warnings about the
-  selected plan, e.g. its peak memory when over 10^12 bytes and the cost
-  model declares no memory capacity; absent when there are none. The candidate
-  list's header shows them.
+  workload and the selected plan: a PromQL query applying `rate`,
+  `increase` or `irate` to a metric the data workload declares a gauge
+  (prefixed with the query id; the query still plans as written), and the
+  plan's peak memory when over 10^12 bytes and the cost model declares no
+  memory capacity; absent when there are none. The candidate list's header
+  shows them.
 - `search_rejected` lists the rejections that name no candidate the
   document holds: under the default search, the first rejection of each
   cause (their candidates are not kept), and the search's own (e.g. `q2`

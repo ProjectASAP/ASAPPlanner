@@ -396,7 +396,10 @@ function accuracyGuaranteesText(doc) {
 // What the search behind the document did, for the candidate list's
 // header: "default search · 206 physical candidates checked · 2 independent
 // components searched separately · runner-up 2.2e-6 · discarded before
-// composition: no accuracy guarantee ×3 (q3, q4, q5)"; under the
+// composition: no accuracy guarantee ×3 (q3, q4, q5)", with why the
+// workload was searched as one ("searched as one: not in joint space") and
+// the classes of interchangeable queries, which took one shared choice
+// ("interchangeable queries: (p50, p90, p99)"); under the
 // exhaustive search, the rejections by cause with their counts. "" for a
 // document that does not say.
 function searchText(doc) {
@@ -422,6 +425,9 @@ function searchText(doc) {
     }
     if (search.raw_scan_candidates_skipped) parts.push(`${search.raw_scan_candidates_skipped} Stage 1 candidates skipped: they scan raw data at query time`);
     if (search.raw_scan_assignments_skipped) parts.push(`${search.raw_scan_assignments_skipped} Stage 2 assignments skipped: they scan raw data at query time`);
+    if (search.searched_as_one) parts.push(`searched as one: ${cause(search.searched_as_one)}`);
+    const classes = (search.interchangeable_queries || []).map((members) => `(${members.map((i) => queryIds[i] || `q${i + 1}`).join(', ')})`);
+    if (classes.length) parts.push(`interchangeable queries: ${classes.join(', ')}`);
   }
   const counts = selection.rejected_by_cause;
   if (doc.search === 'exhaustive' && counts && Object.keys(counts).length) {
