@@ -110,6 +110,13 @@ pub(crate) struct ChoiceCoefficients {
     /// expressions, scans widened to one label set): the model's input
     /// moves them to `cross_shared`.
     pub direct_nodes: Vec<(u64, f64)>,
+    /// Each node a query reaching this choice at query time computes (its
+    /// direct part and its query-time slots), as (node key, work in ms per
+    /// computation). Nodes of several choices with one key may be one node
+    /// in the plan (identical expressions, scans of one source widened),
+    /// which a query's latency counts once: the model counts each key
+    /// once per query, at the least work any choice gives it.
+    pub query_work: Vec<(u64, f64)>,
 }
 
 /// A shareable node of a choice's direct part ([`ChoiceCoefficients::shared_nodes`]).
@@ -859,10 +866,11 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             at_query_time.insert((q, g), vars.add(variable().min(0).max(1)));
         }
     }
-    // A choice's query-time work, without its nodes another group's
-    // choice may share (shareable nodes and shared slots): Stage 3 counts a
-    // shared node once per query, so they are left out to keep latency a
-    // lower bound.
+    // A choice's query-time work as (node key, work): each node a query
+    // reaching the choice computes ([`ChoiceCoefficients::query_work`]);
+    // without that list, its parts' total under a key of its own, its
+    // shareable nodes and shared slots left out (Stage 3 counts a shared
+    // node once per query).
     let query_time_work = |c: usize| -> f64 {
         let coefficients = &input.choices[c].coefficients;
         let shared: f64 = coefficients.shared_nodes.iter().map(|n| n.work_ms).sum();
@@ -877,16 +885,47 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                 .map(|s| s.work_ms)
                 .sum::<f64>()
     };
+    let work_of = |c: usize| -> Vec<(u64, f64)> {
+        let listed = &input.choices[c].coefficients.query_work;
+        match listed.is_empty() {
+            false => listed.clone(),
+            // A key no node key takes: node keys are 32-bit, scan keys
+            // have the top bit.
+            true => vec![((1 << 62) | c as u64, query_time_work(c))],
+        }
+    };
+    // Per node key, the least and the most work any choice gives it: a
+    // query's latency counts each key once, at least at the least.
+    let mut key_work: HashMap<u64, (f64, f64)> = HashMap::new();
+    for c in 0..input.choices.len() {
+        for (key, work) in work_of(c) {
+            let entry = key_work.entry(key).or_insert((work, work));
+            entry.0 = entry.0.min(work);
+            entry.1 = entry.1.max(work);
+        }
+    }
     let held_of = |c: usize| input.held.get(c).copied().unwrap_or_default();
     let mut work_reached: HashMap<(usize, usize), Variable> = HashMap::new();
     for (c, choice) in input.choices.iter().enumerate() {
         let held = held_of(c);
-        if query_time_work(c) <= 0.0 && held.per_reader_per_ms <= 0.0 && held.longest_per_ms <= 0.0
-        {
+        let works = work_of(c).iter().any(|&(_, work)| work > 0.0);
+        if !works && held.per_reader_per_ms <= 0.0 && held.longest_per_ms <= 0.0 {
             continue;
         }
         for &q in &input.group_queries[choice.group.0 as usize] {
             work_reached.insert((q, c), vars.add(variable().min(0).max(1)));
+        }
+    }
+    // `key_reached[q, key]`: query `q` computes the node of `key` at
+    // query time, through any choice it reaches.
+    let mut key_reached: HashMap<(usize, u64), Variable> = HashMap::new();
+    for &(q, c) in work_reached.keys() {
+        for (key, work) in work_of(c) {
+            if work > 0.0 {
+                key_reached
+                    .entry((q, key))
+                    .or_insert_with(|| vars.add(variable().min(0).max(1)));
+            }
         }
     }
     // Held memory per (choice, query) for a reader's own copy, and per
@@ -1206,14 +1245,20 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     for (&(q, c), &w) in &work_reached {
         let g = input.choices[c].group.0 as usize;
         constraints.push(constraint!(w >= at_query_time[&(q, g)] + x[c] - 1));
+        for (key, work) in work_of(c) {
+            if work > 0.0 {
+                constraints.push(constraint!(key_reached[&(q, key)] >= w));
+            }
+        }
     }
-    // Each query's latency: the query-time work of the choices it reaches
-    // (a lower bound: compaction is left out).
+    // Each query's latency: the work of each node it computes at query
+    // time, counted once per node key at the least work any choice gives
+    // it (a lower bound: compaction is left out).
     let latency_of = |q: usize| {
         let mut latency = Expression::from(0.0);
-        for (&(r, c), &w) in &work_reached {
+        for (&(r, key), &v) in &key_reached {
             if r == q {
-                latency += query_time_work(c) * w;
+                latency += key_work[&key].0 * v;
             }
         }
         latency
@@ -1227,11 +1272,10 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     // L the longest the query's latency can be; exact when w is 0 or 1.
     let longest_latency: Vec<f64> = (0..input.queries.len())
         .map(|q| {
-            choices_of
-                .iter()
-                .enumerate()
-                .filter(|(g, _)| input.group_queries[*g].contains(&q))
-                .map(|(_, of_g)| of_g.iter().map(|&c| query_time_work(c)).fold(0.0, f64::max))
+            key_reached
+                .keys()
+                .filter(|&&(r, _)| r == q)
+                .map(|(_, key)| key_work[key].1)
                 .sum()
         })
         .collect();
@@ -2077,6 +2121,7 @@ mod tests {
                 cross_shared: Vec::new(),
                 absorbed_scans: Vec::new(),
                 direct_nodes: Vec::new(),
+                query_work: Vec::new(),
             },
             copy_of: None,
             scan_children: Vec::new(),

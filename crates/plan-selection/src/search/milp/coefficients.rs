@@ -903,6 +903,22 @@ fn coefficients_of(
         );
     }
     let mut part_keys = vec![direct.iter().map(|id| keys[position[id]]).collect()];
+    // Each query-time node a reader computes, keyed as one node in the
+    // plan: a scan by its source (scans of one source may be one widened
+    // scan), any other node by its key up to scan widening.
+    let node_work_key = |id: PhysicalASAPNodeId| -> u64 {
+        match &dag.nodes[position[&id]].payload {
+            Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                (1 << 63) | crate::search::memo::rules::scans::raw_horizon_key(source)
+            }
+            _ => u64::from(widened[position[&id]]),
+        }
+    };
+    let mut query_work: Vec<(u64, f64)> = direct
+        .iter()
+        .filter(|&&id| query_time(id))
+        .map(|&id| (node_work_key(id), priced[&id].work_ms))
+        .collect();
     let mut slots = Vec::new();
     let mut slot_keys = Vec::new();
     let mut slot_reads = Vec::new();
@@ -914,6 +930,13 @@ fn coefficients_of(
         let via = Via::Slot(slots.len());
         lazy_of(&part, via);
         let at_ingestion = matches!(node.materialization, Materialization::MatAtIngestion(_));
+        if !at_ingestion {
+            query_work.extend(
+                part.iter()
+                    .filter(|&&id| query_time(id))
+                    .map(|&id| (node_work_key(id), priced[&id].work_ms)),
+            );
+        }
         // A query-time slot's raw scans are charged as scans.
         let scans: Vec<(u64, f64, f64)> = match at_ingestion {
             true => Vec::new(),
@@ -1032,6 +1055,7 @@ fn coefficients_of(
                     )
                 })
                 .collect(),
+            query_work,
         },
         lazy: LazyTerms {
             held,
