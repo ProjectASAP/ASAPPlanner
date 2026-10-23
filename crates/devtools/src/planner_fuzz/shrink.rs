@@ -3,11 +3,14 @@
 
 use asap_types::ir::properties::AccuracyTarget;
 
-use super::generate::{QuerySpec, RangeFunction};
+use super::generate::{
+    OuterOp, QuerySpec, RangeFunction, SqlAggregate, COUNTER_METRIC, GAUGE_METRIC,
+};
 use super::relations::{Check, Relation};
 
 /// The one-step simplifications of `spec`, simplest first: fewer filters,
-/// fewer grouping labels, no outer aggregation, a plain range function.
+/// fewer grouping labels, `sum` for the aggregation, no outer aggregation,
+/// `sum_over_time` (over the gauge) for the range function.
 pub fn simplified_specs(spec: &QuerySpec) -> Vec<QuerySpec> {
     let mut out = Vec::new();
     match spec {
@@ -23,20 +26,21 @@ pub fn simplified_specs(spec: &QuerySpec) -> Vec<QuerySpec> {
                     s.outer.as_mut().expect("checked").labels.remove(i);
                     out.push(QuerySpec::Promql(s));
                 }
+                if !matches!(outer.op, OuterOp::Sum) {
+                    let mut s = spec.clone();
+                    s.outer.as_mut().expect("checked").op = OuterOp::Sum;
+                    out.push(QuerySpec::Promql(s));
+                }
                 let mut s = spec.clone();
                 s.outer = None;
                 out.push(QuerySpec::Promql(s));
             }
-            if matches!(
-                spec.range,
-                Some(
-                    RangeFunction::AvgOverTime
-                        | RangeFunction::MaxOverTime
-                        | RangeFunction::CountOverTime
-                )
-            ) {
+            if spec.range.is_some_and(|r| r != RangeFunction::SumOverTime) {
                 let mut s = spec.clone();
                 s.range = Some(RangeFunction::SumOverTime);
+                if s.metric == COUNTER_METRIC {
+                    s.metric = GAUGE_METRIC.into();
+                }
                 out.push(QuerySpec::Promql(s));
             }
         }
@@ -49,6 +53,11 @@ pub fn simplified_specs(spec: &QuerySpec) -> Vec<QuerySpec> {
             for i in 0..spec.group_by.len() {
                 let mut s = spec.clone();
                 s.group_by.remove(i);
+                out.push(QuerySpec::Sql(s));
+            }
+            if !matches!(spec.aggregate, SqlAggregate::Sum) {
+                let mut s = spec.clone();
+                s.aggregate = SqlAggregate::Sum;
                 out.push(QuerySpec::Sql(s));
             }
         }

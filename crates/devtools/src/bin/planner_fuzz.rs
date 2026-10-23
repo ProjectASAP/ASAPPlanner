@@ -49,8 +49,15 @@ fn main() {
             &std::fs::read_to_string(request_path).expect("the request reads"),
         )
         .expect("the request parses");
-        let response = serde_json::to_string(&serve(&request)).expect("the response serializes");
-        std::fs::write(response_path, response).expect("the response writes");
+        // One JSON line per response, flushed as it is ready, so a killed
+        // worker still reports the checks it finished.
+        let mut out = std::fs::File::create(response_path).expect("the response opens");
+        serve(&request, &mut |response| {
+            use std::io::Write;
+            let line = serde_json::to_string(&response).expect("the response serializes");
+            writeln!(out, "{line}").expect("the response writes");
+            out.flush().expect("the response flushes");
+        });
         return;
     }
     if let Err(message) = run(args) {
@@ -86,7 +93,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
             "--search" => {
                 settings.search = match value()?.as_str() {
-                    "legacy" => SearchKind::Default,
+                    "legacy" | "default" => SearchKind::Legacy,
                     "memo-brute-force" => SearchKind::MemoBruteForce,
                     "exhaustive" => SearchKind::Exhaustive,
                     other => return Err(format!("unknown search {other}")),

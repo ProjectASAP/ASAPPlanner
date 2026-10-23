@@ -17,7 +17,8 @@
 //! planner-layering acceptance tests share; [`candidate_labels`] names the
 //! candidates for the viewer document. [`rqe_atomic_costs`] converts
 //! sketch-bench's measured per-operation costs into plan selection's
-//! measured table.
+//! measured table. [`planner_fuzz`] is the metamorphic fuzz tester for
+//! missed reuse and sharing behind the `planner_fuzz` bin.
 
 pub mod candidate_labels;
 pub mod planner_fuzz;

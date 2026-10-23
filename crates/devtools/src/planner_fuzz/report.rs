@@ -9,9 +9,11 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use super::generate::{random_query, random_workload, QuerySpec, Rng};
-use super::relations::{evaluate, Check, Measurement, Outcome, Relation, Witness};
+use super::relations::{
+    evaluate, related_workloads, Check, Measurement, Outcome, Relation, Witness,
+};
 use super::shrink::shrink;
-use super::{FuzzQuery, FuzzSettings, FuzzWorkload, Planner};
+use super::{FuzzQuery, FuzzSettings, FuzzWorkload, Language, Planner};
 
 /// One reuse pattern of the design docs and the relation that checks it.
 pub struct DocumentedPattern {
@@ -50,7 +52,7 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             pattern: "Scan widening: two scans of one metric projecting different labels share one widened scan",
             doc_reference: "planner-layering.md Pass 2 L597–607",
             relation: Some(Relation::CoarserGrouping),
-            note: "checked through the quantile/topk rollup witnesses, which read the finer query's scan",
+            note: "checked through the sketch rollup witness, which reads the finer query's scan and state",
         },
         DocumentedPattern {
             pattern: "Nested window: a shorter window merges the newest panes of a longer window's chain",
@@ -139,10 +141,12 @@ pub struct Tally {
     pub holds: usize,
     pub violated: usize,
     pub inconclusive: usize,
+    /// Checks the planner panicked in (also listed, with their message,
+    /// under `inconclusive_reasons`).
     pub crashed: usize,
-    /// Distinct violation signatures (before shrinking).
+    /// Distinct violation signatures ([`signature`]) before shrinking.
     pub distinct_violations: BTreeSet<String>,
-    /// The commonest inconclusive reasons, with counts.
+    /// Each inconclusive reason (its first 400 characters), with counts.
     pub inconclusive_reasons: BTreeMap<String, usize>,
 }
 
@@ -151,10 +155,15 @@ pub struct Tally {
 pub struct Finding {
     pub id: String,
     pub relation: Relation,
+    /// The violation's class ([`draft_key`]): one draft per class.
+    pub draft_key: String,
+    /// The shrunk check's [`signature`].
     pub signature: String,
     pub case: usize,
     pub queries_before_shrinking: usize,
-    pub shrink_attempts: usize,
+    /// Checks the shrink ran; `None` when the shrink failed or timed out
+    /// and the draft shows the unshrunk check.
+    pub shrink_attempts: Option<usize>,
     pub check: Check,
     pub measurement: Measurement,
     /// The open issue a reader should compare it with, when the relation
@@ -172,16 +181,21 @@ pub struct Summary {
     pub elapsed_s: f64,
     pub tallies: BTreeMap<Relation, Tally>,
     pub findings: Vec<Finding>,
-    /// Cases whose worker timed out or crashed (e.g. a stack overflow):
-    /// planning that slow or that fragile is itself worth a look.
+    /// Cases whose worker timed out or crashed (e.g. a stack overflow).
     pub failed_cases: Vec<FailedCase>,
 }
 
+/// A case whose worker timed out or crashed; the checks it finished are
+/// counted.
 #[derive(Debug, Clone, Serialize)]
 pub struct FailedCase {
     pub case: usize,
     pub error: String,
     pub queries: Vec<String>,
+    /// The check that was running: its relation and target query.
+    pub running_check: Option<(Relation, usize)>,
+    /// The last lines the worker wrote to its standard error.
+    pub stderr_tail: String,
 }
 
 /// What a campaign runs.
@@ -203,72 +217,64 @@ pub struct Campaign {
     pub case_timeout_s: f64,
 }
 
-/// A shape of the check, for deduplication: the relation, the language
-/// and each query's structure without its constants (metrics, labels,
-/// values, windows, ranks), plus whether it is exact.
-pub fn signature(check: &Check) -> String {
-    let shape = |q: &super::FuzzQuery| -> String {
-        let exact = if q.accuracy().is_exact() {
-            "exact"
-        } else {
-            "approx"
-        };
-        let body = match &q.spec {
-            Some(QuerySpec::Promql(s)) => format!(
-                "{}({}{})[{}]",
-                s.outer
-                    .as_ref()
-                    .map(|o| format!(
-                        "{}{}{}",
-                        format!("{:?}", o.op).split('(').next().unwrap_or_default(),
-                        if o.without { " without" } else { " by" },
-                        o.labels.len()
-                    ))
-                    .unwrap_or_default(),
-                s.range
-                    .map(|r| format!("{r:?}")
-                        .split('(')
-                        .next()
-                        .unwrap_or_default()
-                        .to_string())
-                    .unwrap_or_else(|| "instant".into()),
-                if s.matchers.is_empty() {
-                    ""
-                } else {
-                    " filtered"
-                },
-                exact
-            ),
-            Some(QuerySpec::Sql(s)) => format!(
-                "sql {}(by {}{})[{}]",
-                format!("{:?}", s.aggregate)
-                    .split('(')
-                    .next()
-                    .unwrap_or_default(),
-                s.group_by.len(),
-                if s.filters.is_empty() {
-                    ""
-                } else {
-                    " filtered"
-                },
-                exact
-            ),
-            None => format!(
-                "{}[{}]",
-                q.text()
-                    .chars()
-                    .filter(|c| !c.is_ascii_digit())
-                    .collect::<String>(),
-                exact
-            ),
-        };
-        body
+/// The shape of one query without its constants (metrics, labels, values,
+/// windows, ranks), plus whether its target is exact.
+fn query_shape(q: &FuzzQuery) -> String {
+    let exact = if q.accuracy().is_exact() {
+        "exact"
+    } else {
+        "approx"
     };
+    let kind = |debug: String| debug.split('(').next().unwrap_or_default().to_string();
+    match &q.spec {
+        Some(QuerySpec::Promql(s)) => format!(
+            "{}({}{})[{exact}]",
+            s.outer
+                .as_ref()
+                .map(|o| format!(
+                    "{}{}{}",
+                    kind(format!("{:?}", o.op)),
+                    if o.without { " without" } else { " by" },
+                    o.labels.len()
+                ))
+                .unwrap_or_default(),
+            s.range
+                .map(|r| kind(format!("{r:?}")))
+                .unwrap_or_else(|| "instant".into()),
+            if s.matchers.is_empty() {
+                ""
+            } else {
+                " filtered"
+            },
+        ),
+        Some(QuerySpec::Sql(s)) => format!(
+            "sql {}(by {}{})[{exact}]",
+            kind(format!("{:?}", s.aggregate)),
+            s.group_by.len(),
+            if s.filters.is_empty() {
+                ""
+            } else {
+                " filtered"
+            },
+        ),
+        None => format!(
+            "{}[{exact}]",
+            q.text()
+                .chars()
+                .filter(|c| !c.is_ascii_digit())
+                .collect::<String>()
+        ),
+    }
+}
+
+/// A check's shape, for counting distinct violations: the relation, the
+/// target query's shape and the other queries' shapes.
+pub fn signature(check: &Check) -> String {
     let target = check
         .workload
         .queries
         .get(check.target)
-        .map(shape)
+        .map(query_shape)
         .unwrap_or_default();
     let mut others: Vec<String> = check
         .workload
@@ -276,7 +282,7 @@ pub fn signature(check: &Check) -> String {
         .iter()
         .enumerate()
         .filter(|(i, _)| !check.relation.per_query() || *i != check.target)
-        .map(|(_, q)| shape(q))
+        .map(|(_, q)| query_shape(q))
         .collect();
     others.sort();
     format!(
@@ -286,9 +292,43 @@ pub fn signature(check: &Check) -> String {
     )
 }
 
+/// A violation's class, for one draft per likely cause: the relation, the
+/// language, how the witness derives `q'` and whether `q` is exact.
+pub fn draft_key(check: &Check, measurement: &Measurement) -> String {
+    let derivation = measurement
+        .witness
+        .as_ref()
+        .and_then(|w| w.derivation.as_ref())
+        .map(|d| {
+            format!("{d:?}")
+                .split([' ', '{', '('])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .unwrap_or_else(|| "none".into());
+    let exact = check
+        .workload
+        .queries
+        .get(check.target)
+        .map(|q| {
+            if q.accuracy().is_exact() {
+                "exact"
+            } else {
+                "approx"
+            }
+        })
+        .unwrap_or_default();
+    format!(
+        "{} | {:?} | {derivation} | q {exact}",
+        check.relation.name(),
+        check.workload.language
+    )
+}
+
 /// The open issue a violation of `relation` most likely duplicates.
 fn possibly_known_issue(relation: Relation, check: &Check) -> Option<&'static str> {
-    let sql = check.workload.language == super::Language::Sql;
+    let sql = check.workload.language == Language::Sql;
     match relation {
         Relation::LooserAccuracy => Some("#903"),
         Relation::FilterOnGroupKey if sql => Some("#902"),
@@ -350,17 +390,15 @@ pub enum WorkerRequest {
     },
 }
 
-/// One check's outcome in a case.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckResult {
-    pub check: Check,
-    pub outcome: Outcome,
-}
-
+/// One response line of a worker: a case answers one `Check` line per
+/// check as it finishes, a shrink one `Shrink` line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerResponse {
-    Case(Vec<CheckResult>),
+    Check {
+        check: Box<Check>,
+        outcome: Box<Outcome>,
+    },
     Shrink {
         check: Box<Check>,
         outcome: Box<Outcome>,
@@ -368,8 +406,34 @@ pub enum WorkerResponse {
     },
 }
 
-/// Does `request` in this process, with a fresh plan cache.
-pub fn serve(request: &WorkerRequest) -> WorkerResponse {
+/// The checks of a case, in the order a worker runs them.
+fn case_checks(
+    workload: &FuzzWorkload,
+    added: &Option<FuzzQuery>,
+    relations: &[Relation],
+) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for &relation in relations {
+        let targets = if relation.per_query() {
+            0..workload.queries.len()
+        } else {
+            0..1
+        };
+        for target in targets {
+            checks.push(Check {
+                relation,
+                workload: workload.clone(),
+                target,
+                added: added.clone(),
+            });
+        }
+    }
+    checks
+}
+
+/// Does `request` in this process, with a fresh plan cache, handing each
+/// response line to `respond` as it is ready.
+pub fn serve(request: &WorkerRequest, respond: &mut dyn FnMut(WorkerResponse)) {
     match request {
         WorkerRequest::Case {
             workload,
@@ -378,25 +442,13 @@ pub fn serve(request: &WorkerRequest) -> WorkerResponse {
             settings,
         } => {
             let mut planner = Planner::new(settings.clone());
-            let mut results = Vec::new();
-            for &relation in relations {
-                let targets = if relation.per_query() {
-                    0..workload.queries.len()
-                } else {
-                    0..1
-                };
-                for target in targets {
-                    let check = Check {
-                        relation,
-                        workload: workload.clone(),
-                        target,
-                        added: added.clone(),
-                    };
-                    let outcome = evaluate_caught(&mut planner, &check);
-                    results.push(CheckResult { check, outcome });
-                }
+            for check in case_checks(workload, added, relations) {
+                let outcome = evaluate_caught(&mut planner, &check);
+                respond(WorkerResponse::Check {
+                    check: Box::new(check),
+                    outcome: Box::new(outcome),
+                });
             }
-            WorkerResponse::Case(results)
         }
         WorkerRequest::Shrink {
             check,
@@ -408,58 +460,74 @@ pub fn serve(request: &WorkerRequest) -> WorkerResponse {
                 |c: &Check| matches!(evaluate_caught(&mut planner, c), Outcome::Violated(_));
             let (shrunk, attempts) = shrink(check, &mut still, *max_attempts);
             let outcome = evaluate_caught(&mut planner, &shrunk);
-            WorkerResponse::Shrink {
+            respond(WorkerResponse::Shrink {
                 check: Box::new(shrunk),
                 outcome: Box::new(outcome),
                 attempts,
-            }
+            });
         }
     }
 }
 
 /// `request` done by a worker process (`worker` with `--worker <request>
-/// <response>`), killed after `timeout_s`; in this process without a
-/// worker.
+/// <response>`, writing JSON lines), killed after `timeout_s`; in this
+/// process without a worker. Returns the response lines written and, when
+/// the worker failed, why and the tail of its standard error.
 fn run_worker(
     campaign: &Campaign,
     request: &WorkerRequest,
     timeout_s: f64,
-) -> Result<WorkerResponse, String> {
+) -> (Vec<WorkerResponse>, Option<(String, String)>) {
+    let mut responses = Vec::new();
     let Some(worker) = &campaign.worker else {
-        return Ok(serve(request));
+        serve(request, &mut |r| responses.push(r));
+        return (responses, None);
     };
     let dir = campaign.out_dir.join("work");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let request_path = dir.join("request.json");
-    let response_path = dir.join("response.json");
-    let _ = std::fs::remove_file(&response_path);
-    std::fs::write(
-        &request_path,
-        serde_json::to_string(request).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let mut child = std::process::Command::new(worker)
-        .arg("--worker")
-        .arg(&request_path)
-        .arg(&response_path)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("worker: {e}"))?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) if status.success() => break,
-            Some(status) => return Err(format!("worker exited with {status}")),
-            None if started.elapsed().as_secs_f64() > timeout_s => {
+    let response_path = dir.join("response.jsonl");
+    let stderr_path = dir.join("stderr.txt");
+    let started = (|| -> std::io::Result<std::process::Child> {
+        std::fs::create_dir_all(&dir)?;
+        let _ = std::fs::remove_file(&response_path);
+        std::fs::write(&request_path, serde_json::to_string(request)?)?;
+        std::process::Command::new(worker)
+            .arg("--worker")
+            .arg(&request_path)
+            .arg(&response_path)
+            .stderr(std::fs::File::create(&stderr_path)?)
+            .spawn()
+    })();
+    let mut child = match started {
+        Ok(child) => child,
+        Err(e) => return (responses, Some((format!("worker: {e}"), String::new()))),
+    };
+    let clock = Instant::now();
+    let error = loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break None,
+            Ok(Some(status)) => break Some(format!("worker exited with {status}")),
+            Err(e) => break Some(format!("worker: {e}")),
+            Ok(None) if clock.elapsed().as_secs_f64() > timeout_s => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out after {timeout_s} s"));
+                break Some(format!("timed out after {timeout_s} s"));
             }
-            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
-    }
-    let text = std::fs::read_to_string(&response_path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    };
+    let text = std::fs::read_to_string(&response_path).unwrap_or_default();
+    // A killed worker may leave a partial last line; it is dropped.
+    responses.extend(
+        text.lines()
+            .filter_map(|line| serde_json::from_str(line).ok()),
+    );
+    let stderr_tail = || {
+        let text = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        lines[lines.len().saturating_sub(5)..].join("\n")
+    };
+    (responses, error.map(|e| (e, stderr_tail())))
 }
 
 /// Runs `campaign` and writes `summary.json`, `summary.md` and the drafts
@@ -483,7 +551,7 @@ pub fn run_campaign(campaign: &Campaign, settings: FuzzSettings) -> std::io::Res
         findings: Vec::new(),
         failed_cases: Vec::new(),
     };
-    let mut shrunk_signatures = BTreeSet::new();
+    let mut drafted = BTreeSet::new();
     for case in 0..campaign.cases {
         if started.elapsed().as_secs_f64() > campaign.time_budget_s {
             break;
@@ -495,31 +563,35 @@ pub fn run_campaign(campaign: &Campaign, settings: FuzzSettings) -> std::io::Res
         summary.cases_run += 1;
         let request = WorkerRequest::Case {
             workload: workload.clone(),
-            added,
+            added: added.clone(),
             relations: campaign.relations.clone(),
             settings: settings.clone(),
         };
-        let results = match run_worker(campaign, &request, campaign.case_timeout_s) {
-            Ok(WorkerResponse::Case(results)) => results,
-            Ok(_) => unreachable!("a case request gets a case response"),
-            Err(error) => {
-                summary.failed_cases.push(FailedCase {
-                    case,
-                    error,
-                    queries: workload
-                        .queries
-                        .iter()
-                        .map(|q| q.text().to_string())
-                        .collect(),
-                });
+        let (responses, error) = run_worker(campaign, &request, campaign.case_timeout_s);
+        if let Some((error, stderr_tail)) = error {
+            let running = case_checks(&workload, &added, &campaign.relations)
+                .get(responses.len())
+                .map(|c| (c.relation, c.target));
+            summary.failed_cases.push(FailedCase {
+                case,
+                error,
+                queries: workload
+                    .queries
+                    .iter()
+                    .map(|q| q.text().to_string())
+                    .collect(),
+                running_check: running,
+                stderr_tail,
+            });
+        }
+        for response in responses {
+            let WorkerResponse::Check { check, outcome } = response else {
                 continue;
-            }
-        };
-        for CheckResult { check, outcome } in results {
+            };
             summary.checks_run += 1;
             let relation = check.relation;
             let tally = summary.tallies.get_mut(&relation).expect("tallied");
-            let measurement = match outcome {
+            let measurement = match *outcome {
                 Outcome::Holds(_) => {
                     tally.holds += 1;
                     continue;
@@ -537,36 +609,43 @@ pub fn run_campaign(campaign: &Campaign, settings: FuzzSettings) -> std::io::Res
                 Outcome::Violated(measurement) => measurement,
             };
             tally.violated += 1;
-            if !tally.distinct_violations.insert(signature(&check)) {
+            tally.distinct_violations.insert(signature(&check));
+            // One draft per class: a class already drafted is counted, not
+            // shrunk again.
+            if drafted.contains(&draft_key(&check, &measurement)) {
                 continue;
             }
             let request = WorkerRequest::Shrink {
-                check: check.clone(),
+                check: (*check).clone(),
                 settings: settings.clone(),
                 max_attempts: campaign.max_shrink_attempts,
             };
-            let (shrunk, shrunk_measurement, attempts) =
-                match run_worker(campaign, &request, 2.0 * campaign.case_timeout_s) {
-                    Ok(WorkerResponse::Shrink {
-                        check: shrunk,
-                        outcome,
-                        attempts,
-                    }) if matches!(*outcome, Outcome::Violated(_)) => {
-                        let Outcome::Violated(m) = *outcome else {
-                            unreachable!("matched")
-                        };
-                        (*shrunk, m, attempts)
-                    }
-                    _ => (check.clone(), measurement, 0),
-                };
-            let shrunk_signature = signature(&shrunk);
-            if !shrunk_signatures.insert(shrunk_signature.clone()) {
+            let (responses, _) = run_worker(campaign, &request, 2.0 * campaign.case_timeout_s);
+            let shrunk = responses.into_iter().find_map(|r| match r {
+                WorkerResponse::Shrink {
+                    check,
+                    outcome,
+                    attempts,
+                } => match *outcome {
+                    Outcome::Violated(m) => Some((*check, m, attempts)),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let (shrunk, shrunk_measurement, attempts) = match shrunk {
+                Some((c, m, a)) => (c, m, Some(a)),
+                None => ((*check).clone(), measurement, None),
+            };
+            let key = draft_key(&shrunk, &shrunk_measurement);
+            if !drafted.insert(key.clone()) {
                 continue;
             }
+            drafted.insert(draft_key(&check, &shrunk_measurement));
             let mut finding = Finding {
                 id: format!("s{}-{:03}", campaign.seed, summary.findings.len() + 1),
                 relation,
-                signature: shrunk_signature,
+                draft_key: key,
+                signature: signature(&shrunk),
                 case,
                 queries_before_shrinking: check.workload.queries.len(),
                 shrink_attempts: attempts,
@@ -601,52 +680,6 @@ fn write_summary(
     )
 }
 
-/// The related workload of a check, as planned: `W ∪ {q'}` (with `W`'s
-/// added selection for the union relation) or `W'`.
-fn related_workloads(check: &Check) -> Option<(FuzzWorkload, FuzzWorkload)> {
-    use super::relations::{derive, disjoint_copy, renamed};
-    let w = &check.workload;
-    if check.relation.is_marginal() {
-        let derived = derive(check.relation, w, check.target)?;
-        let base = match derived.base_addition {
-            Some(addition) => w.with_query(addition),
-            None => w.clone(),
-        };
-        let related = base.with_query(derived.query);
-        return Some((base, related));
-    }
-    let q = w.queries.get(check.target)?;
-    let related = match check.relation {
-        Relation::TighterAccuracy => w.with_query_replaced(
-            check.target,
-            q.with_accuracy(super::generate::tighter(q.accuracy())?),
-        ),
-        Relation::RelaxedLatency => {
-            let mut relaxed = q.clone();
-            relaxed.entry.requirements.max_latency_ms = None;
-            w.with_query_replaced(check.target, relaxed)
-        }
-        Relation::AddedQuery => w.with_query(check.added.clone()?),
-        Relation::NoRawRetention => FuzzWorkload {
-            raw_data_retained: false,
-            ..w.clone()
-        },
-        Relation::ResultsRetained => FuzzWorkload {
-            query_time_results_retained: true,
-            ..w.clone()
-        },
-        Relation::Renamed => renamed(w, "_r", true)?,
-        Relation::Reordered => {
-            let mut r = w.clone();
-            r.queries.reverse();
-            r
-        }
-        Relation::DisjointCopy => disjoint_copy(w)?,
-        _ => return None,
-    };
-    Some((w.clone(), related))
-}
-
 fn derivation_text(witness: &Witness) -> String {
     match witness {
         Witness::Same => "reading q's result node itself".into(),
@@ -655,7 +688,7 @@ fn derivation_text(witness: &Witness) -> String {
         }
         Witness::Graft { text } => format!("`{text}` with its inner `q` read from q's result"),
         Witness::ExactRollup { labels, op } => format!(
-            "an exact `{op}` grouped by ({}) over q's result",
+            "an exact `{op:?}` grouped by ({}) over q's result",
             labels.join(", ")
         ),
         Witness::SmallerTopK { from, to } => {
@@ -666,8 +699,7 @@ fn derivation_text(witness: &Witness) -> String {
             labels.join(", ")
         ),
         Witness::NewestPanes { window_ms } => format!(
-            "a `SummaryMerge` of the newest panes of q's pane chain covering {} ms",
-            window_ms
+            "a `SummaryMerge` of the newest panes of q's pane chain covering {window_ms} ms"
         ),
         Witness::QuantileRank { from, to } => {
             format!("q's quantile estimate at rank {to} instead of {from}, from the same state")
@@ -675,7 +707,7 @@ fn derivation_text(witness: &Witness) -> String {
         Witness::OtherStatistic { statistic } => {
             format!("a `SummaryEstimate` of {statistic:?} from q's summary state")
         }
-        Witness::UnionWith { .. } => {
+        Witness::UnionWithLast => {
             "a `SummaryMerge` of q's state and the other selection's state, then q's estimate"
                 .into()
         }
@@ -690,15 +722,22 @@ fn write_draft(
 ) -> std::io::Result<PathBuf> {
     let check = &finding.check;
     let m = &finding.measurement;
-    let (base, related) = related_workloads(check)
-        .unwrap_or_else(|| (check.workload.clone(), check.workload.clone()));
-    let base_file = format!("{}-base.workload.json", finding.id);
-    let related_file = format!("{}-related.workload.json", finding.id);
-    let pretty = |w: &FuzzWorkload| {
+    let (base, related, _) = related_workloads(check)
+        .unwrap_or_else(|_| (check.workload.clone(), check.workload.clone(), None));
+    let workload_json = |w: &FuzzWorkload| {
         serde_json::to_string(&w.planning_workload()).expect("a workload serializes")
     };
-    std::fs::write(dir.join(&base_file), pretty(&base) + "\n")?;
-    std::fs::write(dir.join(&related_file), pretty(&related) + "\n")?;
+    let workload_file = |w: &FuzzWorkload| {
+        serde_json::to_string_pretty(&w.planning_workload()).expect("a workload serializes") + "\n"
+    };
+    std::fs::write(
+        dir.join(format!("{}-base.workload.json", finding.id)),
+        workload_file(&base),
+    )?;
+    std::fs::write(
+        dir.join(format!("{}-related.workload.json", finding.id)),
+        workload_file(&related),
+    )?;
     let marginal = check.relation.is_marginal();
     let (base_name, related_name) = if marginal {
         ("W", "W ∪ {q'}")
@@ -755,19 +794,29 @@ fn write_draft(
         }
     };
     let mut text = format!("# {title}\n\n## Example\n\n");
+    let shrunk = match finding.shrink_attempts {
+        Some(attempts) => format!(
+            "shrunk from {} to {} queries in {attempts} checks",
+            finding.queries_before_shrinking,
+            check.workload.queries.len()
+        ),
+        None => "not shrunk (the shrink failed or timed out)".into(),
+    };
     text.push_str(&format!(
-        "Found by `planner_fuzz` (seed {seed}, case {}, relation `{}`), shrunk from {} to {} queries. \
+        "Found by `planner_fuzz` (seed {seed}, case {}, relation `{}`), {shrunk}. \
          Search: {:?}; accuracy guarantees {}.\n\n",
         finding.case,
         check.relation.name(),
-        finding.queries_before_shrinking,
-        check.workload.queries.len(),
         settings.search,
-        if settings.enforce_accuracy_guarantees { "enforced" } else { "ignored" },
+        if settings.enforce_accuracy_guarantees {
+            "enforced"
+        } else {
+            "ignored"
+        },
     ));
     text.push_str(&format!(
         "`{base_name}` (save as `base.json`):\n\n```json\n{}\n```\n\n",
-        pretty(&base)
+        workload_json(&base)
     ));
     match &m.related_query {
         Some(query) if marginal => text.push_str(&format!(
@@ -778,7 +827,7 @@ fn write_draft(
         )),
         None => text.push_str(&format!("`{related_name}` (save as `related.json`):\n\n")),
     }
-    text.push_str(&format!("```json\n{}\n```\n\n", pretty(&related)));
+    text.push_str(&format!("```json\n{}\n```\n\n", workload_json(&related)));
     text.push_str(&format!(
         "```sh\n{}\n{}\n```\n\n",
         base.stage_pipeline_command("base.json", settings),
@@ -787,11 +836,11 @@ fn write_draft(
     text.push_str("| Workload | Selected plan | Cost per second |\n|---|---|---|\n");
     text.push_str(&format!(
         "| `{base_name}` | `{}` | {:.6} |\n",
-        m.base_plan, m.base_cost
+        m.base_plan, m.base_cost_per_second
     ));
     text.push_str(&format!(
         "| `{related_name}` | `{}` | {:.6} |\n",
-        m.related_plan, m.related_cost
+        m.related_plan, m.related_cost_per_second
     ));
     if let Some(w) = &m.witness {
         let label = match &w.derivation {
@@ -799,41 +848,72 @@ fn write_draft(
                 "Witness: `W`'s plan with `q'` derived by {}",
                 derivation_text(d)
             ),
-            None => "The other side's plan priced for this workload".into(),
+            None => "The other side's plan, priced for this workload".into(),
         };
-        text.push_str(&format!("| {label} | `{}` | {:.6} |\n", w.plan, w.cost));
+        text.push_str(&format!(
+            "| {label} | `{}` | {:.6} |\n",
+            w.plan, w.cost_per_second
+        ));
     }
     text.push_str(&format!(
         "\n**Relation violated:** `{}`.\n\n{}\n\n",
         check.relation.statement(),
         m.summary
     ));
-    if let Some(w) = &m.witness {
-        if let (Some(derive_cost), Some(node_cost)) = (w.derive_cost, w.derived_node_cost) {
-            text.push_str(&format!(
-                "**Expected:** a candidate for `{related_name}` costing at most about {:.6} per second: \
-                 `W`'s plan ({:.6} as Stage 3 prices it) plus `q'` derived for {derive_cost:.6}. \
-                 Of that, the nodes only `q'` reads cost {node_cost:.6} ({}).\n\n",
-                w.cost,
-                w.base_reference_cost.unwrap_or_default(),
-                if w.derived_operators.is_empty() {
-                    "none: `q'` reads `q`'s node".to_string()
-                } else {
-                    w.derived_operators.join(", ")
-                },
-            ));
-        } else {
-            text.push_str(&format!(
-                "**Expected:** the selected cost respects the relation; the other side's plan prices at {:.6} here.\n\n",
-                w.cost
-            ));
+    let witness = m.witness.as_ref();
+    match witness.and_then(|w| w.derive_cost_per_second.map(|d| (w, d))) {
+        Some((w, derive_cost)) => text.push_str(&format!(
+            "**Expected:** a candidate for `{related_name}` costing at most about {:.6} per second \
+             (the witness): `W`'s plan ({:.6} as Stage 3 prices it) plus `q'` derived for \
+             {derive_cost:.6}. Of that, the nodes only `q'` reads cost {:.6} ({}).\n\n",
+            w.cost_per_second,
+            w.base_reference_cost_per_second.unwrap_or_default(),
+            w.derived_node_cost_per_second.unwrap_or_default(),
+            if w.derived_operators.is_empty() {
+                "none: `q'` reads `q`'s node".to_string()
+            } else {
+                w.derived_operators.join(", ")
+            },
+        )),
+        None => text.push_str(&format!(
+            "**Expected:** the selected costs satisfy `{}`.{}\n\n",
+            check.relation.statement(),
+            witness
+                .map(|w| format!(
+                    " The other side's plan prices at {:.6} per second for this workload.",
+                    w.cost_per_second
+                ))
+                .unwrap_or_default()
+        )),
+    }
+    text.push_str("## Why it happens\n\nNot diagnosed yet. ");
+    if marginal {
+        text.push_str(
+            "The witness is priced by Stage 2 and Stage 3 (`optimize_physical_asap`, \
+             `select_plan`) with the same models as the search, so the cheaper plan passes \
+             Stage 3's checks, but the search did not select it.",
+        );
+        if witness.is_some_and(|w| w.key_filter_keeps_input_guarantee) {
+            text.push_str(
+                " Note: the witness's `Filter` on a group key keeps its input's accuracy \
+                 guarantee, which Stage 1's guarantee composition does not give a filter over \
+                 approximate rows (#689); the gap may be there as much as in the missing \
+                 candidate rule.",
+            );
+        }
+    } else {
+        text.push_str(
+            "The search's selections for the two workloads contradict the relation: one of \
+             the two searches missed a cheaper plan.",
+        );
+        if witness.is_some() {
+            text.push_str(
+                " The other side's logical plan, priced for this workload by Stage 2 and \
+                 Stage 3, is that plan.",
+            );
         }
     }
-    text.push_str(
-        "## Why it happens\n\nNot diagnosed yet. The witness above is priced by Stage 2 and Stage 3 \
-         (`optimize_physical_asap`, `select_plan`) with the same models as the search, so the cheaper \
-         plan exists and passes Stage 3's checks; no candidate rule generates it.\n\n",
-    );
+    text.push_str("\n\n");
     text.push_str(&format!(
         "## Scope and acceptance\n\nA regression test that plans both workloads and asserts `{}`. \
          Today it fails with the numbers above.\n\n",
@@ -852,7 +932,8 @@ fn write_draft(
     Ok(path)
 }
 
-/// The summary as Markdown: the counts per relation, the findings, and the
+/// The summary as Markdown: the counts per relation with their commonest
+/// inconclusive reasons, the findings, the failed cases and panics, and the
 /// design docs' reuse patterns with each relation's status in this run.
 pub fn summary_markdown(summary: &Summary) -> String {
     let mut text = format!(
@@ -862,7 +943,11 @@ pub fn summary_markdown(summary: &Summary) -> String {
         summary.checks_run,
         summary.elapsed_s,
         summary.settings.search,
-        if summary.settings.enforce_accuracy_guarantees { "enforced" } else { "ignored" },
+        if summary.settings.enforce_accuracy_guarantees {
+            "enforced"
+        } else {
+            "ignored"
+        },
     );
     text.push_str("| Relation | Holds | Violated | Distinct violations | Inconclusive | Crashed |\n|---|---|---|---|---|---|\n");
     for (relation, tally) in &summary.tallies {
@@ -876,12 +961,12 @@ pub fn summary_markdown(summary: &Summary) -> String {
             tally.crashed
         ));
     }
-    text.push_str("\n## Findings (shrunk, one per distinct shrunk case)\n\n");
+    text.push_str("\n## Findings (one draft per class)\n\n");
     for finding in &summary.findings {
         text.push_str(&format!(
             "- `{}` `{}`: {} → {} (compare {})\n",
             finding.id,
-            finding.relation.name(),
+            finding.draft_key,
             finding.signature,
             finding.draft.display(),
             finding.possibly_known_issue.unwrap_or("none")
@@ -894,11 +979,24 @@ pub fn summary_markdown(summary: &Summary) -> String {
         ));
         for failed in &summary.failed_cases {
             text.push_str(&format!(
-                "- case {}: {} — `{}`\n",
+                "- case {}: {} while checking {} — `{}`\n",
                 failed.case,
                 failed.error,
+                failed
+                    .running_check
+                    .map(|(r, t)| format!("`{}` at q{}", r.name(), t + 1))
+                    .unwrap_or_else(|| "nothing".into()),
                 failed.queries.join("`, `")
             ));
+        }
+    }
+    text.push_str("\n## Commonest inconclusive reasons\n\n");
+    for (relation, tally) in &summary.tallies {
+        let mut reasons: Vec<_> = tally.inconclusive_reasons.iter().collect();
+        reasons.sort_by(|a, b| b.1.cmp(a.1));
+        for (reason, count) in reasons.into_iter().take(3) {
+            let reason: String = reason.chars().take(160).collect();
+            text.push_str(&format!("- `{}` ({count}): {reason}\n", relation.name()));
         }
     }
     text.push_str("\n## Design-doc reuse patterns\n\n");
@@ -934,15 +1032,16 @@ pub fn coverage_table(summary: &Summary) -> String {
                         )
                     })
                     .collect();
+                let conclusive = t.holds + t.violated;
                 if t.violated > 0 {
                     format!(
-                        "VIOLATED {}× ({} distinct): {}",
+                        "VIOLATED in {} of {conclusive} conclusive checks ({} distinct): {}",
                         t.violated,
                         t.distinct_violations.len(),
                         findings.join(", ")
                     )
                 } else if t.holds > 0 {
-                    format!("holds ({} checks)", t.holds)
+                    format!("holds ({conclusive} conclusive checks)")
                 } else {
                     format!("inconclusive ({} checks)", t.inconclusive)
                 }

@@ -19,8 +19,10 @@ use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::family_capability::FamilyCapability;
 use asap_types::ir::schema::sketch::SketchStatistic;
+use asap_types::ir::schema::{DataType, FieldDataType};
 use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, ScalarExpr,
+    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, QueryRoot,
+    ScalarExpr,
 };
 
 use super::generate::{
@@ -143,7 +145,20 @@ impl Relation {
 
     /// Whether the relation compares a marginal cost with a witness's.
     pub fn is_marginal(self) -> bool {
-        (self as usize) <= Relation::UnionOfSelections as usize
+        matches!(
+            self,
+            Relation::LooserAccuracy
+                | Relation::FilterOnGroupKey
+                | Relation::CoarserGrouping
+                | Relation::NestedShorterWindow
+                | Relation::OtherQuantileRank
+                | Relation::ExactDuplicate
+                | Relation::OuterOverResult
+                | Relation::OtherStatistic
+                | Relation::OtherRepeatInterval
+                | Relation::SmallerTopK
+                | Relation::UnionOfSelections
+        )
     }
 
     /// Whether the relation is checked once per query of the workload
@@ -191,14 +206,14 @@ pub enum Witness {
     /// The frontends' lowering of `text`, a query over `q`'s text, with the
     /// lowering of `q` inside it replaced by `q`'s root.
     Graft { text: String },
-    /// An exact `Aggregate` (`op` = sum, max or min of the value column)
-    /// grouped by the `labels` columns over `q`'s result.
-    ExactRollup { labels: Vec<String>, op: String },
+    /// An exact `Aggregate` (`op` of the value column) grouped by the
+    /// `labels` columns over `q`'s result.
+    ExactRollup { labels: Vec<String>, op: RollupOp },
     /// `q`'s topmost top-k (`Limit` or `TopK` aggregate) at `to` rows per
     /// group instead of `from`, over the same input.
     SmallerTopK { from: usize, to: usize },
-    /// `q`'s topmost `SummaryEstimate` reading a `SummaryMerge` with
-    /// `group_by` the `labels` columns over its state.
+    /// `q`'s root estimate reading a `SummaryMerge` with `group_by` the
+    /// `labels` columns over its state, when the family merges groups.
     SketchRollup { labels: Vec<String> },
     /// `q`'s `SummaryMerge` over a pane chain merging only the newest panes
     /// covering `window_ms`.
@@ -206,12 +221,21 @@ pub enum Witness {
     /// `q`'s topmost quantile estimate (or exact quantile aggregate) at rank
     /// `to` instead of `from`.
     QuantileRank { from: f64, to: f64 },
-    /// `q`'s topmost `SummaryEstimate` reading `statistic` instead, when the
-    /// state's family answers it.
+    /// `q`'s root estimate reading `statistic` instead, when the state's
+    /// family answers it.
     OtherStatistic { statistic: SketchStatistic },
-    /// `q`'s topmost `SummaryEstimate` over a `SummaryMerge` of its state
-    /// and query `other`'s state.
-    UnionWith { other: usize },
+    /// `q`'s root estimate over a `SummaryMerge` of its state and the state
+    /// of `W`'s last query (the other selection, added to `W`).
+    UnionWithLast,
+}
+
+/// The exact rollup of a sum, count (a sum of counts), max or min.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollupOp {
+    Sum,
+    Max,
+    Min,
 }
 
 /// A derived query, how the witness answers it, and for
@@ -227,10 +251,10 @@ pub struct Derived {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Measurement {
     /// `W`'s cost per second and selected plan.
-    pub base_cost: f64,
+    pub base_cost_per_second: f64,
     pub base_plan: String,
     /// The related workload's (`W ∪ {q'}`, or `W'`).
-    pub related_cost: f64,
+    pub related_cost_per_second: f64,
     pub related_plan: String,
     /// The derived or added query's text, for a relation that adds one.
     pub related_query: Option<String>,
@@ -238,9 +262,10 @@ pub struct Measurement {
     /// monotonicity relation: the other side's logical plan priced for this
     /// side).
     pub witness: Option<WitnessReport>,
-    /// The bound `related_cost` was checked against, tolerance included.
-    pub bound: f64,
-    pub tolerance: f64,
+    /// The bound `related_cost_per_second` was checked against, tolerance
+    /// included.
+    pub bound_per_second: f64,
+    pub tolerance_per_second: f64,
     /// One line: the relation's numbers.
     pub summary: String,
 }
@@ -249,16 +274,20 @@ pub struct Measurement {
 pub struct WitnessReport {
     /// How `q'` was derived (marginal relations).
     pub derivation: Option<Witness>,
-    pub cost: f64,
+    pub cost_per_second: f64,
     pub plan: String,
     /// Marginal relations: `W`'s selected logical plan priced the same way.
-    pub base_reference_cost: Option<f64>,
-    /// `cost − base_reference_cost`.
-    pub derive_cost: Option<f64>,
+    pub base_reference_cost_per_second: Option<f64>,
+    /// `cost_per_second − base_reference_cost_per_second`.
+    pub derive_cost_per_second: Option<f64>,
     /// The witness's per-node cost of the nodes only `q'` reads (the derived
     /// operators alone) and their operators.
-    pub derived_node_cost: Option<f64>,
+    pub derived_node_cost_per_second: Option<f64>,
     pub derived_operators: Vec<String>,
+    /// Whether the witness's `Filter` on a group key kept its input's
+    /// guarantee, which Stage 1's guarantee composition does not give it
+    /// (so the witness passes Stage 3 only under that rule).
+    pub key_filter_keeps_input_guarantee: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -386,9 +415,9 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
                     without: outer.without,
                 });
                 let rollup_op = match outer.op {
-                    OuterOp::Sum | OuterOp::Count => Some("sum"),
-                    OuterOp::Max => Some("max"),
-                    OuterOp::Min => Some("min"),
+                    OuterOp::Sum | OuterOp::Count => Some(RollupOp::Sum),
+                    OuterOp::Max => Some(RollupOp::Max),
+                    OuterOp::Min => Some(RollupOp::Min),
                     _ => None,
                 };
                 let mut witnesses = vec![Witness::SketchRollup {
@@ -399,7 +428,7 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
                         0,
                         Witness::ExactRollup {
                             labels: coarse_labels.clone(),
-                            op: op.into(),
+                            op,
                         },
                     );
                 }
@@ -413,9 +442,9 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
                 let mut coarse = spec.clone();
                 coarse.group_by = coarse_columns.clone();
                 let rollup_op = match spec.aggregate {
-                    SqlAggregate::Sum | SqlAggregate::Count => Some("sum"),
-                    SqlAggregate::Max => Some("max"),
-                    SqlAggregate::Min => Some("min"),
+                    SqlAggregate::Sum | SqlAggregate::Count => Some(RollupOp::Sum),
+                    SqlAggregate::Max => Some(RollupOp::Max),
+                    SqlAggregate::Min => Some(RollupOp::Min),
                     _ => None,
                 };
                 let mut witnesses = vec![Witness::SketchRollup {
@@ -426,7 +455,7 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
                         0,
                         Witness::ExactRollup {
                             labels: coarse_columns.clone(),
-                            op: op.into(),
+                            op,
                         },
                     );
                 }
@@ -436,7 +465,11 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
         Relation::NestedShorterWindow => {
             let spec = match q.spec.as_ref()? {
                 QuerySpec::Promql(spec) => {
-                    spec.range?;
+                    // A counter's rate and increase read the window length
+                    // and its boundary samples, not only merged pane state.
+                    if matches!(spec.range?, RangeFunction::Rate | RangeFunction::Increase) {
+                        return None;
+                    }
                     let mut shorter = spec.clone();
                     shorter.window_ms = shorter_window(spec.window_ms)?;
                     QuerySpec::Promql(shorter)
@@ -569,24 +602,18 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
         Relation::UnionOfSelections => {
             // q selects label = v1 by a filter: add the same query on v2
             // to W, and derive the query over v1 or v2.
-            let (other_spec, union_spec, other_index) = match q.spec.as_ref()? {
+            let (other_spec, union_text) = match q.spec.as_ref()? {
                 QuerySpec::Promql(spec) => {
                     let (label, value) = spec.matchers.first()?.clone();
                     let other_value = alternate_value(&value);
                     let mut other = spec.clone();
                     other.matchers[0].1 = other_value.clone();
-                    let mut union = spec.clone();
-                    union.matchers[0] = (label, format!("{value}|{other_value}"));
-                    let union_text = union.render().replacen(
-                        &format!("=\"{value}|{other_value}\""),
-                        &format!("=~\"{value}|{other_value}\""),
+                    let union_text = spec.render().replacen(
+                        &format!("{label}=\"{value}\""),
+                        &format!("{label}=~\"{value}|{other_value}\""),
                         1,
                     );
-                    (
-                        QuerySpec::Promql(other),
-                        (union_text, QuerySpec::Promql(union)),
-                        workload.queries.len(),
-                    )
+                    (QuerySpec::Promql(other), union_text)
                 }
                 QuerySpec::Sql(spec) => {
                     let (column, value) = spec.filters.first()?.clone();
@@ -598,19 +625,15 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
                         &format!("{column} IN ('{value}', '{other_value}')"),
                         1,
                     );
-                    (
-                        QuerySpec::Sql(other),
-                        (union_text, QuerySpec::Sql(spec.clone())),
-                        workload.queries.len(),
-                    )
+                    (QuerySpec::Sql(other), union_text)
                 }
             };
             let mut union = q.clone();
-            union.entry.query.0 = union_spec.0;
+            union.entry.query.0 = union_text;
             union.spec = None;
             Some(Derived {
                 query: union,
-                witnesses: vec![Witness::UnionWith { other: other_index }],
+                witnesses: vec![Witness::UnionWithLast],
                 base_addition: Some(q.with_spec(other_spec)),
             })
         }
@@ -628,10 +651,12 @@ fn alternate_value(value: &str) -> String {
     }
 }
 
-/// Rewrites `node` bottom-up: a node `replace` maps is replaced (its inputs
-/// are not visited), and every node above a replaced one is rebuilt over
-/// its new inputs with its schema derived again. Unchanged sub-DAGs keep
-/// their `Rc`, so sharing is kept.
+/// Rewrites `node`, visiting it depth first from the root (so the first
+/// match is the first on the leftmost path, not necessarily the shallowest):
+/// a node `replace` maps is replaced (its inputs are not visited), and
+/// every node above a replaced one is rebuilt over its new inputs with its
+/// schema derived again. Unchanged sub-DAGs keep their `Rc`, so sharing is
+/// kept.
 pub fn rewrite(
     node: &Rc<OperatorNode>,
     replace: &mut dyn FnMut(&Rc<OperatorNode>) -> Option<Rc<OperatorNode>>,
@@ -697,37 +722,81 @@ fn with_operator(node: &OperatorNode, operator: Operator) -> Rc<OperatorNode> {
     })
 }
 
-/// `q`'s topmost `SummaryEstimate` replaced by `estimate(its input, its
-/// statistic)`, which must keep its output schema's columns.
-fn replace_topmost_estimate(
-    root: &Rc<OperatorNode>,
-    mut estimate: impl FnMut(&Rc<OperatorNode>, &SketchStatistic) -> Result<Rc<OperatorNode>, String>,
-) -> Result<Rc<OperatorNode>, String> {
-    let mut error = None;
-    let mut done = false;
-    let new = rewrite_root(root, "summary estimate", |node| {
-        if done {
-            return None;
+/// `q`'s estimate when it is `q`'s root or the only input of a root
+/// `Project` of plain column references: the shapes in which another
+/// estimate can stand in for it without changing what the nodes above
+/// compute. Returns its state and statistic.
+fn root_estimate(root: &Rc<OperatorNode>) -> Result<(Rc<OperatorNode>, SketchStatistic), String> {
+    let estimate = match root.non_asap() {
+        Some(NonASAPOp::Project { cols, child, .. })
+            if cols
+                .iter()
+                .all(|item| matches!(item.expr, ScalarExpr::Column(_))) =>
+        {
+            child
         }
-        let Some(ASAPOp::SummaryEstimate {
+        _ => root,
+    };
+    match estimate.asap() {
+        Some(ASAPOp::SummaryEstimate {
             summary_input,
             query,
-        }) = node.asap()
-        else {
-            return None;
-        };
-        done = true;
-        match estimate(summary_input, query) {
-            Ok(new) => Some(new),
-            Err(e) => {
-                error = Some(e);
-                Some(node.clone())
-            }
+        }) => Ok((summary_input.clone(), query.clone())),
+        _ => Err(
+            "q's result is not a summary estimate (at its root or under a column projection)"
+                .into(),
+        ),
+    }
+}
+
+/// `root` with its root estimate ([`root_estimate`]) replaced by
+/// `estimate`; a root `Project` keeps the columns `estimate` still has, by
+/// name.
+fn with_root_estimate(
+    root: &Rc<OperatorNode>,
+    estimate: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, String> {
+    let Some(NonASAPOp::Project {
+        cols,
+        qualifier,
+        child,
+    }) = root.non_asap()
+    else {
+        return Ok(estimate);
+    };
+    let cols = cols
+        .iter()
+        .filter_map(|item| {
+            let ScalarExpr::Column(index) = item.expr else {
+                return None;
+            };
+            let name = &child.schema.fields[index].name;
+            let new = estimate
+                .schema
+                .fields
+                .iter()
+                .position(|f| f.name == *name)?;
+            Some(ProjectItem {
+                alias: item.alias.clone(),
+                expr: ScalarExpr::Column(new),
+            })
+        })
+        .collect();
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+        cols,
+        qualifier: qualifier.clone(),
+        child: estimate,
+    }))
+    .map_err(|e| format!("projection over the new estimate: {e}"))
+}
+
+/// The family of the build whose state `state` carries.
+fn state_family(state: &OperatorNode) -> Result<FieldDataType, String> {
+    match state.summary_build() {
+        Some(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
+            Ok(family.clone())
         }
-    })?;
-    match error {
-        Some(e) => Err(e),
-        None => Ok(new),
+        _ => Err("q's estimate reads no single summary build".into()),
     }
 }
 
@@ -807,18 +876,29 @@ pub fn witness_root(
                         .ok_or_else(|| format!("q's output has no column {label}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            // The value column: the last column that is not a group key, a
-            // timestamp or a series identity.
-            let value = fields
+            // The value column: q's one numeric column (group keys are
+            // strings).
+            let numeric: Vec<usize> = fields
                 .iter()
-                .rposition(|f| {
-                    !labels.contains(&f.name) && f.name != "ts" && !f.name.starts_with('$')
+                .enumerate()
+                .filter(|(_, f)| {
+                    matches!(
+                        f.dtype,
+                        FieldDataType::Plain(DataType::Float64 | DataType::Int64)
+                    )
                 })
-                .ok_or("q's output has no value column")?;
-            let measure = match op.as_str() {
-                "sum" => AggIntent::Sum { col: Some(value) },
-                "max" => AggIntent::Max { col: Some(value) },
-                _ => AggIntent::Min { col: Some(value) },
+                .map(|(i, _)| i)
+                .collect();
+            let [value] = numeric[..] else {
+                return Err(format!(
+                    "q's output has {} float columns, not one",
+                    numeric.len()
+                ));
+            };
+            let measure = match op {
+                RollupOp::Sum => AggIntent::Sum { col: Some(value) },
+                RollupOp::Max => AggIntent::Max { col: Some(value) },
+                RollupOp::Min => AggIntent::Min { col: Some(value) },
             };
             OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
                 reduction: Reduction::by(keys),
@@ -860,7 +940,12 @@ pub fn witness_root(
                 changed.then(|| with_operator(node, operator))
             })
         }
-        Witness::SketchRollup { labels } => replace_topmost_estimate(q_root, |state, query| {
+        Witness::SketchRollup { labels } => {
+            let (state, query) = root_estimate(q_root)?;
+            let family = state_family(&state)?;
+            if !FamilyCapability::merges_groups(&family) {
+                return Err(format!("q's family {family:?} does not merge groups"));
+            }
             let group_by = labels
                 .iter()
                 .map(|label| {
@@ -873,24 +958,18 @@ pub fn witness_root(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-                children: vec![state.clone()],
+                children: vec![state],
                 newest_panes: None,
                 group_by: Some(group_by),
             }))
             .map_err(|e| format!("rollup merge: {e}"))?;
-            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+            let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input: merge,
-                query: query.clone(),
+                query,
             }))
-            .map_err(|e| format!("rollup estimate: {e}"))
-        })
-        .and_then(|root| {
-            if Rc::ptr_eq(&root, q_root) {
-                Err("no rollup".into())
-            } else {
-                Ok(root)
-            }
-        }),
+            .map_err(|e| format!("rollup estimate: {e}"))?;
+            with_root_estimate(q_root, estimate)
+        }
         Witness::NewestPanes { window_ms } => {
             rewrite_root(q_root, "summary merge over a pane chain", |node| {
                 let Some(ASAPOp::SummaryMerge {
@@ -960,54 +1039,50 @@ pub fn witness_root(
                 changed.then(|| with_operator(node, operator))
             })
         }
-        Witness::OtherStatistic { statistic } => replace_topmost_estimate(q_root, |state, _| {
-            let family = match state.summary_build() {
-                Some(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
-                    family.clone()
-                }
-                _ => return Err("q's estimate reads no single summary build".into()),
-            };
+        Witness::OtherStatistic { statistic } => {
+            let (state, _) = root_estimate(q_root)?;
+            let family = state_family(&state)?;
             if !FamilyCapability::of(&family).answers(statistic) {
                 return Err(format!(
                     "q's family {family:?} does not answer {statistic:?}"
                 ));
             }
-            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
-                summary_input: state.clone(),
+            let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input: state,
                 query: statistic.clone(),
             }))
-            .map_err(|e| format!("estimate: {e}"))
-        }),
-        Witness::UnionWith { other } => {
+            .map_err(|e| format!("estimate: {e}"))?;
+            with_root_estimate(q_root, estimate)
+        }
+        Witness::UnionWithLast => {
             let other_root = base_roots
-                .get(*other)
+                .last()
                 .and_then(QueryRoot::as_operator)
                 .ok_or("no other query")?;
-            let mut other_state = None;
-            rewrite_root(other_root, "summary estimate", |node| {
-                if let (None, Some(ASAPOp::SummaryEstimate { summary_input, .. })) =
-                    (&other_state, node.asap())
-                {
-                    other_state = Some(summary_input.clone());
-                }
-                None
-            })
-            .ok();
-            let other_state =
-                other_state.ok_or("the other query's plan has no summary estimate")?;
-            replace_topmost_estimate(q_root, |state, query| {
-                let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-                    children: vec![state.clone(), other_state.clone()],
-                    newest_panes: None,
-                    group_by: None,
-                }))
-                .map_err(|e| format!("union merge: {e}"))?;
-                OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
-                    summary_input: merge,
-                    query: query.clone(),
-                }))
-                .map_err(|e| format!("union estimate: {e}"))
-            })
+            let (state, query) = root_estimate(q_root)?;
+            let (other_state, _) = root_estimate(other_root)?;
+            if Rc::ptr_eq(&state, &other_state) {
+                return Err("both selections read one state".into());
+            }
+            let family = state_family(&state)?;
+            if FamilyCapability::of(&family).merge_inputs.is_none() {
+                return Err(format!("q's family {family:?} has no merge"));
+            }
+            // The merge's coverage check refuses states of different
+            // definitions (family, parameters, input) or overlapping
+            // selections.
+            let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+                children: vec![state, other_state],
+                newest_panes: None,
+                group_by: None,
+            }))
+            .map_err(|e| format!("union merge: {e}"))?;
+            let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input: merge,
+                query,
+            }))
+            .map_err(|e| format!("union estimate: {e}"))?;
+            with_root_estimate(q_root, estimate)
         }
     }
 }
@@ -1022,24 +1097,96 @@ fn planned(
         .or_else(|e| inconclusive(format!("{side} does not plan: {e}")))
 }
 
-/// The other side's logical plan priced for `workload`: a plan for it the
-/// search could have selected.
+/// The two workloads `check` compares: `W` (for
+/// [`Relation::UnionOfSelections`], with the other selection added) and the
+/// related one (`W ∪ {q'}` or `W'`), with the derivation of a marginal
+/// relation. `Err` is why the relation does not apply.
+pub fn related_workloads(
+    check: &Check,
+) -> Result<(FuzzWorkload, FuzzWorkload, Option<Derived>), String> {
+    let w = &check.workload;
+    if check.relation.is_marginal() {
+        let Some(derived) = derive(check.relation, w, check.target) else {
+            return inconclusive("not applicable to q");
+        };
+        let base = match &derived.base_addition {
+            Some(addition) => w.with_query(addition.clone()),
+            None => w.clone(),
+        };
+        let related = base.with_query(derived.query.clone());
+        return Ok((base, related, Some(derived)));
+    }
+    let q = w.queries.get(check.target).ok_or("no query")?;
+    let related = match check.relation {
+        Relation::TighterAccuracy => {
+            let Some(tight) = tighter(q.accuracy()) else {
+                return inconclusive("q is exact");
+            };
+            w.with_query_replaced(check.target, q.with_accuracy(tight))
+        }
+        Relation::RelaxedLatency => {
+            if q.entry.requirements.max_latency_ms.is_none() {
+                return inconclusive("q has no latency bound");
+            }
+            let mut relaxed = q.clone();
+            relaxed.entry.requirements.max_latency_ms = None;
+            w.with_query_replaced(check.target, relaxed)
+        }
+        Relation::AddedQuery => match &check.added {
+            Some(added) => w.with_query(added.clone()),
+            None => return inconclusive("no added query"),
+        },
+        Relation::NoRawRetention => {
+            if !w.raw_data_retained {
+                return inconclusive("raw data is not retained");
+            }
+            FuzzWorkload {
+                raw_data_retained: false,
+                ..w.clone()
+            }
+        }
+        Relation::ResultsRetained => {
+            if w.query_time_results_retained {
+                return inconclusive("query-time results are already retained");
+            }
+            FuzzWorkload {
+                query_time_results_retained: true,
+                ..w.clone()
+            }
+        }
+        Relation::Renamed => renamed(w, "_r", true).ok_or("a query has no structured form")?,
+        Relation::Reordered => {
+            if w.queries.len() < 2 {
+                return inconclusive("one query");
+            }
+            let mut reordered = w.clone();
+            reordered.queries.reverse();
+            reordered
+        }
+        Relation::DisjointCopy => disjoint_copy(w).ok_or("a query has no structured form")?,
+        _ => unreachable!("marginal relations are handled above"),
+    };
+    Ok((w.clone(), related, None))
+}
+
+/// The other side's logical plan priced for `workload` (its first
+/// `keep` roots): a plan for `workload` the search could have selected.
 fn confirming(
     planner: &Planner,
     workload: &FuzzWorkload,
     roots: Option<&Vec<QueryRoot>>,
     keep: usize,
 ) -> Option<WitnessReport> {
-    let roots = roots?;
-    let priced = planner.price(workload, &roots[..keep], None).ok()?;
+    let priced = planner.price(workload, &roots?[..keep], false).ok()?;
     Some(WitnessReport {
         derivation: None,
-        cost: priced.cost_per_second,
+        cost_per_second: priced.cost_per_second,
         plan: priced.selected,
-        base_reference_cost: None,
-        derive_cost: None,
-        derived_node_cost: None,
+        base_reference_cost_per_second: None,
+        derive_cost_per_second: None,
+        derived_node_cost_per_second: None,
         derived_operators: Vec::new(),
+        key_filter_keeps_input_guarantee: false,
     })
 }
 
@@ -1049,78 +1196,21 @@ pub fn evaluate(planner: &mut Planner, check: &Check) -> Outcome {
 }
 
 fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, String> {
-    let w = &check.workload;
-    if check.relation.is_marginal() {
-        return evaluate_marginal(planner, check);
+    let (w, related, derived) = related_workloads(check)?;
+    let base = planned(planner, &w, "W")?;
+    let other = planned(planner, &related, "the related workload")?;
+    if let Some(derived) = derived {
+        return evaluate_marginal(planner, check, &w, &related, &derived, &base, &other);
     }
-    let target = check.target;
-    let (related, related_query) = match check.relation {
-        Relation::TighterAccuracy => {
-            let q = &w.queries[target];
-            let Some(tight) = tighter(q.accuracy()) else {
-                return inconclusive("q is exact");
-            };
-            (w.with_query_replaced(target, q.with_accuracy(tight)), None)
-        }
-        Relation::RelaxedLatency => {
-            let q = &w.queries[target];
-            if q.entry.requirements.max_latency_ms.is_none() {
-                return inconclusive("q has no latency bound");
-            }
-            let mut relaxed = q.clone();
-            relaxed.entry.requirements.max_latency_ms = None;
-            (w.with_query_replaced(target, relaxed), None)
-        }
-        Relation::AddedQuery => {
-            let Some(added) = &check.added else {
-                return inconclusive("no added query");
-            };
-            (w.with_query(added.clone()), Some(added.text().to_string()))
-        }
-        Relation::NoRawRetention => {
-            if !w.raw_data_retained {
-                return inconclusive("raw data is not retained");
-            }
-            let mut related = w.clone();
-            related.raw_data_retained = false;
-            (related, None)
-        }
-        Relation::ResultsRetained => {
-            if w.query_time_results_retained {
-                return inconclusive("query-time results are already retained");
-            }
-            let mut related = w.clone();
-            related.query_time_results_retained = true;
-            (related, None)
-        }
-        Relation::Renamed => match renamed(w, "_r", true) {
-            Some(related) => (related, None),
-            None => return inconclusive("a query has no structured form"),
-        },
-        Relation::Reordered => {
-            if w.queries.len() < 2 {
-                return inconclusive("one query");
-            }
-            let mut related = w.clone();
-            related.queries.reverse();
-            (related, None)
-        }
-        Relation::DisjointCopy => match disjoint_copy(w) {
-            Some(related) => (related, None),
-            None => return inconclusive("a query has no structured form"),
-        },
-        _ => unreachable!("marginal relations are evaluated above"),
-    };
-    let base = planned(planner, w, "W")?;
-    let other = planned(planner, &related, "W'")?;
     let (b, r) = (base.cost_per_second, other.cost_per_second);
+    let n = w.queries.len();
     let (bound, tolerance, violated, witness) = match check.relation {
         Relation::TighterAccuracy | Relation::AddedQuery | Relation::NoRawRetention => {
             let tolerance = planner.settings.tolerance(b);
             let violated = r < b - tolerance;
             // The related plan, minus an added query, is a plan for W.
             let witness = violated
-                .then(|| confirming(planner, w, other.logical_roots.as_ref(), w.queries.len()))
+                .then(|| confirming(planner, &w, other.logical_roots.as_ref(), n))
                 .flatten();
             (b - tolerance, tolerance, violated, witness)
         }
@@ -1128,20 +1218,13 @@ fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, Strin
             let tolerance = planner.settings.tolerance(b);
             let violated = r > b + tolerance;
             let witness = violated
-                .then(|| {
-                    confirming(
-                        planner,
-                        &related,
-                        base.logical_roots.as_ref(),
-                        w.queries.len(),
-                    )
-                })
+                .then(|| confirming(planner, &related, base.logical_roots.as_ref(), n))
                 .flatten();
             (b + tolerance, tolerance, violated, witness)
         }
         Relation::DisjointCopy => {
             let tolerance = planner.settings.tolerance(2.0 * b);
-            ((2.0 * b), tolerance, (r - 2.0 * b).abs() > tolerance, None)
+            (2.0 * b, tolerance, (r - 2.0 * b).abs() > tolerance, None)
         }
         _ => {
             let tolerance = planner.settings.tolerance(b.max(r));
@@ -1153,14 +1236,18 @@ fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, Strin
         check.relation.statement()
     );
     let measurement = Measurement {
-        base_cost: b,
+        base_cost_per_second: b,
         base_plan: base.selected.clone(),
-        related_cost: r,
+        related_cost_per_second: r,
         related_plan: other.selected.clone(),
-        related_query,
+        related_query: check
+            .added
+            .as_ref()
+            .filter(|_| check.relation == Relation::AddedQuery)
+            .map(|q| q.text().to_string()),
         witness,
-        bound,
-        tolerance,
+        bound_per_second: bound,
+        tolerance_per_second: tolerance,
         summary,
     };
     Ok(if violated {
@@ -1170,22 +1257,26 @@ fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, Strin
     })
 }
 
-fn evaluate_marginal(planner: &mut Planner, check: &Check) -> Result<Outcome, String> {
-    let Some(derived) = derive(check.relation, &check.workload, check.target) else {
-        return inconclusive("not applicable to q");
-    };
-    let base_workload = match &derived.base_addition {
-        Some(addition) => check.workload.with_query(addition.clone()),
-        None => check.workload.clone(),
-    };
-    let related = base_workload.with_query(derived.query.clone());
-    let base = planned(planner, &base_workload, "W")?;
-    let with = planned(planner, &related, "W ∪ {q'}")?;
+/// The marginal relation: the cheapest witness that builds and prices,
+/// against the planner's marginal cost. Violated only when both the
+/// relation (`Δ > derive_cost + tolerance`) and its plain reading (the
+/// witness is cheaper than the planner's `W ∪ {q'}` by more than the
+/// tolerance) fail, so a search that prices `W` below Stage 3's price of
+/// the same plan cannot make a false violation.
+fn evaluate_marginal(
+    planner: &mut Planner,
+    check: &Check,
+    base_workload: &FuzzWorkload,
+    related: &FuzzWorkload,
+    derived: &Derived,
+    base: &Planned,
+    with: &Planned,
+) -> Result<Outcome, String> {
     let Some(base_roots) = base.logical_roots.clone() else {
         return inconclusive("the search keeps no logical plan for W");
     };
     let base_reference = planner
-        .price(&base_workload, &base_roots, None)
+        .reference_price(base_workload, &base_roots)
         .or_else(|e| inconclusive(format!("W's plan does not price: {e}")))?;
     let mut best: Option<(Witness, Priced)> = None;
     let mut failures = Vec::new();
@@ -1193,16 +1284,15 @@ fn evaluate_marginal(planner: &mut Planner, check: &Check) -> Result<Outcome, St
         let priced = witness_root(
             planner,
             witness,
-            &base_workload,
-            &base,
+            base_workload,
+            base,
             &base_roots,
             check.target,
         )
         .and_then(|root| {
             let mut roots = base_roots.clone();
             roots.push(QueryRoot::Operator(root));
-            let key_filter = matches!(witness, Witness::Filter { .. }).then_some(roots.len() - 1);
-            planner.price(&related, &roots, key_filter)
+            planner.price(related, &roots, matches!(witness, Witness::Filter { .. }))
         });
         match priced {
             Ok(priced)
@@ -1222,8 +1312,8 @@ fn evaluate_marginal(planner: &mut Planner, check: &Check) -> Result<Outcome, St
     let derive_cost = priced.cost_per_second - base_reference.cost_per_second;
     let delta = with.cost_per_second - base.cost_per_second;
     let tolerance = planner.settings.tolerance(with.cost_per_second);
-    let violated = delta > derive_cost + tolerance;
-    let last = priced.private_node_cost_per_second.len() - 1;
+    let violated = delta > derive_cost + tolerance
+        && with.cost_per_second > priced.cost_per_second + tolerance;
     let summary = format!(
         "cost(W ∪ {{q'}}) − cost(W) = {:.6} − {:.6} = {delta:.6}; derive_cost = {:.6} (witness {:.6} − W's plan {:.6}); tolerance {tolerance:.6}",
         with.cost_per_second,
@@ -1232,23 +1322,26 @@ fn evaluate_marginal(planner: &mut Planner, check: &Check) -> Result<Outcome, St
         priced.cost_per_second,
         base_reference.cost_per_second,
     );
+    let key_filter = matches!(witness, Witness::Filter { .. });
     let measurement = Measurement {
-        base_cost: base.cost_per_second,
+        base_cost_per_second: base.cost_per_second,
         base_plan: base.selected.clone(),
-        related_cost: with.cost_per_second,
+        related_cost_per_second: with.cost_per_second,
         related_plan: with.selected.clone(),
         related_query: Some(derived.query.text().to_string()),
         witness: Some(WitnessReport {
             derivation: Some(witness),
-            cost: priced.cost_per_second,
+            cost_per_second: priced.cost_per_second,
             plan: priced.selected.clone(),
-            base_reference_cost: Some(base_reference.cost_per_second),
-            derive_cost: Some(derive_cost),
-            derived_node_cost: Some(priced.private_node_cost_per_second[last]),
-            derived_operators: priced.private_operators[last].clone(),
+            base_reference_cost_per_second: Some(base_reference.cost_per_second),
+            derive_cost_per_second: Some(derive_cost),
+            derived_node_cost_per_second: Some(priced.derived_root.cost_per_second),
+            derived_operators: priced.derived_root.operators.clone(),
+            key_filter_keeps_input_guarantee: key_filter,
         }),
-        bound: base.cost_per_second + derive_cost + tolerance,
-        tolerance,
+        bound_per_second: (base.cost_per_second + derive_cost).max(priced.cost_per_second)
+            + tolerance,
+        tolerance_per_second: tolerance,
         summary,
     };
     Ok(if violated {
@@ -1417,13 +1510,11 @@ mod tests {
             coarser.witnesses[0],
             Witness::ExactRollup {
                 labels: vec!["job".into()],
-                op: "sum".into()
+                op: RollupOp::Sum
             }
         );
-        assert_eq!(
-            text(Relation::NestedShorterWindow).as_deref(),
-            Some("sum by (job, instance) (rate(m_counter[1m]))")
-        );
+        // A counter's rate reads more than merged panes: no nested window.
+        assert_eq!(text(Relation::NestedShorterWindow), None);
         assert_eq!(text(Relation::OtherQuantileRank), None);
         assert_eq!(
             text(Relation::OuterOverResult).as_deref(),

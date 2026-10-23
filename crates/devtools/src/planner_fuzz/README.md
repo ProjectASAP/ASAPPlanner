@@ -18,7 +18,7 @@ Audience: planner developers.
 
 ```sh
 cargo run --release -p asap-devtools --bin planner_fuzz -- \
-  --seed 1 --cases 1000 --time-budget-s 3600 --out /mydata/planner-fuzz/run-1 \
+  --seed 1 --cases 1000 --time-budget-s 3600 --out out/run-1 \
   [--relations a,b,tighter-accuracy] [--search legacy|memo-brute-force|exhaustive] \
   [--seed-workload eval/rangeheavy.workload.json]... [--ignore-accuracy-guarantees] \
   [--relative-tolerance 0.01] [--absolute-tolerance 1e-6] \

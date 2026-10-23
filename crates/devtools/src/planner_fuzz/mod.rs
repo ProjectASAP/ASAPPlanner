@@ -205,6 +205,7 @@ impl FuzzWorkload {
 
     /// The `stage_pipeline` invocation that plans this workload, saved as
     /// `workload_file`, with `settings`.
+    /// Its output document is `<workload_file stem>.out.json`.
     pub fn stage_pipeline_command(&self, workload_file: &str, settings: &FuzzSettings) -> String {
         let mut command = format!(
             "cargo run -p asap-devtools --bin stage_pipeline -- --workload {workload_file}"
@@ -222,11 +223,12 @@ impl FuzzWorkload {
             ));
         }
         match settings.search {
-            SearchKind::Default => {}
+            SearchKind::Legacy => {}
             SearchKind::MemoBruteForce => command.push_str(" --search memo-brute-force"),
             SearchKind::Exhaustive => command.push_str(" --exhaustive"),
         }
-        command.push_str(" --out out.json");
+        let stem = workload_file.strip_suffix(".json").unwrap_or(workload_file);
+        command.push_str(&format!(" --out {stem}.out.json"));
         command
     }
 }
@@ -290,9 +292,10 @@ pub fn read_seed_file(path: &std::path::Path) -> Result<FuzzWorkload, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SearchKind {
-    /// The search `plan_installable` runs (`stage_pipeline` without
-    /// `--exhaustive` or `--search`; `--search legacy`).
-    Default,
+    /// The default search, the one `plan_installable` runs
+    /// (`stage_pipeline` without `--exhaustive` or `--search`; `--search
+    /// legacy`).
+    Legacy,
     /// The reference search over the memo (`--search memo-brute-force`).
     MemoBruteForce,
     /// Every generated candidate (`--exhaustive`), up to
@@ -320,7 +323,7 @@ pub struct FuzzSettings {
 impl Default for FuzzSettings {
     fn default() -> Self {
         Self {
-            search: SearchKind::Default,
+            search: SearchKind::Legacy,
             enforce_accuracy_guarantees: true,
             relative_tolerance: 0.01,
             absolute_tolerance: 1e-6,
@@ -354,16 +357,26 @@ pub struct Planned {
 pub struct Priced {
     pub selected: String,
     pub cost_per_second: f64,
-    /// Per root, the cost per second of the nodes only that root reads (its
-    /// private operators), and their operators.
-    pub private_node_cost_per_second: Vec<f64>,
-    pub private_operators: Vec<Vec<String>>,
+    /// The nodes only the last root reads: in a witness, the operators
+    /// that derive `q'`.
+    pub derived_root: PrivateNodes,
 }
 
-/// Plans and prices workloads, caching each workload's plan.
+/// The nodes of a plan only one root reads.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PrivateNodes {
+    /// Their summed per-node cost per second.
+    pub cost_per_second: f64,
+    /// Their operators.
+    pub operators: Vec<String>,
+}
+
+/// Plans and prices workloads, caching each workload's plan and the
+/// reference price of its selected logical plan.
 pub struct Planner {
     pub settings: FuzzSettings,
     cache: HashMap<String, Result<Rc<Planned>, String>>,
+    reference_prices: HashMap<String, Result<Priced, String>>,
 }
 
 impl Planner {
@@ -371,6 +384,7 @@ impl Planner {
         Self {
             settings,
             cache: HashMap::new(),
+            reference_prices: HashMap::new(),
         }
     }
 
@@ -467,16 +481,16 @@ impl Planner {
     /// assignment implemented and priced, the cheapest selected, with the
     /// same models as [`plan`](Self::plan). Guarantees are composed again
     /// first, so a derived node carries the guarantee of what it reads.
-    /// Root `key_filter_root`, when given, is a `Filter` on group-key
-    /// columns only: it keeps its input's guarantee (whole groups selected
-    /// by an exact key keep each remaining row's bound), which Stage 1's
-    /// composition, giving no guarantee to any filter over approximate
-    /// rows, does not know.
+    /// With `last_root_is_key_filter`, the last root is a `Filter` on
+    /// group-key columns only and keeps its input's guarantee (whole groups
+    /// selected by an exact key keep each remaining row's bound), which
+    /// Stage 1's composition, giving no guarantee to any filter over
+    /// approximate rows, does not know.
     pub fn price(
         &self,
         workload: &FuzzWorkload,
         roots: &[QueryRoot],
-        key_filter_root: Option<usize>,
+        last_root_is_key_filter: bool,
     ) -> Result<Priced, String> {
         for root in roots {
             root.validate_structure()
@@ -485,10 +499,10 @@ impl Planner {
         let mut roots =
             asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees(roots)
                 .map_err(|e| format!("witness guarantees: {e}"))?;
-        if let Some(index) = key_filter_root {
-            let filter = roots[index].as_operator().ok_or("a scalar root")?;
+        if let (true, Some(last)) = (last_root_is_key_filter, roots.last_mut()) {
+            let filter = last.as_operator().ok_or("a scalar root")?;
             let input = filter.operator.children()[0].guarantee.clone();
-            roots[index] = QueryRoot::Operator(Rc::new((**filter).clone().with_guarantee(input)));
+            *last = QueryRoot::Operator(Rc::new((**filter).clone().with_guarantee(input)));
         }
         let planning = workload.planning_workload();
         let entries: Vec<_> = planning.query_workload.entries().collect();
@@ -530,38 +544,40 @@ impl Planner {
             seen
         };
         let reached_by_root: Vec<BTreeSet<_>> = dag.roots.iter().map(|r| reached(*r)).collect();
-        let mut private_node_cost_per_second = Vec::new();
-        let mut private_operators = Vec::new();
-        for (index, nodes) in reached_by_root.iter().enumerate() {
-            let private: Vec<_> = nodes
+        let (last, others) = reached_by_root.split_last().ok_or("no roots")?;
+        let private: Vec<_> = last
+            .iter()
+            .filter(|node| others.iter().all(|set| !set.contains(node)))
+            .filter_map(|node| cost.per_node.get(node))
+            .collect();
+        let derived_root = PrivateNodes {
+            cost_per_second: private.iter().filter_map(|n| n.cost_per_second).sum(),
+            operators: private
                 .iter()
-                .filter(|node| {
-                    reached_by_root
-                        .iter()
-                        .enumerate()
-                        .all(|(other, set)| other == index || !set.contains(node))
-                })
-                .collect();
-            private_node_cost_per_second.push(
-                private
-                    .iter()
-                    .filter_map(|node| cost.per_node.get(node))
-                    .filter_map(|node| node.cost_per_second)
-                    .sum(),
-            );
-            private_operators.push(
-                private
-                    .iter()
-                    .filter_map(|node| cost.per_node.get(node))
-                    .map(|node| format!("{:?}", node.operator))
-                    .collect(),
-            );
-        }
+                .map(|n| format!("{:?}", n.operator))
+                .collect(),
+        };
         Ok(Priced {
             selected: selection.selected.clone(),
             cost_per_second,
-            private_node_cost_per_second,
-            private_operators,
+            derived_root,
         })
+    }
+
+    /// [`price`](Self::price) of `workload`'s selected logical plan
+    /// `roots`, cached per workload: every marginal check of a case prices
+    /// the same `W`.
+    pub fn reference_price(
+        &mut self,
+        workload: &FuzzWorkload,
+        roots: &[QueryRoot],
+    ) -> Result<Priced, String> {
+        let key = serde_json::to_string(workload).expect("a workload serializes");
+        if let Some(priced) = self.reference_prices.get(&key) {
+            return priced.clone();
+        }
+        let priced = self.price(workload, roots, false);
+        self.reference_prices.insert(key, priced.clone());
+        priced
     }
 }

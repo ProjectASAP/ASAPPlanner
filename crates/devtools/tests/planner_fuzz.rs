@@ -46,8 +46,16 @@ fn finds_issue_903_looser_accuracy_not_reading_the_exact_result() {
         Outcome::Violated(m) => {
             let witness = m.witness.expect("a marginal relation has a witness");
             assert_eq!(witness.derivation, Some(Witness::Same));
-            assert!((m.related_cost - 0.166).abs() < 0.005, "{}", m.summary);
-            assert!((witness.cost - 0.144).abs() < 0.005, "{}", m.summary);
+            assert!(
+                (m.related_cost_per_second - 0.166).abs() < 0.005,
+                "{}",
+                m.summary
+            );
+            assert!(
+                (witness.cost_per_second - 0.144).abs() < 0.005,
+                "{}",
+                m.summary
+            );
         }
         other => panic!("expected #903's violation, got {other:?}"),
     }
@@ -74,7 +82,12 @@ fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
         Outcome::Violated(m) => {
             let witness = m.witness.expect("a marginal relation has a witness");
             assert!(matches!(witness.derivation, Some(Witness::Filter { .. })));
-            assert!(m.related_cost > witness.cost, "{}", m.summary);
+            assert!(witness.key_filter_keeps_input_guarantee);
+            assert!(
+                m.related_cost_per_second > witness.cost_per_second * 1.1,
+                "{}",
+                m.summary
+            );
         }
         other => panic!("expected #902's violation, got {other:?}"),
     }
@@ -103,7 +116,15 @@ fn finds_issue_891_filtered_rate_not_reading_the_grouped_rate() {
     };
     workload.queries = vec![workload.queries[0].with_spec(QuerySpec::Promql(grouped))];
     match check(Relation::FilterOnGroupKey, workload, 0) {
-        Outcome::Violated(m) => assert!(m.witness.is_some(), "{}", m.summary),
+        Outcome::Violated(m) => {
+            let witness = m.witness.expect("a marginal relation has a witness");
+            assert!(matches!(witness.derivation, Some(Witness::Filter { .. })));
+            assert!(
+                m.related_cost_per_second > witness.cost_per_second * 1.1,
+                "{}",
+                m.summary
+            );
+        }
         other => panic!("expected #891's violation, got {other:?}"),
     }
 }
@@ -150,4 +171,112 @@ fn campaign_writes_summary_coverage_and_drafts() {
         assert!(draft.starts_with("# "));
         assert!(draft.contains("## Example"));
     }
+}
+
+/// One generated query exact or at ε = 0.01, δ = 0.001.
+fn generated(spec: QuerySpec, approximate: bool) -> FuzzWorkload {
+    use asap_devtools::planner_fuzz::generate::generated_workload;
+    use asap_devtools::planner_fuzz::{FuzzQuery, Language};
+    use asap_types::ir::properties::AccuracyTarget;
+    let language = match spec {
+        QuerySpec::Promql(_) => Language::Promql,
+        QuerySpec::Sql(_) => Language::Sql,
+    };
+    let accuracy = if approximate {
+        AccuracyTarget::max_error(0.01).failure_probability(0.001)
+    } else {
+        AccuracyTarget::exact()
+    };
+    generated_workload(
+        language,
+        vec![FuzzQuery::generated(spec, accuracy, 10_000, None)],
+        1_000,
+        15_000,
+    )
+}
+
+fn promql(
+    metric: &str,
+    range: Option<RangeFunction>,
+    outer: Option<(OuterOp, &[&str])>,
+) -> QuerySpec {
+    QuerySpec::Promql(PromqlSpec {
+        metric: metric.into(),
+        matchers: vec![],
+        range,
+        window_ms: 300_000,
+        outer: outer.map(|(op, labels)| OuterAggregation {
+            op,
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            without: false,
+        }),
+    })
+}
+
+/// The witness `relation` builds for `workload`'s query, which must build
+/// and price (the check is conclusive).
+fn witness_of(relation: Relation, workload: FuzzWorkload) -> Witness {
+    match check(relation, workload, 0) {
+        Outcome::Holds(m) | Outcome::Violated(m) => m
+            .witness
+            .and_then(|w| w.derivation)
+            .expect("a marginal relation has a witness"),
+        Outcome::Inconclusive { reason } => panic!("{relation:?} is inconclusive: {reason}"),
+    }
+}
+
+/// The sketch rollup witness builds and prices for a grouped quantile:
+/// a `SummaryMerge` with `group_by` over the finer per-group KLL.
+#[test]
+fn sketch_rollup_witness_prices_for_a_grouped_quantile() {
+    let q = promql(
+        "m_gauge",
+        None,
+        Some((OuterOp::Quantile(0.9), &["job", "instance"])),
+    );
+    assert_eq!(
+        witness_of(Relation::CoarserGrouping, generated(q, true)),
+        Witness::SketchRollup {
+            labels: vec!["job".into()]
+        }
+    );
+}
+
+/// The exact rollup witness builds and prices for a grouped count (a sum
+/// of the finer counts).
+#[test]
+fn exact_rollup_witness_prices_for_a_grouped_count() {
+    let q = promql(
+        "m_gauge",
+        None,
+        Some((OuterOp::Count, &["instance", "region"])),
+    );
+    assert!(matches!(
+        witness_of(Relation::CoarserGrouping, generated(q, false)),
+        Witness::ExactRollup { .. }
+    ));
+}
+
+/// The quantile-rank witness builds and prices from the same KLL.
+#[test]
+fn quantile_rank_witness_prices_from_the_same_sketch() {
+    let q = promql("m_gauge", Some(RangeFunction::QuantileOverTime(0.9)), None);
+    assert_eq!(
+        witness_of(Relation::OtherQuantileRank, generated(q, true)),
+        Witness::QuantileRank { from: 0.9, to: 0.5 }
+    );
+}
+
+/// The smaller top-k witness builds and prices over the same input.
+#[test]
+fn smaller_topk_witness_prices_over_the_same_input() {
+    let q = promql(
+        "m_counter",
+        Some(RangeFunction::Rate),
+        Some((OuterOp::Topk(10), &["job"])),
+    );
+    assert_eq!(
+        witness_of(Relation::SmallerTopK, generated(q, false)),
+        Witness::SmallerTopK { from: 10, to: 3 }
+    );
 }
