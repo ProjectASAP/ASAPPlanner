@@ -580,35 +580,61 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             entry.0 += rate_or_slowest * cost * v;
             entry.1 += rate_or_slowest * cost;
         }
+        // A scan's charge at its consumer's rate: for a consumer whose rate
+        // is the reaching queries' union rate (a node built once or a
+        // slot), the slowest class's rate plus the excess of the union
+        // its rate selector picks.
+        let scans_here = !input.choices[c].coefficients.absorbed_scans.is_empty()
+            || (total != 0.0 && input.choices[c].scan_source.is_some());
+        let mut above_slowest: Vec<(f64, Variable)> = Vec::new();
+        if scans_here && rate(k).is_none() {
+            let g = match k {
+                Consumer::Group(g) => g.0 as usize,
+                Consumer::Slot { choice, .. } => input.choices[choice].group.0 as usize,
+                Consumer::Query(_) => unreachable!("a query's rate is constant"),
+            };
+            for (set, selector) in &rate_of[&g] {
+                let excess = input.union_rate[set] - rate_or_slowest;
+                if excess > 0.0 {
+                    above_slowest.push((excess, product(&mut vars, *selector, v)));
+                }
+            }
+        }
+        let at_rate = |cost: f64| -> Expression {
+            let mut charge = rate_or_slowest * cost * v;
+            for &(excess, z) in &above_slowest {
+                charge += excess * cost * z;
+            }
+            charge
+        };
         for &(source, cost, pass) in &input.choices[c].coefficients.absorbed_scans {
             let pass = pass.min(cost);
             *pass_charges
                 .entry((source, cost.to_bits()))
                 .or_default()
                 .entry((c, 0))
-                .or_insert_with(|| Expression::from(0.0)) += rate_or_slowest * pass * v;
+                .or_insert_with(|| Expression::from(0.0)) += at_rate(pass);
             *scan_charges
                 .entry(source)
                 .or_default()
                 .entry((c, 0))
-                .or_insert_with(|| Expression::from(0.0)) += rate_or_slowest * (cost - pass) * v;
+                .or_insert_with(|| Expression::from(0.0)) += at_rate(cost - pass);
         }
         if total == 0.0 {
             continue;
         }
         if let Some(source) = input.choices[c].scan_source {
-            let rate = rate_or_slowest;
             let pass = input.choices[c].scan_project_cost_per_unit_rate.min(total);
             *pass_charges
                 .entry((source, total.to_bits()))
                 .or_default()
                 .entry((c, 0))
-                .or_insert_with(|| Expression::from(0.0)) += rate * pass * v;
+                .or_insert_with(|| Expression::from(0.0)) += at_rate(pass);
             *scan_charges
                 .entry(source)
                 .or_default()
                 .entry((c, 0))
-                .or_insert_with(|| Expression::from(0.0)) += rate * (total - pass) * v;
+                .or_insert_with(|| Expression::from(0.0)) += at_rate(total - pass);
             continue;
         }
         let shared = shared_cost[c].min(total);
@@ -654,7 +680,31 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     // Query-time slots' scans, at the slot's group's slowest rate, each
     // slot's apart from its choice's other parts.
     for (c, choice) in input.choices.iter().enumerate() {
-        let slowest = slowest_rate(choice.group.0 as usize);
+        let g = choice.group.0 as usize;
+        let slowest = slowest_rate(g);
+        let with_scans = choice.coefficients.slots.iter().any(|slot| {
+            !slot.scans.is_empty()
+                && !matches!(slot.materialization, Materialization::MatAtIngestion(_))
+        });
+        if !with_scans {
+            continue;
+        }
+        // At the slot's rate: the slowest class's, plus the excess of the
+        // union its group's rate selector picks.
+        let mut above_slowest: Vec<(f64, Variable)> = Vec::new();
+        for (set, selector) in &rate_of[&g] {
+            let excess = input.union_rate[set] - slowest;
+            if excess > 0.0 {
+                above_slowest.push((excess, product(&mut vars, *selector, x[c])));
+            }
+        }
+        let at_rate = |cost: f64| -> Expression {
+            let mut charge = slowest * cost * x[c];
+            for &(excess, z) in &above_slowest {
+                charge += excess * cost * z;
+            }
+            charge
+        };
         for (i, slot) in choice.coefficients.slots.iter().enumerate() {
             if matches!(slot.materialization, Materialization::MatAtIngestion(_)) {
                 continue;
@@ -665,12 +715,12 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                     .entry((source, cost.to_bits()))
                     .or_default()
                     .entry((c, i + 1))
-                    .or_insert_with(|| Expression::from(0.0)) += slowest * pass * x[c];
+                    .or_insert_with(|| Expression::from(0.0)) += at_rate(pass);
                 *scan_charges
                     .entry(source)
                     .or_default()
                     .entry((c, i + 1))
-                    .or_insert_with(|| Expression::from(0.0)) += slowest * (cost - pass) * x[c];
+                    .or_insert_with(|| Expression::from(0.0)) += at_rate(cost - pass);
             }
         }
     }
