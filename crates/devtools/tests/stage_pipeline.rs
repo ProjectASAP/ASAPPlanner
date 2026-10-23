@@ -1233,9 +1233,13 @@ fn workload_set_index_and_files_validate() {
 }
 
 /// The committed workload examples (`examples.json` entries with a
-/// `workload`) are current: written with the default search from their
-/// workload file, deployment capabilities, cost model and accuracy
-/// guarantee mode (`accuracy_guarantees`, ignored when absent). Each carries its
+/// `workload`) are current: written with the default search (or the
+/// entry's `search`) from their workload file, the SQL tables in the
+/// `tables.json` next to it, deployment capabilities, cost model and
+/// accuracy guarantee mode (`accuracy_guarantees`, ignored when absent).
+/// A memo-MILP example is current up to its timings, certified, and
+/// carries the memo plan the viewer shows ([`check_memo_example`]). Each
+/// other one carries its
 /// data workload as the file declares it and the selected plan's stored
 /// outputs as `plan_installable` gives them, each mapped to a node of the
 /// selected Stage 2 candidate.
@@ -1251,7 +1255,7 @@ fn committed_workload_examples_are_current_with_data_workload_and_stored_outputs
         .iter()
         .filter(|e| e.get("workload").is_some())
         .collect();
-    assert_eq!(workload_examples.len(), 3);
+    assert_eq!(workload_examples.len(), 9);
     std::thread::scope(|scope| {
         for example in workload_examples {
             let root = &root;
@@ -1281,12 +1285,30 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
     if enforce {
         args.push("--enforce-accuracy-guarantees");
     }
+    let tables_path = path.parent().unwrap().join("tables.json");
+    let tables: Vec<String> = match tables_path.exists() {
+        true => serde_json::from_str::<Vec<Value>>(&std::fs::read_to_string(&tables_path).unwrap())
+            .unwrap()
+            .iter()
+            .map(Value::to_string)
+            .collect(),
+        false => Vec::new(),
+    };
+    for table in &tables {
+        args.extend(["--table", table.as_str()]);
+    }
+    let search = example.get("search").map(|s| s.as_str().unwrap());
+    if let Some(search) = search {
+        args.extend(["--search", search]);
+    }
     let document = document_of(&args);
     let committed: Value = serde_json::from_str(
         &std::fs::read_to_string(root.join(example["file"].as_str().unwrap())).unwrap(),
     )
     .unwrap();
-    assert!(document == committed, "regenerate {}", example["file"]);
+    if search != Some("memo-milp") {
+        assert!(document == committed, "regenerate {}", example["file"]);
+    }
 
     let workload: PlanningWorkload =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1298,6 +1320,10 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
     assert!(queries
         .iter()
         .all(|q| q["recurrence"]["repeated"].is_object() && q["predictability"].is_object()));
+    if search == Some("memo-milp") {
+        check_memo_example(document, committed, example);
+        return;
+    }
 
     let selection = &document["stage3_plan_selection"];
     let selected = selection["selected"].as_str().unwrap();
@@ -1362,6 +1388,101 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
         })
         .collect();
     assert_eq!(Value::Array(emitted), expected);
+}
+
+/// A memo-MILP example: current except for its search report, which may
+/// vary between runs (its selected plan and cost may not), certified (gap at most 1e-4), cheaper
+/// than its queries planned alone, and with a memo plan whose chosen
+/// candidates name groups and coupling sites in range, one of them shared.
+fn check_memo_example(document: Value, committed: Value, example: &Value) {
+    // Equally cheap solutions decode to the same plan in any order, so
+    // the memo plan, the rounds and the solver's bounds may vary between
+    // runs, and with the rounds the candidate ids (`P<round>-<k>`, from
+    // `L<round>…`); the selected plan and its cost do not.
+    let without_search = |document: &Value| {
+        let mut document = document.clone();
+        let physical = document["stage3_plan_selection"]["selected"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let logical = document["stage2_physical_asap_optimization"]["candidates"][0]
+            ["from_logical"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        document["stage3_plan_selection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("search");
+        let text = document
+            .to_string()
+            .replace(&format!("\"{physical}\""), "\"<selected>\"")
+            .replace(&format!("\"{logical}\""), "\"<selected logical>\"");
+        serde_json::from_str::<Value>(&text).unwrap()
+    };
+    assert!(
+        without_search(&document) == without_search(&committed),
+        "regenerate {}",
+        example["file"]
+    );
+    let cost = |document: &Value| {
+        document["stage3_plan_selection"]["search"]["incumbent_cost"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!((cost(&document) - cost(&committed)).abs() <= 1e-9 * cost(&committed));
+    let search = &document["stage3_plan_selection"]["search"];
+    assert_eq!(search["algorithm"], "memo-milp");
+    assert!(
+        search["milp"]["gap"].as_f64().unwrap() <= 1e-4,
+        "{} certified",
+        example["id"]
+    );
+    let incumbent = search["incumbent_cost"].as_f64().unwrap();
+    let alone = search["milp"]["queries_alone_cost"].as_f64().unwrap();
+    assert!(incumbent < alone, "{}: sharing saves", example["id"]);
+    let plan = &search["memo_plan"];
+    let groups = plan["groups"].as_array().unwrap();
+    let sites = plan["coupling_sites"].as_array().unwrap().len();
+    for (index, group) in groups.iter().enumerate() {
+        assert_eq!(group["group"], index);
+        if let Some(chosen) = group["chosen"].as_object() {
+            for field in ["implements", "reads"] {
+                let ids = chosen[field].as_array().unwrap();
+                assert!(ids
+                    .iter()
+                    .all(|g| (g.as_u64().unwrap() as usize) < groups.len()));
+            }
+            let at = chosen["coupling_sites"].as_array().unwrap();
+            assert!(at.iter().all(|s| (s.as_u64().unwrap() as usize) < sites));
+        }
+    }
+    // A group the plan shares: read by two or more chosen candidates or
+    // query roots.
+    let readers = |g: &Value| {
+        let read_by = groups
+            .iter()
+            .filter(|p| {
+                p["chosen"]["reads"]
+                    .as_array()
+                    .is_some_and(|reads| reads.contains(&g["group"]))
+            })
+            .count();
+        read_by + g["roots_of"].as_array().unwrap().len()
+    };
+    assert!(
+        groups
+            .iter()
+            .any(|g| readers(g) > 1 && !g["chosen"].is_null())
+            || plan["coupling_sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["readers"].as_array().unwrap().len() > 1)
+            || plan["scans_widened"] == true,
+        "{}: the plan shares a unit",
+        example["id"]
+    );
 }
 
 /// The `--promql` path's data workload is what it plans with: every metric

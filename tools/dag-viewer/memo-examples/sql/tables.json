@@ -1,0 +1,43 @@
+[
+  {
+    "name": "http",
+    "time_index": 0,
+    "columns": [
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "nullable": false
+      },
+      {
+        "name": "region",
+        "type": "utf8",
+        "nullable": false
+      },
+      {
+        "name": "service",
+        "type": "utf8",
+        "nullable": false
+      },
+      {
+        "name": "endpoint",
+        "type": "utf8",
+        "nullable": false
+      },
+      {
+        "name": "status",
+        "type": "utf8",
+        "nullable": false
+      },
+      {
+        "name": "user_id",
+        "type": "float64",
+        "nullable": false
+      },
+      {
+        "name": "latency",
+        "type": "float64",
+        "nullable": false
+      }
+    ]
+  }
+]

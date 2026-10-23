@@ -25,6 +25,10 @@
       { selector: 'node[group = "rel"]', style: { 'background-color': tok('--cat-rel'), 'border-color': tok('--cat-rel-line') } },
       { selector: 'node[group = "summary"]', style: { 'background-color': tok('--cat-summary'), 'border-color': tok('--cat-summary-line') } },
       { selector: 'node[group = "scalar"]', style: { 'background-color': tok('--cat-scalar'), 'border-color': tok('--cat-scalar-line'), 'border-style': 'dashed' } },
+      // Stage 2: the fill says when a node runs (the border keeps its
+      // category); the label's ⏱ line says it in words.
+      { selector: 'node.ingestionTime', style: { 'background-color': tok('--time-ingest') } },
+      { selector: 'node.queryTime', style: { 'background-color': tok('--time-query') } },
       { selector: 'node.root', style: { 'border-width': 3.5, 'border-color': tok('--accent') } },
       { selector: 'node:selected', style: { 'overlay-color': tok('--accent'), 'overlay-opacity': 0.14, 'overlay-padding': 5 } },
       { selector: 'edge', style: { width: 1.6, 'line-color': tok('--edge'), 'target-arrow-color': tok('--edge'), 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 0.9 } },
@@ -279,6 +283,7 @@
       renderRanking();
     }
     renderStoredOutputs();
+    renderMemoSearch();
   }
 
   const table = (head, body) => `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;
@@ -335,6 +340,21 @@
       tr.addEventListener('click', pick);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
     });
+  }
+
+  // The memo-MILP search's summary and the selected plan's shared units
+  // with their readers and threshold; hidden for other searches.
+  function renderMemoSearch() {
+    const view = memoSearchView(doc);
+    $('memoPanel').hidden = !view;
+    if (!view) return;
+    $('memo-meta').textContent = [memoSummaryText(view.summary),
+      view.scansWidened ? 'selected plan: the scan-widening variant of the solution' : ''].filter(Boolean).join(' · ');
+    $('memoShared').innerHTML = view.sharedUnits.length
+      ? table(['shared unit', 'kind', 'readers', 'queries', 'threshold', 'runs', 'strictest reader'],
+        view.sharedUnits.map((u) => `<tr><td class="wrap">${esc(u.unit)}</td><td>${esc(u.kind)}</td><td class="wrap">${esc(u.readers.join(', '))}</td><td>${esc(u.queries.join(', '))}</td>` +
+          `<td class="wrap">${esc(u.threshold)}</td><td class="wrap">${esc(u.schedule)}</td><td>${esc(u.strictest)}</td></tr>`).join(''))
+      : '<span class="status">The selected plan shares nothing: every group has one reader.</span>';
   }
 
   // Show the selected plan in the Stage 2 lane and select its node `id`.

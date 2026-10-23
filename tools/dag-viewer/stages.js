@@ -270,7 +270,8 @@ function validateStagePipeline(doc) {
   errors.push(...validateDataWorkload(doc.workload.data_workload));
   if (errors.length) return errors;
   const selectionErrors = validateSelection(stage3, physicalById);
-  return selectionErrors.length ? selectionErrors : validateStoredOutputs(stage3, physicalById);
+  if (selectionErrors.length) return selectionErrors;
+  return validateStoredOutputs(stage3, physicalById).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
 }
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
@@ -403,7 +404,7 @@ function accuracyGuaranteesText(doc) {
 // exhaustive search, the rejections by cause with their counts. "" for a
 // document that does not say.
 function searchText(doc) {
-  const name = { default: 'default search', exhaustive: 'exhaustive search' }[doc.search];
+  const name = { default: 'default search', exhaustive: 'exhaustive search', 'memo-brute-force': 'memo brute-force search', 'memo-milp': 'memo-MILP search' }[doc.search];
   if (!name) return '';
   const parts = [name];
   const selection = doc.stage3_plan_selection || {};
@@ -426,6 +427,7 @@ function searchText(doc) {
     if (search.raw_scan_candidates_skipped) parts.push(`${search.raw_scan_candidates_skipped} Stage 1 candidates skipped: they scan raw data at query time`);
     if (search.raw_scan_assignments_skipped) parts.push(`${search.raw_scan_assignments_skipped} Stage 2 assignments skipped: they scan raw data at query time`);
     if (search.searched_as_one) parts.push(`searched as one: ${cause(search.searched_as_one)}`);
+    if (search.routed_to_legacy) parts.push(`legacy search ran instead: ${cause(search.routed_to_legacy)}`);
     const classes = (search.interchangeable_queries || []).map((members) => `(${members.map((i) => queryIds[i] || `q${i + 1}`).join(', ')})`);
     if (classes.length) parts.push(`interchangeable queries: ${classes.join(', ')}`);
   }
@@ -583,6 +585,15 @@ function paneWindowText(k, width) {
   return `t−${durationText((k + 1) * width)} … ${end}`;
 }
 
+// A physical node's timing as its lane class, which colors its fill:
+// `ingestionTime`, `queryTime`, or "" without a timing (a logical node).
+function timingClass(timing) {
+  const text = timing === undefined || timing === null ? '' : formatTiming(timing);
+  if (text === 'ingestion time') return 'ingestionTime';
+  if (text === 'query time') return 'queryTime';
+  return '';
+}
+
 // A stage DAG (`dag`, as the document writes it) as cytoscape elements:
 // one node per operator (`n<id>`), one `Scalar` node per standalone scalar
 // query (`s<query position>`) over the nodes it reads, and one edge per
@@ -626,13 +637,13 @@ function stageLaneElements(dag, options) {
         const common = { paneOf: node.id, pane: k, reachedBy: queries, rootFor: [], timing: node.timing, node: node.raw };
         if (k > 0) {
           nodes.push({ data: Object.assign({ id: `${id}s`, nodeId: `${node.id}p${k}s`, kind: 'TimeShift', group: group('TimeShift'),
-            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: 'pane' });
+            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
         }
         nodes.push({ data: Object.assign({ id: `${id}r`, nodeId: `${node.id}p${k}r`, kind: 'TimeRange', group: group('TimeRange'),
-          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: 'pane' });
+          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
         nodes.push({ data: Object.assign({ id, nodeId: `${node.id}p${k}`, kind: 'pane', group: 'summary',
           label: [`pane ${k + 1} of ${body.pane_count}`, `summary: ${summaryFamilyText(body.family)}`, `window ${paneWindowText(k, width)}`,
-            'click to collapse'].join('\n') }, common), classes: 'pane' });
+            'click to collapse'].join('\n') }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
       }
       return;
     }
@@ -651,7 +662,7 @@ function stageLaneElements(dag, options) {
         id: `n${node.id}`, nodeId: node.id, kind: node.kind, group: group(node.kind), label: lines.join('\n'),
         rootFor: roots, reachedBy: queries, timing: node.timing, cost, node: node.raw, expandable: node.kind === 'PaneChain',
       },
-      classes: node.timing !== undefined && formatTiming(node.timing) === 'ingestion time' ? 'ingestionTime' : '',
+      classes: timingClass(node.timing),
     });
   });
   const edges = [];
@@ -972,4 +983,200 @@ function planningWorkloadQueries(workload) {
 // stage document (to show).
 function isPlanningWorkload(value) {
   return !!value && typeof value === 'object' && !isStagePipelineDocument(value) && !!value.query_workload && typeof value.query_workload === 'object';
+}
+
+// The memo-MILP search's selected plan over the memo
+// (`stage3_plan_selection.search.memo_plan`): every group, coupling-site and
+// query reference in range. An absent plan has nothing to check.
+function validateMemoPlan(plan, queryCount) {
+  if (plan === undefined || plan === null) return [];
+  const at = 'stage3_plan_selection.search.memo_plan';
+  if (typeof plan !== 'object' || !Array.isArray(plan.groups) || !Array.isArray(plan.coupling_sites)) return [`${at} must have groups and coupling_sites arrays`];
+  const errors = [];
+  const groupCount = plan.groups.length;
+  const siteCount = plan.coupling_sites.length;
+  const inRange = (ids, n) => Array.isArray(ids) && ids.every((i) => Number.isInteger(i) && i >= 0 && i < n);
+  plan.groups.forEach((group, index) => {
+    const where = `${at}.groups[${index}]`;
+    if (!group || group.group !== index) { errors.push(`${where}: group must be ${index}`); return; }
+    if (!inRange(group.parents, groupCount)) errors.push(`${where}: parents must name groups`);
+    if (!inRange(group.queries, queryCount) || !inRange(group.roots_of, queryCount)) errors.push(`${where}: queries and roots_of must name queries`);
+    if (group.implemented_by !== null && group.implemented_by !== undefined && !inRange([group.implemented_by], groupCount)) errors.push(`${where}: implemented_by must name a group`);
+    const chosen = group.chosen;
+    if (chosen && (!inRange(chosen.implements, groupCount) || !inRange(chosen.reads, groupCount) || !inRange(chosen.coupling_sites, siteCount))) {
+      errors.push(`${where}.chosen: implements and reads must name groups, coupling_sites must name coupling sites`);
+    }
+  });
+  plan.coupling_sites.forEach((site, index) => {
+    if (!site || !inRange(site.readers, groupCount)) errors.push(`${at}.coupling_sites[${index}]: readers must name groups`);
+  });
+  return errors;
+}
+
+// A coupling site's chosen threshold as text: a shared build's size, a pane
+// chain's grid, a scan's label set or a raw horizon.
+function couplingThresholdText(kind, threshold) {
+  const t = threshold || {};
+  switch (kind) {
+    case 'SharedBuildSize':
+      if ('state' in t) return `finer state ${summaryFamilyText(t.state)}`;
+      if (!t.params) return 'exact accumulator (no size)';
+      return [Object.keys(t.params)[0]].concat(wireParams(t.params)).join(' · ');
+    case 'PaneChain': return `${durationText(t.pane_width_ms)} panes over ${durationText(t.longest_window_ms)} · ${summaryFamilyText(t.family)}`;
+    case 'ScanLabels': return `labels ${(t.labels || []).join(', ') || 'none'}`;
+    case 'RawHorizon': return `raw horizon ${durationText(t.horizon_ms)}`;
+    default: return compactWire(threshold);
+  }
+}
+
+function gcd(a, b) { return b ? gcd(b, a % b) : a; }
+
+// The memo-MILP search's view of a document, or null when its search built
+// no memo: the MILP summary (incumbent cost, lower bound, gap, rounds,
+// whether it certified, and the cost of each query planned alone), each
+// memo group with its chosen implementation candidate, and the selected
+// plan's shared units: each group one node serves to several readers, and
+// each coupling site read by several groups, with its readers, the queries
+// behind them, their repeat intervals (a shared unit runs on their union)
+// and the threshold (a size is set by its strictest reader).
+function memoSearchView(doc) {
+  const search = (doc.stage3_plan_selection || {}).search || {};
+  const milp = search.milp;
+  const plan = search.memo_plan;
+  if (!milp && !plan) return null;
+  const queries = doc.workload.queries;
+  const qid = (i) => (queries[i] || {}).id || `q${i + 1}`;
+  const gid = (g) => `G${g + 1}`;
+  const interval = (i) => ((queries[i] || {}).requirements || {}).repeat_interval_ms;
+  const maxError = (i) => (((queries[i] || {}).requirements || {}).accuracy || {}).max_error;
+  const fixed = (x) => (typeof x !== 'number' ? null : (x !== 0 && Math.abs(x) < 1e-3 ? x.toExponential(3) : String(Number(x.toPrecision(4)))));
+  const summary = milp ? {
+    incumbent: fixed(search.incumbent_cost),
+    lowerBound: fixed(milp.lower_bound),
+    gap: typeof milp.gap === 'number' ? milp.gap : null,
+    rounds: milp.rounds,
+    certified: typeof milp.gap === 'number' && milp.gap <= 1e-4 && !milp.time_limit_reached,
+    alone: fixed(milp.queries_alone_cost),
+    saving: typeof milp.queries_alone_cost === 'number' && milp.queries_alone_cost > 0 && typeof search.incumbent_cost === 'number'
+      ? 1 - search.incumbent_cost / milp.queries_alone_cost : null,
+    clusters: (milp.clusters || []).length,
+    memo: search.memo || null,
+  } : null;
+  if (!plan) return { summary, groups: [], sharedUnits: [] };
+  // The queries (and their schedule and strictest target) behind readers.
+  const behind = (groupIds) => [...new Set(groupIds.flatMap((g) => plan.groups[g].queries))].sort((a, b) => a - b);
+  const schedule = (qs) => {
+    const every = [...new Set(qs.map(interval).filter((ms) => typeof ms === 'number'))].sort((a, b) => a - b);
+    if (every.length < 2) return every.length ? `every ${durationText(every[0])}` : '—';
+    return `${every.map((ms) => `every ${durationText(ms)}`).join(' ∪ ')} → on a ${durationText(every.reduce(gcd))} grid`;
+  };
+  const strictest = (qs) => {
+    const approx = qs.filter((q) => typeof maxError(q) === 'number');
+    if (!approx.length) return '—';
+    const best = Math.min(...approx.map(maxError));
+    return `${approx.filter((q) => maxError(q) === best).map(qid).join(', ')} (ε=${best})`;
+  };
+  const groups = plan.groups.map((g) => {
+    const [kind, body] = stageOperatorParts(g.operator);
+    const lines = stageNodeLines(g.operator, null).slice(1);
+    const c = g.chosen;
+    return {
+      id: gid(g.group),
+      label: [kind].concat(lines).join(' · '),
+      reads: stageLogicalChildren(body).map(gid),
+      readBy: g.parents.map(gid).concat(g.roots_of.map((q) => `${qid(q)} (root)`)),
+      queries: g.queries.map(qid),
+      candidates: g.candidates,
+      chosen: c ? [`${c.origin} · ${c.operator}`,
+        c.implements.length > 1 ? `fuses ${c.implements.map(gid).join(', ')}` : '',
+        c.reads.length ? `reads ${c.reads.map(gid).join(', ')}` : '',
+        c.built_once ? 'built once per evaluation' : '',
+        c.coupling_sites.length ? `at ${c.coupling_sites.map((s) => `S${s + 1}`).join(', ')}` : ''].filter(Boolean).join(' · ')
+        : (g.implemented_by !== null && g.implemented_by !== undefined ? `implemented by ${gid(g.implemented_by)}'s candidate`
+          : (g.parents.length ? 'no choice: inside its readers\' candidates' : 'not read by the plan')),
+      shared: g.parents.length + g.roots_of.length > 1,
+    };
+  });
+  // The plan's readers of group g: the queries whose root it is, and the
+  // parents whose chosen candidate (or the candidate fusing them) reads it.
+  const chosenOf = (p) => {
+    const parent = plan.groups[p];
+    if (parent.chosen) return [p, parent.chosen];
+    const by = parent.implemented_by;
+    return by === null || by === undefined ? [null, null] : [by, plan.groups[by].chosen];
+  };
+  const planReaders = (g) => {
+    const parents = [...new Set(g.parents.map(chosenOf).filter(([, c]) => c && c.reads.includes(g.group)).map(([p]) => p))];
+    return parents.map(gid).concat(g.roots_of.map(qid));
+  };
+  const sharedUnits = [];
+  plan.groups.forEach((g) => {
+    if (!g.chosen && (g.implemented_by === null || g.implemented_by === undefined)) return;
+    const readers = planReaders(g);
+    if (readers.length < 2) return;
+    const qs = g.queries;
+    sharedUnits.push({
+      unit: `${gid(g.group)} · ${groups[g.group].label}`,
+      kind: 'shared group',
+      readers,
+      queries: qs.map(qid),
+      threshold: g.chosen ? (g.chosen.built_once ? 'one node, built once per evaluation' : 'one node; its query-time part runs per reader') : `inside ${gid(g.implemented_by)}'s candidate`,
+      schedule: schedule(qs),
+      strictest: strictest(qs),
+    });
+  });
+  plan.coupling_sites.forEach((site, index) => {
+    const qs = behind(site.readers);
+    if (site.readers.length < 2 && qs.length < 2) return;
+    sharedUnits.push({
+      unit: `S${index + 1}`,
+      kind: `coupling site · ${site.kind}`,
+      readers: site.readers.map(gid),
+      queries: qs.map(qid),
+      threshold: `${couplingThresholdText(site.kind, site.threshold)} (1 of ${site.thresholds} thresholds)`,
+      schedule: schedule(qs),
+      strictest: strictest(qs),
+    });
+  });
+  // Scan widening is no model variable: when the selected plan is the
+  // widened variant, a source's scan groups are one scan.
+  if (plan.scans_widened) {
+    const bySource = new Map();
+    plan.groups.forEach((g) => {
+      const [kind, body] = stageOperatorParts(g.operator);
+      if (kind !== 'Scan') return;
+      const source = wireSource(body.source);
+      if (!bySource.has(source)) bySource.set(source, []);
+      bySource.get(source).push(g);
+    });
+    bySource.forEach((scans, source) => {
+      if (scans.length < 2) return;
+      const readers = scans.flatMap((g) => g.parents);
+      const qs = behind(scans.map((g) => g.group));
+      sharedUnits.push({
+        unit: `${scans.map((g) => gid(g.group)).join(' + ')} · Scan of ${source}`,
+        kind: 'widened scan',
+        readers: readers.map(gid),
+        queries: qs.map(qid),
+        threshold: 'one scan, widened to the union of its readers\' labels',
+        schedule: schedule(qs),
+        strictest: strictest(qs),
+      });
+    });
+  }
+  return { summary, groups, sharedUnits, scansWidened: !!plan.scans_widened };
+}
+
+// The MILP summary as one line, e.g. "incumbent 1.2 · lower bound 1.2 ·
+// gap 0 · 3 rounds · certified · queries planned alone 2.4 (sharing saves
+// 50%)".
+function memoSummaryText(summary) {
+  if (!summary) return '';
+  const parts = [`incumbent ${summary.incumbent ?? '—'}`, `lower bound ${summary.lowerBound ?? '—'}`,
+    `gap ${summary.gap === null ? '—' : (summary.gap === 0 ? '0' : summary.gap.toExponential(2))}`, `${summary.rounds} round${summary.rounds === 1 ? '' : 's'}`,
+    summary.certified ? 'certified (gap ≤ 1e-4)' : 'not certified'];
+  if (summary.clusters > 1) parts.push(`${summary.clusters} independent clusters`);
+  if (summary.memo) parts.push(`${summary.memo.groups} groups (${summary.memo.shared_groups} shared), ${summary.memo.candidates} implementation candidates`);
+  if (summary.alone !== null) parts.push(`queries planned alone ${summary.alone}${summary.saving === null ? '' : ` (sharing saves ${Number((summary.saving * 100).toFixed(1))}%)`}`);
+  return parts.join(' · ');
 }

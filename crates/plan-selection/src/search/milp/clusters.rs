@@ -221,6 +221,8 @@ pub(crate) fn combine(
         .sum();
     selection.search.incumbent_cost = Some(price);
     selection.search.milp = Some(milp_report(&found));
+    selection.search.memo_plan =
+        combined_memo_plan(found.iter().map(|(s, _, _, _)| s.search.memo_plan.as_ref()));
     let roots = combined;
     Some((selection, selected, roots))
 }
@@ -255,7 +257,43 @@ fn milp_report(
         time_limit_reached: reports.iter().any(|r| r.time_limit_reached),
         decode_failures: reports.iter().map(|r| r.decode_failures).sum(),
         clusters: found.iter().map(|(_, _, _, c)| c.clone()).collect(),
+        queries_alone_cost: reports.iter().map(|r| r.queries_alone_cost).sum(),
     }
+}
+
+/// The workload's memo plan from its clusters' (in cluster order): each
+/// cluster's groups and coupling sites after the earlier clusters',
+/// renumbered. A cluster whose warm start was selected has no plan and
+/// adds no groups; `None` when no cluster has one.
+fn combined_memo_plan<'a>(
+    plans: impl Iterator<Item = Option<&'a crate::MemoPlanReport>>,
+) -> Option<crate::MemoPlanReport> {
+    let mut combined: Option<crate::MemoPlanReport> = None;
+    for plan in plans.flatten() {
+        let combined = combined.get_or_insert_with(Default::default);
+        combined.scans_widened |= plan.scans_widened;
+        let (groups, sites) = (combined.groups.len(), combined.coupling_sites.len());
+        let shift = |ids: &[usize], by: usize| ids.iter().map(|i| i + by).collect::<Vec<_>>();
+        for group in &plan.groups {
+            let mut group = group.clone();
+            group.group += groups;
+            group.operator = group.operator.map_children(|c| c.map(|g| g + groups));
+            group.parents = shift(&group.parents, groups);
+            group.implemented_by = group.implemented_by.map(|g| g + groups);
+            if let Some(chosen) = &mut group.chosen {
+                chosen.implements = shift(&chosen.implements, groups);
+                chosen.reads = shift(&chosen.reads, groups);
+                chosen.coupling_sites = shift(&chosen.coupling_sites, sites);
+            }
+            combined.groups.push(group);
+        }
+        for site in &plan.coupling_sites {
+            let mut site = site.clone();
+            site.readers = shift(&site.readers, groups);
+            combined.coupling_sites.push(site);
+        }
+    }
+    combined
 }
 
 #[cfg(test)]
@@ -291,6 +329,70 @@ mod tests {
     /// Queries over two gauges are two clusters, those over one gauge
     /// reaching its scan group; one coupling site (a shared build's size,
     /// a source's raw horizon) carried by candidates of both joins them.
+    /// Clusters' memo plans are concatenated with every group and
+    /// coupling-site index moved past the earlier clusters'; a cluster
+    /// without a plan (its warm start selected) adds nothing.
+    #[test]
+    fn combined_memo_plans_shift_group_and_site_indices() {
+        let (memo, _) = memo(&["sum_over_time(m[5m])"]);
+        let plan = |scans_widened| crate::MemoPlanReport {
+            groups: memo
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(g, group)| {
+                    let mut children = group.children.iter();
+                    crate::MemoGroupReport {
+                        group: g,
+                        operator: group
+                            .node
+                            .operator
+                            .map_children(|_| children.next().map(|c| c.0 as usize)),
+                        parents: group.parents.iter().map(|p| p.0 as usize).collect(),
+                        queries: vec![0],
+                        roots_of: group.roots_of.clone(),
+                        candidates: 1,
+                        chosen: Some(crate::ChosenCandidateReport {
+                            implements: vec![g],
+                            reads: group.children.iter().map(|c| c.0 as usize).collect(),
+                            coupling_sites: vec![0],
+                            ..Default::default()
+                        }),
+                        implemented_by: None,
+                    }
+                })
+                .collect(),
+            coupling_sites: vec![crate::CouplingSiteReport {
+                readers: vec![0],
+                ..Default::default()
+            }],
+            scans_widened,
+        };
+        let (first, second) = (plan(false), plan(true));
+        let n = first.groups.len();
+        assert!(n >= 2);
+        let combined = combined_memo_plan([Some(&first), None, Some(&second)].into_iter()).unwrap();
+        assert_eq!(combined.groups.len(), 2 * n);
+        assert!(combined.scans_widened);
+        assert_eq!(combined.coupling_sites[1].readers, vec![n]);
+        for (g, group) in combined.groups.iter().enumerate().skip(n) {
+            let own = &first.groups[g - n];
+            assert_eq!(group.group, g);
+            assert_eq!(
+                group.parents,
+                own.parents.iter().map(|p| p + n).collect::<Vec<_>>()
+            );
+            let chosen = group.chosen.as_ref().unwrap();
+            assert_eq!(chosen.implements, vec![g]);
+            assert_eq!(chosen.coupling_sites, vec![1]);
+            assert_eq!(
+                group.operator,
+                own.operator.map_children(|c| c.map(|c| c + n))
+            );
+        }
+        assert!(combined_memo_plan([None, None].into_iter()).is_none());
+    }
+
     #[test]
     fn a_shared_group_or_coupling_site_joins_clusters() {
         let models = PlanningModels::builtin();

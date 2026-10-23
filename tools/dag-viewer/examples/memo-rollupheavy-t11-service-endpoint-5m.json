@@ -1,0 +1,3867 @@
+{
+  "accuracy_guarantees": "enforced",
+  "deployment_capabilities": {
+    "query_time_results_retained": false,
+    "raw_data_retained": true,
+    "supported_summaries": [
+      {
+        "family": "UnivMon",
+        "readouts": [
+          "Total",
+          "Distinct",
+          "FrequencyL2",
+          "FrequencyEntropy"
+        ]
+      },
+      {
+        "family": "Kll",
+        "readouts": [
+          "Quantile"
+        ]
+      },
+      {
+        "family": "Cms",
+        "readouts": [
+          "Total"
+        ]
+      },
+      {
+        "family": "Hll",
+        "readouts": [
+          "Total",
+          "Distinct"
+        ]
+      },
+      {
+        "family": "DDSketch",
+        "readouts": [
+          "Total",
+          "Quantile"
+        ]
+      },
+      {
+        "family": "CmsWithHeap",
+        "readouts": [
+          "TopK"
+        ]
+      },
+      {
+        "family": "Kmv",
+        "readouts": [
+          "Total",
+          "Distinct"
+        ]
+      },
+      {
+        "family": "CountSketchWithHeap",
+        "readouts": [
+          "TopK"
+        ]
+      }
+    ]
+  },
+  "format": "asap-stage-pipeline/v1",
+  "search": "memo-milp",
+  "stage0_query_language_frontends": {
+    "dag": {
+      "nodes": [
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "region",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "service",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "endpoint",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "status",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "user_id",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "latency",
+                      "nullable": false,
+                      "table": "http"
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "Table": {
+                    "table_ref": "http"
+                  }
+                }
+              }
+            }
+          },
+          "result_kind": "relation",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 0,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
+              }
+            }
+          },
+          "result_kind": "relation",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 1,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "accuracy": {
+                      "accuracy_metric": "relative",
+                      "accuracy_scope": "per_value",
+                      "failure_probability": 0.05,
+                      "max_error": 0.05
+                    },
+                    "cols": [
+                      5
+                    ],
+                    "kind": "cardinality"
+                  }
+                ],
+                "output_names": [
+                  "count(DISTINCT http.user_id)"
+                ],
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          },
+          "result_kind": "relation",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count(DISTINCT http.user_id)",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Project": {
+                "child": 2,
+                "cols": [
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          },
+          "result_kind": "relation",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "region",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "service",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "endpoint",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "status",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "user_id",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "latency",
+                      "nullable": false,
+                      "table": "http"
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "Table": {
+                    "table_ref": "http"
+                  }
+                }
+              }
+            }
+          },
+          "result_kind": "relation",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 4,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
+              }
+            }
+          },
+          "result_kind": "relation",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 5,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "accuracy": {
+                      "accuracy_metric": "relative",
+                      "accuracy_scope": "per_value",
+                      "failure_probability": 0.05,
+                      "max_error": 0.05
+                    },
+                    "cols": [
+                      5
+                    ],
+                    "kind": "cardinality"
+                  }
+                ],
+                "output_names": [
+                  "count(DISTINCT http.user_id)"
+                ],
+                "reduction": {
+                  "Reduce": [
+                    2,
+                    3
+                  ]
+                }
+              }
+            }
+          },
+          "result_kind": "relation",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count(DISTINCT http.user_id)",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Project": {
+                "child": 6,
+                "cols": [
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 1
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 2
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          },
+          "result_kind": "relation",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "timing": null
+        }
+      ],
+      "roots": [
+        {
+          "Operator": 3
+        },
+        {
+          "Operator": 7
+        }
+      ]
+    }
+  },
+  "stage1_logical_asap_optimization": {
+    "candidates": [
+      {
+        "dag": {
+          "nodes": [
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "absolute",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  }
+                }
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Scan": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": true,
+                      "fields": [
+                        {
+                          "dtype": {
+                            "Plain": "timestamp"
+                          },
+                          "name": "ts",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "region",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "service",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "endpoint",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "status",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "user_id",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "latency",
+                          "nullable": false,
+                          "table": "http"
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "Table": {
+                        "table_ref": "http"
+                      }
+                    }
+                  }
+                }
+              },
+              "result_kind": "relation",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "region",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "status",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "user_id",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "http"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "absolute",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  }
+                }
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "TimeRange": {
+                    "child": 0,
+                    "kind": "range",
+                    "range": {
+                      "nanos": 0,
+                      "secs": 300
+                    }
+                  }
+                }
+              },
+              "result_kind": "relation",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "region",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "status",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "user_id",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "http"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": null,
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "SummaryAgg": {
+                    "child": 1,
+                    "family": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "filter": null,
+                    "grouping": "PerSubpopulationInstance",
+                    "input": {
+                      "item": null,
+                      "weight": {
+                        "Column": {
+                          "Qualified": {
+                            "name": "user_id",
+                            "table": "http"
+                          }
+                        }
+                      },
+                      "weight_domain": {
+                        "kind": "unknown_or_signed"
+                      }
+                    },
+                    "reduction": {
+                      "Reduce": [
+                        2,
+                        3
+                      ]
+                    }
+                  }
+                }
+              },
+              "result_kind": "state",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "timing": null
+            },
+            {
+              "guarantee": null,
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "SummaryMerge": {
+                    "children": [
+                      2
+                    ],
+                    "group_by": [
+                      0
+                    ]
+                  }
+                }
+              },
+              "result_kind": "state",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "SummaryEstimate": {
+                    "query": "Cardinality",
+                    "summary_input": 3
+                  }
+                }
+              },
+              "result_kind": "relation",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "cardinality",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 4,
+                    "cols": [
+                      {
+                        "alias": "service",
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "count(DISTINCT http.user_id)",
+                        "expr": {
+                          "Column": 1
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              },
+              "result_kind": "relation",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "count(DISTINCT http.user_id)",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 5,
+                    "cols": [
+                      {
+                        "alias": null,
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "value",
+                        "expr": {
+                          "Column": 1
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              },
+              "result_kind": "relation",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "SummaryEstimate": {
+                    "query": "Cardinality",
+                    "summary_input": 2
+                  }
+                }
+              },
+              "result_kind": "relation",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "cardinality",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 7,
+                    "cols": [
+                      {
+                        "alias": "service",
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "endpoint",
+                        "expr": {
+                          "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "count(DISTINCT http.user_id)",
+                        "expr": {
+                          "Column": 2
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              },
+              "result_kind": "relation",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "count(DISTINCT http.user_id)",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 8,
+                    "cols": [
+                      {
+                        "alias": null,
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": null,
+                        "expr": {
+                          "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "value",
+                        "expr": {
+                          "Column": 2
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              },
+              "result_kind": "relation",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "timing": null
+            }
+          ],
+          "roots": [
+            {
+              "Operator": 6
+            },
+            {
+              "Operator": 9
+            }
+          ]
+        },
+        "display_name": "Q1 exact · Q2 exact",
+        "id": "L1-0"
+      }
+    ],
+    "capped": false,
+    "combinations": 1,
+    "pass1_pruned": []
+  },
+  "stage2_physical_asap_optimization": {
+    "candidates": [
+      {
+        "dag": {
+          "edges": [
+            {
+              "consumer": 1,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "region",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "status",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "user_id",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "http"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 0,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 2,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "region",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "status",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "user_id",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "http"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 1,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 3,
+              "data_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "producer": 2,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 4,
+              "data_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "producer": 3,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 5,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "cardinality",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "producer": 4,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 6,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "count(DISTINCT http.user_id)",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "producer": 5,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 7,
+              "data_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "producer": 2,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 8,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "cardinality",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "producer": 7,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 9,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "count(DISTINCT http.user_id)",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "producer": 8,
+              "role": "Input",
+              "window": "NotApplicable"
+            }
+          ],
+          "nodes": [
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "absolute",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  }
+                }
+              },
+              "id": 0,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "region",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "status",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "user_id",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "http"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Scan": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": true,
+                      "fields": [
+                        {
+                          "dtype": {
+                            "Plain": "timestamp"
+                          },
+                          "name": "ts",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "region",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "service",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "endpoint",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "status",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "user_id",
+                          "nullable": false,
+                          "table": "http"
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "latency",
+                          "nullable": false,
+                          "table": "http"
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "Table": {
+                        "table_ref": "http"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "absolute",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  }
+                }
+              },
+              "id": 1,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "region",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "status",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "user_id",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "http"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "TimeRange": {
+                    "child": 0,
+                    "kind": "range",
+                    "range": {
+                      "nanos": 0,
+                      "secs": 300
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": null,
+              "id": 2,
+              "materialization": {
+                "MatAtQuery": "Memory"
+              },
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "SummaryAgg": {
+                    "child": 1,
+                    "family": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "filter": null,
+                    "grouping": "PerSubpopulationInstance",
+                    "input": {
+                      "item": null,
+                      "weight": {
+                        "Column": {
+                          "Qualified": {
+                            "name": "user_id",
+                            "table": "http"
+                          }
+                        }
+                      },
+                      "weight_domain": {
+                        "kind": "unknown_or_signed"
+                      }
+                    },
+                    "reduction": {
+                      "Reduce": [
+                        2,
+                        3
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": null,
+              "id": 3,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "algorithm": "Kmv",
+                          "category": "Cardinality",
+                          "params": {
+                            "Kmv": {
+                              "k": 3001,
+                              "relative_error": 0.05
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "SummaryMerge": {
+                    "children": [
+                      2
+                    ],
+                    "group_by": [
+                      0
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "id": 4,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "cardinality",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "SummaryEstimate": {
+                    "query": "Cardinality",
+                    "summary_input": 3
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "id": 5,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "count(DISTINCT http.user_id)",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 4,
+                    "cols": [
+                      {
+                        "alias": "service",
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "count(DISTINCT http.user_id)",
+                        "expr": {
+                          "Column": 1
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "id": 6,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 5,
+                    "cols": [
+                      {
+                        "alias": null,
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "value",
+                        "expr": {
+                          "Column": 1
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "id": 7,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": "http"
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "cardinality",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "SummaryEstimate": {
+                    "query": "Cardinality",
+                    "summary_input": 2
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "id": 8,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "count(DISTINCT http.user_id)",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 7,
+                    "cols": [
+                      {
+                        "alias": "service",
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "endpoint",
+                        "expr": {
+                          "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "count(DISTINCT http.user_id)",
+                        "expr": {
+                          "Column": 2
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "provenance": [
+                  {
+                    "algorithm": "Kmv",
+                    "contract": "kmv_exact_below_k_chernoff_v1",
+                    "kind": "sketch_evaluation",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    },
+                    "query": "Cardinality"
+                  }
+                ],
+                "spec": {
+                  "accuracy_metric": "relative",
+                  "accuracy_scope": "per_value",
+                  "error": {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  "failure_probability": {
+                    "op": "constant",
+                    "value": 0.04998003174606404
+                  }
+                }
+              },
+              "id": 9,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "service",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "endpoint",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "int64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 8,
+                    "cols": [
+                      {
+                        "alias": null,
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": null,
+                        "expr": {
+                          "Column": 1
+                        }
+                      },
+                      {
+                        "alias": "value",
+                        "expr": {
+                          "Column": 2
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              }
+            }
+          ],
+          "roots": [
+            6,
+            9
+          ],
+          "scalar_roots": []
+        },
+        "display_name": "Q1 exact · Q2 exact · query time, shared: Kmv",
+        "from_logical": "L1-0",
+        "id": "P1-0"
+      }
+    ],
+    "pruned": []
+  },
+  "stage3_plan_selection": {
+    "accepted": {
+      "P1-0": [
+        {
+          "accepted_metric": "relative",
+          "accepted_regardless_of_guarantee": false,
+          "guarantee_check_rejection": null,
+          "sketches": [
+            "Kmv"
+          ],
+          "summary": "metric relative; accepted relative (Kmv)",
+          "target_metric": "relative"
+        },
+        {
+          "accepted_metric": "relative",
+          "accepted_regardless_of_guarantee": false,
+          "guarantee_check_rejection": null,
+          "sketches": [
+            "Kmv"
+          ],
+          "summary": "metric relative; accepted relative (Kmv)",
+          "target_metric": "relative"
+        }
+      ]
+    },
+    "costs": {
+      "P1-0": {
+        "cost_per_second": 1.391973629526537e-6,
+        "cost_unit": "cost_per_second",
+        "cpu_core_seconds_per_second": 0.11800116666666663,
+        "per_node": {
+          "0": {
+            "cost_per_second": 1.1019120119435632e-6,
+            "cpu_core_seconds_per_second": 0.098,
+            "detail": "scan 600000000 samples; x 0.0167/s; keeps 52800000000 bytes of raw data on disk; holds 88 bytes for 7080.0 ms",
+            "multiplier": 1,
+            "operator": "Scan",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "1": {
+            "cost_per_second": 1.1244001194356325e-7,
+            "cpu_core_seconds_per_second": 0.01,
+            "detail": "time range 300s: keep 600000000 of 600000000 rows; x 0.0167/s; holds 88 bytes for 7080.0 ms",
+            "multiplier": 1,
+            "operator": "TimeRange",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "2": {
+            "cost_per_second": 1.4502423513347902e-7,
+            "cpu_core_seconds_per_second": 0.01,
+            "detail": "build Kmv into 10000 states: 600000000 rows x depth 1; x 0.0167/s; holds 240080000 bytes for 7080.0 ms",
+            "multiplier": 1,
+            "operator": "SummaryAgg",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "3": {
+            "cost_per_second": 3.258610913347904e-8,
+            "cpu_core_seconds_per_second": 1.6666666666666665e-7,
+            "detail": "merge 10000 states into 10000; x 0.0167/s; holds 240080000 bytes for 7080.0 ms",
+            "multiplier": 1,
+            "operator": "SummaryMerge",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "4": {
+            "cost_per_second": 1.874e-12,
+            "cpu_core_seconds_per_second": 1.6666666666666665e-7,
+            "detail": "estimate 10000 groups x 1; x 0.0167/s",
+            "multiplier": 1,
+            "operator": "SummaryEstimate",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "5": {
+            "cost_per_second": 1.877257337734103e-12,
+            "cpu_core_seconds_per_second": 1.6666666666666665e-7,
+            "detail": "operator: pass 10000 rows; x 0.0167/s; holds 24 bytes for 7080.0 ms",
+            "multiplier": 1,
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "6": {
+            "cost_per_second": 1.877257337734103e-12,
+            "cpu_core_seconds_per_second": 1.6666666666666665e-7,
+            "detail": "operator: pass 10000 rows; x 0.0167/s; holds 24 bytes for 7080.0 ms",
+            "multiplier": 1,
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "7": {
+            "cost_per_second": 1.874e-12,
+            "cpu_core_seconds_per_second": 1.6666666666666665e-7,
+            "detail": "estimate 10000 groups x 1; x 0.0167/s",
+            "multiplier": 1,
+            "operator": "SummaryEstimate",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "8": {
+            "cost_per_second": 1.879428888555616e-12,
+            "cpu_core_seconds_per_second": 1.6666666666666665e-7,
+            "detail": "operator: pass 10000 rows; x 0.0167/s; holds 40 bytes for 7080.0 ms",
+            "multiplier": 1,
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
+          },
+          "9": {
+            "cost_per_second": 1.879428888555616e-12,
+            "cpu_core_seconds_per_second": 1.6666666666666665e-7,
+            "detail": "operator: pass 10000 rows; x 0.0167/s; holds 40 bytes for 7080.0 ms",
+            "multiplier": 1,
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics)",
+        "usage": {
+          "average_memory_bytes": 56659235.97884134,
+          "cpu_ops_per_second": 30001166.666666675,
+          "disk_bytes": 52800000000,
+          "latency_per_query": [
+            {
+              "compaction_ms": 0.0,
+              "query_ms": 7080.04
+            },
+            {
+              "compaction_ms": 0.0,
+              "query_ms": 7080.03
+            }
+          ],
+          "peak_cpu_cores": 2,
+          "peak_memory_bytes": 480160304,
+          "scanned_bytes_per_second": 880000000.0
+        }
+      }
+    },
+    "front": [],
+    "pane_retention_ms": {},
+    "rejected": [],
+    "rejected_by_cause": {},
+    "search": {
+      "algorithm": "memo-milp",
+      "candidates_checked": 11,
+      "components": [],
+      "incumbent_cost": 1.391973629526537e-6,
+      "memo": {
+        "build_ms": 5.124580999999999,
+        "candidates": 31,
+        "candidates_by_origin": {
+          "Panes": 12,
+          "Pass1": 16,
+          "Rollup": 3
+        },
+        "coupling_sites_by_kind": {
+          "PaneChain": 3,
+          "RawHorizon": 1,
+          "SharedBuildSize": 3
+        },
+        "groups": 7,
+        "shared_groups": 1
+      },
+      "memo_plan": {
+        "coupling_sites": [
+          {
+            "kind": "SharedBuildSize",
+            "readers": [
+              2,
+              5
+            ],
+            "threshold": {
+              "state": {
+                "Sketch": [
+                  {
+                    "algorithm": "Kmv",
+                    "category": "Cardinality",
+                    "params": {
+                      "Kmv": {
+                        "k": 3001,
+                        "relative_error": 0.05
+                      }
+                    }
+                  },
+                  "PerSubpopulationInstance"
+                ]
+              }
+            },
+            "thresholds": 1
+          }
+        ],
+        "groups": [
+          {
+            "candidates": 1,
+            "chosen": null,
+            "group": 0,
+            "implemented_by": null,
+            "operator": {
+              "NonASAP": {
+                "Scan": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": true,
+                    "fields": [
+                      {
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "name": "ts",
+                        "nullable": false,
+                        "table": "http"
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "name": "region",
+                        "nullable": false,
+                        "table": "http"
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "name": "service",
+                        "nullable": false,
+                        "table": "http"
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "name": "endpoint",
+                        "nullable": false,
+                        "table": "http"
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "name": "status",
+                        "nullable": false,
+                        "table": "http"
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "name": "user_id",
+                        "nullable": false,
+                        "table": "http"
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "name": "latency",
+                        "nullable": false,
+                        "table": "http"
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "source": {
+                    "Table": {
+                      "table_ref": "http"
+                    }
+                  }
+                }
+              }
+            },
+            "parents": [
+              1,
+              4
+            ],
+            "queries": [
+              0,
+              1
+            ],
+            "roots_of": []
+          },
+          {
+            "candidates": 1,
+            "chosen": {
+              "built_once": false,
+              "coupling_sites": [],
+              "implements": [
+                1
+              ],
+              "operator": "TimeRange",
+              "origin": "Pass1",
+              "reads": []
+            },
+            "group": 1,
+            "implemented_by": null,
+            "operator": {
+              "NonASAP": {
+                "TimeRange": {
+                  "child": 0,
+                  "kind": "range",
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                }
+              }
+            },
+            "parents": [
+              2
+            ],
+            "queries": [
+              0
+            ],
+            "roots_of": []
+          },
+          {
+            "candidates": 13,
+            "chosen": {
+              "built_once": false,
+              "coupling_sites": [
+                0
+              ],
+              "implements": [
+                2
+              ],
+              "operator": "Project",
+              "origin": "Rollup",
+              "reads": [
+                1,
+                5
+              ]
+            },
+            "group": 2,
+            "implemented_by": null,
+            "operator": {
+              "NonASAP": {
+                "Aggregate": {
+                  "child": 1,
+                  "filters": [],
+                  "having": null,
+                  "measures": [
+                    {
+                      "accuracy": {
+                        "accuracy_metric": "relative",
+                        "accuracy_scope": "per_value",
+                        "failure_probability": 0.05,
+                        "max_error": 0.05
+                      },
+                      "cols": [
+                        5
+                      ],
+                      "kind": "cardinality"
+                    }
+                  ],
+                  "output_names": [
+                    "count(DISTINCT http.user_id)"
+                  ],
+                  "reduction": {
+                    "Reduce": [
+                      2
+                    ]
+                  }
+                }
+              }
+            },
+            "parents": [
+              3
+            ],
+            "queries": [
+              0
+            ],
+            "roots_of": []
+          },
+          {
+            "candidates": 1,
+            "chosen": {
+              "built_once": false,
+              "coupling_sites": [],
+              "implements": [
+                3
+              ],
+              "operator": "Project",
+              "origin": "Pass1",
+              "reads": [
+                2
+              ]
+            },
+            "group": 3,
+            "implemented_by": null,
+            "operator": {
+              "NonASAP": {
+                "Project": {
+                  "child": 2,
+                  "cols": [
+                    {
+                      "alias": null,
+                      "expr": {
+                        "Column": 0
+                      }
+                    },
+                    {
+                      "alias": "value",
+                      "expr": {
+                        "Column": 1
+                      }
+                    }
+                  ],
+                  "qualifier": null
+                }
+              }
+            },
+            "parents": [],
+            "queries": [
+              0
+            ],
+            "roots_of": [
+              0
+            ]
+          },
+          {
+            "candidates": 1,
+            "chosen": {
+              "built_once": false,
+              "coupling_sites": [],
+              "implements": [
+                4
+              ],
+              "operator": "TimeRange",
+              "origin": "Pass1",
+              "reads": []
+            },
+            "group": 4,
+            "implemented_by": null,
+            "operator": {
+              "NonASAP": {
+                "TimeRange": {
+                  "child": 0,
+                  "kind": "range",
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                }
+              }
+            },
+            "parents": [
+              5
+            ],
+            "queries": [
+              1
+            ],
+            "roots_of": []
+          },
+          {
+            "candidates": 13,
+            "chosen": {
+              "built_once": false,
+              "coupling_sites": [
+                0
+              ],
+              "implements": [
+                5
+              ],
+              "operator": "Project",
+              "origin": "Pass1",
+              "reads": [
+                4
+              ]
+            },
+            "group": 5,
+            "implemented_by": null,
+            "operator": {
+              "NonASAP": {
+                "Aggregate": {
+                  "child": 4,
+                  "filters": [],
+                  "having": null,
+                  "measures": [
+                    {
+                      "accuracy": {
+                        "accuracy_metric": "relative",
+                        "accuracy_scope": "per_value",
+                        "failure_probability": 0.05,
+                        "max_error": 0.05
+                      },
+                      "cols": [
+                        5
+                      ],
+                      "kind": "cardinality"
+                    }
+                  ],
+                  "output_names": [
+                    "count(DISTINCT http.user_id)"
+                  ],
+                  "reduction": {
+                    "Reduce": [
+                      2,
+                      3
+                    ]
+                  }
+                }
+              }
+            },
+            "parents": [
+              6
+            ],
+            "queries": [
+              1
+            ],
+            "roots_of": []
+          },
+          {
+            "candidates": 1,
+            "chosen": {
+              "built_once": false,
+              "coupling_sites": [],
+              "implements": [
+                6
+              ],
+              "operator": "Project",
+              "origin": "Pass1",
+              "reads": [
+                5
+              ]
+            },
+            "group": 6,
+            "implemented_by": null,
+            "operator": {
+              "NonASAP": {
+                "Project": {
+                  "child": 5,
+                  "cols": [
+                    {
+                      "alias": null,
+                      "expr": {
+                        "Column": 0
+                      }
+                    },
+                    {
+                      "alias": null,
+                      "expr": {
+                        "Column": 1
+                      }
+                    },
+                    {
+                      "alias": "value",
+                      "expr": {
+                        "Column": 2
+                      }
+                    }
+                  ],
+                  "qualifier": null
+                }
+              }
+            },
+            "parents": [],
+            "queries": [
+              1
+            ],
+            "roots_of": [
+              1
+            ]
+          }
+        ],
+        "scans_widened": false
+      },
+      "milp": {
+        "clusters": [
+          {
+            "decode_failures": 0,
+            "gap": 1.403895769493593e-6,
+            "groups": 7,
+            "incumbent_cost": 1.391973629526537e-6,
+            "lower_bound": 1.3919716753406472e-6,
+            "queries": [
+              0,
+              1
+            ],
+            "rounds": 9,
+            "solver_time_ms": 2214,
+            "time_limit_reached": false
+          }
+        ],
+        "constraint_count": 2214,
+        "decode_failures": 0,
+        "first_lower_bound": 1.2198327039024885e-6,
+        "gap": 1.403895769493593e-6,
+        "lower_bound": 1.3919716753406472e-6,
+        "queries_alone_cost": 2.7187636873682783e-6,
+        "rounds": 9,
+        "solver_time_ms": 2214,
+        "time_limit_reached": false,
+        "variable_count": 1249
+      },
+      "queries": [],
+      "raw_scan_assignments_skipped": 0,
+      "raw_scan_candidates_skipped": 0,
+      "runner_up_cost_per_second": 1.5549056589873822e-6,
+      "searched_as_one": null
+    },
+    "search_rejected": [],
+    "selected": "P1-0",
+    "stored_outputs": []
+  },
+  "workload": {
+    "data_workload": {
+      "arrival": {
+        "ingesting": {
+          "rows_per_second": 2000000.0
+        }
+      },
+      "sources": {
+        "http": {
+          "max_distinct_per_evaluation": 1000000,
+          "metric_type": null,
+          "sample_interval": 5,
+          "series_count": 10000,
+          "stream_norms": null,
+          "values_non_negative": true
+        }
+      }
+    },
+    "queries": [
+      {
+        "id": "q1",
+        "language": "sql",
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "recurrence": {
+          "repeated": {
+            "fixed_interval": 60000
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "relative",
+            "accuracy_scope": "per_value",
+            "failure_probability": 0.05,
+            "max_error": 0.05
+          },
+          "repeat_interval_ms": 60000
+        },
+        "text": "SELECT service, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service"
+      },
+      {
+        "id": "q2",
+        "language": "sql",
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "recurrence": {
+          "repeated": {
+            "fixed_interval": 60000
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "relative",
+            "accuracy_scope": "per_value",
+            "failure_probability": 0.05,
+            "max_error": 0.05
+          },
+          "repeat_interval_ms": 60000
+        },
+        "text": "SELECT service, endpoint, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service, endpoint"
+      }
+    ]
+  }
+}

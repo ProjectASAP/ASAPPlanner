@@ -2398,6 +2398,11 @@ struct ClusterLoop<'a, Id> {
     unevaluated_bound: Option<f64>,
     /// Solutions solution decoding could not compose into a plan.
     decode_failures: u32,
+    /// Per kept logical candidate, the solution it decodes: its chosen
+    /// choices and the groups built once (for the report).
+    solution_of: HashMap<String, (Vec<usize>, BTreeSet<GroupId>)>,
+    /// The warm-start plan's cost per second (each query planned alone).
+    queries_alone_cost: Option<f64>,
 }
 
 impl<'a, Id: Clone> ClusterLoop<'a, Id> {
@@ -2438,6 +2443,8 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             max_free_combinations: crate::search::milp::decode::MAX_FREE_COMBINATIONS,
             unevaluated_bound: None,
             decode_failures: 0,
+            solution_of: HashMap::new(),
+            queries_alone_cost: None,
         })
         .map(|mut cluster| {
             cluster.offer_independent_plan();
@@ -2501,6 +2508,8 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         candidate.id = "P0".to_string();
         if self.selector.offer(&candidate).is_ok() && self.selector.keeps_from_logical(ID) {
             self.logical.insert(ID.to_string(), roots);
+            // The first plan offered: the cheapest is its price.
+            self.queries_alone_cost = self.selector.cheapest_price();
         }
     }
 
@@ -2615,10 +2624,16 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             physical.id = format!("P{}-{k}", self.number);
             self.selector.offer(&physical)?;
             if self.selector.keeps_from_logical(&logical_id) {
+                self.solution_of.insert(
+                    logical_id.clone(),
+                    (solution.chosen.clone(), solution.built_once.clone()),
+                );
                 self.logical.insert(logical_id, decoded.roots);
             }
             let selector = &self.selector;
             self.logical.retain(|id, _| selector.keeps_from_logical(id));
+            self.solution_of
+                .retain(|id, _| selector.keeps_from_logical(id));
         }
         // A choice set with plans not evaluated keeps its objective as a
         // lower bound once cut; at the last round (no bound) it stays
@@ -2704,6 +2719,8 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             unevaluated_bound,
             decode_failures,
             proven_bound,
+            mut solution_of,
+            queries_alone_cost,
             ..
         } = self;
         let mut input = input.expect("the loop's input");
@@ -2783,6 +2800,7 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             time_limit_reached,
             decode_failures,
             clusters: Vec::new(),
+            queries_alone_cost,
         };
         let cluster = crate::MilpClusterReport {
             queries: queries.to_vec(),
@@ -2796,6 +2814,27 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             decode_failures,
         };
         selection.search.milp = Some(report);
+        selection.search.memo_plan =
+            solution_of
+                .remove(&selected.from_logical)
+                .map(|(chosen, built_once)| {
+                    let mut report = crate::search::milp::report::memo_plan_report(
+                        &memo,
+                        &input,
+                        &chosen,
+                        &built_once,
+                        queries,
+                    );
+                    // Decoding names its widened variants `L<n>w0`
+                    // (labels widened) and `L<n>w1` (identical scans also
+                    // one node).
+                    report.scans_widened = selected
+                        .from_logical
+                        .trim_start_matches('L')
+                        .trim_start_matches(|c: char| c.is_ascii_digit())
+                        .starts_with("w1");
+                    report
+                });
         let roots = logical
             .remove(&selected.from_logical)
             .expect("the selection's logical roots are kept");

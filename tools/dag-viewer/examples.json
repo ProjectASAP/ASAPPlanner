@@ -61,5 +61,89 @@
     "accuracy_guarantees": "enforced",
     "file": "examples/random-mixed-seed-862-long-workload-01.json",
     "story": "Workload set Random mixed · seed-862-long, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices, accuracy guarantees enforced). The seed-862 workloads with three times longer lookbacks: 3 to 60 minutes."
+  },
+  {
+    "id": "memo-rangeheavy-t5-q05-q09-1h",
+    "name": "RangeHeavy T5 q0.5+q0.9 (shared sketch)",
+    "workload": "memo-examples/promql/rangeheavy-t5-q05-q09-1h.json",
+    "deployment_capabilities": {
+      "raw_data_retained": true,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
+    "search": "memo-milp",
+    "file": "examples/memo-rangeheavy-t5-q05-q09-1h.json",
+    "story": "Shared sketch: W-RangeHeavy template 5, quantile_over_time(q, data[1h]) for q = 0.5 and 0.9, both read one DDSketch pane chain (1 min panes over 1 h) sized for both."
+  },
+  {
+    "id": "memo-rangeheavy-t8-t5-1h",
+    "name": "RangeHeavy T8+T5 (ratio reuses its operands)",
+    "workload": "memo-examples/promql/rangeheavy-t8-t5-1h.json",
+    "deployment_capabilities": {
+      "raw_data_retained": true,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
+    "search": "memo-milp",
+    "file": "examples/memo-rangeheavy-t8-t5-1h.json",
+    "story": "Shared groups: W-RangeHeavy template 8, the ratio quantile_over_time(0.9, data[1h]) / quantile_over_time(0.5, data[1h]), reads the same two groups as template 5's q = 0.9 and q = 0.5 queries."
+  },
+  {
+    "id": "memo-rangeheavy-t5-q09-15m-1h",
+    "name": "RangeHeavy T5 q0.9 15m+1h (pane chain)",
+    "workload": "memo-examples/promql/rangeheavy-t5-q09-15m-1h.json",
+    "deployment_capabilities": {
+      "raw_data_retained": true,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
+    "search": "memo-milp",
+    "file": "examples/memo-rangeheavy-t5-q09-15m-1h.json",
+    "story": "Nested windows: W-RangeHeavy template 5, quantile_over_time(0.9, data[w]) for w = 15 min and 1 h, one DDSketch chain of 1 min panes over 1 h; the 15 min query merges its newest 15 panes."
+  },
+  {
+    "id": "memo-rangeheavy-t7-t4-1h",
+    "name": "RangeHeavy T7+T4 (widened scan)",
+    "workload": "memo-examples/promql/rangeheavy-t7-t4-1h.json",
+    "deployment_capabilities": {
+      "raw_data_retained": true,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
+    "search": "memo-milp",
+    "file": "examples/memo-rangeheavy-t7-t4-1h.json",
+    "story": "Widened scan: W-RangeHeavy templates 7 and 4 over 1 h; one scan of data with the job label feeds one pane chain of per-series sums, which T4 reads and T7 sums by job."
+  },
+  {
+    "id": "memo-rangeheavy-t5-q05-1h-60s-300s",
+    "name": "RangeHeavy T5 q0.5 every 60 s + 300 s (union rate)",
+    "workload": "memo-examples/promql/rangeheavy-t5-q05-1h-60s-300s.json",
+    "deployment_capabilities": {
+      "raw_data_retained": true,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
+    "search": "memo-milp",
+    "file": "examples/memo-rangeheavy-t5-q05-1h-60s-300s.json",
+    "story": "Union rate: W-RangeHeavy template 5, quantile_over_time(0.5, data[1h]) asked every 60 s and every 300 s (two of the 8-user dashboards): one group, run on the union of the two schedules."
+  },
+  {
+    "id": "memo-rollupheavy-t11-service-endpoint-5m",
+    "name": "RollupHeavy T11 by service + (service, endpoint) (sketch rollup)",
+    "workload": "memo-examples/sql/rollupheavy-t11-service-endpoint-5m.json",
+    "deployment_capabilities": {
+      "raw_data_retained": true,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
+    "search": "memo-milp",
+    "file": "examples/memo-rollupheavy-t11-service-endpoint-5m.json",
+    "story": "Sketch rollup: W-RollupHeavy template 11, distinct users over 5 min by (service, endpoint) and by (service); the coarser grouping merges the finer one's KMV states, sized for both."
   }
 ]

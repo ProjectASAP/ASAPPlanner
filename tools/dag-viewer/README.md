@@ -24,8 +24,10 @@ To run it, see [RUNNING.md](RUNNING.md).
 ## The page
 
 - **Examples**: one tab per entry of `examples.json`: #509 Examples 1, 3a
-  and 3b, and workload-01 of each ASAPQuery random workload set (below).
-  `#example3b` in the URL opens that example.
+  and 3b, workload-01 of each ASAPQuery random workload set (below), and
+  six memo-MILP examples, each one kind of sharing on the smallest subset
+  of a paper workload template (below). `#example3b` in the URL opens that
+  example.
 - **Workload sets** (button): one table per set listed in
   `workloads/index.json`, one row per workload with its query count, query
   labels, the queries (text, how often, accuracy) and the sources they
@@ -61,7 +63,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   and the rejections Stage 3 recorded, which are not clickable.
 - **Three lanes**, stacked top to bottom so each is as wide as the page:
   Stage 0, the chosen Stage 1 candidate, and its Stage 2 candidate
-  with each node's timing and Stage 3 cost (`× n` when a node that is not
+  with each node's timing (also its fill: green at ingestion time, orange
+  at query time; the border keeps its category) and Stage 3 cost (`× n` when a node that is not
   materialized is computed once per reader). Each lane is the whole
   workload's DAG, so a node shared by several queries appears once. Nodes
   are data sources, relational operators or summary operators; summary
@@ -88,6 +91,16 @@ To run it, see [RUNNING.md](RUNNING.md).
   node in the Stage 2 lane. Stage 3 predicts no
   per-node state size, so the table has none. The lane's header also shows
   the shown candidate's Stage 3 usage.
+- **Shared units** (memo-MILP documents only), under the stored outputs:
+  a line with the selected plan's cost, the MILP lower bound, gap and
+  rounds, whether the run certified (gap ≤ 1e-4 without a time limit) and
+  the cost of the queries planned alone with the saving; then the selected
+  plan's shared units: each memo group (`G1`, `G2`, …: one distinct
+  logical sub-expression) one node serves to several readers, each
+  coupling site (`S1`, …) read by several groups, and a widened scan, with
+  their readers, the queries behind them, their repeat intervals (a shared
+  unit runs on their union) and the threshold (a shared build's size, a
+  pane chain's grid, set by the strictest reader).
 - **Details**: click a node for its operator, the queries reaching it, timing, materialization,
   output schema, guarantee and Stage 3 cost; click an edge for its schema
   and data state.
@@ -278,6 +291,22 @@ are ignored, `stage_pipeline`'s default.
   searched as one (`searched_as_one`), the classes of interchangeable
   queries (`interchangeable_queries`, by query index), and per query its
   own candidates checked and those discarded with why.
+- Under `search` `memo-milp`, `stage3_plan_selection.search` also has
+  `algorithm`, `memo` (the memo's size: `groups`, `shared_groups`,
+  `candidates`, `candidates_by_origin`, `coupling_sites_by_kind`,
+  `build_ms`), `incumbent_cost`, `milp` (`lower_bound`, `gap`, `rounds`,
+  model size, `solver_time_ms`, `time_limit_reached`, per-cluster
+  `clusters`, and `queries_alone_cost`, the warm-start plan's cost: each
+  query planned alone, no sharing between queries) and `memo_plan`, the
+  selected plan over the memo: `groups` (per group its `operator` with
+  children named by group index, `parents`, `queries`, `roots_of`,
+  `candidates`, the `chosen` implementation candidate's `origin`,
+  `operator`, `implements`, `reads`, `built_once` and `coupling_sites`, or
+  `implemented_by` the group whose fused candidate implements it),
+  `coupling_sites` (per site its `kind`, chosen `threshold`, number of
+  `thresholds` and reader groups `readers`) and `scans_widened` (the
+  selected plan is the solution's scan-widening variant). `memo_plan` is
+  absent when the warm start (each query planned alone) was selected.
 - `stage3_plan_selection.warnings` holds one-line warnings about the
   workload and the selected plan: a PromQL query applying `rate`,
   `increase` or `irate` to a metric the data workload declares a gauge
@@ -340,12 +369,23 @@ shown. If a check fails, it shows the problems instead.
   `deployment_capabilities` and `cost_model`) is committed under
   `examples/`. The committed documents are
   `examples/planner-layering-example1.json` and workload-01 of each
-  ASAPQuery set (0.9, 0.9 and 1.4 MB); `crates/devtools/tests/stage_pipeline.rs`
-  checks that they are current. `server.py --regenerate` rewrites them.
+  ASAPQuery set (0.9, 0.9 and 1.4 MB), and the six memo-MILP examples
+  (0.1 MB each); `crates/devtools/tests/stage_pipeline.rs`
+  checks that they are current (a memo-MILP one up to its timings, and
+  certified). `server.py --regenerate` rewrites them.
   An entry's `accuracy_guarantees` (`ignored` when absent) says whether it
   is planned with `--enforce-accuracy-guarantees`; every current entry
   enforces, since each story is about which plans meet their accuracy
   target, and a workload example matches its set.
+- `memo-examples/`: the memo-MILP examples' `PlanningWorkload` files
+  (`promql/`, and `sql/` with its `tables.json`). Each is the smallest
+  subset of an ASAPQuery paper workload template that shows one kind of
+  sharing, with the template's data facts (W-RangeHeavy: `data`, 10^4
+  series sampled every 5 ms, 2 × 10^6 rows/s; W-RollupHeavy: `http`, 10^4
+  series, every 5 ms, at most 10^6 distinct values per evaluation), raw
+  data retained, AWS Fargate prices and accuracy guarantees enforced. Their
+  `examples.json` entries name `"search": "memo-milp"`, which server.py
+  passes as `--search`; their documents are committed under `examples/`.
 - `cytoscape.min.js`, `dagre.min.js`, `cytoscape-dagre.js`: vendored, so the
   page works offline.
 

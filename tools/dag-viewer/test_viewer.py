@@ -793,15 +793,31 @@ class PageTests(unittest.TestCase):
 
     def test_workload_examples_plan_as_their_set_does(self):
         """A workload example's precomputed document is planned with its
-        set's settings, so it matches what the server plans for the row."""
+        set's settings, so it matches what the server plans for the row.
+        The memo-search examples (with a `search`) read files of their own,
+        in no set."""
         examples = json.loads((HERE / "examples.json").read_text())
         sets = json.loads((WORKLOADS / "index.json").read_text())["sets"]
         by_file = {f"workloads/{entry['file']}": s for s in sets for entry in s["workloads"]}
-        for example in (e for e in examples if "workload" in e):
+        for example in (e for e in examples if "workload" in e and "search" not in e):
             with self.subTest(example["id"]):
                 workload_set = by_file[example["workload"]]
                 for field in ("deployment_capabilities", "cost_model", "accuracy_guarantees"):
                     self.assertEqual(example.get(field), workload_set.get(field), field)
+
+    def test_memo_examples_name_a_search_and_their_own_workload(self):
+        """Each memo-search example is planned with `--search memo-milp`
+        from a file under memo-examples/, and server.py passes the search."""
+        examples = [e for e in json.loads((HERE / "examples.json").read_text()) if "search" in e]
+        self.assertEqual(len(examples), 6)
+        for example in examples:
+            with self.subTest(example["id"]):
+                self.assertTrue(example["workload"].startswith("memo-examples/"))
+                self.assertTrue((HERE / example["workload"]).exists())
+                args = server.example_args(example, "out.json")
+                self.assertEqual(args[args.index("--search") + 1], "memo-milp")
+        with self.assertRaises(ValueError):
+            server.example_args(dict(examples[0], search="fastest"), "out.json")
 
     def test_committed_documents_are_example1_and_the_workload_examples(self):
         examples = json.loads((HERE / "examples.json").read_text())
