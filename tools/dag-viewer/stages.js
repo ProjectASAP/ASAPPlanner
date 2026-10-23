@@ -597,6 +597,15 @@ function paneWindowText(k, width) {
 // none for the newest), a TimeRange of one pane (`n<id>p<k>r`) and the
 // pane's build (`n<id>p<k>`), each pane fed by the chain's input and read by
 // the chain's readers). Display only: the document keeps the chain.
+// A physical node's timing as its lane class, which colors its fill:
+// `ingestionTime`, `queryTime`, or "" without a timing (a logical node).
+function timingClass(timing) {
+  const text = timing === undefined || timing === null ? '' : formatTiming(timing);
+  if (text === 'ingestion time') return 'ingestionTime';
+  if (text === 'query time') return 'queryTime';
+  return '';
+}
+
 function stageLaneElements(dag, options) {
   const { physical = false, costPerNode = null, queryIds = [], expandedChains = [] } = options || {};
   const group = typeof nodeGroup === 'function' ? nodeGroup : () => 'rel';
@@ -628,13 +637,13 @@ function stageLaneElements(dag, options) {
         const common = { paneOf: node.id, pane: k, reachedBy: queries, rootFor: [], timing: node.timing, node: node.raw };
         if (k > 0) {
           nodes.push({ data: Object.assign({ id: `${id}s`, nodeId: `${node.id}p${k}s`, kind: 'TimeShift', group: group('TimeShift'),
-            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: 'pane' });
+            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
         }
         nodes.push({ data: Object.assign({ id: `${id}r`, nodeId: `${node.id}p${k}r`, kind: 'TimeRange', group: group('TimeRange'),
-          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: 'pane' });
+          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
         nodes.push({ data: Object.assign({ id, nodeId: `${node.id}p${k}`, kind: 'pane', group: 'summary',
           label: [`pane ${k + 1} of ${body.pane_count}`, `summary: ${summaryFamilyText(body.family)}`, `window ${paneWindowText(k, width)}`,
-            'click to collapse'].join('\n') }, common), classes: 'pane' });
+            'click to collapse'].join('\n') }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
       }
       return;
     }
@@ -653,7 +662,7 @@ function stageLaneElements(dag, options) {
         id: `n${node.id}`, nodeId: node.id, kind: node.kind, group: group(node.kind), label: lines.join('\n'),
         rootFor: roots, reachedBy: queries, timing: node.timing, cost, node: node.raw, expandable: node.kind === 'PaneChain',
       },
-      classes: node.timing !== undefined && formatTiming(node.timing) === 'ingestion time' ? 'ingestionTime' : '',
+      classes: timingClass(node.timing),
     });
   });
   const edges = [];

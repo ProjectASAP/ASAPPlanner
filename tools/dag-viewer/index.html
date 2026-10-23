@@ -28,6 +28,8 @@
   --cat-summary-line: #7a5ab5;
   --cat-scalar: #f6f4ef;
   --cat-scalar-line: #8a7f6a;
+  --time-ingest: #d5efe1;
+  --time-query: #fbe3c8;
   --edge: #9aa1b2;
   --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
   --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -38,14 +40,14 @@
     --bg: #11141b; --panel: #181c25; --panel-2: #1f2430; --line: #2e3443; --fg: #e6e9f0; --muted: #9aa2b4;
     --accent: #8ea8ff; --accent-soft: #232c49; --ok: #6fd3a0; --ok-soft: #173326; --bad: #ff8f86; --bad-soft: #3a1d1b;
     --warn: #e8bd6a; --warn-soft: #3a2e14; --cat-source: #1f2a40; --cat-source-line: #6f8cc8; --cat-rel: #232833;
-    --cat-rel-line: #7c849a; --cat-summary: #2c2340; --cat-summary-line: #a88be0; --cat-scalar: #26241f; --cat-scalar-line: #b3a88f; --edge: #5f6780; color-scheme: dark;
+    --cat-rel-line: #7c849a; --cat-summary: #2c2340; --cat-summary-line: #a88be0; --cat-scalar: #26241f; --cat-scalar-line: #b3a88f; --edge: #5f6780; --time-ingest: #15342a; --time-query: #42301a; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #11141b; --panel: #181c25; --panel-2: #1f2430; --line: #2e3443; --fg: #e6e9f0; --muted: #9aa2b4;
   --accent: #8ea8ff; --accent-soft: #232c49; --ok: #6fd3a0; --ok-soft: #173326; --bad: #ff8f86; --bad-soft: #3a1d1b;
   --warn: #e8bd6a; --warn-soft: #3a2e14; --cat-source: #1f2a40; --cat-source-line: #6f8cc8; --cat-rel: #232833;
-  --cat-rel-line: #7c849a; --cat-summary: #2c2340; --cat-summary-line: #a88be0; --cat-scalar: #26241f; --cat-scalar-line: #b3a88f; --edge: #5f6780; color-scheme: dark;
+  --cat-rel-line: #7c849a; --cat-summary: #2c2340; --cat-summary-line: #a88be0; --cat-scalar: #26241f; --cat-scalar-line: #b3a88f; --edge: #5f6780; --time-ingest: #15342a; --time-query: #42301a; color-scheme: dark;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
@@ -119,7 +121,6 @@ footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
 .drop-active { outline: 2px dashed var(--accent); outline-offset: -8px; }
 .editor { padding: 12px; display: grid; gap: 10px; }
 .editor h3 { margin: 0; font-family: var(--font-display); font-size: 14px; font-weight: 600; }
-#memoPanel h3 { margin: 10px 12px 4px; font-family: var(--font-display); font-size: 14px; font-weight: 600; }
 .editor .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .editor input, .editor select, .editor textarea { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; min-width: 0; }
 .editor textarea { font-family: var(--font-mono); font-size: 12.5px; resize: vertical; }
@@ -234,12 +235,9 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
           <div class="table-wrap" id="storedOutputs"></div>
         </section>
         <section class="panel" id="memoPanel" aria-labelledby="memo-title" hidden>
-          <div class="panel-head"><div><div class="eyebrow">Memo-MILP search · the selected plan over the memo</div><h2 id="memo-title">Memo groups and shared units</h2></div></div>
+          <div class="panel-head"><div><div class="eyebrow">Memo-MILP search · selected plan</div><h2 id="memo-title">Shared units</h2></div></div>
           <div class="lane-meta" id="memo-meta"></div>
-          <h3>Shared units</h3>
           <div class="table-wrap" id="memoShared"></div>
-          <h3>Memo groups</h3>
-          <div class="table-wrap" id="memoGroups"></div>
         </section>
       </div>
       <div class="legend" aria-label="Legend">
@@ -248,6 +246,8 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
         <span><span class="swatch" style="background:var(--cat-summary); border-color:var(--cat-summary-line)"></span>summary operator (build, merge, estimate, finalize)</span>
         <span><span class="swatch" style="background:var(--cat-scalar); border-color:var(--cat-scalar-line); border-style:dashed"></span>standalone scalar query</span>
         <span><span class="swatch" style="background:transparent; border-color:var(--accent); border-width:3px"></span>query root</span>
+        <span><span class="swatch" style="background:var(--time-ingest); border-color:var(--muted)"></span>Stage 2 fill: ingestion time (⏱ in the label)</span>
+        <span><span class="swatch" style="background:var(--time-query); border-color:var(--muted)"></span>Stage 2 fill: query time</span>
       </div>
       <section class="panel" aria-labelledby="details-title">
         <div class="panel-head"><h2 id="details-title">Details</h2><span class="eyebrow">click a node or edge</span></div>

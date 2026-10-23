@@ -181,3 +181,14 @@ test('a memo plan naming a missing group is refused', () => {
   // Other searches have no memo view.
   assert.equal(call('memoSearchView', doc), null);
 });
+
+test('Stage 2 nodes carry their timing as a class the lane colors', () => {
+  assert.equal(call('timingClass', 'ingestion_time'), 'ingestionTime');
+  assert.equal(call('timingClass', 'QueryTime'), 'queryTime');
+  assert.equal(call('timingClass', undefined), '');
+  const elements = call('stageLaneElements', dag, { physical: true, queryIds });
+  const classes = new Set(nodesOf(elements).map((n) => n.classes));
+  assert.ok(classes.has('ingestionTime') && classes.has('queryTime'));
+  // The label keeps the timing in words.
+  assert.ok(nodesOf(elements).filter((n) => n.classes === 'queryTime').every((n) => n.data.label.includes('⏱ query time')));
+});

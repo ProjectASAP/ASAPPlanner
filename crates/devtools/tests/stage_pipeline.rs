@@ -1388,26 +1388,33 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
     assert_eq!(Value::Array(emitted), expected);
 }
 
-/// A memo-MILP example: current except for its timings (the memo's build
-/// time and the solver's wall time), certified (gap at most 1e-4), cheaper
+/// A memo-MILP example: current except for its search report, which may
+/// vary between runs (its selected plan and cost may not), certified (gap at most 1e-4), cheaper
 /// than its queries planned alone, and with a memo plan whose chosen
 /// candidates name groups and coupling sites in range, one of them shared.
-fn check_memo_example(mut document: Value, mut committed: Value, example: &Value) {
-    fn without_timings(document: &mut Value) {
-        let search = &mut document["stage3_plan_selection"]["search"];
-        search["memo"]["build_ms"] = serde_json::json!(0);
-        search["milp"]["solver_time_ms"] = serde_json::json!(0);
-        for cluster in search["milp"]["clusters"]
-            .as_array_mut()
-            .into_iter()
-            .flatten()
-        {
-            cluster["solver_time_ms"] = serde_json::json!(0);
-        }
-    }
-    without_timings(&mut document);
-    without_timings(&mut committed);
-    assert!(document == committed, "regenerate {}", example["file"]);
+fn check_memo_example(document: Value, committed: Value, example: &Value) {
+    // Equally cheap solutions decode to the same plan in any order, so
+    // the memo plan, the rounds and the solver's bounds may vary between
+    // runs; the selected plan and its cost do not.
+    let without_search = |document: &Value| {
+        let mut document = document.clone();
+        document["stage3_plan_selection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("search");
+        document
+    };
+    assert!(
+        without_search(&document) == without_search(&committed),
+        "regenerate {}",
+        example["file"]
+    );
+    let cost = |document: &Value| {
+        document["stage3_plan_selection"]["search"]["incumbent_cost"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!((cost(&document) - cost(&committed)).abs() <= 1e-9 * cost(&committed));
     let search = &document["stage3_plan_selection"]["search"];
     assert_eq!(search["algorithm"], "memo-milp");
     assert!(
