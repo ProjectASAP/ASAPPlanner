@@ -40,7 +40,7 @@ use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
-use super::{CandidateOrigin, GroupId, ImplementationCandidate, Memo, MemoGroup};
+use crate::search::memo::{CandidateOrigin, GroupId, ImplementationCandidate, Memo, MemoGroup};
 
 /// The memo of `per_computation`'s workload: its roots hash-consed into
 /// groups, children before parents, and each group's Pass 1 candidates.
@@ -509,12 +509,12 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
 /// derives. Memoized per node (the memo keeps each node alive, so its
 /// address is not reused).
 #[derive(Default)]
-pub(super) struct NodeKeys {
+pub(crate) struct NodeKeys {
     memo: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
 }
 
 impl NodeKeys {
-    pub(super) fn key(&mut self, node: &Rc<OperatorNode>) -> u64 {
+    pub(crate) fn key(&mut self, node: &Rc<OperatorNode>) -> u64 {
         if let Some((_, key)) = self.memo.get(&Rc::as_ptr(node)) {
             return *key;
         }

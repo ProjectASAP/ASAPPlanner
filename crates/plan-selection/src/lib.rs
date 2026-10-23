@@ -112,7 +112,7 @@
 //! node computed at ingestion time is a streaming operator holding one row,
 //! and is not charged.)
 //!
-//! Prices come from [`crate::cost::analytical_cost::estimate_operator`] over edge
+//! Prices come from [`crate::cost::analytical::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! groups × k. A query-time scan reads the longest window above it (a time
@@ -263,10 +263,10 @@ use asap_types::workload::{
 };
 use thiserror::Error;
 
-use crate::cost::analytical_cost::{
+use crate::cost::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
-use crate::cost::physical_operator_statistics::{
+use crate::cost::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use asap_logical_asap_optimization::accuracy::composition::{
@@ -288,20 +288,19 @@ pub use accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
 };
 pub mod cost;
-/// Costed reuse of compatible physical pane producers.
-pub mod pane_sharing;
+pub use search::legacy::pane_sharing;
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
-pub mod pass;
-pub use pass::{
+pub mod search;
+pub use search as pass;
+pub use search::{
     optimize, run_stage1_to_stage3, run_stage1_to_stage3_with, ExecutorCompileCheck,
     OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError, PassNameConflict,
     PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
     Stage1ToStage3Search,
 };
 
-mod measured_operation_costs;
-use measured_operation_costs::{aggregate_lookup, lookup, StateFamily};
-pub use measured_operation_costs::{
+use cost::measured::{aggregate_lookup, lookup, StateFamily};
+pub use cost::measured::{
     CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource,
     OperatorCost, OperatorKind, SummaryOperation,
 };
@@ -584,7 +583,7 @@ impl PlanSelectionSettings {
                 horizon,
             ));
         }
-        measured_operation_costs::validate(
+        cost::measured::validate(
             &self.measured_operation_costs,
             self.resource_speed.ms_per_cpu_op,
         )?;
@@ -5678,7 +5677,7 @@ impl StateInputRows {
 /// [`summary_shape`] of one sketch: its update operations per row and its
 /// bytes per state. With [`StateInputRows::UNKNOWN`], the bytes are also the
 /// size the measured table interpolates between
-/// ([`measured_operation_costs`]).
+/// ([`cost::measured`]).
 fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
     match params {
         SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
@@ -6432,12 +6431,12 @@ mod tests {
         let root = lower_promql("quantile_over_time(0.99, m[5m])", target.clone());
         let entries = [entry_with(target, repeating(60_000))];
         let data = with_series(Some(10_000));
-        let run = crate::pass::run_stage1_to_stage3_with(
+        let run = crate::search::run_stage1_to_stage3_with(
             vec![(0, QueryRoot::Operator(root))],
             &entries,
             &data,
             PlanningModels::builtin(),
-            crate::pass::Stage1ToStage3Search::exhaustive(),
+            crate::search::Stage1ToStage3Search::exhaustive(),
         )
         .unwrap();
         let candidates = &run.stage2_physical_asap_optimization;
@@ -6493,12 +6492,12 @@ mod tests {
         // 10 jobs: one Count-Min per job is cheaper than the exact per-series sums.
         data.sources.get_mut("m").unwrap().distinct_values_per_label =
             [("job".to_string(), 10)].into();
-        let run = crate::pass::run_stage1_to_stage3_with(
+        let run = crate::search::run_stage1_to_stage3_with(
             vec![(0, QueryRoot::Operator(root))],
             &[entry_with(target, repeating(10_000))],
             &data,
             PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
-            crate::pass::Stage1ToStage3Search::exhaustive(),
+            crate::search::Stage1ToStage3Search::exhaustive(),
         )
         .unwrap();
         let domains = |roots: &[QueryRoot]| -> Vec<WeightDomain> {
@@ -8809,12 +8808,12 @@ mod tests {
         models: PlanningModels<'_>,
     ) -> (Vec<PhysicalCandidate>, Selection) {
         let root = lower_promql(query, planned.clone());
-        let run = crate::pass::run_stage1_to_stage3_with(
+        let run = crate::search::run_stage1_to_stage3_with(
             vec![(0, QueryRoot::Operator(root))],
             &[entry_with(selected.clone(), QueryRecurrence::Unknown)],
             data,
             models,
-            crate::pass::Stage1ToStage3Search::exhaustive(),
+            crate::search::Stage1ToStage3Search::exhaustive(),
         )
         .unwrap();
         (

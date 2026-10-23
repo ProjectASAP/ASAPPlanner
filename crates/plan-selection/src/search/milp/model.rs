@@ -18,8 +18,8 @@ use good_lp::{
     constraint, variable, Expression, ProblemVariables, Solution, SolverModel, Variable, WithMipGap,
 };
 
-use super::coefficients::LazyTerms;
-use super::{GroupId, Memo};
+use crate::search::memo::{GroupId, Memo};
+use crate::search::milp::coefficients::LazyTerms;
 use crate::{CostModel, PlanSelector, PlanningModels, ResourceUnitCost, Selection, SelectionError};
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
 use asap_physical_asap_optimization::PhysicalCandidate;
@@ -213,7 +213,7 @@ pub(crate) struct ModelInput {
     /// Choices that may not be chosen together with any of the second set
     /// (panes and an exact top-k reuse in one plan).
     pub exclusive: (Vec<usize>, Vec<usize>),
-    /// The rollup requirements ([`super::windows::rollup_rules`]): when a
+    /// The rollup requirements ([`crate::search::memo::rules::windows::rollup_rules`]): when a
     /// choice of each set of the first list is chosen (each set a
     /// candidate's choices), one of the second is.
     pub rollup_rules: Vec<(Vec<Vec<usize>>, Vec<usize>)>,
@@ -1506,8 +1506,9 @@ pub(crate) fn search<Id: Clone>(
     time_limit_ms: Option<u64>,
 ) -> MemoSearchResult {
     let started = std::time::Instant::now();
-    let memo = super::search::memo(per_computation, entries);
-    let memo_stats = super::search::stats(&memo, started.elapsed().as_secs_f64() * 1e3);
+    let memo = crate::search::memo::brute_force::memo(per_computation, entries);
+    let memo_stats =
+        crate::search::memo::brute_force::stats(&memo, started.elapsed().as_secs_f64() * 1e3);
     let mut input = model_input_of(&memo, entries, data, models)?;
     let mut selector = PlanSelector::new(entries, data, models, false)?;
     let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
@@ -1567,14 +1568,15 @@ pub(crate) fn search<Id: Clone>(
         }
         // The solution's group choice: the candidate each chosen choice
         // takes for its group.
-        let mut group_choice: super::search::GroupChoice = vec![None; memo.groups.len()];
+        let mut group_choice: crate::search::memo::brute_force::GroupChoice =
+            vec![None; memo.groups.len()];
         for &c in &solution.chosen {
             group_choice[input.choices[c].group.0 as usize] = Some(input.choices[c].candidate);
         }
         // A group choice that fails a requirement the model does not
         // encode is offered as any other: the reference evaluation finds
         // no valid plan in it, and the cut below removes exactly it.
-        super::search::offer_group_choice(
+        crate::search::memo::brute_force::offer_group_choice(
             &memo,
             per_computation,
             &group_choice,
@@ -1680,14 +1682,14 @@ pub(crate) fn search<Id: Clone>(
 /// The model's input for `memo`: each group's shared choices (copies and
 /// widened scans are left to the exact pricing) with their lazy lower
 /// bounds, and the raw scans.
-pub(super) fn model_input_of(
+pub(crate) fn model_input_of(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<ModelInput, SelectionError> {
-    let scale = super::pricing::frozen_calibration(memo, entries, data, models)?;
-    let mut cache = super::pricing::PriceCache::new(scale);
+    let scale = crate::cost::per_node::frozen_calibration(memo, entries, data, models)?;
+    let mut cache = crate::cost::per_node::PriceCache::new(scale);
     let mut choices: Vec<Choice> = Vec::new();
     let mut raw_scans: Vec<(usize, String, u64, Via)> = Vec::new();
     let mut lazies: Vec<LazyTerms> = Vec::new();
@@ -1695,7 +1697,7 @@ pub(super) fn model_input_of(
         unreachable!("the caller routes cost models 2 and 3 to the legacy search");
     };
     for g in 0..memo.groups.len() {
-        let (group_choices, lazy) = super::coefficients::choices(
+        let (group_choices, lazy) = crate::search::milp::coefficients::choices(
             memo,
             GroupId(g as u32),
             entries,
@@ -1714,7 +1716,7 @@ pub(super) fn model_input_of(
         for (choice, lazy) in group_choices.into_iter().zip(lazy) {
             if choice.copy_of.is_some()
                 || memo.candidates[g][choice.candidate].origin
-                    == super::CandidateOrigin::WidenedScans
+                    == crate::search::memo::CandidateOrigin::WidenedScans
             {
                 continue;
             }
@@ -1803,7 +1805,7 @@ pub(super) fn model_input_of(
 }
 
 /// Every group choice of `memo` with its exact price (the cheapest plan
-/// [`super::search::offer_group_choice`] finds) and the model's value
+/// [`crate::search::memo::brute_force::offer_group_choice`] finds) and the model's value
 /// restricted to it, which should be a lower bound of the price; group
 /// choices without a valid plan are left out.
 pub(crate) fn lower_bound_check<Id: Clone>(
@@ -1813,13 +1815,20 @@ pub(crate) fn lower_bound_check<Id: Clone>(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
-) -> Result<Vec<(super::search::GroupChoice, f64, Option<f64>)>, SelectionError> {
+) -> Result<
+    Vec<(
+        crate::search::memo::brute_force::GroupChoice,
+        f64,
+        Option<f64>,
+    )>,
+    SelectionError,
+> {
     let mut out = Vec::new();
-    for group_choice in super::search::group_choices(memo).unwrap_or_default() {
+    for group_choice in crate::search::memo::brute_force::group_choices(memo).unwrap_or_default() {
         let mut one = PlanSelector::new(entries, data, models, false)?;
         let mut scratch = HashMap::new();
         let mut k = 0usize;
-        super::search::offer_group_choice(
+        crate::search::memo::brute_force::offer_group_choice(
             memo,
             per_computation,
             &group_choice,
@@ -1944,7 +1953,7 @@ fn model_input(
         }
     }
     // Requirements the reference search checks on a group choice
-    // ([`super::windows::requirements_met`]); rollups below.
+    // ([`crate::search::memo::rules::windows::requirements_met`]); rollups below.
     let candidate_of = |c: &Choice| &memo.candidates[c.group.0 as usize][c.candidate];
     let mut requires = Vec::new();
     for (c, choice) in choices.iter().enumerate() {
@@ -1952,7 +1961,8 @@ fn model_input(
         for &g in &candidate.requires_exact_children {
             let allowed = (0..choices.len())
                 .filter(|&a| {
-                    choices[a].group == g && super::windows::is_exact(candidate_of(&choices[a]))
+                    choices[a].group == g
+                        && crate::search::memo::rules::windows::is_exact(candidate_of(&choices[a]))
                 })
                 .collect();
             requires.push((c, allowed));
@@ -1988,7 +1998,7 @@ fn model_input(
             .push(c);
     }
     let present: BTreeSet<(usize, usize)> = choices_of.keys().copied().collect();
-    let rollup_rules = super::windows::rollup_rules(memo, &present)
+    let rollup_rules = crate::search::memo::rules::windows::rollup_rules(memo, &present)
         .into_iter()
         .map(|rule| {
             (
@@ -2000,14 +2010,14 @@ fn model_input(
             )
         })
         .collect();
-    let of_origin = |origin: super::CandidateOrigin| -> Vec<usize> {
+    let of_origin = |origin: crate::search::memo::CandidateOrigin| -> Vec<usize> {
         (0..choices.len())
             .filter(|&c| candidate_of(&choices[c]).origin == origin)
             .collect()
     };
     let exclusive = (
-        of_origin(super::CandidateOrigin::Panes),
-        of_origin(super::CandidateOrigin::TopKReuse),
+        of_origin(crate::search::memo::CandidateOrigin::Panes),
+        of_origin(crate::search::memo::CandidateOrigin::TopKReuse),
     );
     let group_slots = memo
         .groups
@@ -2146,7 +2156,7 @@ mod tests {
     /// with no latency bound, solved with a no-good cut on each group
     /// choice it returns until it is infeasible; and the group choices of
     /// the same candidates the reference search accepts
-    /// ([`super::super::windows::requirements_met`]).
+    /// ([`crate::search::memo::rules::windows::requirements_met`]).
     fn model_and_reference_plans(
         queries: &[&str],
         targets: &[AccuracyTarget],
@@ -2196,13 +2206,13 @@ mod tests {
             .collect(),
         };
         let models = PlanningModels::builtin();
-        let memo = super::super::search::memo(&per_computation, &entries);
+        let memo = crate::search::memo::brute_force::memo(&per_computation, &entries);
         let scale =
-            super::super::pricing::frozen_calibration(&memo, &entries, &data, models).unwrap();
-        let mut cache = super::super::pricing::PriceCache::new(scale);
+            crate::cost::per_node::frozen_calibration(&memo, &entries, &data, models).unwrap();
+        let mut cache = crate::cost::per_node::PriceCache::new(scale);
         let mut choices = Vec::new();
         for g in 0..memo.groups.len() {
-            let (group_choices, _) = super::super::coefficients::choices(
+            let (group_choices, _) = crate::search::milp::coefficients::choices(
                 &memo,
                 GroupId(g as u32),
                 &entries,
@@ -2214,7 +2224,7 @@ mod tests {
             choices.extend(group_choices.into_iter().filter(|choice| {
                 choice.copy_of.is_none()
                     && memo.candidates[g][choice.candidate].origin
-                        != super::super::CandidateOrigin::WidenedScans
+                        != crate::search::memo::CandidateOrigin::WidenedScans
             }));
         }
         let mut input = model_input(&memo, choices, &entries, models).unwrap();
@@ -2274,7 +2284,7 @@ mod tests {
                 .collect()
         };
         let model = model.into_iter().map(project).collect();
-        let reference = super::super::search::group_choices(&memo)
+        let reference = crate::search::memo::brute_force::group_choices(&memo)
             .unwrap()
             .into_iter()
             .filter(|plan| {
@@ -2283,12 +2293,12 @@ mod tests {
                     .all(|(g, c)| c.is_none_or(|c| present.contains(&(g, c))))
             })
             .filter(|plan| {
-                let chosen: Vec<(GroupId, &super::super::ImplementationCandidate)> = plan
+                let chosen: Vec<(GroupId, &crate::search::memo::ImplementationCandidate)> = plan
                     .iter()
                     .enumerate()
                     .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
                     .collect();
-                super::super::windows::requirements_met(&chosen)
+                crate::search::memo::rules::windows::requirements_met(&chosen)
             })
             .map(project)
             .collect();

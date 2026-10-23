@@ -41,7 +41,7 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 
-use super::{
+use crate::search::memo::{
     CandidateOrigin, CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo, MemoGroup,
     RollupRead,
 };
@@ -1662,8 +1662,9 @@ mod tests {
             .map(|q| QueryRoot::Operator(lower_promql(q, AccuracyTarget::exact())))
             .enumerate()
             .collect();
-        let mut memo =
-            super::super::groups::memo_of(&generate_per_computation_candidates(roots).unwrap());
+        let mut memo = crate::search::memo::groups::memo_of(
+            &generate_per_computation_candidates(roots).unwrap(),
+        );
         let entries = vec![repeating(60_000); 2];
         add_pass2_candidates(&mut memo, &entries);
         let ranking = memo

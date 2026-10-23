@@ -34,8 +34,10 @@ use asap_types::ir::operator::Source;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::physical::{Materialization, Medium};
 
-use super::groups::NodeKeys;
-use super::{CandidateOrigin, CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo};
+use crate::search::memo::groups::NodeKeys;
+use crate::search::memo::{
+    CandidateOrigin, CouplingKind, CouplingSite, GroupId, ImplementationCandidate, Memo,
+};
 
 /// One label set a metric's scans may be widened to.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -494,7 +496,7 @@ fn hash_of<T: Hash>(value: &T) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass::subexpr::groups::memo_of;
+    use crate::search::memo::groups::memo_of;
     use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;

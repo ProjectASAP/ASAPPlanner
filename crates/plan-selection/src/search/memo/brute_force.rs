@@ -18,7 +18,7 @@ use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate}
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use super::{groups, CouplingKind, GroupId, ImplementationCandidate, Memo};
+use crate::search::memo::{groups, CouplingKind, GroupId, ImplementationCandidate, Memo};
 use crate::{MemoStats, PlanSelector, PlanningModels, Selection, SelectionError};
 
 /// The workload's memo: groups, Pass 1 candidates and the Pass 2
@@ -28,11 +28,11 @@ pub(crate) fn memo<Id: Clone>(
     entries: &[QueryWorkloadEntry],
 ) -> Memo {
     let mut memo = groups::memo_of(per_computation);
-    super::capability::add_shared_builds(&mut memo);
-    super::windows::add_pass2_candidates(&mut memo, entries);
-    super::scans::add_scan_widening(&mut memo);
-    super::scans::add_raw_horizons(&mut memo);
-    super::scans::scan_materializations(&mut memo);
+    crate::search::memo::rules::capability::add_shared_builds(&mut memo);
+    crate::search::memo::rules::windows::add_pass2_candidates(&mut memo, entries);
+    crate::search::memo::rules::scans::add_scan_widening(&mut memo);
+    crate::search::memo::rules::scans::add_raw_horizons(&mut memo);
+    crate::search::memo::rules::scans::scan_materializations(&mut memo);
     memo
 }
 
@@ -72,12 +72,12 @@ pub(crate) fn stats(memo: &Memo, build_ms: f64) -> MemoStats {
 
 /// One plan of the memo: a candidate per needed group (`None` for a group
 /// no chosen candidate needs, or one a fused candidate implements).
-pub(super) type GroupChoice = Vec<Option<usize>>;
+pub(crate) type GroupChoice = Vec<Option<usize>>;
 
 /// Every consistent choice of one candidate per needed group, parents
 /// before children: a group is needed when it is a query's root or a child
 /// of a chosen candidate, and not implemented by a chosen fused candidate.
-pub(super) fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
+pub(crate) fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
     let order = memo.topological_order()?;
     let parents_first: Vec<GroupId> = order.into_iter().rev().collect();
     let n = memo.groups.len();
@@ -142,7 +142,7 @@ pub(super) fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
 /// of its coupling sites: every combination of thresholds every reader may
 /// read. A raw-horizon site has no rewrite and leaves its readers as they
 /// are; Stage 3 prices it.
-pub(super) fn at_thresholds(
+pub(crate) fn at_thresholds(
     memo: &Memo,
     choice: &GroupChoice,
 ) -> Vec<Vec<Option<ImplementationCandidate>>> {
@@ -166,25 +166,29 @@ pub(super) fn at_thresholds(
         for plan in plans {
             match site.kind {
                 CouplingKind::PaneChain => {
-                    for threshold in super::windows::chain_thresholds(memo, &site) {
+                    for threshold in
+                        crate::search::memo::rules::windows::chain_thresholds(memo, &site)
+                    {
                         let mut rewritten = plan.clone();
                         let mut valid = true;
                         for candidate in rewritten.iter_mut().flatten() {
                             if !candidate.coupling_sites.contains(&site) {
                                 continue;
                             }
-                            let readers: Vec<_> = super::windows::chain_readers(&candidate.node)
-                                .into_iter()
-                                .filter(|r| r.key == site.key)
-                                .collect();
-                            if !readers
-                                .iter()
-                                .all(|r| super::windows::may_read(&threshold, r))
-                            {
+                            let readers: Vec<_> =
+                                crate::search::memo::rules::windows::chain_readers(&candidate.node)
+                                    .into_iter()
+                                    .filter(|r| r.key == site.key)
+                                    .collect();
+                            if !readers.iter().all(|r| {
+                                crate::search::memo::rules::windows::may_read(&threshold, r)
+                            }) {
                                 valid = false;
                                 break;
                             }
-                            match super::windows::read_at_threshold(candidate, &site, &threshold) {
+                            match crate::search::memo::rules::windows::read_at_threshold(
+                                candidate, &site, &threshold,
+                            ) {
                                 Ok(node) => candidate.node = node,
                                 Err(_) => {
                                     valid = false;
@@ -198,14 +202,16 @@ pub(super) fn at_thresholds(
                     }
                 }
                 CouplingKind::ScanLabels => {
-                    for threshold in super::scans::label_thresholds(memo, &site) {
+                    for threshold in
+                        crate::search::memo::rules::scans::label_thresholds(memo, &site)
+                    {
                         let mut rewritten = plan.clone();
                         let mut valid = true;
                         for candidate in rewritten.iter_mut().flatten() {
                             if !candidate.coupling_sites.contains(&site) {
                                 continue;
                             }
-                            match super::scans::widened_at_threshold(
+                            match crate::search::memo::rules::scans::widened_at_threshold(
                                 memo, candidate, &site, &threshold,
                             ) {
                                 Ok(Some(widened)) => *candidate = widened,
@@ -220,21 +226,29 @@ pub(super) fn at_thresholds(
                         }
                     }
                 }
-                CouplingKind::SharedBuildSize if super::windows::is_rollup_state(memo, &site) => {
+                CouplingKind::SharedBuildSize
+                    if crate::search::memo::rules::windows::is_rollup_state(memo, &site) =>
+                {
                     // A sketch rollup's finer build, sized for its readers:
                     // the rollups and the finer group's exposing candidate.
-                    for threshold in super::windows::state_size_thresholds(memo, &site) {
+                    for threshold in
+                        crate::search::memo::rules::windows::state_size_thresholds(memo, &site)
+                    {
                         let mut rewritten = plan.clone();
                         let mut valid = true;
                         for candidate in rewritten.iter_mut().flatten() {
                             if !candidate.coupling_sites.contains(&site) {
                                 continue;
                             }
-                            if !super::windows::may_read_state(&threshold, candidate, &site) {
+                            if !crate::search::memo::rules::windows::may_read_state(
+                                &threshold, candidate, &site,
+                            ) {
                                 valid = false;
                                 break;
                             }
-                            match super::windows::resize_state_at(candidate, &site, &threshold) {
+                            match crate::search::memo::rules::windows::resize_state_at(
+                                candidate, &site, &threshold,
+                            ) {
                                 Ok(node) => candidate.node = node,
                                 Err(_) => {
                                     valid = false;
@@ -248,14 +262,16 @@ pub(super) fn at_thresholds(
                     }
                 }
                 CouplingKind::SharedBuildSize => {
-                    for threshold in super::capability::size_thresholds(memo, &site) {
+                    for threshold in
+                        crate::search::memo::rules::capability::size_thresholds(memo, &site)
+                    {
                         let mut rewritten = plan.clone();
                         let mut valid = true;
                         for candidate in rewritten.iter_mut().flatten() {
                             if !candidate.coupling_sites.contains(&site) {
                                 continue;
                             }
-                            match super::capability::resized_at_threshold(
+                            match crate::search::memo::rules::capability::resized_at_threshold(
                                 memo, candidate, &site, &threshold,
                             ) {
                                 Ok(Some(node)) => candidate.node = node,
@@ -283,7 +299,7 @@ pub(super) fn at_thresholds(
 /// them: every closed set of identical nodes made one node, and, when a
 /// metric's scans project different labels, the candidates over every
 /// metric's scans widened to one label set that share a scan.
-pub(super) fn identical_expression_variants(roots: Vec<QueryRoot>) -> Vec<Vec<QueryRoot>> {
+pub(crate) fn identical_expression_variants(roots: Vec<QueryRoot>) -> Vec<Vec<QueryRoot>> {
     let mut variants = Vec::new();
     for shared in identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots)) {
         variants.push(shared.roots);
@@ -312,7 +328,7 @@ pub(super) fn identical_expression_variants(roots: Vec<QueryRoot>) -> Vec<Vec<Qu
 /// candidate reads from outside its query (a rollup's finer group, a
 /// ranking, a host chain) is built once, by the first query below whose
 /// root it is, or once for all.
-pub(super) fn composed_roots<Id>(
+pub(crate) fn composed_roots<Id>(
     memo: &Memo,
     per_computation: &PerComputationCandidates<Id>,
     chosen: &[Option<ImplementationCandidate>],
@@ -465,7 +481,7 @@ fn substituted(
 /// The shared builds `plan` resized: each shared-build reader's build that
 /// differs from the build of the memo's candidate it was chosen as
 /// (`choice`).
-pub(super) fn resized_builds(
+pub(crate) fn resized_builds(
     memo: &Memo,
     choice: &GroupChoice,
     plan: &[Option<ImplementationCandidate>],
@@ -477,9 +493,10 @@ pub(super) fn resized_builds(
         .filter_map(|(g, (c, candidate))| {
             let candidate = candidate.as_ref()?;
             let original = &memo.candidates[g][(*c)?];
-            let build = super::capability::shared_build_of(candidate)?;
-            let own = super::capability::shared_build_of(original)?;
-            (candidate.origin == super::CandidateOrigin::SharedBuild && *build != *own)
+            let build = crate::search::memo::rules::capability::shared_build_of(candidate)?;
+            let own = crate::search::memo::rules::capability::shared_build_of(original)?;
+            (candidate.origin == crate::search::memo::CandidateOrigin::SharedBuild
+                && *build != *own)
                 .then_some(build)
         })
         .collect()
@@ -493,7 +510,7 @@ pub(super) fn resized_builds(
 /// (`L<number>`). `false` when the choice breaks a joint rule (nothing
 /// offered).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn offer_group_choice<Id: Clone>(
+pub(crate) fn offer_group_choice<Id: Clone>(
     memo: &Memo,
     per_computation: &PerComputationCandidates<Id>,
     choice: &GroupChoice,
@@ -509,14 +526,14 @@ pub(super) fn offer_group_choice<Id: Clone>(
         .enumerate()
         .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
         .collect();
-    if !super::windows::requirements_met(&chosen) {
+    if !crate::search::memo::rules::windows::requirements_met(&chosen) {
         return Ok(false);
     }
     // Scans are widened as the identical-expression rule widens them,
     // every metric's at once ([`identical_expression_variants`]).
     if chosen
         .iter()
-        .any(|(_, c)| c.origin == super::CandidateOrigin::WidenedScans)
+        .any(|(_, c)| c.origin == crate::search::memo::CandidateOrigin::WidenedScans)
     {
         return Ok(false);
     }
@@ -533,8 +550,10 @@ pub(super) fn offer_group_choice<Id: Clone>(
         // Shared builds are one build (the summary-capability rule),
         // then identical nodes shared or not, as the exhaustive search
         // lists them.
-        let roots =
-            super::capability::share_equal_builds(&roots, &resized_builds(memo, choice, &plan));
+        let roots = crate::search::memo::rules::capability::share_equal_builds(
+            &roots,
+            &resized_builds(memo, choice, &plan),
+        );
         for roots in identical_expression_variants(roots) {
             *number += 1;
             let id = format!("L{number}");
@@ -615,7 +634,7 @@ mod tests {
     /// read the build, so it is the only plan.
     #[test]
     fn two_kll_readers_at_a_threshold_compose_to_one_build() {
-        use super::super::CandidateOrigin;
+        use crate::search::memo::CandidateOrigin;
         let roots: Vec<(usize, QueryRoot)> = [0.01, 0.02]
             .iter()
             .map(|&e| {
@@ -628,7 +647,7 @@ mod tests {
             .collect();
         let per_computation = generate_per_computation_candidates(roots).unwrap();
         let mut memo = groups::memo_of(&per_computation);
-        super::super::capability::add_shared_builds(&mut memo);
+        crate::search::memo::rules::capability::add_shared_builds(&mut memo);
         let is_kll = |c: &ImplementationCandidate| {
             OperatorNode::reachable(&c.node).iter().any(|n| {
                 matches!(n.asap(), Some(asap_types::ir::ASAPOp::SummaryAgg { family, .. })
@@ -654,7 +673,7 @@ mod tests {
         let plans = at_thresholds(&memo, &choice);
         assert_eq!(plans.len(), 1);
         let roots = composed_roots(&memo, &per_computation, &plans[0]).unwrap();
-        let roots = super::super::capability::share_equal_builds(
+        let roots = crate::search::memo::rules::capability::share_equal_builds(
             &roots,
             &resized_builds(&memo, &choice, &plans[0]),
         );
@@ -719,7 +738,7 @@ mod tests {
     /// by kind, a site two candidates share once.
     #[test]
     fn stats_count_candidates_by_origin_and_sites_by_kind() {
-        use super::super::{CandidateOrigin, CouplingSite};
+        use crate::search::memo::{CandidateOrigin, CouplingSite};
         let roots = vec![(
             0usize,
             QueryRoot::Operator(lower_promql(
@@ -804,7 +823,7 @@ mod tests {
                 c.rollup_of
                     .as_ref()
                     .is_some_and(|read| read.finer_state.is_some())
-            }) && super::super::windows::requirements_met(&chosen)
+            }) && crate::search::memo::rules::windows::requirements_met(&chosen)
         });
         assert!(met, "no sketch rollup meets its requirements");
     }
