@@ -49,6 +49,7 @@ use crate::search::memo::{CouplingKind, CouplingSite, GroupId, ImplementationCan
 use crate::search::milp::model::{
     Choice, ChoiceCoefficients, PartCoefficients, SharedNodeCoefficients, SlotCoefficients, Via,
 };
+use crate::search::milp::sizing;
 use crate::{
     kept_pane_chains, maintained_window_ms, node_map, pane_retention_ms, price_node, query_reach,
     retained_panes, source_name, windows_read, CostModel, PlanningModels, PricedNode,
@@ -115,6 +116,13 @@ pub(crate) fn choices(
 /// the site's thresholds).
 type SiteThresholds = Vec<(CouplingSite, usize)>;
 
+/// The final size of a version's own summaries ([`sizing`]).
+struct Level {
+    per_input_failure_probability: Option<f64>,
+    input_limits: Vec<(usize, usize)>,
+    summary_keys: Vec<u64>,
+}
+
 /// A choice with the shallow keys ([`shallow_keys`]) of its nodes, by
 /// which a composed plan's nodes are found (tests).
 pub(crate) struct ChoiceParts {
@@ -170,16 +178,44 @@ pub(crate) fn choice_parts(
         _ => vec![None],
     };
     let mut out = Vec::new();
-    let versions: Vec<(usize, ImplementationCandidate, SiteThresholds)> = memo.candidates
-        [group.0 as usize]
-        .iter()
-        .enumerate()
-        .flat_map(|(index, candidate)| {
-            at_site_thresholds(memo, candidate)
-                .into_iter()
-                .map(move |(version, thresholds)| (index, version, thresholds))
-        })
-        .collect();
+    let sizing = Rc::clone(
+        cache
+            .sizing
+            .get_or_insert_with(|| Rc::new(sizing::sizing(memo, entries, data))),
+    );
+    // The model links a choice's summary sizes to its queries' plans only
+    // under the built-in accuracy model's semantics: otherwise a plan
+    // whose value has no guarantee may be accepted, and Stage 3 enlarges
+    // nothing for it.
+    let limits_hold = !models
+        .effective_accuracy()
+        .may_accept_regardless_of_guarantee()
+        && !models.evidence.may_provide_evidence();
+    // Each candidate at its sites' thresholds, then its own summaries at
+    // each final size its queries may ask for.
+    let mut versions: Vec<(usize, ImplementationCandidate, SiteThresholds, Level)> = Vec::new();
+    for (index, candidate) in memo.candidates[group.0 as usize].iter().enumerate() {
+        for (version, thresholds) in at_site_thresholds(memo, candidate) {
+            let summary_keys: Vec<u64> = sizing::private_summaries(memo, &version)
+                .iter()
+                .map(|state| cache.summary_keys.key(state))
+                .collect();
+            for (leveled, delta) in
+                sizing::at_levels(memo, &version, &sizing.levels[group.0 as usize], data)
+            {
+                let input_limits = match limits_hold {
+                    true => sizing::input_limits(memo, &leveled, queries, &sizing, data),
+                    false => Vec::new(),
+                };
+                let level = Level {
+                    per_input_failure_probability: delta,
+                    input_limits,
+                    summary_keys: summary_keys.clone(),
+                };
+                versions.push((index, leveled, thresholds.clone(), level));
+            }
+        }
+    }
     for copy_of in modes {
         // A copy for one query is built for it twice, so that Stage 2
         // offers its builds built once for several readers (`MatAtQuery`):
@@ -190,7 +226,7 @@ pub(crate) fn choice_parts(
         };
         let part_entries: Vec<QueryWorkloadEntry> =
             built_for.iter().map(|&q| entries[q].clone()).collect();
-        for (index, candidate, thresholds) in &versions {
+        for (index, candidate, thresholds, level) in &versions {
             let (index, candidate) = (*index, candidate);
             let roots =
                 vec![QueryRoot::Operator(Rc::clone(&candidate.node)); built_for.len().max(1)];
@@ -429,6 +465,9 @@ pub(crate) fn choice_parts(
                                 scan_project_cost_per_unit_rate: parts.scan_project_cost,
                                 built_once_with_other_group,
                                 built_once_keys,
+                                per_input_failure_probability: level.per_input_failure_probability,
+                                input_limits: level.input_limits.clone(),
+                                summary_keys: level.summary_keys.clone(),
                             },
                             lazy: LazyTerms {
                                 thresholds: thresholds.clone(),

@@ -142,6 +142,12 @@ pub(crate) struct PriceCache {
     /// The raw windows of each scan horizon key of the memo
     /// (`coefficients::raw_windows`), computed once per memo.
     pub(crate) raw_windows: Option<Rc<HashMap<u64, std::collections::BTreeSet<u64>>>>,
+    /// What sizing once reads from the memo
+    /// (`crate::search::milp::sizing::sizing`), computed once per memo.
+    pub(crate) sizing: Option<Rc<crate::search::milp::sizing::Sizing>>,
+    /// Structural keys of the memo's summary states, by which the model
+    /// counts the distinct summaries a query's plan composes.
+    pub(crate) summary_keys: crate::search::memo::groups::NodeKeys,
     /// Local prices found in the cache.
     pub hits: u64,
     /// Local prices computed.
@@ -1189,6 +1195,7 @@ mod tests {
                 roots_of: vec![0],
             }],
             candidates: vec![candidates],
+            roots: Vec::new(),
         };
         add_window_composition(&mut memo, &entries);
         let panes = memo.candidates[0]

@@ -80,6 +80,8 @@ pub(crate) struct Memo {
     pub groups: Vec<MemoGroup>,
     /// Each group's implementation candidates, by group index.
     pub candidates: Vec<Vec<ImplementationCandidate>>,
+    /// The queries' roots as the frontends gave them, in workload order.
+    pub roots: Vec<asap_types::ir::QueryRoot>,
 }
 
 /// One way to implement a group: its node as Stage 2 implements it, over

@@ -528,6 +528,7 @@ mod tests {
         let mut memo = Memo {
             groups: vec![group(&scan, vec![]), group(&window, vec![GroupId(0)])],
             candidates: vec![Vec::new(), Vec::new()],
+            roots: Vec::new(),
         };
         for (q, (algorithm, params)) in readers.iter().enumerate() {
             let node = estimate(build(algorithm.clone(), params.clone(), &window));

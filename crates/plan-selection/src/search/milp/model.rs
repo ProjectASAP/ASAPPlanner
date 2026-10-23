@@ -177,6 +177,17 @@ pub(crate) struct Choice {
     pub built_once_with_other_group: Vec<u32>,
     /// The keys of all its private builds built once at query time.
     pub built_once_keys: Vec<u32>,
+    /// The per-input failure probability its own summaries are enlarged
+    /// for (sizing once, [`crate::search::milp::sizing`]); `None`: as its
+    /// candidate builds them.
+    pub per_input_failure_probability: Option<f64>,
+    /// Per query whose plan reaching it may compose fewer summaries than
+    /// [`ModelInput::max_inputs`] asks for, at most how many its own
+    /// summaries' size allows ([`crate::search::milp::sizing::input_limits`]).
+    pub input_limits: Vec<(usize, usize)>,
+    /// The structural keys of its own summaries, by which the model counts
+    /// the distinct summaries a query's plan composes.
+    pub summary_keys: Vec<u64>,
 }
 
 /// A shared group's own node, built once per evaluation when chosen.
@@ -226,6 +237,10 @@ pub(crate) struct ModelInput {
     /// Per choice, the threshold index it reads each coupling site at (by
     /// site key): the choices of one plan read each site at one threshold.
     pub site_thresholds: Vec<Vec<(u64, usize)>>,
+    /// Per query, at most how many summaries its plan's value composes
+    /// ([`crate::search::milp::sizing::Sizing::max_inputs`]): the bound of
+    /// each choice's [`Choice::input_limits`].
+    pub max_inputs: Vec<usize>,
     /// Lower bounds on the omitted cost, added as `extra ≥ bound` when all
     /// of a choice set is chosen (local cuts).
     pub extra_bounds: Vec<(Vec<usize>, f64)>,
@@ -1183,6 +1198,32 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             flow_query_time.insert((q, c), vars.add(variable().min(0).max(1)));
         }
     }
+    // Sizing once: per query some choice limits, each distinct summary its
+    // plan composes (by key), at least each flow into a choice with it.
+    let limited: BTreeSet<usize> = input
+        .choices
+        .iter()
+        .flat_map(|choice| choice.input_limits.iter().map(|&(q, _)| q))
+        .filter(|&q| q < input.max_inputs.len())
+        .collect();
+    let mut composed: BTreeMap<usize, Expression> = BTreeMap::new();
+    let mut summary_var: BTreeMap<(usize, u64), Variable> = BTreeMap::new();
+    let mut counted: Vec<(Variable, (usize, usize))> = Vec::new();
+    for (c, choice) in input.choices.iter().enumerate() {
+        for &q in &input.group_queries[choice.group.0 as usize] {
+            if !limited.contains(&q) || !flow_all.contains_key(&(q, c)) {
+                continue;
+            }
+            for &key in &choice.summary_keys {
+                let m = *summary_var.entry((q, key)).or_insert_with(|| {
+                    let m = vars.add(variable().min(0).max(1));
+                    *composed.entry(q).or_insert_with(|| Expression::from(0.0)) += m;
+                    m
+                });
+                counted.push((m, (q, c)));
+            }
+        }
+    }
     let variable_count = vars.len() as u64;
     let column_of: HashMap<Variable, usize> = vars
         .iter_variables_with_def()
@@ -1745,6 +1786,26 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
     }
     for (_, any) in per_site {
         constraints.push(constraint!(any <= 1));
+    }
+    // Sizing once: a choice's summaries at their final size meet a query
+    // reaching it only if its plan's value composes at most the choice's
+    // limit of distinct summaries (each counted once by its key).
+    for (m, key) in &counted {
+        constraints.push(constraint!(*m >= flow_all[key]));
+    }
+    for (c, choice) in input.choices.iter().enumerate() {
+        for &(q, limit) in &choice.input_limits {
+            let (Some(&most), Some(&flow)) = (input.max_inputs.get(q), flow_all.get(&(q, c)))
+            else {
+                continue;
+            };
+            let count = composed
+                .get(&q)
+                .cloned()
+                .unwrap_or_else(|| Expression::from(0.0));
+            let slack = (most - limit) as f64;
+            constraints.push(constraint!(count <= limit as f64 + slack - slack * flow));
+        }
     }
     // A build built once only with another group's identical build: some
     // other group's choice builds it too.
@@ -2839,6 +2900,8 @@ pub(crate) fn model_input_of(
     // decoding) and the threshold it reads each site at.
     let mut versions: Vec<ImplementationCandidate> = Vec::new();
     let mut site_thresholds: Vec<Vec<(u64, usize)>> = Vec::new();
+    // A sized site's (threshold, final size) pairs, numbered.
+    let mut site_levels: HashMap<(usize, Option<u64>), usize> = HashMap::new();
     let mut kept = Vec::new();
     // Per candidate node (its group and node), its widened-scans twins'
     // scans: (source key, label set, price per unit of rate).
@@ -2962,11 +3025,26 @@ pub(crate) fn model_input_of(
         );
         let (choice, lazy) = (part.choice, part.lazy);
         versions.push(part.version);
+        // A shared build or chain is one node at one size: its readers
+        // take one threshold and one final size.
+        let level = choice.per_input_failure_probability.map(f64::to_bits);
         site_thresholds.push(
             lazy.thresholds
                 .iter()
                 .filter(|(site, _)| site.kind != crate::search::memo::CouplingKind::RawHorizon)
-                .map(|(site, t)| (site.key, *t))
+                .map(|(site, t)| {
+                    let sized = matches!(
+                        site.kind,
+                        crate::search::memo::CouplingKind::SharedBuildSize
+                            | crate::search::memo::CouplingKind::PaneChain
+                    );
+                    let next = site_levels.len();
+                    let index = match sized {
+                        true => *site_levels.entry((*t, level)).or_insert(next),
+                        false => *t,
+                    };
+                    (site.key, index)
+                })
                 .collect(),
         );
         lazies.push(lazy.clone());
@@ -3186,6 +3264,7 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         excluded: input.excluded.clone(),
         excluded_once: input.excluded_once.clone(),
         site_thresholds: input.site_thresholds.clone(),
+        max_inputs: input.max_inputs.clone(),
         extra_bounds: input.extra_bounds.clone(),
         requires: input.requires.clone(),
         exclusive: input.exclusive.clone(),
@@ -3208,12 +3287,13 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
 /// result is at least its per-value one) unless a node is exact whatever
 /// its input (a count of rows), so a group's node composed over its
 /// candidate and one child candidate, every other child exact, bounds it
-/// from below. With its summaries at the largest size Stage 3 can give
-/// them ([`crate::resized_to_the_largest`]), its data-workload statistics
-/// bound and every other unknown term at zero (the optimistic floor), its
-/// failure probability above the largest target of the queries a plan may
-/// lead to the group rules the pair out, under every size threshold of the
-/// candidate's and the child's coupling sites. No guarantee at all (an
+/// from below. With its data-workload statistics bound and every other
+/// unknown term at zero (the optimistic floor), its failure probability
+/// above the largest target of the queries a plan may lead to the group
+/// rules the pair out, under every size threshold of the candidate's and
+/// the child's coupling sites and every final size of their summaries
+/// ([`crate::search::milp::sizing::at_levels`]), one of which Stage 3
+/// takes. No guarantee at all (an
 /// approximate input that no rule composes) counts as failing surely. A
 /// candidate that fails with every child exact is ruled out alone. A group
 /// a plan may read through a node exact whatever its input gets no rule.
@@ -3228,6 +3308,7 @@ fn guarantee_requirements(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
+    sizing: &crate::search::milp::sizing::Sizing,
 ) -> Vec<(usize, Vec<usize>)> {
     use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
     use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric};
@@ -3252,25 +3333,13 @@ fn guarantee_requirements(
             _ => Err(()),
         }
     };
-    let exact = |node: &Rc<OperatorNode>| {
-        guarantee_of(&[QueryRoot::Operator(Rc::clone(node))])
-            .is_ok_and(|g| g.is_some_and(|g| g.is_exact()))
-    };
     // The optimistic floor of the failure probability of `node`'s
-    // guarantee with its summaries at the largest size Stage 3's resizing
-    // can give them; `Some(1.0)` for no guarantee at its own size, which
-    // no resizing or node above repairs (an approximate input no rule
-    // composes); `None` when unknown. A guarantee lost only at the largest
-    // size (a family whose size cap lets its error grow there, e.g. a
-    // UnivMon heap at a tiny failure probability) is unknown, never 1.0.
+    // guarantee, its summaries at the size they have; `Some(1.0)` for no
+    // guarantee, which no node above repairs (an approximate input no
+    // rule composes); `None` when unknown.
     let floor = |node: &Rc<OperatorNode>| -> Option<f64> {
-        let largest =
-            crate::resized_to_the_largest(&[QueryRoot::Operator(Rc::clone(node))]).ok()?;
-        let Some(guarantee) = guarantee_of(&largest).ok()? else {
-            return guarantee_of(&[QueryRoot::Operator(Rc::clone(node))])
-                .ok()?
-                .is_none()
-                .then_some(1.0);
+        let Some(guarantee) = guarantee_of(&[QueryRoot::Operator(Rc::clone(node))]).ok()? else {
+            return Some(1.0);
         };
         crate::bind_statistics(&guarantee, &|statistic| {
             crate::workload_statistic(statistic, None, data)
@@ -3290,24 +3359,7 @@ fn guarantee_requirements(
         .iter()
         .map(|group| group.roots_of.iter().copied().collect())
         .collect();
-    let mut free = vec![false; memo.groups.len()];
-    for candidates in &memo.candidates {
-        for candidate in candidates {
-            for &GroupId(h) in &candidate.children {
-                let h = h as usize;
-                let child_node = Rc::as_ptr(&memo.groups[h].node);
-                free[h] |= memo.candidates[h].iter().any(|d| {
-                    let replaced = HashMap::from([(child_node, Rc::clone(&d.node))]);
-                    let composed = crate::search::memo::brute_force::substituted(
-                        &candidate.node,
-                        &replaced,
-                        &mut HashMap::new(),
-                    );
-                    !exact(&d.node) && exact(&composed)
-                });
-            }
-        }
-    }
+    let mut free = crate::search::milp::sizing::read_through_exact(memo);
     loop {
         let mut changed = false;
         for (g, candidates) in memo.candidates.iter().enumerate() {
@@ -3350,17 +3402,25 @@ fn guarantee_requirements(
             .or_default()
             .push(c);
     }
-    let versions: HashMap<(usize, usize), Vec<Rc<OperatorNode>>> = choices_of
-        .keys()
-        .map(|&(g, c)| {
-            let nodes =
-                crate::search::milp::coefficients::at_site_thresholds(memo, &memo.candidates[g][c])
-                    .into_iter()
-                    .map(|(version, _)| version.node)
-                    .collect();
-            ((g, c), nodes)
-        })
-        .collect();
+    // Each at every final size of its own summaries: one of them is the
+    // size Stage 3 takes ([`crate::search::milp::sizing`]).
+    let versions: HashMap<(usize, usize), Vec<Rc<OperatorNode>>> =
+        choices_of
+            .keys()
+            .map(|&(g, c)| {
+                let nodes = crate::search::milp::coefficients::at_site_thresholds(
+                    memo,
+                    &memo.candidates[g][c],
+                )
+                .into_iter()
+                .flat_map(|(version, _)| {
+                    crate::search::milp::sizing::at_levels(memo, &version, &sizing.levels[g], data)
+                })
+                .map(|(version, _)| version.node)
+                .collect();
+                ((g, c), nodes)
+            })
+            .collect();
     let mut requires = Vec::new();
     for (&(g, c), own) in &choices_of {
         let Some(target) = target(g) else {
@@ -3599,8 +3659,9 @@ fn model_input(
             requires.push((c, allowed));
         }
     }
+    let sizing = crate::search::milp::sizing::sizing(memo, entries, data);
     requires.extend(guarantee_requirements(
-        memo, &choices, entries, data, models,
+        memo, &choices, entries, data, models, &sizing,
     ));
     // A reader of a scan shared at horizon `h` reads the scan group's
     // choice at that horizon, so every reader of one scan agrees on it.
@@ -3669,6 +3730,7 @@ fn model_input(
         excluded: Vec::new(),
         excluded_once: Vec::new(),
         site_thresholds: Vec::new(),
+        max_inputs: sizing.max_inputs,
         extra_bounds: Vec::new(),
         requires,
         exclusive,
@@ -3716,6 +3778,9 @@ pub(crate) mod tests {
             scan_project_cost_per_unit_rate: 0.0,
             built_once_with_other_group: Vec::new(),
             built_once_keys: Vec::new(),
+            per_input_failure_probability: None,
+            input_limits: Vec::new(),
+            summary_keys: Vec::new(),
         }
     }
 
@@ -3753,6 +3818,7 @@ pub(crate) mod tests {
             excluded: Vec::new(),
             excluded_once: Vec::new(),
             site_thresholds: Vec::new(),
+            max_inputs: Vec::new(),
             extra_bounds: Vec::new(),
             requires: Vec::new(),
             exclusive: (Vec::new(), Vec::new()),
@@ -3820,6 +3886,7 @@ pub(crate) mod tests {
             excluded: Vec::new(),
             excluded_once: Vec::new(),
             site_thresholds: Vec::new(),
+            max_inputs: Vec::new(),
             extra_bounds: Vec::new(),
             requires: Vec::new(),
             exclusive: (Vec::new(), Vec::new()),
@@ -4229,16 +4296,20 @@ pub(crate) mod tests {
         .collect()
     }
 
-    /// Distinct items per minute within 5% with probability 0.99, over at
-    /// most 2,000 distinct items: classic HLL at its Pass 1 precision does
-    /// not certify that, and Stage 3 enlarges its precision until it does.
-    /// So no HLL choice is ruled out.
+    /// Distinct items per minute per series within 5% with probability
+    /// 0.99 each, over at most 2,000 distinct items: classic HLL at its
+    /// Pass 1 precision does not certify that, and its final size (the
+    /// precision Stage 3 takes for a per-value failure probability of
+    /// 0.01) does. So no HLL choice is ruled out.
     #[test]
     fn a_summary_stage_3_enlarges_to_certify_is_kept() {
         use asap_logical_asap_optimization::accuracy::estimators::hll;
+        use asap_types::ir::properties::AccuracyScope;
         let (memo, input) = memo_and_input_over(
             &["distinct_over_time(m[1m])"],
-            &[AccuracyTarget::max_error(0.05).failure_probability(0.01)],
+            &[AccuracyTarget::max_error(0.05)
+                .failure_probability(0.01)
+                .accuracy_scope(AccuracyScope::PerValue)],
             Some(2_000),
         );
         let hll_choices: Vec<usize> = (0..input.choices.len())
@@ -4353,6 +4424,7 @@ pub(crate) mod tests {
             excluded: Vec::new(),
             excluded_once: Vec::new(),
             site_thresholds: Vec::new(),
+            max_inputs: Vec::new(),
             extra_bounds: Vec::new(),
             requires: Vec::new(),
             exclusive: (Vec::new(), Vec::new()),
@@ -4535,5 +4607,71 @@ pub(crate) mod tests {
         assert!(none.rounds > 1);
         assert_eq!(none.lower_bound, none.first_lower_bound);
         assert!(none.gap.unwrap() > 0.0, "{none:?}");
+    }
+    /// A 0.9 quantile per series over 5 minutes within 1% with probability
+    /// 0.99 over the whole result of 10,000 series: Stage 3 sizes its one
+    /// KLL for δ / (n · V) = 0.01 / 10,000. Each KLL choice is the
+    /// candidate at one final size: at a size for a larger failure
+    /// probability, it meets no plan composing one summary (limit 0); at
+    /// that size, it is not limited. Every solution reading a KLL reads it
+    /// at a size meeting the query.
+    #[test]
+    fn a_choice_at_a_final_size_meets_only_the_plans_it_is_large_enough_for() {
+        let (memo, mut input) = memo_and_input(
+            &["quantile_over_time(0.9, m[5m])"],
+            &[AccuracyTarget::max_error(0.01).failure_probability(0.01)],
+        );
+        let kll = |c: usize| {
+            let choice = &input.choices[c];
+            crate::search::milp::sizing::private_summaries(
+                &memo,
+                &memo.candidates[choice.group.0 as usize][choice.candidate],
+            )
+            .iter()
+            .any(|n| format!("{:?}", n.asap()).contains("Kll"))
+        };
+        let klls: Vec<usize> = (0..input.choices.len()).filter(|&c| kll(c)).collect();
+        assert!(!klls.is_empty());
+        let final_delta = 0.01 / 10_000.0;
+        let mut at_final = 0;
+        for &c in &klls {
+            let choice = &input.choices[c];
+            match choice.per_input_failure_probability {
+                Some(delta) if (delta - final_delta).abs() <= final_delta * 1e-9 => {
+                    at_final += 1;
+                    assert!(choice.input_limits.is_empty(), "{:?}", choice.input_limits);
+                }
+                Some(delta) if delta < final_delta => {}
+                _ => assert_eq!(choice.input_limits, vec![(0, 0)], "{c}"),
+            }
+        }
+        assert!(at_final > 0);
+        for query in &mut input.queries {
+            query.max_latency_ms = None;
+        }
+        let mut plans = 0;
+        while let Some(solution) = solve(&input).unwrap() {
+            plans += 1;
+            for &c in &solution.chosen {
+                assert!(
+                    !kll(c) || input.choices[c].input_limits.is_empty(),
+                    "{c}: {:?}",
+                    input.choices[c].per_input_failure_probability
+                );
+            }
+            let groups = solution
+                .chosen
+                .iter()
+                .map(|&c| input.choices[c].group)
+                .collect::<BTreeSet<_>>()
+                .len();
+            input
+                .excluded
+                .push((solution.chosen.clone(), Vec::new(), groups as f64 - 1.0));
+            if plans > 50 {
+                break;
+            }
+        }
+        assert!(plans > 0);
     }
 }

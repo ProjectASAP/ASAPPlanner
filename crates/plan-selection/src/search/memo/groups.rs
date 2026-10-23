@@ -49,7 +49,15 @@ use crate::search::memo::{CandidateOrigin, GroupId, ImplementationCandidate, Mem
 pub(crate) fn memo_of<Id: Clone>(per_computation: &PerComputationCandidates<Id>) -> Memo {
     let (groups, group_of) = hash_consed(&per_computation.roots);
     let candidates = pass1_candidates(per_computation, &groups, &group_of);
-    Memo { groups, candidates }
+    Memo {
+        groups,
+        candidates,
+        roots: per_computation
+            .roots
+            .iter()
+            .map(|(_, root)| root.clone())
+            .collect(),
+    }
 }
 
 /// Each original node (of `roots`), by address, to its group.
@@ -508,7 +516,7 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
 /// without the schema, guarantee, timing and materialization composition
 /// derives. Memoized per node (the memo keeps each node alive, so its
 /// address is not reused).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct NodeKeys {
     memo: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
 }
