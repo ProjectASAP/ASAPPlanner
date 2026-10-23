@@ -250,9 +250,9 @@ pub(crate) struct ModelInput {
     pub held: Vec<HeldAtQueryTime>,
     /// Per choice, its direct part's price per second computed at
     /// ingestion time, under an ingestion-time slot (scans read one second
-    /// of rows; [`LazyTerms::direct_at_ingestion`]); 0 when it cannot run
-    /// at ingestion time.
-    pub direct_at_ingestion_cost: Vec<f64>,
+    /// of rows; [`LazyTerms::direct_at_ingestion`]); `None` when it cannot
+    /// run at ingestion time.
+    pub direct_at_ingestion_cost: Vec<Option<f64>>,
     /// The solver's time limit in seconds, if any.
     pub time_limit_s: Option<f64>,
     /// Solve the linear relaxation (every binary in [0, 1]): a lower bound
@@ -420,7 +420,7 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
         held.per_reader_per_ms *= scale;
         held.longest_per_ms *= scale;
     }
-    for cost in &mut scaled.direct_at_ingestion_cost {
+    for cost in scaled.direct_at_ingestion_cost.iter_mut().flatten() {
         *cost *= scale;
     }
     for (_, bound) in &mut scaled.extra_bounds {
@@ -591,21 +591,41 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     // Each choice's direct charge per schedule class of its query
     // consumers: one node serves the class's queries.
     let mut class_charges: BTreeMap<(usize, usize), Vec<Expression>> = BTreeMap::new();
+    // Reaches of a part that cannot run at ingestion time by an
+    // ingestion-time slot: fixed at 0.
+    let mut not_at_ingestion: Vec<Variable> = Vec::new();
+    // Per ingestion-time slot node, each slot consumer's charges for the
+    // parts it reaches.
+    let mut ingestion_charges: BTreeMap<String, BTreeMap<(usize, usize), Expression>> =
+        BTreeMap::new();
     // Each cross-group node's charges per consumer, and their largest sum.
     let mut cross_per_consumer: BTreeMap<u64, (Expression, f64)> = BTreeMap::new();
     for (&(k, c), &v) in &y {
         // Under an ingestion-time slot the direct part runs at ingestion
         // time, once per second, as Stage 3 prices it there: none of the
-        // query-time charges below apply.
+        // query-time charges below apply. Slots that may be one shared
+        // node (charged once, `shared_slots` below) read one ingestion
+        // copy of their inputs: charged at the dearest of their
+        // consumers' charges. A part that cannot run at ingestion time is
+        // not reached so.
         if let Consumer::Slot { choice, slot } = k {
-            let m = input.choices[choice].coefficients.slots[slot].materialization;
-            if matches!(m, Materialization::MatAtIngestion(_)) {
-                let cost = input
-                    .direct_at_ingestion_cost
-                    .get(c)
-                    .copied()
-                    .unwrap_or(0.0);
-                objective += cost * v;
+            let s = &input.choices[choice].coefficients.slots[slot];
+            if matches!(s.materialization, Materialization::MatAtIngestion(_)) {
+                let Some(cost) = input.direct_at_ingestion_cost.get(c).copied().flatten() else {
+                    not_at_ingestion.push(v);
+                    continue;
+                };
+                let node = match s.shared_site {
+                    Some((site, threshold)) => {
+                        format!("{site} {threshold} {:?}", s.materialization)
+                    }
+                    None => format!("choice {choice} slot {slot}"),
+                };
+                *ingestion_charges
+                    .entry(node)
+                    .or_default()
+                    .entry((choice, slot))
+                    .or_insert_with(|| Expression::from(0.0)) += cost * v;
                 continue;
             }
         }
@@ -775,7 +795,11 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         objective += m;
         scan_maxima.push((m, charges));
     }
-    for charges in scan_charges.into_values().chain(pass_charges.into_values()) {
+    for charges in scan_charges
+        .into_values()
+        .chain(pass_charges.into_values())
+        .chain(ingestion_charges.into_values())
+    {
         let m = vars.add(variable().min(0));
         objective += m;
         scan_maxima.push((m, charges.into_values().collect()));
@@ -1009,6 +1033,9 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     let variable_count = vars.len() as u64;
     let model = vars.minimise(objective.clone()).using(highs);
     let mut constraints = Vec::new();
+    for &v in &not_at_ingestion {
+        constraints.push(constraint!(v == 0));
+    }
     // Needed groups: every query's roots; children of chosen choices.
     for query in &input.queries {
         for root in &query.roots {
@@ -2408,10 +2435,7 @@ pub(crate) fn model_input_of(
         .collect();
     input.direct_at_ingestion_cost = lazies
         .iter()
-        .map(|lazy| {
-            lazy.direct_at_ingestion
-                .map_or(0.0, |p| p.cost_per_unit_rate)
-        })
+        .map(|lazy| lazy.direct_at_ingestion.map(|p| p.cost_per_unit_rate))
         .collect();
     input.site_thresholds = site_thresholds;
     Ok((input, versions))

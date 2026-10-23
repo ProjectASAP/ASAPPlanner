@@ -2014,6 +2014,54 @@ mod tests {
         );
     }
 
+    /// Two queries whose children are read by two ingestion-time slots,
+    /// without raw data: Stage 3 runs each shared child as one ingestion
+    /// copy, so the model charges its ingestion-time part once, not once
+    /// per slot reading it.
+    #[test]
+    fn the_model_is_a_lower_bound_for_a_child_of_two_ingestion_time_slots() {
+        let within = AccuracyTarget::max_error(0.01);
+        for intervals in [[300_000, 300_000], [60_000, 300_000]] {
+            for window in ["5m", "1m"] {
+                assert_model_is_a_lower_bound_in(
+                    &[
+                        &format!("quantile_over_time(0.9, m[{window}])"),
+                        &format!("quantile_over_time(0.5, m[{window}])"),
+                    ],
+                    &intervals,
+                    &[within.clone(), within.clone()],
+                    false,
+                    &data(),
+                );
+            }
+            assert_model_is_a_lower_bound_in(
+                &["quantile_over_time(0.9, m[5m])", "sum_over_time(m[5m])"],
+                &intervals,
+                &[within.clone(), AccuracyTarget::exact()],
+                false,
+                &data(),
+            );
+            assert_model_is_a_lower_bound_in(
+                &["quantile_over_time(0.9, m[5m])", "max_over_time(m[1m])"],
+                &intervals,
+                &[within.clone(), AccuracyTarget::exact()],
+                false,
+                &data(),
+            );
+            let exact = AccuracyTarget::exact();
+            assert_model_is_a_lower_bound_in(
+                &[
+                    "max by (job) (sum_over_time(m[5m]))",
+                    "sum_over_time(m[5m])",
+                ],
+                &intervals,
+                &[exact.clone(), exact.clone()],
+                false,
+                &data(),
+            );
+        }
+    }
+
     /// Three quantiles of one metric over a 1-minute, a 5-minute and an
     /// instant window (#840's shape), every 10 s; and a shared group with
     /// a rollup.
