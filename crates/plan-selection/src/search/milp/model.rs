@@ -1583,7 +1583,6 @@ pub(crate) fn search<Id: Clone + std::fmt::Debug>(
             "the MILP search reached its time limit: the clusters' plans did not combine into one plan whose cost is their sum, and no time is left to search the memo as one".to_string(),
         ));
     }
-    // One cluster, or clusters whose plans do not add up: the whole memo.
     let all: Vec<usize> = (0..entries.len()).collect();
     let mut cluster = ClusterLoop::new(
         memo,
