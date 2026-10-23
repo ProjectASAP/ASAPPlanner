@@ -255,6 +255,11 @@ pub(crate) struct ModelInput {
     pub direct_at_ingestion_cost: Vec<Option<f64>>,
     /// The solver's time limit in seconds, if any.
     pub time_limit_s: Option<f64>,
+    /// Only solutions cheaper than this (the incumbent's price), by more
+    /// than [`CUTOFF_TOLERANCE`], are wanted: the solver prunes every
+    /// branch whose bound reaches it, and the model is infeasible when
+    /// none is left.
+    pub objective_cutoff: Option<f64>,
     /// Solve the linear relaxation (every binary in [0, 1]): a lower bound
     /// on the model's optimum.
     pub relaxed: bool,
@@ -385,7 +390,8 @@ enum Consumer {
     Group(GroupId),
 }
 
-/// Build and solve the model. `None` when it is infeasible.
+/// Build and solve the model. `None` when it is infeasible (no plan below
+/// [`ModelInput::objective_cutoff`], when set).
 pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError> {
     // Prices per second are tiny (1e-6 and less) next to the solver's
     // feasibility tolerance (1e-7): solve in units where the largest
@@ -406,6 +412,12 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, SolveEr
         solution
     }))
 }
+
+/// How far below the incumbent's price (relatively) a solution must be
+/// to be wanted: the solver's optimum is exact only to its own tolerances
+/// (about 1e-7 of the scaled objective), so plans the model prices within
+/// them of the incumbent tie with it.
+const CUTOFF_TOLERANCE: f64 = 1e-6;
 
 /// How far below its objective a solve stopped at the solver's gap
 /// tolerance (a relative gap of about 1e-6 at most) may have its optimum.
@@ -474,6 +486,9 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
     }
     for (_, bound) in &mut scaled.extra_bounds {
         *bound *= scale;
+    }
+    if let Some(cutoff) = &mut scaled.objective_cutoff {
+        *cutoff *= scale;
     }
     scaled
 }
@@ -1079,6 +1094,16 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
     for &v in &kept_on_disk {
         objective += v;
     }
+    // A query's reach passing into each choice of a group it reaches
+    // (at all, and at query time): see the reach constraints.
+    let mut flow_all: HashMap<(usize, usize), Variable> = HashMap::new();
+    let mut flow_query_time: HashMap<(usize, usize), Variable> = HashMap::new();
+    for (c, choice) in input.choices.iter().enumerate() {
+        for &q in &input.group_queries[choice.group.0 as usize] {
+            flow_all.insert((q, c), vars.add(variable().min(0).max(1)));
+            flow_query_time.insert((q, c), vars.add(variable().min(0).max(1)));
+        }
+    }
     let variable_count = vars.len() as u64;
     let column_of: HashMap<Variable, usize> = vars
         .iter_variables_with_def()
@@ -1185,25 +1210,43 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             }
         }
     }
-    // Aggregated over a group's choices (one is chosen when it is
-    // needed), which keeps the LP relaxation tight.
-    for (g, of_g) in choices_of.iter().enumerate() {
-        let mut children: BTreeSet<usize> = BTreeSet::new();
-        for &c in of_g {
-            children.extend(input.choices[c].children.iter().map(|h| h.0 as usize));
+    // The choices of other groups that implement each group (fused).
+    let mut fused_into: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (c, choice) in input.choices.iter().enumerate() {
+        for i in &choice.implements {
+            if *i != choice.group {
+                fused_into[i.0 as usize].push(c);
+            }
         }
-        for h in children {
-            let mut with_child = Expression::from(0.0);
+    }
+    // As a flow, which keeps the LP relaxation tight: a query reaching a
+    // group passes into its chosen choice (at most that choice's `x`, at
+    // least the reach in total, unless a fused choice implements the
+    // group), and reaches each child of the choices it passes into.
+    for (g, of_g) in choices_of.iter().enumerate() {
+        for &q in &input.group_queries[g] {
+            let Some(&above) = reaches_at_all.get(&(q, g)) else {
+                continue;
+            };
+            let mut into = Expression::from(0.0);
+            let mut below: BTreeMap<usize, Expression> = BTreeMap::new();
             for &c in of_g {
-                if input.choices[c].children.iter().any(|k| k.0 as usize == h) {
-                    with_child += x[c];
+                let w = flow_all[&(q, c)];
+                constraints.push(constraint!(w <= x[c]));
+                into += w;
+                for h in &input.choices[c].children {
+                    *below
+                        .entry(h.0 as usize)
+                        .or_insert_with(|| Expression::from(0.0)) += w;
                 }
             }
-            for &q in &input.group_queries[g] {
-                if let (Some(&above), Some(&below)) =
-                    (reaches_at_all.get(&(q, g)), reaches_at_all.get(&(q, h)))
-                {
-                    constraints.push(constraint!(below >= above + with_child.clone() - 1));
+            for &c in &fused_into[g] {
+                into += x[c];
+            }
+            constraints.push(constraint!(into >= above));
+            for (h, flow) in below {
+                if let Some(&reached) = reaches_at_all.get(&(q, h)) {
+                    constraints.push(constraint!(reached >= flow));
                 }
             }
         }
@@ -1263,6 +1306,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
     for (&(k, c), &v) in &y {
         let g = input.choices[c].group.0 as usize;
         constraints.push(constraint!(v >= passes[&(k, g)] + x[c] - 1));
+        constraints.push(constraint!(v <= x[c]));
     }
     for (&(k, g), &p) in &passes {
         let mut into = Expression::from(0.0);
@@ -1388,38 +1432,44 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             }
         }
     }
+    // As a flow, as the reach at all.
     for (g, of_g) in choices_of.iter().enumerate() {
-        let mut children: BTreeSet<usize> = BTreeSet::new();
-        for &c in of_g {
-            children.extend(input.choices[c].children.iter().map(|h| h.0 as usize));
-        }
-        for h in children {
-            let mut with_child = Expression::from(0.0);
+        for &q in &input.group_queries[g] {
+            let Some(&above) = at_query_time.get(&(q, g)) else {
+                continue;
+            };
+            let mut into = Expression::from(0.0);
+            let mut below: BTreeMap<usize, Expression> = BTreeMap::new();
             for &c in of_g {
+                let w = flow_query_time[&(q, c)];
+                constraints.push(constraint!(w <= x[c]));
+                into += w;
+                if let Some(&reached) = work_reached.get(&(q, c)) {
+                    constraints.push(constraint!(reached >= w));
+                }
                 let choice = &input.choices[c];
-                let at_query = choice
-                    .children
-                    .iter()
-                    .zip(&choice.coefficients.child_via)
-                    .any(|(child, via)| {
-                        child.0 as usize == h
-                            && match via {
-                                Via::Direct => true,
-                                Via::Slot(i) => !matches!(
-                                    choice.coefficients.slots[*i].materialization,
-                                    Materialization::MatAtIngestion(_)
-                                ),
-                            }
-                    });
-                if at_query {
-                    with_child += x[c];
+                for (h, via) in choice.children.iter().zip(&choice.coefficients.child_via) {
+                    let at_query = match via {
+                        Via::Direct => true,
+                        Via::Slot(i) => !matches!(
+                            choice.coefficients.slots[*i].materialization,
+                            Materialization::MatAtIngestion(_)
+                        ),
+                    };
+                    if at_query {
+                        *below
+                            .entry(h.0 as usize)
+                            .or_insert_with(|| Expression::from(0.0)) += w;
+                    }
                 }
             }
-            for &q in &input.group_queries[g] {
-                if let (Some(&above), Some(&below)) =
-                    (at_query_time.get(&(q, g)), at_query_time.get(&(q, h)))
-                {
-                    constraints.push(constraint!(below >= above + with_child.clone() - 1));
+            for &c in &fused_into[g] {
+                into += x[c];
+            }
+            constraints.push(constraint!(into >= above));
+            for (h, flow) in below {
+                if let Some(&reached) = at_query_time.get(&(q, h)) {
+                    constraints.push(constraint!(reached >= flow));
                 }
             }
         }
@@ -1645,6 +1695,62 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
         }
         constraints.push(constraint!(x[*c] <= any));
     }
+    // A consumer reading a child group through a choice with such a
+    // requirement passes into one of the required choices (unless the
+    // child is built once, whose own consumer then does): the flow, not
+    // only the choice, meets the requirement.
+    for (c, allowed) in &input.requires {
+        let Some(h) = allowed.first().map(|&a| input.choices[a].group) else {
+            continue;
+        };
+        let choice = &input.choices[*c];
+        let Some(via) = choice
+            .children
+            .iter()
+            .zip(&choice.coefficients.child_via)
+            .find(|(child, _)| **child == h)
+            .map(|(_, via)| *via)
+        else {
+            continue;
+        };
+        let into_allowed = |k: Consumer| -> Option<Expression> {
+            let mut sum = Expression::from(0.0);
+            for &a in allowed {
+                sum += *y.get(&(k, a))?;
+            }
+            Some(sum)
+        };
+        let built_once = once.get(&h).copied();
+        let mut readers: Vec<(Consumer, Expression)> = Vec::new();
+        match via {
+            Via::Direct => {
+                for (&(k, d), &v) in &y {
+                    if d == *c {
+                        readers.push((k, Expression::from(v)));
+                    }
+                }
+            }
+            Via::Slot(i) => readers.push((
+                Consumer::Slot {
+                    choice: *c,
+                    slot: i,
+                },
+                Expression::from(x[*c]),
+            )),
+        }
+        for (k, passing) in readers {
+            let Some(sum) = into_allowed(k) else { continue };
+            match built_once {
+                Some(o) => constraints.push(constraint!(sum >= passing - o)),
+                None => constraints.push(constraint!(sum >= passing)),
+            }
+        }
+        if let Some(o) = built_once {
+            if let Some(sum) = into_allowed(Consumer::Group(h)) {
+                constraints.push(constraint!(sum >= o + x[*c] - 1));
+            }
+        }
+    }
     for (all_of, one_of) in &input.rollup_rules {
         let mut chosen = Expression::from(0.0);
         for set in all_of {
@@ -1715,6 +1821,17 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
     if let Some(limit) = input.time_limit_s {
         highs_model.set_option("time_limit", limit.max(0.001));
     }
+    let cutoff = input
+        .objective_cutoff
+        .filter(|_| !relaxed)
+        .map(|cutoff| cutoff * (1.0 - CUTOFF_TOLERANCE));
+    if let Some(cutoff) = cutoff {
+        // HiGHS leaves out the objective's constant.
+        highs_model.set_option(
+            "objective_bound",
+            cutoff - good_lp::IntoAffineExpression::constant(&objective),
+        );
+    }
     let solved = highs_model
         .try_solve()
         .map_err(|e| SolveError::Failed(format!("HiGHS error while solving model: {e:?}")))?;
@@ -1766,6 +1883,11 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
         column_of,
         values: solved.get_solution().columns().to_vec(),
     };
+    // Nothing below the cutoff: the solver may still report a plan above
+    // it.
+    if cutoff.is_some_and(|cutoff| !stopped_early && solution.eval(&objective) >= cutoff) {
+        return Ok(None);
+    }
     let chosen: Vec<usize> = x
         .iter()
         .enumerate()
@@ -2239,6 +2361,7 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         }
         let input = self.input.as_mut().expect("the loop's input");
         input.time_limit_s = remaining_s;
+        input.objective_cutoff = self.selector.cheapest_price();
         self.iterations += 1;
         true
     }
@@ -2711,6 +2834,7 @@ pub(crate) fn lower_bound_check<Id: Clone>(
         };
         let mut restricted = model_input_clone(input);
         restricted.excluded.clear();
+        restricted.objective_cutoff = None;
         restricted.excluded_once.clear();
         let outside: Vec<usize> = (0..restricted.choices.len())
             .filter(|&c| {
@@ -2747,6 +2871,7 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         held: input.held.clone(),
         direct_at_ingestion_cost: input.direct_at_ingestion_cost.clone(),
         time_limit_s: input.time_limit_s,
+        objective_cutoff: input.objective_cutoff,
         relaxed: input.relaxed,
         rollup_rules: input.rollup_rules.clone(),
     }
@@ -3229,6 +3354,7 @@ fn model_input(
         held: Vec::new(),
         direct_at_ingestion_cost: Vec::new(),
         time_limit_s: None,
+        objective_cutoff: None,
         relaxed: false,
     })
 }
@@ -3311,6 +3437,7 @@ pub(crate) mod tests {
             held: Vec::new(),
             direct_at_ingestion_cost: Vec::new(),
             time_limit_s: None,
+            objective_cutoff: None,
             relaxed: false,
         };
         let solution = solve(&input).unwrap().unwrap();
@@ -3383,6 +3510,7 @@ pub(crate) mod tests {
             direct_at_ingestion_cost: Vec::new(),
             time_limit_s: None,
             relaxed: false,
+            objective_cutoff: None,
         };
         // Each reader: 1.0 per ms × its rate × 1 ms × 0.1 / 0.15.
         let stage_3 = (0.1 + 0.05) * (0.1 / 0.15);
@@ -3889,6 +4017,7 @@ pub(crate) mod tests {
             held: Vec::new(),
             direct_at_ingestion_cost: Vec::new(),
             time_limit_s: None,
+            objective_cutoff: None,
             relaxed: false,
         }
     }
