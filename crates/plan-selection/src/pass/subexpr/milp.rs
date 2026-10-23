@@ -274,6 +274,10 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
     }))
 }
 
+/// How far below its objective a solve stopped at the solver's gap
+/// tolerance (a relative gap of about 1e-6 at most) may have its optimum.
+const GAP_TOLERANCE: f64 = 1e-4;
+
 /// The factor that brings `input`'s largest charge to about 1.
 fn price_scale(input: &ModelInput) -> f64 {
     let fastest = input.queries.iter().map(|q| q.rate).fold(1.0, f64::max);
@@ -1069,6 +1073,8 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     if std::env::var_os("JP_MILP_VERBOSE").is_some() {
         model.set_verbose(true);
     }
+    // No absolute gap either: prices are scaled to about 1.
+    model = model.set_option("mip_abs_gap", 0.0);
     if let Some(limit) = input.time_limit_s {
         model = model.set_time_limit(limit.max(0.001));
     }
@@ -1155,8 +1161,19 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     Ok(Some(ModelSolution {
         chosen,
         built_once,
-        objective: solution.eval(&objective),
-        optimal: matches!(solution.status(), good_lp::solvers::SolutionStatus::Optimal),
+        // Stopped within the solver's own tolerance of a zero gap, the
+        // objective is lowered by more than that tolerance to stay a bound.
+        objective: match solution.status() {
+            good_lp::solvers::SolutionStatus::GapLimit => {
+                let value = solution.eval(&objective);
+                value - value.abs() * GAP_TOLERANCE
+            }
+            _ => solution.eval(&objective),
+        },
+        optimal: matches!(
+            solution.status(),
+            good_lp::solvers::SolutionStatus::Optimal | good_lp::solvers::SolutionStatus::GapLimit
+        ),
         variables: variable_count,
         constraints: constraint_count,
     }))
