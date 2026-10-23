@@ -1614,6 +1614,59 @@ mod tests {
                         .copied()
                         .collect();
                     lazy.held.retain(|term| !sub.contains(&term.node_key));
+                    // Its scans below are computed as it is (once when it
+                    // is built once, per consumer otherwise).
+                    let scans_below: Vec<PhysicalASAPNodeId> = below(node)
+                        .into_iter()
+                        .filter(|id| {
+                            matches!(nodes[id].payload, Operator::NonASAP(NonASAPOp::Scan { .. }))
+                        })
+                        .collect();
+                    let materialized_here =
+                        nodes[&node].materialization != Materialization::NotMaterialized;
+                    for (&scan, &(_, cost, _)) in
+                        scans_below.iter().zip(&coefficients.absorbed_scans)
+                    {
+                        if !materialized_here {
+                            break;
+                        }
+                        actual -= cost * rates[&p.root].1;
+                        // Its held memory, once at the scan's rate.
+                        let scan_key = keys[position_of[&scan]];
+                        let scan_held: Vec<HeldTerm> = lazy
+                            .held
+                            .iter()
+                            .filter(|t| t.node_key == scan_key)
+                            .copied()
+                            .collect();
+                        lazy.held.retain(|t| t.node_key != scan_key);
+                        if built_once_nodes.insert(scan) {
+                            actual += cost * rates[&scan].1;
+                            let readers: Vec<(usize, f64)> = reach
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, r)| r.contains(&scan))
+                                .map(|(q, _)| (q, query_rate(q)))
+                                .collect();
+                            let rate: f64 = readers.iter().map(|(_, r)| r).sum();
+                            for term in scan_held {
+                                let evaluation_ms = match term.per_reader && rate > 0.0 {
+                                    true => {
+                                        readers.iter().map(|&(q, r)| r * latency[q]).sum::<f64>()
+                                            / rate
+                                    }
+                                    false => {
+                                        readers.iter().map(|&(q, _)| latency[q]).fold(0.0, f64::max)
+                                    }
+                                };
+                                held_extra += prices.cost_per_memory_byte_second
+                                    * term.bytes as f64
+                                    * rates[&scan].1
+                                    * evaluation_ms
+                                    / 1_000.0;
+                            }
+                        }
+                    }
                     if built_once_nodes.insert(node) {
                         actual += shared.cost_per_unit_rate * rates[&node].1;
                         let readers: Vec<(usize, f64)> = reach

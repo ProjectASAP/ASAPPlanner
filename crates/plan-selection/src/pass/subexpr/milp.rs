@@ -64,6 +64,18 @@ pub(crate) struct SlotCoefficients {
     pub shared_site: Option<(u64, usize)>,
 }
 
+/// A cross-group node's variables: its once charge, its charge, the
+/// binary choosing between per consumer and once, its members' once
+/// charges, its per-consumer charge and their big M.
+type CrossNodeVars = (
+    Variable,
+    Variable,
+    Variable,
+    Vec<(usize, f64)>,
+    Expression,
+    f64,
+);
+
 /// One choice's coefficients.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ChoiceCoefficients {
@@ -681,14 +693,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                 .push((c, slowest_rate(choice.group.0 as usize) * cost));
         }
     }
-    let mut cross_vars: Vec<(
-        Variable,
-        Variable,
-        Variable,
-        Vec<(usize, f64)>,
-        Expression,
-        f64,
-    )> = Vec::new();
+    let mut cross_vars: Vec<CrossNodeVars> = Vec::new();
     for (key, members) in cross_once {
         let (per_consumer, per_consumer_max) = cross_per_consumer
             .remove(&key)
@@ -957,15 +962,28 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         }
         constraints.push(constraint!(into >= p));
     }
-    // A slot's consumer exists only when its choice is chosen.
+    // A slot's consumer exists only when its choice is chosen, and a
+    // group's own consumer only when the group is built once.
+    let exists = |k: Consumer| -> Option<Variable> {
+        match k {
+            Consumer::Slot { choice, .. } => Some(x[choice]),
+            Consumer::Group(g) => once.get(&g).copied(),
+            Consumer::Query(_) => None,
+        }
+    };
     for (&(k, _), &r) in &reach {
-        if let Consumer::Slot { choice, .. } = k {
-            constraints.push(constraint!(r <= x[choice]));
+        if let Some(e) = exists(k) {
+            constraints.push(constraint!(r <= e));
+        }
+    }
+    for (&(k, _), &p) in &passes {
+        if let Some(e) = exists(k) {
+            constraints.push(constraint!(p <= e));
         }
     }
     for (&(k, _), &v) in &y {
-        if let Consumer::Slot { choice, .. } = k {
-            constraints.push(constraint!(v <= x[choice]));
+        if let Some(e) = exists(k) {
+            constraints.push(constraint!(v <= e));
         }
     }
     for (c, choice) in input.choices.iter().enumerate() {
