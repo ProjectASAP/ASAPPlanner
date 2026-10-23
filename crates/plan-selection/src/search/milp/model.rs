@@ -719,6 +719,53 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
         BTreeMap::new();
     // Each cross-group node's charges per consumer, and their largest sum.
     let mut cross_per_consumer: BTreeMap<u64, (Expression, f64)> = BTreeMap::new();
+    // A node of a choice's direct part another group's choice also has
+    // (`cross_shared`) is one node once shared, reading one scan of a
+    // source: the dearest of theirs. A pass of a narrower absorbed scan
+    // then stands for no work beyond that node's charge: with a sharer
+    // with a dearer scan of its source chosen, it is waived by
+    // `pass_waived` (per choice, absorbed scan and shared key), at most
+    // the node's charge over all its waivers.
+    let mut pass_waived: Vec<(usize, usize, u64, Variable)> = Vec::new();
+    let mut constraints_early = Vec::new();
+    let fastest_rate = input
+        .union_rate
+        .values()
+        .copied()
+        .chain(input.queries.iter().map(|q| q.rate))
+        .fold(0.0, f64::max);
+    for (c, choice) in input.choices.iter().enumerate() {
+        let k = &choice.coefficients;
+        for (s, &(source, cost, pass)) in k.absorbed_scans.iter().enumerate() {
+            for &(key, _) in &k.cross_shared {
+                let mut dearer_chosen = Expression::from(0.0);
+                let mut any = false;
+                for (d, other) in input.choices.iter().enumerate() {
+                    let o = &other.coefficients;
+                    if d != c
+                        && o.cross_shared
+                            .iter()
+                            .any(|&(other_key, _)| other_key == key)
+                        && o.absorbed_scans
+                            .iter()
+                            .any(|&(other_source, other_cost, _)| {
+                                other_source == source && other_cost > cost
+                            })
+                    {
+                        dearer_chosen += x[d];
+                        any = true;
+                    }
+                }
+                if any {
+                    let w = vars.add(variable().min(0));
+                    constraints_early.push(constraint!(
+                        w <= fastest_rate * pass.min(cost) * dearer_chosen
+                    ));
+                    pass_waived.push((c, s, key, w));
+                }
+            }
+        }
+    }
     for (&(k, c), &v) in &y {
         // Under an ingestion-time slot the direct part runs at ingestion
         // time, once per second, as Stage 3 prices it there: none of the
@@ -908,6 +955,15 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             }
         }
     }
+    for &(c, s, _, w) in &pass_waived {
+        let (source, cost, _) = input.choices[c].coefficients.absorbed_scans[s];
+        if let Some(charge) = pass_charges
+            .get_mut(&(source, cost.to_bits()))
+            .and_then(|charges| charges.get_mut(&(c, 0)))
+        {
+            *charge -= w;
+        }
+    }
     let mut scan_maxima: Vec<(Variable, Vec<Expression>)> = Vec::new();
     for charges in class_charges.into_values() {
         let m = vars.add(variable().min(0));
@@ -1090,14 +1146,13 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             true => vec![((1 << 62) | c as u64, query_time_work(c))],
         }
     };
-    // Per node key, the least and the most work any choice gives it: a
-    // query's latency counts each key once, at least at the least.
-    let mut key_work: HashMap<u64, (f64, f64)> = HashMap::new();
+    // Per node key, the most work any choice gives it: a query's latency
+    // counts each key once, at most at the most.
+    let mut key_work: HashMap<u64, f64> = HashMap::new();
     for c in 0..input.choices.len() {
         for (key, work) in work_of(c) {
-            let entry = key_work.entry(key).or_insert((work, work));
-            entry.0 = entry.0.min(work);
-            entry.1 = entry.1.max(work);
+            let most = key_work.entry(key).or_insert(work);
+            *most = most.max(work);
         }
     }
     let no_held = HeldAtQueryTime::default();
@@ -1117,15 +1172,16 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             work_reached.insert((q, c), vars.add(variable().min(0).max(1)));
         }
     }
-    // `key_reached[q, key]`: query `q` computes the node of `key` at
-    // query time, through any choice it reaches.
-    let mut key_reached: HashMap<(usize, u64), Variable> = HashMap::new();
+    // `key_work_ms[q, key]`: the work in ms of the node of `key` query
+    // `q` computes at query time, at least that of each choice it reaches
+    // with that key.
+    let mut key_work_ms: HashMap<(usize, u64), Variable> = HashMap::new();
     for &(q, c) in work_reached.keys() {
         for (key, work) in work_of(c) {
             if work > 0.0 {
-                key_reached
+                key_work_ms
                     .entry((q, key))
-                    .or_insert_with(|| vars.add(variable().min(0).max(1)));
+                    .or_insert_with(|| vars.add(variable().min(0)));
             }
         }
     }
@@ -1596,18 +1652,20 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
         constraints.push(constraint!(w >= at_query_time[&(q, g)] + x[c] - 1));
         for (key, work) in work_of(c) {
             if work > 0.0 {
-                constraints.push(constraint!(key_reached[&(q, key)] >= w));
+                constraints.push(constraint!(key_work_ms[&(q, key)] >= work * w));
             }
         }
     }
     // Each query's latency: the work of each node it computes at query
-    // time, counted once per node key at the least work any choice gives
-    // it (a lower bound: compaction is left out).
+    // time, counted once per node key at the most work of the choices it
+    // reaches with that key (a lower bound: one node of a key is a
+    // choice's own or, shared, at least as wide as each sharer's;
+    // compaction is left out).
     let latency_of = |q: usize| {
         let mut latency = Expression::from(0.0);
-        for (&(r, key), &v) in &key_reached {
+        for (&(r, _), &v) in &key_work_ms {
             if r == q {
-                latency += key_work[&key].0 * v;
+                latency += v;
             }
         }
         latency
@@ -1621,10 +1679,10 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
     // L the longest the query's latency can be; exact when w is 0 or 1.
     let longest_latency: Vec<f64> = (0..input.queries.len())
         .map(|q| {
-            key_reached
+            key_work_ms
                 .keys()
                 .filter(|&&(r, _)| r == q)
-                .map(|(_, key)| key_work[key].1)
+                .map(|(_, key)| key_work[key])
                 .sum()
         })
         .collect();
@@ -1733,6 +1791,16 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             constraints.push(constraint!(m >= charge));
         }
     }
+    let mut waived_of_key: BTreeMap<u64, Expression> = BTreeMap::new();
+    for &(_, _, key, w) in &pass_waived {
+        *waived_of_key
+            .entry(key)
+            .or_insert_with(|| Expression::from(0.0)) += w;
+    }
+    for (key, waived) in waived_of_key {
+        constraints.push(constraint!(waived <= cross_charged[&key]));
+    }
+    constraints.append(&mut constraints_early);
     for (once, charged, u, members, per_consumer, big_m) in cross_vars {
         for (c, charge) in members {
             constraints.push(constraint!(once >= charge * x[c]));

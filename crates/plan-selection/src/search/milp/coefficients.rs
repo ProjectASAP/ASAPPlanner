@@ -2073,6 +2073,31 @@ mod tests {
         );
     }
 
+    /// #840's shape: three quantiles over a 1-minute, a 5-minute and an
+    /// instant window of one metric, every 10 s. A query's latency counts
+    /// each node it computes at the work of the choice it reaches with
+    /// that node's key, not at the least work any choice gives the key
+    /// (a 1-minute scan for the 5-minute query's): its held memory is
+    /// charged over that latency. The bound on the cheapest plan was
+    /// 0.9713 of its price at the least work.
+    #[test]
+    fn the_model_charges_held_memory_over_the_reached_choices_latency() {
+        let within = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        let ratio = best_plan_bound_ratio(
+            &[
+                "quantile_over_time(0.5, m[1m])",
+                "quantile_over_time(0.9, m[5m])",
+                "quantile by (job) (0.5, m)",
+            ],
+            &[10_000, 10_000, 10_000],
+            &[within.clone(), within.clone(), within],
+        );
+        assert!(
+            ratio > 0.98 && ratio <= 1.0 + 1e-9,
+            "bound {ratio} of the price"
+        );
+    }
+
     /// An exact top-k of 5-minute sums every 5 minutes over 1,000 series
     /// sampled every 15 s, without raw data: only a summary maintained at
     /// ingestion time is valid. Its scan and window are read only through
@@ -2287,6 +2312,46 @@ mod tests {
         ] {
             assert!(kinds.contains(kind), "no {kind} cut in {kinds:?}");
         }
+    }
+
+    /// #839's quantiles over its data (100,000 rows a second): both may
+    /// read one DDSketch pane chain, one node of both groups' direct
+    /// parts, over one 100-second scan. That node reads the scan once and
+    /// is charged once, so the narrower reader's pass over the scan is
+    /// waived up to that charge: with each query's held memory charged
+    /// over its reached latency, charging the pass put the model at 135.2
+    /// over Stage 3's 127.6.
+    #[test]
+    fn the_model_is_a_lower_bound_for_one_pane_chain_of_two_groups_over_one_scan() {
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 100_000.0,
+            },
+            sources: [(
+                "m".to_string(),
+                SourceFacts {
+                    series_count: Some(10_000),
+                    sample_interval: Some(asap_types::workload::DurationMs(100)),
+                    metric_type: Some(asap_types::workload::MetricType::Gauge),
+                    values_non_negative: true,
+                    ..SourceFacts::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
+        assert_model_is_a_lower_bound_in(
+            &[
+                "avg by (region, service, job) (quantile_over_time(0.99, m[100s]))",
+                "avg by (region) (quantile_over_time(0.95, m[100s]))",
+            ],
+            &[1_000, 1_000],
+            &[target.clone(), target],
+            true,
+            &data,
+            30,
+        );
     }
 
     /// One query reading two groups over one metric, whose scans may be one
