@@ -12,4 +12,5 @@ extensions. A design document is not a promise of downstream runtime support.
 - [Decoupling operators from scalar expressions](decoupling_op_and_expr.md)
 - [ASAPPlanner layering](planner-layering.md)
 - [Memo-based joint optimization with MILP](joint-planning-search.md)
+- [Window and materialization choices](window-materialization-choices.md)
 - [Schema and physical data for ASAP primitives](asap-primitive-schema.md)

@@ -143,25 +143,7 @@ The MILP chooses candidates for both query roots and their required input groups
 
 Shared execution is charged once, with merge and estimation charges owned by their selected groups. A higher standalone cost can enable a cheaper joint plan, so earlier stages retain valid candidates and Stage 3 performs cost-based selection.
 
-### Window and materialization choices
-
-Keep these dimensions separate:
-
-- **Semantics:** requested window width, offset, evaluation timestamps, and alignment.
-- **Implementation:** raw recomputation, supported direct sliding state, fixed-width panes, or an EH algorithm.
-- **Materialization:** when each internal state is computed and how long it is retained.
-
-A pane is an aligned, non-overlapping fixed-width interval and its aggregate/summary state. An EH bucket represents a portion of the stream under an exponential histogram algorithm, with algorithm-specific merge, expiration, and error rules.
-
-| Implementation | Ingestion, when maintained there | Evaluation |
-| --- | --- | --- |
-| Direct sliding-window state | Add data and remove expired contributions. | Read state and compute result. |
-| Pane-based | Update panes and evict expired panes. | Merge required panes and compute result. |
-| EH-based | Update, merge, and evict buckets. | Estimate the window result. |
-
-This table describes possible strategies. Current pane support does not imply general direct sliding-state or EH support. Offer only executable candidates. Multiple pane widths can coexist; alignment, coverage, mergeability, retention, and error contracts determine legality. A 15m window evaluated every 1m can use 1m panes; complete 5m panes alone generally cannot cover every endpoint.
-
-Use existing `Materialization` options: `NotMaterialized`, `MatAtQuery(Memory)`, `MatAtIngestion(Memory)`, and `MatAtQueryKeptAcrossEvaluations(Memory)`. Assign them to eligible internal nodes, not necessarily the entire query. For example, maintain panes at ingestion and merge at query time. Generate only supported assignments: retained query-time state currently requires deployment capability and an eligible pane chain. Ingestion timing and upstream dependencies must satisfy Stage 2 rules.
+Window semantics, implementation candidates, and materialization are defined separately in [Window and Materialization Choices](window-materialization-choices.md). That design also describes pane/EH terminology, supported configurations, and materialization eligibility.
 
 ## 4. Cost Model and Optimization Objective
 
