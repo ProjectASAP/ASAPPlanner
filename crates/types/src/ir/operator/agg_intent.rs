@@ -14,6 +14,7 @@
 //! operator pair.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::ir::operator::operator_properties::DataModel;
 use crate::ir::properties::AccuracyTarget;
@@ -208,13 +209,19 @@ pub enum AggIntent<C = ColumnId> {
 
     // ── Presence functions (issue #47) ───────────────────────────────────
     // `absent`/`present_over_time` — the value/emptiness of the argument
-    // determines the output. The empty-result → synthesized-1-sample logic is
-    // a post-ASAP/runtime concern; this IR only marks the operation.
-    // Modelled as label-preserving so the argument's (matcher-derived) labels — which
-    // `absent` synthesizes onto its output — stay in the schema.
-    /// PromQL `absent(v)` — a 1-sample vector when the instant vector `v` has no
-    /// matching series, else empty.
-    Absent,
+    // determines the output.
+    /// PromQL `absent(v)` — a 1-sample vector of value 1 when the instant
+    /// vector `v` has no sample, else empty. A cross-series reduction to one
+    /// result with no grouping keys (`Reduction::Reduce` by nothing), so it
+    /// answers even when its input has no row.
+    Absent {
+        /// The labels of the synthesized sample, label name → value: those of
+        /// `v`'s equality matchers, as Prometheus derives them (empty unless
+        /// `v` is a selector). The output schema has one `Utf8` column per
+        /// label, in name order, before the value.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        labels: BTreeMap<String, String>,
+    },
     /// PromQL `absent_over_time(v[w])` — `absent` over a range vector.
     AbsentOverTime,
     /// PromQL `present_over_time(v[w])` — value 1 per series that has any sample
@@ -433,7 +440,7 @@ impl<C: Clone> AggIntent<C> {
             | Self::HistogramStdDev
             | Self::HistogramStdVar
             | Self::HistogramFraction { .. }
-            | Self::Absent
+            | Self::Absent { .. }
             | Self::AbsentOverTime
             | Self::PresentOverTime
             | Self::TimeFn(_)
@@ -473,7 +480,6 @@ impl<C: Clone> AggIntent<C> {
                 | Self::HistogramStdVar
                 | Self::HistogramFraction { .. }
                 | Self::Math(_)
-                | Self::Absent
                 | Self::AbsentOverTime
                 | Self::PresentOverTime
                 | Self::TimeFn(_)
@@ -573,7 +579,7 @@ impl<C: Clone> AggIntent<C> {
                 col("histogram_quantile", DataType::Float64, false)
             }
             AggIntent::Math(_) => col("value", DataType::Float64, false),
-            AggIntent::Absent => col("absent", DataType::Float64, false),
+            AggIntent::Absent { .. } => col("absent", DataType::Float64, false),
             AggIntent::AbsentOverTime => col("absent_over_time", DataType::Float64, false),
             AggIntent::PresentOverTime => col("present_over_time", DataType::Float64, false),
             AggIntent::TimeFn(_) => col("value", DataType::Float64, false),

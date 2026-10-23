@@ -47,6 +47,39 @@ impl Operator {
             output: schema(vec![result_field("value", DataType::Float64, false)]),
         })
     }
+    /// PromQL `absent(v)` over `v`'s rows: the one sample `labels`, value 1,
+    /// when `v` has no row, else nothing. `output` holds one `Utf8` column
+    /// per label, in name order, then the Float64 value.
+    pub fn absent(
+        input: SchemaRef,
+        labels: BTreeMap<String, String>,
+        output: SchemaRef,
+    ) -> Result<Self, Error> {
+        let expected = labels
+            .keys()
+            .map(|name| (name.as_str(), DataType::Utf8))
+            .chain(std::iter::once(("", DataType::Float64)));
+        let matches = output.fields.len() == labels.len() + 1
+            && output
+                .fields
+                .iter()
+                .zip(expected)
+                .all(|(field, (name, dtype))| {
+                    (name.is_empty() || field.name == name)
+                        && field.dtype == SummaryFamilyType::Plain(dtype)
+                        && !field.nullable
+                });
+        if !matches {
+            return Err(invalid(
+                "absent output must be its label columns, then a Float64 value",
+            ));
+        }
+        Ok(Self {
+            kind: Kind::Absent { labels },
+            inputs: vec![input],
+            output,
+        })
+    }
     pub fn union(input: SchemaRef, arity: usize) -> Result<Self, Error> {
         if arity == 0 {
             return Err(invalid("union needs at least one input"));
@@ -112,6 +145,23 @@ pub(super) fn execute<'a>(
                 output,
                 &Value::Float64(if count == 1 { value } else { f64::NAN }),
             )
+        })
+        .boxed_local()),
+        Kind::Absent { labels } => Ok(futures::stream::once(async move {
+            let mut input = input;
+            let mut work = Cooperative::new(&context);
+            let mut rows = 0usize;
+            while let Some(batch) = input.next().await {
+                let batch = batch?;
+                work.checkpoint_rows(batch.num_rows()).await?;
+                rows = rows.saturating_add(batch.num_rows());
+            }
+            let row = labels
+                .values()
+                .map(|value| Value::Utf8(value.as_str().into()))
+                .chain(std::iter::once(Value::Float64(1.0)))
+                .collect();
+            Batch::try_new(output, if rows == 0 { vec![row] } else { vec![] })
         })
         .boxed_local()),
         _ => unreachable!(),

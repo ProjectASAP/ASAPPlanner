@@ -701,7 +701,9 @@ fn resolve_agg_intent(
             le: resolve_column_ref(le, schema)?,
         },
         AggIntent::Math(f) => AggIntent::Math(f.clone()),
-        AggIntent::Absent => AggIntent::Absent,
+        AggIntent::Absent { labels } => AggIntent::Absent {
+            labels: labels.clone(),
+        },
         AggIntent::AbsentOverTime => AggIntent::AbsentOverTime,
         AggIntent::PresentOverTime => AggIntent::PresentOverTime,
         AggIntent::TimeFn(f) => AggIntent::TimeFn(*f),

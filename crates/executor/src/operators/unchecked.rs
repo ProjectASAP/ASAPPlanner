@@ -40,6 +40,7 @@ impl TryFrom<UncheckedOperator> for Operator {
                 lookback_ms,
             } => Operator::current_series(input(0)?, identity, coordinate, value, lookback_ms)?,
             Kind::VectorToScalar { column } => Operator::vector_to_scalar(input(0)?, column)?,
+            Kind::Absent { labels } => Operator::absent(input(0)?, labels, output.clone())?,
             Kind::VectorBinary {
                 operator,
                 return_bool,

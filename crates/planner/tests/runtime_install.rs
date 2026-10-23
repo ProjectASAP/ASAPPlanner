@@ -3300,4 +3300,98 @@ async fn a_classic_histogram_quantile_keeps_labels_and_handles_inf_and_empty_inp
         );
         assert!((value - 0.98).abs() < 1e-9, "{value}");
     }
+
+// ── PromQL absent() (issue #895) ─────────────────────────────────────────────
+
+/// The Prometheus stale marker, which Remote Write carries when a series ends.
+const STALE_MARKER: f64 = f64::from_bits(0x7ff0_0000_0000_0002);
+
+/// The answers of the exact plan of PromQL `query` over `samples` of `m`
+/// (6 series, every 10 s), with the query-time reference's.
+async fn exact_answers(query: &str, samples: &[RawDataSample]) -> Vec<Answer> {
+    let plan_json = plan_json_for(
+        exact_workload(&[query], ""),
+        &DeploymentCapabilities::default(),
+    )
+    .await;
+    let run = run_data_plane(&plan_json, samples, EVALUATION_MS, &mut SummaryStore::new());
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+    run.answers_per_query[0].clone()
+}
+
+/// A sample of `m` at `ago_ms` before `EVALUATION_MS` with `labels`.
+fn m_sample(labels: &[(&str, &str)], ago_ms: i64, value: f64) -> RawDataSample {
+    let mut sample = sample("m", "1", EVALUATION_MS - ago_ms, value);
+    for (name, label) in labels {
+        sample.labels.insert(name.to_string(), label.to_string());
+    }
+    sample
+}
+
+/// `absent(v)` answers as Prometheus' `funcAbsent`: one sample of value 1
+/// when `v` selects no series at the evaluation time, labelled with the
+/// selector's equality matchers (`job`, not the negated `instance` and
+/// `env`); no sample when some series matches, whatever its value
+/// (0 included). A series whose newest sample is the stale marker has
+/// ended, so `absent` answers 1 again.
+#[tokio::test]
+async fn absent_answers_as_prometheus_through_the_installed_plan() {
+    let query = r#"absent(m{job="a",instance!="3",env!="prod"})"#;
+    let one = vec![(BTreeMap::from([("job".to_string(), "a".to_string())]), 1.0)];
+    // No sample at all.
+    assert_eq!(exact_answers(query, &[]).await, one);
+    // Only series the matchers reject: job b, env prod, instance 3.
+    let rejected = [
+        m_sample(&[("job", "b")], 1_000, 1.0),
+        m_sample(&[("job", "a"), ("env", "prod")], 1_000, 1.0),
+        {
+            let mut other = m_sample(&[("job", "a")], 1_000, 1.0);
+            other.labels.insert("instance".into(), "3".into());
+            other
+        },
+    ];
+    assert_eq!(exact_answers(query, &rejected).await, one);
+    // A matching series, valued 0 or not: no sample.
+    for value in [0.0, 5.0] {
+        let samples = [m_sample(&[("job", "a")], 1_000, value)];
+        assert_eq!(exact_answers(query, &samples).await, vec![], "{value}");
+    }
+    // The last matching series ended (its newest sample is stale).
+    let ended = [
+        m_sample(&[("job", "a")], 5_000, 5.0),
+        m_sample(&[("job", "a")], 1_000, STALE_MARKER),
+    ];
+    assert_eq!(exact_answers(query, &ended).await, one);
+}
+
+/// `absent(m)` (no matcher) synthesizes a label-less sample; the missing-job
+/// alert shape (several equality matchers) keeps every matcher's label.
+#[tokio::test]
+async fn absent_labels_come_from_the_equality_matchers_only() {
+    assert_eq!(
+        exact_answers("absent(m)", &[]).await,
+        vec![(BTreeMap::new(), 1.0)]
+    );
+    let alert = r#"absent(m{kubernetes_namespace="mw-content-history-reconcile-enrich",release="production",job_name="mw_content_history_reconcile_enrich"})"#;
+    let labels: BTreeMap<String, String> = [
+        (
+            "kubernetes_namespace",
+            "mw-content-history-reconcile-enrich",
+        ),
+        ("release", "production"),
+        ("job_name", "mw_content_history_reconcile_enrich"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect();
+    assert_eq!(exact_answers(alert, &[]).await, vec![(labels.clone(), 1.0)]);
+    let running = [m_sample(
+        &labels
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>(),
+        1_000,
+        3600.0,
+    )];
+    assert_eq!(exact_answers(alert, &running).await, vec![]);
 }
