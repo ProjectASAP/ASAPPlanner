@@ -1071,8 +1071,9 @@ pub struct MilpReport {
     /// together.
     pub solver_time_ms: u64,
     /// Whether it stopped at its time limit
-    /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]): the plan is
-    /// then proven optimal only if `gap` is 0.
+    /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]) or another
+    /// solver limit (iterations, memory, interrupt): the plan is then
+    /// proven optimal only if `gap` is 0.
     pub time_limit_reached: bool,
 }
 
