@@ -1,653 +1,462 @@
-# Joint planning search and exact pruning
+# Memo group and MILP design
 
-## Contents
+Status: design proposal. Audience: planner designers and implementers.
 
-## Problem
+ASAP primitives introduce sharing opportunities across queries, but also enlarge
+ASAPPlanner's optimization search space. The optimizer must represent these
+opportunities compactly and select a low-cost, valid physical plan for the whole
+workload. This design uses memo groups for candidate generation and a mixed-integer
+linear program (MILP) for joint selection. It preserves the responsibilities of
+the stages in [planner-layering.md](planner-layering.md).
 
-Planning a workload jointly lets queries share computation: one summary answers several queries, identical sub-expressions run once, and panes are reused across evaluations. Today Stage 1 to Stage 3 enumerate every whole-workload candidate, price each one, and keep all of them in memory.
+## Challenges and goals
 
-That does not scale past a handful of queries. Planning a growing prefix of one 10-query workload of ASAPQuery's random mixed workloads:
+Whole-workload enumeration multiplies per-computation candidates, sharing
+configurations, and materialization assignments. The earlier joint-search
+measurements on a growing prefix of one random mixed workload illustrate this
+problem:
 
-| Queries | Time | Peak memory |
+| Queries | Planning time | Peak memory |
 | ---: | ---: | ---: |
 | 3 | 0.4 s | 0.14 GB |
 | 4 | 5 s | 1.5 GB |
 | 5 | 129 s | 24.7 GB |
 | 6 | stopped at about 228 s | about 100 GB |
 
-Each added query multiplies the work by roughly 20. None of those workloads, and not the Kubernetes recording-rule set, can be planned as a whole. Each query planned alone takes milliseconds, but then sharing across queries is lost.
+These are historical measurements, not a benchmark of the proposed design.
 
-## Goals and non-goals
+The goals are to reduce duplicate candidate generation, avoid enumerating the
+Cartesian product of whole-workload plans, and preserve the minimum cost over the
+configured finite candidate space. A time-limited search must return its best
+validated plan and report whether optimality is proved. Incremental replanning
+and new window algorithms are separate work.
 
-**Goals**
+## Memo groups and candidate generation
 
-- Joint planning of realistic workloads (tens of queries) within seconds and a few GB.
-- The same selected plan as exhaustive search over the same candidate space (see [Exactness contract](#exactness-contract)).
-- Bounded search that says what it did: when a budget stops the search, the result reports it and whether optimality is certified.
+A memo group identifies one logical computation and its output contract. Exact
+candidates produce the same logical result. Approximate candidates implement that
+result subject to explicit accuracy obligations; they are not exactly equivalent
+expressions. A group is not a sketch family or a collection of all computations
+that could share a sketch.
 
-**Non-goals**
+Build the initial memo after Stage 0, before Stage 1 Pass 1:
 
-- Changing what the stages decide. Candidate generation, sharing rules, materializations, and the accuracy and cost checks stay as they are.
-- Approximate search modes. They are future work and must be labeled as such.
-- Incremental replanning.
+- Create a group for each distinct logical sub-expression.
+- Merge identical expressions only where semantic identity and sharing legality
+  are established; verify equality after hashing. Preserve schema, grouping,
+  source-language semantics, and time semantics. Keyless nodes can require
+  separate identities per reader.
+- Record group dependencies, query roots, and reader requirements.
 
-## Where the search space comes from
+Pass 1 generates candidates directly against these group identities. Cache
+candidate generation by group and all relevant context, including accuracy
+requirements. Different readers may need different summary sizes; merging their
+logical identity must not discard candidates needed by a reader. This avoids
+repeating generation for identical computations without first composing every
+whole-query plan.
 
-| Stage | Choice | Grows as |
-| --- | --- | --- |
-| Stage 1, Pass 1 | One per-computation candidate per target | the product of the targets' candidate counts |
-| Stage 1, Pass 2 | Sharing alternatives of each composed candidate: identical expressions, summary capability, window composition, rollup, top-k reuse | the subsets of the sharing opportunities |
-| Stage 2 | One materialization per summary build: at ingestion, at query time, or at query time kept across evaluations | three per build |
+### Memo grouping versus CSE
 
-Most combinations cannot be selected. Either a cheaper alternative replaces them in every completion, or their choices in one part of the workload do not interact with another part. The methods below remove those combinations without removing the optimum.
+Memo grouping represents the search space. Common subexpression elimination
+(CSE) identifies computations that can reuse work. A repeated identical
+expression can have one memo group with multiple parents, but that identity alone
+does not require one materialized execution at runtime.
 
-## Optimizer search survey
+ASAP-aware CSE also identifies sharing between different logical computations:
+summary capability sharing, pane composition, rollup, top-k reuse, and scan
+widening. These rules add candidates and dependencies between groups; they do not
+merge groups whose requested results differ.
 
-| Approach | How it searches | Guarantee |
-| --- | --- | --- |
-| [System R-style DP](https://research.ibm.com/publications/access-path-selection-in-a-relational-database-management-system) | Builds larger plans from smaller subproblems, retaining alternatives with useful physical properties. | Exact within its enumerated plan space when the state captures every property needed by a parent. |
-| [Volcano/Cascades](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf) | Stores equivalent expressions in memo groups; explores alternatives on demand with cost limits. | Requires sufficient context in memo keys and valid pruning bounds. |
-| [Multi-query optimization](https://arxiv.org/abs/cs/9910021) | Chooses which common computations to build, materialize, and reuse across queries. | Greedy sharing is practical but generally heuristic; consumers' choices are coupled. |
-| [MILP](https://arxiv.org/abs/1511.02071) | Encodes plan choices and constraints for a solver. | Optimality applies to the encoded alternatives and objective, including any cost approximations. |
-| [Bounded/randomized search](https://www.postgresql.org/docs/17/runtime-config-query.html#RUNTIME-CONFIG-QUERY-GEQO) | Limits exploration to control planning time. | Can miss the exhaustive optimum. |
+For example, p95 and p99 over the same input window are separate result groups.
+Their KLL candidates may share one build, with separate estimation nodes. A
+coupling site identifies the shared configuration decisions, such as build size
+or a pane chain's grid and retention span. The solver must select compatible
+configurations for all attached readers. A shared build can instead be represented
+as an explicit intermediate group; either representation must preserve the same
+choices and charge ownership.
 
- 
- 
-A memo group is standard optimizer terminology for logically equivalent expressions; see [Cascades, Section 2](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf) and [CockroachDB's optimizer documentation](https://github.com/cockroachdb/cockroach/blob/master/pkg/sql/opt/doc.go#memo). Memorization group was proposed in the paper *[The Cascades Framework for Query Optimization](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/graefe-ieee1995.pdf)*, which is the central data structure used to compactly represent and explore the huge search space of equivalent query execution plans. The Memo group data structure is compact representation of the search space as a DAG, instead of building the full DAG(s) of a batch of input queries. It can reuse the common sub-expressions and tracks their costs and physical properties. Each Group represents a set of logically equivalent relational expressions (sub-queries or relations) that all produce the same output result.
+### Responsibilities of the stages
 
- 
-
-## Design overview
-
-The search keeps the stages' semantics and changes only how their choices are explored.
-
-**Components**
-
-| Component | Role |
+| Stage | Decisions represented in the memo |
 | --- | --- |
-| Search state | A partial whole-workload plan: the choices made so far, plus everything later choices can observe (see [Exactness contract](#exactness-contract)). |
-| Memo | Equivalent search states, grouped so that each is expanded once (method 1). |
-| Interaction graph | Which computations can interact through sharing or shared resource charges. Its connected components are searched separately when that is exact (method 5). |
-| Lower bound | A valid lower bound on the cost of every completion of a state (method 3). |
-| Incumbent | The best validated complete plan so far, or a resource frontier when global limits apply. |
-| Budget | Limits on states expanded or time, with a report of unresolved work when it stops the search. |
+| Stage 0 | Parse and lower queries into logical DAGs; establish query semantics. |
+| Initial memo construction | Establish logical group identities, dependencies, and query roots. |
+| Stage 1, Pass 1 | Add exact, exact-accumulator, summary-family, summary-size, and fused-computation candidates. |
+| Stage 1, Pass 2 | Add ASAP-aware CSE candidates, shared configurations, and cross-group dependencies. |
+| Stage 2 | Generate legal physical implementation and materialization candidates, including assignments to internal nodes. |
+| Stage 3 | Jointly select candidates under the configured objective and constraints; validate the decoded plan. |
 
-**Search loop**
+Candidate generation can be lazy. Only provably invalid or contextually dominated
+candidates may be removed without changing the finite-space optimum. A higher
+standalone cost is not enough to discard a candidate that enables sharing.
 
-1. Build the interaction graph from all alternatives, and split the workload into components where independence is proven (method 5).
-2. For each component, generate states lazily, in the existing enumeration order.
-3. For each new state, apply in order:
-   - duplicate elimination (method 1);
-   - permanent-invalidity rejection (method 2);
-   - lower-bound pruning against the incumbent (method 3);
-   - contextual dominance (method 4).
-4. When a materialization or sharing choice becomes isolated, resolve it locally (methods 6 and 7) instead of branching on it.
-5. Complete plans go through the existing validation and ranking path, and update the incumbent.
-6. Combine the components' results: the sum of their optima when the objective is additive and feasibility factors, otherwise their resource frontiers.
+## Cost-based joint optimization
 
-Every pruning step requires its stated precondition. When the precondition is unknown, the alternative stays in the search.
+Assign resource usage to the nodes of the selected physical DAG using the
+configured cost model. The objective can minimize billed cost, including CPU,
+memory, storage, and other priced resources. In a cluster without billing prices,
+select an explicit objective, such as latency or memory, subject to capacity
+limits. Capacity limits alone do not define an optimum.
 
-## Exact pruning methods
+A shared computation is charged once per actual execution, not once per reader.
+An ingestion-maintained build has update and retained-state costs; query-time
+work has costs at its actual trigger rate. Multiple consumers can still cause
+multiple executions of an unmaterialized node. Estimation and merge work private
+to each reader is charged separately.
 
-Each method applies only when its stated conditions hold. Otherwise retain the alternative. These are correctness conditions, not promises of a particular pruning rate.
+### Why joint selection is needed
 
-### 1. Eliminate duplicate states
+Consider two result groups, a quantile at 0.5 and a quantile at 0.9, over the same
+input window. Assume their private KLL implementations cost 4 and 6 units per
+second. A shared build satisfying both readers costs 7, with each estimator
+costing 0.1. All configurations in this example meet accuracy requirements.
 
-Expand one representative when two states have the same observable interface, remaining choices, and cost/resource obligations. Verify equality after hashing and retain required provenance and tie information.
+Optimizing the groups independently selects the private implementations for a
+combined cost of 10. Joint selection can choose the shared build for 7.2. The
+incremental cost of attaching a reader depends on whether another selected
+candidate already enables the build. It can also depend on whether that reader
+requires a larger build, a longer retention horizon, or more frequent evaluation.
 
-This is exact because both states have the same completions. Memoizing equivalent computations does not force their runtime results to be shared.
+A dynamic program retaining only the cheapest candidate per group loses this
+context. DP is possible if its state includes the relevant reader sets, shared
+configurations, materializations, and resource tradeoffs, but those states can
+grow combinatorially. MILP provides a general engine for these joint discrete
+choices. Local DP and caching remain useful where dependencies are limited.
 
-### 2. Reject permanently invalid branches
+## Window model
 
-Reject a branch only when no remaining choice can satisfy semantics, capabilities, executor support, or output accuracy. Examples include an unrepairable type error or a fixed unsupported operator with no legal replacement.
+Distinguish three dimensions:
 
-Defer failures that another choice can repair: resizing can improve accuracy, changing summary family can supply evidence, and ingestion materialization can remove a query-time raw-data requirement. Recheck completed plans with the authoritative validator.
+1. **Window semantics:** width, evaluation step, time origin/alignment, and endpoint
+   conventions. A 15m trailing window evaluated every 1m is a sliding-window query.
+   With width and step both 15m and aligned boundaries, windows are tumbling.
+2. **Window implementation:** how the required data is represented and combined,
+   such as raw recomputation, direct sliding-state maintenance, fixed-width panes,
+   or exponential histogram (EH) buckets.
+3. **Materialization:** when each internal state is computed and how long it is
+   retained. Sliding-window semantics do not prevent ingestion-time maintenance.
 
-### 3. Prune using a workload lower bound
+### Panes and EH buckets
 
-For a partial state `S`, require `LB(S) <= cost(P)` for every feasible completion `P`. With a validated incumbent of cost `U`, prune only when `LB(S) > U`, conservatively accounting for numeric error and the selection tie policy. A resource lower bound exceeding a hard limit also rejects the branch.
+**Panes** partition a timeline into aligned, non-overlapping intervals of a fixed
+width. Each pane contains data or aggregate/summary state for its interval. A
+window combines the required panes, with explicit boundary handling when its
+endpoints do not align. An implementation may maintain several pane widths or a
+hierarchy where larger panes are formed from smaller ones.
 
-Start with zero for nonnegative objectives, then add proven unavoidable, nonshareable charges, counted once. Potentially shareable or replaceable work contributes zero until a stronger bound is proved. A partial plan's current cost, or a sum of standalone query costs, is not automatically a lower bound.
+**EH buckets** follow an exponential histogram algorithm: eligible buckets are
+merged into geometrically increasing size levels and expired buckets are
+removed. Standard EH sizes commonly measure represented item counts, rather than
+fixed time durations. The algorithm must define the statistic it supports and
+bound error from partially overlapping the oldest bucket. EH cannot be assumed
+to work with every summary family, including an arbitrary KLL composition.
 
-### 4. Remove contextually dominated alternatives
+Pane width and EH bucket size are separate from the summary-size parameters
+controlling the state within each pane or bucket.
 
-Discard B only if every completion of B can be replaced by a feasible completion of A with compatible outputs and reusable producers, no higher objective, and no worse constrained resources. A sufficient case is an identical boundary interface with a componentwise no-worse resource/cost vector under a monotone composition rule.
+### Window configurations
 
-Keep useful resource tradeoffs and sharing capabilities. For example, a producer costing 10 plus private work costing 6 can let another query cost 1 instead of 100. Replacing that first query with a standalone plan costing 5 can lose the joint plan costing 17. Standalone price alone does not establish dominance.
+For a 15m window, candidate pane compositions might include 15 × 1m, 5 × 3m,
+3 × 5m, or a hierarchy combining fine boundary panes and coarser interior panes.
+These are candidates only when they match the query's evaluation boundaries or
+include a valid boundary treatment. For a 15m window evaluated every 1m, complete
+5m panes alone cannot generally represent every evaluation exactly.
 
-### 5. Split independent components
+The solver may enable multiple pane widths simultaneously. It chooses which
+states to maintain, whether they are built from raw input or finer panes, and
+which composition each query reads. Do not impose a global constraint selecting
+only one pane width. Shared configuration sites must distinguish incompatible
+chains rather than collapse every pane computation into one site.
 
-Analyze possible interactions across **all** alternatives: identical computations, capability sharing, rollup, top-k reuse, windows, and shared resource charges. Include interactions exposed by later rewrites. If independence is unknown, keep the components together.
+| Implementation | Ingestion-time work, if maintained there | Evaluation work |
+| --- | --- | --- |
+| Direct sliding state | Insert new data and expire old contributions, where the statistic supports it. | Read/finalize current state. |
+| Pane-based | Update the active pane and maintain retention. | Read, merge, and estimate from the required panes, unless those results are also maintained. |
+| EH-based | Update, merge, and expire buckets according to the supported algorithm. | Apply its window estimator. |
 
-Choose each component's scalar optimum separately only when feasibility factors and the objective is additive. With global capacity limits, retain and combine resource frontiers instead. Include cores as well as memory, disk, and objective dimensions. Raw retention uses the maximum horizon per source, so source accounting can couple otherwise separate computations.
+This table describes design options, not an implementation-completeness claim.
+The inspected memo implementation provides tumbling-pane and pane-chain
+candidates and summary computation support. It does not establish a general
+direct sliding-state implementation or EH support. Pane input binding,
+scheduling, and retention also require deployment support. Unsupported strategies
+must not be offered as executable candidates.
 
-### 6. Resolve isolated materialization choices locally
+## MILP formulation
 
-Choose the cheapest local realization only after fixing its inputs, outputs, lifetimes, and required properties, and proving that it has no remaining cost or resource interaction. Otherwise retain nondominated realizations for that interface.
+The following is a design-level formulation. The implementation may expand a
+choice into several internal-node decisions rather than enumerate all local
+assignments. It must not enumerate the product of complete workload plans.
 
-An unshared build is not automatically isolated: it can share a scan or affect ancestor working memory and raw retention. Under a memory limit of 2, alternatives `(cost 1, memory 10)` and `(cost 2, memory 1)` require keeping the second option.
+### Choices and variables
 
-### 7. Force sharing only when it dominates recomputation
-
-First apply the existing [CSE legality checks](../../../crates/types/src/ir/cse.rs). Then eliminate recomputation only if the shared physical realization is no worse on every relevant cost, resource, and consumer property.
-
-Equal expressions alone do not prove this: sharing can extend retention or introduce copying, synchronization, or scheduling costs. When dominance is unproved, retain both physical alternatives and memoize their common semantics.
-
-## Interfaces
-
-These are design-level interfaces; names in the implementation may differ.
-
-**Inputs**
-- The existing Stage 1 to Stage 3 inputs: workload, planning models, plan selection settings.
-- A search budget in plan selection settings: limits on expanded states and on time, with a large default.
-- An exhaustive mode, used by tests to compare results.
-
-**Outputs**
-- The selected plan, as today.
-- A search report:
-  - the components found;
-  - per component: states generated, states pruned by each method, and plans validated;
-  - whether the search completed;
-  - if a budget stopped it: the best feasible plan found, the unresolved work, and whether optimality is certified.
-- Developer tools can still request the full candidate lists; normal planning keeps only the incumbent.
-
-## Worked example
-
-A workload of three recurring queries:
-
-```promql
-q1: sum by (job) (rate(http_requests_total[5m]))
-q2: topk(5, sum by (job) (rate(http_requests_total[5m])))
-q3: quantile_over_time(0.99, latency_ms[5m])
-```
-
-- **Method 5.** q1 and q2 read the same source and can share the per-job rate sum (identical computation and top-k reuse), so they form one component. q3 reads another source. It has no sharing opportunity with q1 or q2, so under an additive objective with no global limit it is searched on its own. With a global memory or core limit, the two components keep resource frontiers and are combined at the end.
-- **Method 1.** In the {q1, q2} component, the composed candidates that differ only in how the identical rate sum is numbered are one state.
-- **Method 7.** Sharing the per-job rate sum is forced only if the shared realization is no worse on every relevant cost, resource and consumer property. Otherwise both the shared and the separate realization stay.
-- **Method 6.** q3's per-series KLL panes have no interaction with the other component. Their materialization can be chosen locally once their inputs, lifetimes and raw-retention effect are fixed. If the choice changes raw retention for `latency_ms`, the nondominated realizations are kept instead.
-- **Method 3.** Once a validated plan for {q1, q2} exists, a partial state whose unavoidable, nonshareable charges already exceed it is pruned.
-
-The selected plan is the same as exhaustive search's. The number of states expanded drops from the product over all three queries to roughly the sum over the components.
-
-## Search and validation
-
-Generate candidates lazily and stream completed plans through the existing validation and ranking path. Apply the rules above as soon as their preconditions are known. Unknown bounds and numerical near-ties remain searchable. Preserve legacy selection order for tolerance-sensitive ties unless a new total-order policy is explicitly adopted; stable IDs alone do not reproduce a nontransitive tolerance comparison.
-
-Exact search finishes when every remaining branch has been explored or certified unable to improve the result. A budget stop reports the best feasible plan found, unresolved work, and whether optimality is certified. No incumbent means “no feasible plan found,” not “infeasible.” Report a scalar gap only with a bound covering all unresolved branches; report Pareto-front completeness separately.
-
-Validate each rule against exhaustive enumeration on small workloads, alone and in combination. Include donor-dependent sharing, global memory/core limits, overlapping reuse, per-source retention, repairable accuracy failures, and near ties. Verify bounds against the best exhaustive completion of each tested partial state. Measure planning time and peak memory on Examples 1–4, the mixed workloads, and Kubernetes recording rules without claiming a universal scaling guarantee.
-
-## The problem: sharing is a decision
-
-The main difficulty: whether to share, and at what granularity, is a decision the solver must make, and this is multi-query optimization (MQO).
-
-The problem we solve. Given a workload of queries, each with an accuracy target and a repeat interval, choose for every query one way to compute it, and for every computation it reads, whether it is computed alone or shared with other queries, and at which granularity (a sketch, a pane chain, a scan, a finer grouping rolled up). The choice must meet every query's accuracy and latency, fit the deployment's memory and cores, and minimize the workload's cost under the chosen cost model.
-
-Three properties make the decision hard. The cost of sharing depends on who shares:
-
-1. **A query can read several shared units.** Its latency is a sum over the units it reads, and its held memory is that sum times the latency. For example, `max_over_time(m[5m]) - min_over_time(m[5m])` together with `max_over_time(m[5m])`: the first query reads two units, one shared with the second. Pricing each unit alone overestimates the pair (0.4617 against an exact 0.4165).
-2. **A unit's cost depends on its reader set.** A shared unit runs at the union of its readers' repeat intervals (60 s and 90 s → 30 s), keeps data for the longest reader's window (5 min vs 24 h), and is sized for the strictest reader's accuracy (0.01 vs 0.05). Adding one reader can make a unit more expensive for all the others.
-3. **Units interact.** A shared scan reads the longest reader's window, which changes the inputs, and so the costs, of the units above it.
-
-### Is this MQO?
-
-Yes. The memo is MQO's AND-OR DAG: groups are the OR nodes (alternative ways to compute one sub-expression), implementation candidates are the AND nodes (one way, reading its child groups), and choosing a sub-DAG that covers every query, with shared nodes counted once, is the classic MQO problem.
-
-It is NP-hard. Classic MQO is NP-hard (Sellis 1988): choosing which shared nodes to compute is at least as hard as set cover, since each shared node covers the queries that read it. Our problem contains classic MQO as the special case where sizes, accuracy and time do not depend on the reader set, so it is NP-hard too, and no exact algorithm is polynomial in the worst case. Our problem goes beyond classic MQO in four ways: a shared node's size depends on its strictest reader; accuracy composes across the nodes a query reads; time matters (pane grids, retention, repeat intervals); and memory held during a query multiplies by its latency.
-
-### How MQO is solved
-
-| Family | Idea | Fit here |
-|---|---|---|
-| Greedy materialization | Add the shared node with the best benefit until none helps. | No optimality bound; misses sharing that pays only in combination. |
-| A* / branch and bound | Search plan combinations, prune by a cost bound. | Exact, but the current enumerator is this, and it does not finish on whole workloads. |
-| Integer programming | Binary variables per node and per choice; a solver finds the optimum. | Exact, but reader-set-dependent and multiplicative costs are not linear. |
-| Logic-based Benders decomposition | A MILP master chooses with linear lower-bound costs; a subproblem prices the choice exactly and returns cuts. | Fits: Stage 3 is the exact subproblem. |
-| Column generation (branch and price) | Each column is a whole sharing pattern, priced exactly; a pricing problem finds new columns. | Fits reader-set-dependent costs exactly; columns grow with reader subsets. |
-
-### How we solve it
-
-Logic-based Benders decomposition. The MILP over the memo is the master: it chooses candidates and sharing with linear coefficients that are lower bounds of the true cost. Stage 3 evaluates the decoded plan exactly. When the exact cost exceeds the master's estimate, a cut returns to the master. The loop ends when the incumbent's cost is within the gap of the master's lower bound, so the result is optimal within that gap.
-
-The algorithm:
+Let `G` be the logical groups and `C(g)` the legal physical choices for group `g`.
+A choice includes its implementation, window configuration, private-node summary
+parameters, and legal materialization assignment. Shared configurations are
+represented separately so their costs are not duplicated.
 
 ```text
-input:  memo M, cost model C, gap tolerance g, time limit T
-output: plan P*, its exact cost U, lower bound L
-
-build master MILP from M:
-    variables x (candidate chosen), m (group materialized),
-              u (shared unit used), r (reader of unit), ...
-    constraints: every query covered; a chosen candidate's child groups
-                 are computed; validity (accuracy, latency, capacity)
-    objective: sum of lower-bound coefficients of the chosen terms
-cuts := {}
-U := +inf; P* := none
-loop:
-    solve master with cuts            -> solution s, objective L
-    if master infeasible: return no plan
-    P := decode(s)                    # exactly one plan
-    c := Stage 3 exact cost of P under C
-    if c < U: U := c; P* := P         # incumbent
-    if (U - L) / U <= g: return (P*, U, L)        # optimal within g
-    if time limit T reached: return (P*, U, L)    # reported with its gap
-    for each term t of P whose exact cost exceeds its coefficient:
-        add cut: (t chosen) => (objective >= exact cost of t)
-    if no term cut applies:
-        add no-good cut excluding s
+n[g]   ∈ {0,1}    logical group g is required
+x[g,c] ∈ {0,1}    select physical choice c for group g
+y[b,t] ∈ {0,1}    enable shared computation instance b at configuration t
 ```
 
-Two properties make it correct. Every coefficient is a lower bound of the exact cost of its term, so L never exceeds the optimum. Every cut is valid: it removes no plan whose exact cost is below what the cut states. Together, when the loop stops at gap g, P* is within g of the optimum.
+A shared configuration `t` can include summary size `s`, pane width, retention,
+and materialization. Thus `y[b,s]` is the special case where only summary size
+varies. Materialization can also be explicit as `x[g,c,m]`; when a candidate has
+several internal nodes, `m` denotes an assignment to those nodes, not one label
+for the entire query.
 
-The number of rounds depends on the strength of the master and the cuts, so the work goes there, in the standard ways:
+The materialization vocabulary is:
 
-- **Validity before cost.** Invalid candidates are pruned per candidate; composed accuracy and path latency are MILP constraints, not cuts.
-- **Stronger cuts.** A cut prices the terms that were underestimated (a reader set's union rate, retention, size; a query's held memory), so one cut excludes every plan sharing that term, not just one plan.
-- **Decomposition into clusters.** Groups that share nothing are solved as separate MILPs.
-- **Decoding.** One master solution decodes to exactly one plan.
-
-For a small cluster whose costs depend heavily on the reader set, column generation prices each sharing pattern exactly and needs no cuts for it. It is a complement for those clusters, not a replacement for the master. No heuristic replaces the exact search; a run that hits its time limit reports its gap.
-
-## Memo-group search
-
-### Components
-
-| Component | What it is |
+| Option | Meaning |
 | --- | --- |
-| Memo group | One distinct logical sub-expression of the workload: the logical DAG hash-consed, so identical expressions of several queries are one group. Identical-expression sharing is group identity. |
-| Implementation candidate | One way to implement one group: exact, exact accumulator, a summary family with its size parameters, tumbling panes, or a read of another group (newest panes of a shared chain, a rollup regrouping, a top-k ranking). It references child groups, not child nodes. A fused computation (e.g. a heap that absorbs a sum and a top-k) is one candidate that implements several groups; it records which. |
-| Materialization | `NotMaterialized`, `MatAtQuery`, at ingestion, or kept across evaluations: chosen once per implementation candidate of a group, however many parents read it. |
-| Shared group | A group read by two or more parents. Its choice (implementation, size, materialization, pane grid) couples its parents. |
-| Coupling site | A choice several groups' costs depend on: a shared group's size (sized for its strictest reader), a shared pane chain's grid, longest window and size, a metric's scan label set, a source's raw-data horizon. |
-| Local cost | One implementation candidate's usage, evaluated by Stage 3's per-node cost function given its context (its readers' requirements, its coupling sites' thresholds): CPU operations, scanned bytes, memory byte-seconds, peak memory, disk, each reader's latency. Cached per (group, candidate, context). |
-| MILP | One mixed-integer linear program over the memo whose variables are the groups' candidate choices, their materializations and the coupling sites' thresholds, with Stage 3's prices as coefficients. It replaces enumerating whole-workload candidates. |
+| `NotMaterialized` | Compute through a consumer without retaining an independently reusable result. |
+| `MatAtQuery` | Build at query time and reuse within the applicable evaluation. |
+| `MatAtIngestion` | Maintain state as input arrives and retain it for readers. |
+| `MatAtQueryKeptAcrossEvaluations` | Build at query time and retain across evaluations, with valid freshness and maintenance behavior. |
 
-### How the stages and the memo work together
+Generate only legal assignments. A reader can use ingestion-maintained panes
+while performing merge and estimation at query time.
 
-Today the stages run one after another over the whole workload, and each hands the next every whole-workload candidate; the candidate count is the product of every query's choices:
+Enumerate a finite set of supported size/configuration values and derive costs
+for each. The mapping from size to cost need not be linear: a precomputed cost
+is a constant coefficient multiplying a binary configuration variable. This
+approach is exact only over the generated configurations; exhaustive configuration
+enumeration can itself become expensive.
 
-```text
-Stage 0  frontend            -> pre-ASAP logical DAG
-Stage 1  Pass 1              -> per target, whole sub-DAG candidates           (no cost)
-         Pass 2              -> one whole-workload candidate per sharing subset (no cost)
-Stage 2  materialization     -> every candidate x every materialization
-Stage 3  selection           -> every physical candidate built, checked, priced (~1 ms each)
-Stage 4  executor
-```
+### Coverage and dependencies
 
-The memo keeps each stage's semantics and code, and changes what they exchange: groups and implementation candidates instead of whole plans. Each stage runs per group, and only the choices that couple groups are made jointly:
+Each query root must be required:
 
 ```text
-                 group A                 group B                 group C (shares nothing)
-Stage 1 Pass 1   A's implementations     B's implementations     C's implementations
-Stage 1 Pass 2   transformations add implementations that read another group (capability, panes, rollup, top-k)
-Stage 2          materialization per implementation, once per group however many parents read it
-Stage 3          local price per (group, implementation, context), cached: the MILP's coefficients
-------------------------- coupling sites of the cluster {A, B} -------------------------
-                 discrete threshold variables: a shared group's size (strictest reader),
-                 a pane chain's grid and longest window, a metric's scan labels, a source's raw horizon;
-                 one MILP chooses them together with every group's candidate; C's choice is independent
--------------------------------------------------------------------------------------------
-Selected plan    composed once, then Stage 3's checks and the executor's compile check
+n[root(q)] = 1
 ```
 
-Example: two queries over one metric.
-
-```promql
-Q1: quantile_over_time(0.9, data[5m])
-Q2: topk(5, sum by (job) (sum_over_time(data[5m])))
-```
-
-Hash-consing their logical DAGs gives six groups; `G2` is one group read by both queries:
+Let `implements(h,c)` contain all groups implemented by choice `(h,c)`, including
+groups absorbed by fusion. Require each needed group to be covered once:
 
 ```text
-G1 = Scan(data)
-G2 = TimeRange(5m) over G1          <- read by Q1 and Q2
-G3 = quantile_over_time(0.9) over G2    (Q1's root)
-G4 = sum_over_time over G2
-G5 = sum by (job) over G4
-G6 = topk(5) over G5                    (Q2's root)
+Σ_{(h,c): g ∈ implements(h,c)} x[h,c] = n[g]
 ```
 
-Pass 1 and the Pass 2 transformations give each group the implementations of that node alone, referencing child groups:
+If choice `(h,c)` reads logical group `d`, it requires that group:
 
 ```text
-G3: exact quantile (reads G2) | KLL(k) (reads G2) | DDSketch(alpha) (reads G2)
-    | newest-n panes of a shared chain (reads another group's pane chain)
-G4: exact sum accumulator (reads G2)
-G5: exact group-by sum (reads G4)
-G6: exact top-k (reads G5)
-    | Count-Min heap (reads G2)     <- fused: one implementation of G4, G5 and G6
-G1, G2: each reader computes its own (NotMaterialized) | built once per evaluation (MatAtQuery)
+x[h,c] ≤ n[d]
 ```
 
-Before, the same `Scan -> TimeRange(5m)` was repeated inside every per-target candidate, and Pass 2 had to discover it again; candidates multiplied across targets. In the memo, `G2` appears once, `G3` has a handful of implementations, and the MILP has one variable per (group, implementation): `G2`'s materialization is a coupling choice that both queries' costs depend on.
+Candidates must also satisfy exact-input, state-exposure, and other reuse
+requirements. Dependencies must be acyclic, either by candidate construction or
+by explicit ordering constraints. Sharing a result and computing separate
+physical copies may be distinct choices while preserving one logical identity.
 
-Where each part of the stage design lives in the memo:
+### Shared producers and compatibility
 
-| Stage design | In the memo |
-| --- | --- |
-| Pass 1 computation candidates | implementation candidates per group, referencing child groups |
-| Identical-expression rule | group identity (hash-consing) |
-| Summary-capability rule | an implementation serving several reader groups; its size is a coupling site (strictest reader) |
-| Window-composition rule | pane implementations in a group; a shared chain's grid and longest window are a coupling site; a reader reads its newest panes |
-| Rollup and exact top-k reuse | an implementation of a coarse group (or a top-k) that reads a finer group (or a ranking) |
-| Stage 2 materialization | chosen per implementation, once per group |
-| Stage 3 pricing and checks | local price per (group, implementation, context), cached; the full plan is checked once |
-| Raw retention, cost models 2 and 3, measured table | a per-source horizon threshold; linear peak and capacity constraints; a calibration factor fitted once and frozen |
-
-### End to end: the memo with the sharing strategies
-
-This walks one workload through the memo, showing what each sharing strategy (the identical-expression, summary-capability and window-composition rules, rollup and exact top-k reuse) contributes and where each decision is made. All queries read `data`, a gauge.
-
-```promql
-Q1: quantile_over_time(0.9, data[5m])                       every 10 s, relative error 0.01
-Q2: quantile_over_time(0.5, data[1m])                       every 10 s, relative error 0.05
-Q3: topk(5, sum by (job) (sum_over_time(data[5m])))         every 60 s
-Q4: sum by (job, instance) (sum_over_time(data[5m]))        every 60 s
-```
-
-**1. Hash-cons the logical DAGs (identical-expression rule).** Each distinct sub-expression is one group. `Scan(data)` and `TimeRange(5m)` appear once, so every reader of them reads the same group; the identical-expression rule needs no separate pass.
+For each reader choice using shared instance `b`, let `A(g,c,b)` be the compatible
+configurations:
 
 ```text
-G1 = Scan(data)                                  read by all four queries
-G2 = TimeRange(5m) over G1                       read by Q1, Q3, Q4
-G3 = TimeRange(1m) over G1                       read by Q2
-G4 = quantile_over_time(0.9) over G2             Q1
-G5 = quantile_over_time(0.5) over G3             Q2
-G6 = sum_over_time over G2                       read by Q3, Q4
-G7 = sum by (job, instance) over G6              Q4
-G8 = sum by (job) over G6                        read by Q3
-G9 = topk(5) over G8                             Q3
+x[g,c] ≤ Σ_{t ∈ A(g,c,b)} y[b,t]
+Σ_t y[b,t] ≤ 1                       for one shared instance b
 ```
 
-**2. Pass 1: each group's own implementations.** Pass 1 gives every group the implementations of its node alone: `G4` and `G5` get exact, KLL and DDSketch, each whole-window or in tumbling panes; `G6` to `G9` get exact operators; `G9` also gets a fused Count-Min heap that implements `G6`, `G8` and `G9` at once.
+Compatibility includes input, family, grouping, window boundaries, summary size,
+and materialization. If multiple configurations must coexist, represent separate
+instances or an explicit multi-configuration structure. Each enabled producer
+must have its own input dependencies and legal production implementation.
 
-**3. Pass 2: the sharing strategies add implementations that read other groups.**
-
-| Strategy | Implementation it adds | Coupling site it creates |
-| --- | --- | --- |
-| Summary capability | `G4` and `G5` may read one DDSketch build over `data`, sized for the stricter reader (`G4`, error 0.01) | the shared build's size |
-| Window composition | that build as one chain of 10 s panes over 5 m; `G5` reads its newest 6 panes, `G4` all 30 | the chain's grid (10 s, the gcd of the readers' widths), its longest window (5 m) and its size |
-| Rollup | `G8` (`by (job)`) implemented by regrouping `G7` (`by (job, instance)`) | none beyond `G7` being read twice |
-| Exact top-k reuse | where another query keeps the same ranking, `G9` reads it | the ranking's group |
-| (scan widening) | `G1`'s readers read one scan with the union of their labels | the metric's label set |
-
-Nothing here builds a whole-workload candidate; each strategy only adds alternatives to a group.
-
-**4. Stage 2: materialization per implementation.** For example, the shared pane chain may be kept at ingestion time or rebuilt per evaluation; `G2` may be computed by each reader or built once per evaluation. A group with several parents chooses once.
-
-**5. Stage 3: coefficient derivation.** Each implementation's cost is derived once per consumer rate, materialization and threshold, and cached; these are the MILP's coefficients. Here all nine groups are coupled through `G1`, `G2` and the shared quantile build. A second metric's groups would share no variable with them, and the solver separates such blocks on its own.
-
-**6. One MILP chooses everything.** Threshold enumeration gives each coupling site its discrete values, which become MILP variables:
+Where activation means a producer serves at least one reader, add:
 
 ```text
-shared quantile build:  size threshold in {for G4's 0.01, for G5's 0.05, no shared build}
-  at 0.01: G5 may read it (0.05 >= 0.01) and does if that is cheaper for G5
-  at 0.05: G4 cannot read it (0.01 is stricter), so G4 uses its own build
-pane chain:             grid in {10 s}, longest window in {5 m, 1 m}
-G2, G6:                 per reader or built once per evaluation
-raw retention of data:  horizon threshold among the readers that scan raw data
+y[b,t] ≤ Σ_{(g,c) able to read (b,t)} x[g,c]
 ```
 
-The same MILP also chooses every other group's implementation: `G8` exact or rolled up from `G7`, `G9` exact or the fused heap. The threshold variables replace subsets of readers. The lazy-cut loop (below) then prices the solver's plan with Stage 3 and adds the held-memory term back until the two agree.
+Do not rely solely on a positive objective coefficient to suppress unused
+producers; zero-price resources are possible.
 
-**7. Build late.** The selected choices are composed into one physical plan. Stage 3 checks it once (guarantees, latency against each repeat interval, capacity) and the executor's compile check runs on it alone. The runner-ups are built only if a report asks for them.
+### Accuracy, windows, and physical validity
 
-The result is the plan the exhaustive search would select. It is checked by `joint_search_equivalence` on workloads small enough for `--exhaustive`, one per strategy and per coupling site.
+- Every query's composed guarantee must satisfy its target, including applicable
+  confidence requirements. Summary error and window-representation error require
+  a valid composition rule, not an assumed arithmetic sum.
+- Every window read must cover the correct data at each modeled evaluation,
+  without omission or double counting. Regular-grid checks can establish this
+  symbolically without expanding every timestamp.
+- Every selected operation must have a supported physical implementation.
+- A selected materialization must provide fresh, available state when its readers
+  execute. Enforce the actual physical compatibility rules rather than assuming
+  that every ancestor forces the same materialization on all descendants.
+- Raw and intermediate-state retention must cover every selected reader's needs.
 
-### Stage interfaces
+Reject provably invalid choices during generation. Encode remaining joint checks
+in the model, or use a sound validation/refinement mechanism described below.
 
-- **Pass 1** emits, per group, its implementation candidates (exact, exact accumulators, each summary family and size, pane variants), each referencing child groups. It no longer emits a whole sub-DAG per target.
-- **Pass 2 rules** add implementation candidates to groups:
-  - summary capability: one build serving several reader groups, sized for the strictest reader;
-  - window composition: pane implementations, a newest-n read of another group's chain, and the gcd grid;
-  - rollup: a coarse group implemented by regrouping a finer group;
-  - exact top-k reuse: a top-k implemented from another group's ranking.
-- **Stage 2** chooses each candidate's materialization; a group with several parents chooses once.
-- **Stage 3** prices per group with the cache. The executor's compile check and the full physical DAG are built only for the selection and the runner-ups a report asks for.
+### Consumer rates and resource accounting
 
-### Algorithm
-
-1. **Hash-cons** the workload's logical DAG into groups.
-2. **Generate** each group's implementation candidates (Pass 1, then the Pass 2 transformations), each with its child groups and its coupling sites.
-3. **Coefficient derivation.** Derive each choice's objective coefficients from Stage 3's per-node cost function (`price_node`): a candidate's private nodes per consumer rate and per materialization, and each coupling site's node at each of its thresholds. Stage 3 stays the only source of costs.
-4. **Solve one MILP over the memo** (below): one choice per needed group, its materializations and the coupling sites' thresholds.
-5. **Solution decoding, incumbent evaluation, lazy cuts.** Decode the solver's solution into its one physical plan, recompose its guarantees, and evaluate the plan's exact cost with Stage 3 (the incumbent cost). If the incumbent cost exceeds the MILP lower bound (the held-memory term), or a composed guarantee fails, add a cut that corrects or excludes that plan, and solve again. Stop when the best incumbent cost equals the MILP lower bound and every check passes. The gap must be 0 to report the plan as optimal.
-6. **Build late.** Run the executor's compile check on the selected plan only, and report it.
-
-### The solver: MILP over the memo
-
-Threshold enumeration still turns each coupling site into discrete choices: a shared size set by one reader's requirement, a pane chain's grid and longest window, a scan's label set, a source's raw horizon. The MILP chooses among them instead of a hand-written search.
-
-**Variables.**
-- `x[g,c]`: group `g` implemented by candidate `c`. Groups a chosen candidate reads must be implemented; a fused candidate implements several.
-- `m[s,o]`: materialization `o` of slot `s` (a candidate's build, or a shared group's node).
-- `u[site,t]`: coupling site at threshold `t`; a reader may attach only to a threshold it may read.
-- `r[k,g]`: consumer `k` (a query, or a materialized slot) reaches group `g` through unmaterialized nodes.
-- `y[k,g,c] = r[k,g] ∧ x[g,c]`, linearized as `y ≥ r + x − 1`.
-
-**Objective (cost model 1).** Σ rate(k) · per-consumer cost(g, c) · y, plus each materialized slot's own cost, each threshold's site cost, raw retention per source (`R_s ≥ bytes · query-time raw scan`), and pane retention (`keep ≥ span · read`). A slot built once per evaluation for readers on different grids takes the union rate through one indicator per distinct grid set.
-
-**Constraints.** One candidate per needed group; down-closure (ingestion needs ingestion below); the reach propagation; attachment only to admitted thresholds; the combination rules (top-k reuse never with panes; rollup source rules); each query's latency (the sum of the work it reaches) within its bound and its repeat interval.
-
-**Lazy terms.** Memory held while a query runs costs bytes × that query's latency, a product of two sums over its reach. The model omits it, which gives a lower bound, and step 5 adds it back through cuts on the incumbent. Composed accuracy guarantees depend on the chosen children; step 5 checks them on the incumbent and excludes failing combinations with no-good cuts.
-
-**Cost models 2 and 3.** The same variables. Peaks and capacity limits become linear constraints over the per-node peak contributions, and each objective is as specified.
-
-**Formulation.**
-
-Sets:
-- `Q`: queries; `G`: memo groups; `C(g)`: candidates of group `g`.
-- `ch(g,c)`: child groups that candidate `(g,c)` reads; `impl(g,c)`: groups it implements (more than `{g}` for a fused candidate).
-- `O = {nm, mq, ing, kept}`: materializations (not materialized, built once per evaluation, at ingestion, kept across evaluations).
-- `S`: coupling sites; `T(s)`: thresholds of site `s`.
-- `K = Q ∪ {(g,c,o) : o ≠ nm}`: consumers, the queries and the materialized slots.
-
-Parameters, all derived from Stage 3's per-node cost function, in cost per second unless noted:
-- `rate(k)`: evaluations per second of consumer `k`.
-- `w(g,c)`: cost of one computation of `(g,c)`'s own nodes.
-- `a(g,c,o)`: standing cost of slot `(g,c,o)` (ingestion upkeep, kept state).
-- `σ(s,t)`: cost of site `s` at threshold `t`.
-- `may(s,t,g)`: whether group `g` may read site `s` at threshold `t`.
-- `ℓ(g,c)`: latency of one computation, in ms.
-- `B(q)`: the latency limit of query `q`, `min(max_latency_ms, repeat interval)`.
-- `hz(n)`: raw horizon bytes of raw scan `n`; `span(q,h)`: retention that reader `q` needs from pane chain `h`; `β(h)`: cost per second of keeping one span unit of `h`; `p_disk`: disk price.
-
-Variables:
+Introduce consumer-reach and activation variables where a node's execution rate
+depends on selected ancestors, readers, and materialization. For a binary product
+`v = a AND b`, use the complete linearization:
 
 ```text
-x[g,c]   ∈ {0,1}   group g is implemented by candidate c
-m[g,c,o] ∈ {0,1}   candidate (g,c) is materialized as o
-u[s,t]   ∈ {0,1}   coupling site s takes threshold t
-r[k,g]   ∈ {0,1}   consumer k computes group g (reaches it through unmaterialized nodes)
-y[k,g,c] ∈ {0,1}   r[k,g] ∧ x[g,c]
-λ[q,g]   ∈ {0,1}   g is computed within q's evaluation (reached through nm or mq nodes)
-R[s]     ≥ 0       raw horizon kept for source s
-keep[h]  ≥ 0       retention kept for pane chain h
-θ        ≥ 0       held memory (memory × latency), added by lazy cuts
+v ≤ a
+v ≤ b
+v ≥ a + b - 1
 ```
 
-Objective, cost model 1:
+A query-time shared build runs at the union of actual reader triggers, accounting
+for time alignment and reuse scope. Two readers on 60s and 90s schedules aligned
+at zero have union rate `1/60 + 1/90 - 1/180`, not the rate of the 30s gcd grid.
+A gcd grid may describe legal pane alignment without describing execution count.
+
+For one raw source, retention follows the longest required raw horizon under
+the selected storage policy, rather than the sum of per-query copies. Pane
+retention similarly follows the selected readers and maintained layers. If a
+maximum is modeled only with lower bounds, positivity/minimization may make it
+tight; otherwise add constraints enforcing its intended value.
+
+### Objective and optional capacity constraints
+
+The billing objective is:
 
 ```text
-min  Σ_k Σ_(g,c) rate(k) · w(g,c) · y[k,g,c]      computation, once per consumer that reaches it
-   + Σ_(g,c,o) a(g,c,o) · m[g,c,o]                standing cost of materialized slots
-   + Σ_(s,t)   σ(s,t) · u[s,t]                    coupling sites at their thresholds
-   + p_disk · Σ_s R[s]  +  Σ_h β(h) · keep[h]     raw and pane retention
-   + θ                                            held memory (lazy)
+min  selected private-node execution costs
+   + enabled shared-producer execution costs
+   + retained raw and intermediate-state costs
+   + temporary-state and other plan-level costs
 ```
 
-Constraints:
+Give each charge one owner. A shared build must not be included both in every
+reader's private coefficient and in `y[b,t]`. Account for update, merge,
+estimation, expiration, and compaction where the selected implementation needs
+them. Freeze calibration and model inputs before solving.
+
+If requested, constrain CPU, memory, disk, and per-query latency. Resource
+coefficients must match their meaning: average memory is not peak memory, and
+summing query work does not establish concurrent CPU or memory demand without
+an execution/concurrency model. A cluster objective can minimize latency or
+memory under these constraints. A Pareto request requires a frontier search,
+not a claim that one scalar solve returns every nondominated plan.
+
+## Solving and validation
+
+Start with a complete MILP for the supported finite candidate space where the
+costs and constraints can be encoded accurately and compactly. MILP does not
+require logic-based Benders decomposition (LBBD).
+
+A separate exact evaluator remains useful for checking a decoded plan. Validation
+alone cannot certify optimality if the model omits costs or legal candidates.
+If difficult composed checks or costs are deliberately omitted, the model must
+be a valid relaxation, and refinement is required:
+
+1. Solve the relaxed model and retain its certified solver lower bound.
+2. Decode a complete physical plan and validate its accuracy, timing, resources,
+   and full cost. A validated plan supplies an incumbent upper bound.
+3. Exclude a proved-infeasible combination, or add a proved-valid cost bound.
+4. Repeat until the certified bound closes the target gap or the budget expires.
+
+A no-good cut must include every decision needed to prove infeasibility. A cost
+cut must be conditioned on all choices affecting that charge; applying a
+whole-plan cost to an incomplete candidate signature can exclude a cheaper plan.
+Excluding a feasible, evaluated configuration is safe only if its validated plan
+is retained and the proof accounts for that excluded region. Do not confuse a
+solver's current feasible objective with its certified global lower bound.
+
+LBBD is one possible master/subproblem design for this refinement, not a
+requirement. An iterative cut loop is not automatically LBBD. Select a
+decomposition only when measured model size or difficult checks justify it.
+
+Split workload components only when all potential sharing, retention, and
+feasibility interactions are absent. Global capacity constraints can couple
+otherwise separate components: keep the joint model or combine complete resource
+frontiers. Unknown interactions remain connected.
+
+### Reporting and exactness
+
+Report candidate/configuration counts, model size, generation and solver time,
+validation effort, incumbent cost, certified lower bound, gap, and stop reason.
+The gap is `(U-L)/U` for positive incumbent cost `U`; define zero-cost handling
+explicitly. A time limit with no incumbent means no feasible plan found, not
+proved infeasible. If refinement has exhausted the remaining region but retained
+an incumbent, return that incumbent rather than reporting the workload infeasible.
+
+Optimality is relative to the generated finite candidates and configured models.
+It is not a guarantee of measured runtime, completeness over all pane widths or
+summary sizes, or support for unimplemented algorithms. Ties require an explicit
+selection policy; equal-cost plans need not have identical structure.
+
+## Workflow and example
 
 ```text
-(1) cover      Σ_{(h,c): g ∈ impl(h,c)} x[h,c] = need[g]            each needed group covered once
-               need[root(q)] = 1;   need[g] ≥ x[p,c]  for g ∈ ch(p,c)
-(2) materialize Σ_o m[g,c,o] = x[g,c]
-               m[g,c,ing] ≤ Σ_c' m[g',c',ing] + rawsource(g')   for g' ∈ ch(g,c)   (ingestion needs ingestion below)
-(3) reach      r[q,root(q)] = 1;   r[(g,c,o),g'] ≥ m[g,c,o]      for g' ∈ ch(g,c)
-               r[k,g'] ≥ r[k,p] + x[p,c] − Σ_{o≠nm} m[p,c,o] − 1  for g' ∈ ch(p,c)
-(4) product    y[k,g,c] ≥ r[k,g] + x[g,c] − 1
-(5) sites      Σ_t u[s,t] ≤ 1;   x[g,c] ≤ Σ_{t: may(s,t,g)} u[s,t]  for each candidate (g,c) that reads site s
-(6) retention  R[s] ≥ hz(n) · λ[q,n]   for each raw scan n of s and each q
-               keep[h] ≥ span(q,h) · x[q's reader of h]
-(7) latency    λ[q,root(q)] = 1;   λ[q,g'] ≥ λ[q,p] + x[p,c] − m[p,c,ing] − m[p,c,kept] − 1
-               Σ_(g,c) ℓ(g,c) · (λ[q,g] + x[g,c] − 1)^+  + compaction(q)  ≤  B(q)
-               (the product linearized as in (4))
-(8) rules      combination limits, e.g. x[top-k reuse] + x[pane candidate of the same group] ≤ 1
+Stage 0: queries → logical DAGs
+    ↓
+Build initial memo: identities, dependencies, query roots
+    ↓
+Stage 1, Pass 1: generate per-group computation candidates
+    ↓
+Stage 1, Pass 2: add ASAP-aware CSE candidates and shared configurations
+    ↓
+Stage 2: generate legal physical and materialization candidates
+    ↓
+Stage 3: build and solve the joint MILP
+    ↓
+Decode and validate the selected physical DAG
+    ↓
+Return a validated plan and search report; refine the model if required
 ```
 
-Minimization keeps `r`, `y`, `λ`, `R` and `keep` at their smallest feasible values, so their lower-bound constraints make them exact.
-
-Lazy cuts, added by the loop for an incumbent plan `P` (a set of chosen `(g,c)` and `(g,c,o)`):
+Consider:
 
 ```text
-held memory     θ ≥ H(P) · ( Σ_{(g,c) ∈ P} x[g,c] − |P| + 1 )     H(P) = Stage 3's held-memory cost of P
-accuracy        Σ_{(g,c) ∈ B} x[g,c] ≤ |B| − 1                     B = a combination whose composed guarantee fails
+Q1: p95(latency[15m]), evaluated every 1m
+Q2: p99(latency[15m]), evaluated every 1m
 ```
 
-Each held-memory cut is binding only when every choice of `P` is made, so it never cuts off another plan, and its bound is exact for `P`.
+Stage 0 establishes two different quantile results with the same window width
+and evaluation step. Initial memo construction keeps separate result groups and
+shares eligible identical inputs. Pass 1 adds exact and supported KLL candidates,
+with sizes derived from the readers' accuracy requirements.
 
-Cost models 2 and 3 keep (1)–(8) and the cuts, and change the objective:
-- **Cost model 2:** `min π_mem · M + π_cpu · N + π_disk · D`, with `M ≥ Σ peak contributions`, `N ≥` ingestion cores `+` concurrently evaluating queries, and `D ≥` retention.
-- **Cost model 3:** no prices. Add `M ≤ cap_mem`, `D ≤ cap_disk` (and `N ≤ cap_cores`), then minimize the chosen objective: the worst latency `L ≥ L_q` for every `q`, or `M`.
+Pass 2 adds candidates for a shared whole-window KLL build and supported pane
+compositions. One possible configuration maintains 1m KLL panes and reads the
+latest 15 panes. The two estimates can share the build, and, where legal, a merge
+result. Other widths and hierarchies remain candidates only when generated and
+supported; 5m panes alone cannot cover every 1m-aligned evaluation.
 
-**Why a MILP rather than a hand-written search.** The memo is small: the whole paper workloads have 74 groups and 284 candidates (W-RangeHeavy) and 158 groups and 584 candidates (W-RollupHeavy), each built in under 0.3 s. Cost model 1 is not additive per node:
-- memory held while a query runs costs bytes × that query's latency;
-- how often a node runs depends on the materialization choices above it.
+Stage 2 supplies legal assignments: for example, pane builds at ingestion and
+merge/estimate at query time, or query-time construction from retained raw data.
+Stage 3 compares their full costs. A shared build may be sized for both readers;
+private builds remain candidates. The selected plan meets both accuracy targets,
+window semantics, latency limits, and any configured resource capacities.
 
-A branch and bound with dynamic programming would need custom bounds for both, plus Pareto frontiers for cost models 2 and 3. In a MILP each of these is a standard exact linearization or a linear constraint, and the solver supplies the bounds, the search and an optimality certificate.
+## Implementation and verification
 
-**Why dynamic programming alone does not apply.** Dynamic programming over the memo needs optimal substructure: a group's best implementation depends only on what lies below it, and the plan's cost is the sum of its parts. This workload breaks that in three ways:
+The inspected memo implementation in
+`crates/plan-selection/src/pass/subexpr/` separates group construction,
+summary capability sharing, window composition, scan sharing, pricing, and search.
+Its memo builder currently receives Pass 1 candidates. Moving group construction
+after Stage 0 and adapting Pass 1 to generate directly into groups is the target
+architecture, not an assertion about the current call order.
 
-1. **The memo is a DAG, not a tree.**
-   - A shared group (a scan, a time range, a shared sketch) has several parents.
-   - Its size is set by its strictest reader, and which parents read it depends on their own choices.
-   - Its cost is paid once and split among the readers.
-   - So its best choice depends on the choices above it, not only on its subtree. This is the core difficulty of multi-query optimization, which is NP-hard.
-2. **Costs depend on the context above.**
-   - How often a node runs depends on its ancestors' materialization: below a node built once per evaluation or maintained at ingestion time, the node is not recomputed per reader.
-   - Cost therefore flows top-down, while dynamic programming works bottom-up.
-   - Cascades handles this by memoizing per (group, required properties). Here the context is the reader set, the thresholds and the materializations above, and their combinations bring the blow-up back.
-3. **The objective is not additive.**
-   - Held memory costs bytes × the query's latency, and the latency is the sum of the work along the query's whole path. This is a product of sums, not a sum.
-   - A subtree that is cheapest on its own is not always part of the optimum: a slightly costlier but faster subtree lowers the query's latency and so its held-memory cost elsewhere.
-   - Each subproblem would have to keep a Pareto front over (cost, latency) rather than one minimum, and the fronts can grow large.
-   - Raw retention (the longest horizon among readers) and pane retention (the longest span) are maxima, which are not additive either.
+Likewise, the inspected MILP path supports usage-over-time pricing and routes
+unsupported cost models to legacy search. Cluster-capacity and provisioned-cost
+formulations in this document are design requirements, not claims of current
+MILP coverage. EH, general direct sliding-state maintenance, and arbitrary
+multi-layer pane generation require their own implementation work.
 
-A MILP needs none of these properties. It solves all choices jointly:
-- sharing and context are linear constraints (reach `r`, products `y`, thresholds `u`);
-- maxima are lower-bound variables (`R`, `keep`);
-- the product term is added back by lazy cuts.
+Verify the design against exhaustive enumeration on small workloads and a
+separate brute-force search over the memo. Compare minimum validated cost under
+the same candidate inventory and models, not merely whether both return a plan.
+Include:
 
-Dynamic programming remains useful only for the parts that do decompose, for example independent blocks with no shared group.
+- Sharing that is profitable only when selected jointly.
+- Reader-dependent summary sizes, evaluation rates, and retention.
+- Multiple pane widths, alignment failures, and overlapping windows.
+- Fused candidates, rollup dependencies, and cycles introduced by reuse.
+- All supported materializations and internal-node assignments.
+- Composed accuracy, shared scans, raw horizons, and global capacity limits.
+- Zero-price resources, numeric tolerances, budget stops, and valid solver bounds.
 
-This is the multi-query optimization problem. The memo is its AND-OR DAG: a group is an equivalence node and a candidate is an operation node. Greedy multi-query optimizers (for example Roy et al., SIGMOD 2000) give up optimality for speed. Exact formulations are integer programs. Our shared sizes depend on the strictest reader, accuracy guarantees compose, and time enters through panes and retention, so we need the exact form.
-
-**How each non-additive term is encoded.**
-
-| Term (cost model 1) | Encoding | Exact |
-| --- | --- | --- |
-| How often a node runs: once per consumer whose path reaches it through unmaterialized nodes | reach indicators `r[k,g]` propagated through `x` and `m`; cost on `y = r ∧ x` | linear |
-| A node built once per evaluation for readers on different grids | one indicator per distinct set of reader grids; cost at that set's union rate | linear |
-| A shared size set by the strictest reader (capability builds, pane chains, rollup state) | one indicator per threshold; a reader attaches only to a threshold it may read | linear |
-| A scan's label set | one indicator per label set | linear |
-| Raw retention: the longest horizon among query-time raw scans of a source | `R_s ≥ bytes(n) · query-time(n)` | linear |
-| Pane retention: the longest span among a chain's readers | `keep ≥ span(q) · read(q, chain)` | linear |
-| Ingestion compaction: depends on the ingest worker count, a ceiling | integer workers `≥ work / capacity` | linear |
-| Latency within the bound and the repeat interval | the sum of the reached work, over `y` | linear |
-| Memory held while a query runs: bytes × latency | omitted from the model; added back by lazy cuts | lazy |
-| Composed accuracy guarantees | checked on the incumbent; failing combinations excluded | lazy |
-| A measured table's calibration factor | fitted once before the search | constant |
-
-An exact linearization of the held-memory product needs a variable for each query and each pair of groups it reaches (about 3M on W-RollupHeavy with 8 users), so it is generated lazily instead.
-
-**The lazy-cut loop.** The model without the lazy terms never overestimates a plan's cost, so its optimum is a lower bound on the true optimum. The loop:
-1. Solve the model and take its plan `P`, with objective `c_milp`.
-2. Decode `P` into its physical plan and evaluate it with Stage 3, which includes held memory and the composed guarantees, giving the incumbent cost `c_true`.
-3. If `c_true = c_milp` and every check passes, `P` is optimal: its true cost equals a lower bound on every plan's true cost.
-4. Otherwise add a cut and go to step 1:
-   - a combination whose guarantee fails is excluded;
-   - a combination whose cost was underestimated gets "choosing this combination costs at least `c_true`".
-
-Each cut removes or corrects at least one of finitely many combinations, so the loop ends, and it ends at the optimum. For example:
-- Round 1 picks `P1` at 0.40 per second, and Stage 3 prices it at 0.47. A cut makes `P1`'s combination cost at least 0.47.
-- Round 2 picks `P2` at 0.45, and Stage 3 agrees. `P2` is optimal.
-
-(These numbers are illustrative.) The cost of the loop is the number of rounds. Tight McCormick bounds on held memory (from the memo's byte and latency ranges) and several cuts per round keep it low; the report gives the rounds per workload.
-
-**Reporting.** The result states the solver gap. A time limit that ends with a nonzero gap is reported with that gap, never as optimal.
-
-**Validation.** The brute force over the memo is a second oracle. `joint_search_equivalence` checks the MILP, the brute force and `--exhaustive` against each other on small workloads under all three cost models: a peak case, a capacity case and a raw-horizon case.
-
-### Coefficients
-
-**Terms.** Three distinct steps use Stage 3's cost function, and this document keeps their names apart:
-
-| Term | What it is | When | How often |
-| --- | --- | --- | --- |
-| **Coefficient derivation** | Computing the objective coefficient of each local choice (a group's implementation, materialization, threshold) from Stage 3's per-node cost function. The result is a lower bound on that choice's true cost. | before solving | once per choice, cached |
-| **Solution decoding** | Turning a MILP solution (the values of `x`, `m`, `u`, …) into the one physical plan it describes. | after each solve | once per round |
-| **Incumbent evaluation** | Running Stage 3 on that decoded plan as a whole: guarantees, latency checks and its exact cost (the **incumbent cost**). | after decoding | once per round |
-
-The **MILP lower bound** is the solver's objective, a lower bound on every plan's cost. The **gap** is (incumbent cost − MILP lower bound) / incumbent cost. The report keeps `incumbent_cost` at the search level and the MILP-only figures in a `milp` object: `lower_bound`, `first_lower_bound`, `gap`, `rounds`, `variable_count`, `constraint_count`, `solver_time_ms`, `time_limit_reached`.
-
-**One solution, one plan.** Every choice that changes a plan's cost is a model variable, so a solution decodes to exactly one plan, and incumbent evaluation runs Stage 3 once per round:
-- sharing an identical expression or computing it per reader is the materialization `m` (`mq` vs `nm`);
-- a shared node's size is the threshold `u`;
-- a metric's scan label set is a threshold variable of the scan's coupling site (the union of the labels of the readers attached to it);
-- pane grids and raw horizons are threshold variables of their sites.
-
-A solution must never stand for several plans whose costs are then enumerated: that enumeration (thresholds × identical-expression variants × materializations) is what exhausts memory on whole workloads. If a variant cannot be a variable yet, its alternatives are evaluated as a small set local to that one site, never as a product with other sites, and the design records it as a gap to close.
-
-**Principle: Stage 3 is the only source of costs, and the coefficients only need to be lower bounds.**
-- Every coefficient comes from Stage 3's per-node pricing (`price_node`), evaluated in a hypothetical context. The MILP has no cost formula of its own.
-- The selected plan is always evaluated by Stage 3 as a whole (incumbent evaluation), and its cost is the incumbent cost. So a coefficient may be any value **no greater than** the true cost of the choice it stands for.
-- Exact coefficients make the first bound tight. Lower-bound coefficients keep the result exact at the cost of more lazy-cut rounds.
-
-**Decomposition.** A plan's cost is the sum over its nodes of `price_node(node, context)`. A node's context is who computes it, how often, how it is materialized, at which threshold it is sized, and how large its input is. When a cost depends only on discrete context, each value of the context gets its own coefficient, selected by a 0/1 variable:
-
-| Cost depends on | Variable | Coefficient |
-| --- | --- | --- |
-| the chosen implementation | `x[g,c]` | `price_node` of the candidate's own nodes |
-| the materialization | `m[g,c,o]` | standing cost `a(g,c,o)` and per-computation cost `w(g,c)` for that `o` |
-| which consumers compute it, how often | `y[k,g,c]` | `rate(k) · w(g,c)`, with `w` the cost of one computation |
-| a shared node's size | `u[s,t]` | `σ(s,t)`: the node's cost at threshold `t` |
-
-Example: `quantile_over_time(0.9, data[5m])` as a KLL built once per evaluation at threshold 0.01 is the choice (group, KLL, `mq`, `t = 0.01`). Its `w` is Stage 3's price of one KLL sized for 0.01 over five minutes of rows, and its objective term is `rate(Q1) · w · y[Q1, G4, KLL]`. Coefficients are generated per candidate, per combination of its coupling-site thresholds, and per materialization of its private builds.
-
-**Terms that do not decompose, and their lower bounds:**
-
-| Term | Why it does not decompose | Coefficient used | Corrected by |
-| --- | --- | --- | --- |
-| Held memory, bytes × latency | the latency is a sum over the whole path | 0, or a McCormick bound from the memo's byte and latency ranges | a cut on the term |
-| A shared scan's window (the longest reader's) | its input depends on other groups' choices | derived at the reader's own window | a cut when a longer reader is chosen |
-| A child consumed by an ingestion-time build | the child runs at ingestion time instead | the cheaper of the two pricings | a cut on the pair |
-| A chain kept across evaluations, charged per request | depends on the request count | the per-evaluation price | a cut |
-| Compaction with several ingest workers | depends on the global worker count | 0 | a cut |
-| Composed accuracy | depends on the chosen children | no coefficient | a no-good cut on a failing combination |
-
-Validation: for every plan of the brute force over the memo, the sum of its coefficients is at most Stage 3's price, and equal wherever the term decomposes exactly.
-
-**Cuts.** When Stage 3's price of the incumbent exceeds the bound, the loop adds:
-- a **term cut** for each underestimated term, conditioned only on the choices that term depends on, for example "if `m[n,o]` then held memory of `n` ≥ H" or "if `x[g,c]` and `x[g',c']` then the scan window cost ≥ W". One term cut corrects every plan sharing those choices.
-- a **no-good cut** on the whole combination, as the fallback that guarantees termination.
-
-The report gives the number of rounds and the first round's bound against the final price (the tightness of the model).
-
-### Coupled charges
-
-- **Raw data on disk**: a per-source horizon threshold, linear in the MILP.
-- **Cost models 2 and 3**: peaks and limits as linear constraints.
-- **A measured cost table**: the calibration factor is fitted once, before the search, over every candidate node the generation produced (before pruning), and frozen; every coefficient is derived with it.
-
-### Code layout
-
-`crates/plan-selection/src/pass/subexpr/`: `groups.rs` (hash-consing, Pass 1), `capability.rs`, `windows.rs`, `scans.rs` (the Pass 2 transformations), `pricing.rs` (per-node prices in a consumer context), `search.rs` (the memo and the brute-force reference), `milp.rs` (the model, the lazy-cut loop). The search is chosen by `--search legacy|memo-brute-force|memo-milp`; the MILP becomes the default once it matches `--exhaustive` on every equivalence test.
-
-## Future work
-
-- Stronger LP relaxations and McCormick bounds for the held-memory term; tree-decomposition dynamic programming as an alternative engine for the MILP.
-- Greedy incumbents and learned branch ordering to accelerate exact search.
-- Explicit approximate modes such as beam search, top-k candidates, capped resource frontiers, and coarser parameter domains. These may lose the optimum and must be labeled accordingly.
-- Incremental replanning and broader candidate/rewrite coverage.
+For any relaxed formulation, check on enumerated plans that its assigned cost
+never exceeds full cost and that every generated cut is valid. Measure planning
+time, peak memory, model size, solver gap, and validation rounds on representative
+workloads before choosing stronger decomposition or configuration restrictions.
