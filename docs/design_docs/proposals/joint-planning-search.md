@@ -102,8 +102,8 @@ Current memo construction receives Pass 1 candidates. Building initial identitie
 Apply computation rules to each group independently. In this example, each group receives an exact candidate and supported KLL candidates:
 
 ```text
-G95 = { ExactQuantile(0.95, G_input, 15m), PrivateKLLQuantile(0.95, G_input, 15m, s) }
-G99 = { ExactQuantile(0.99, G_input, 15m), PrivateKLLQuantile(0.99, G_input, 15m, s) }
+G95 = { ExactQuantile(0.95, G_input, 15m), LocalKLLQuantile(0.95, G_input, 15m, s) }
+G99 = { ExactQuantile(0.99, G_input, 15m), LocalKLLQuantile(0.99, G_input, 15m, s) }
 ```
 
 Here `s` ranges over generated capacities; each candidate records its accuracy contract and dependencies. Other computations can receive exact accumulator or fused candidates. Cache generation with relevant reader requirements and avoid composing the Cartesian product of complete workload plans.
@@ -139,7 +139,7 @@ Stage 2 checks deployment capabilities, ingestion eligibility, and upstream timi
 
 ### Stage 3: select a joint physical plan
 
-The MILP chooses candidates for both query roots and their required input groups, including any intermediate states. It may select exact/private computation, a shared whole-window build, or a legal pane-based candidate. It enforces reader/state compatibility, accuracy, latency, and resource constraints, then reconstructs and validates one `PhysicalASAPDAG`.
+The MILP chooses candidates for both query roots and their required input groups, including any intermediate states. It may select exact/local computation, a shared whole-window build, or a legal pane-based candidate. It enforces reader/state compatibility, accuracy, latency, and resource constraints, then reconstructs and validates one `PhysicalASAPDAG`.
 
 Shared execution is charged once, with merge and estimation charges owned by their selected groups. A higher standalone cost can enable a cheaper joint plan, so earlier stages retain valid candidates and Stage 3 performs cost-based selection.
 
@@ -178,8 +178,8 @@ Current memo MILP supports usage-over-time pricing; unsupported models route to 
 Give every charge one owner:
 
 - **Producer:** build/update, maintenance, and retained state.
-- **Reader:** private merge, extraction, read, and finalization.
-- **Other physical work:** private operators and temporary state.
+- **Reader:** local merge, extraction, read, and finalization.
+- **Other physical work:** local operators and temporary state.
 - **Shared accounting:** per-source raw retention and other plan-level charges.
 
 Charge shared work once per actual execution or maintained state, not once per query path. Reader-specific work remains separately charged. Use a common horizon or consistent per-second rates; distinguish memory/storage occupancy over time from peak capacity. Producer costs can depend on selected readers, evaluation schedules, upstream materialization, and retention. Model that context rather than assuming every producer has a constant cost.
@@ -221,7 +221,7 @@ For fixed-context costs:
 min  Σ_{g,c} cost[g,c] × x[g,c] + plan-level charges
 ```
 
-`cost[g,c]` owns only the candidate's private work/state, down to its input-group boundaries. A KLL-state candidate owns its build and retention; an estimator candidate owns extraction. A shared merge has its own group if readers reuse its result. Never include an input group's costs again in each parent.
+`cost[g,c]` owns only the candidate's local work/state, down to its input-group boundaries. A KLL-state candidate owns its build and retention; an estimator candidate owns extraction. A shared merge has its own group if readers reuse its result. Never include an input group's costs again in each parent.
 
 Selecting one state candidate does not by itself mean one execution. Materialization and consumer context determine whether it runs once per evaluation, per reader, or at ingestion. Add reach/rate and physical-copy variables for these cases; charge each actual instance correctly. Reader recurrence, phase, and range-evaluation steps affect work; a pane-alignment gcd grid is not automatically an execution rate. Raw retention and other non-computation charges remain resource/accounting variables rather than artificial computation groups.
 
@@ -260,7 +260,7 @@ x[g,c] ≤ Σ_{d ∈ K(g,c,h)} x[h,d]                for h ∈ R(g,c)
 
 This form assumes nonfused input candidates. If another candidate implements `h` by fusion, use its compatible implementing choices in the sum instead. Compatibility covers inputs, grouping, family, reduction, windows, capacity, freshness, and timing. If several readers select the same state group, its chosen candidate must satisfy all of them.
 
-Different pane widths can coexist as distinct intermediate groups. A group-level configuration choice must not become a global one-pane-width restriction. Retain private computation through private-state candidates/instances or the existing per-reader-copy/materialization mechanism; neither interning nor CSE should force a shared execution. Shared-instance scope is explicit where readers cannot use one configuration or lifetime.
+Different pane widths can coexist as distinct intermediate groups. A group-level configuration choice must not become a global one-pane-width restriction. Retain local computation through local-state candidates/instances or the existing per-reader-copy/materialization mechanism; neither interning nor CSE should force a shared execution. Shared-instance scope is explicit where readers cannot use one configuration or lifetime.
 
 #### Auxiliary-variable constraints
 
@@ -299,7 +299,7 @@ Q1: quantile_over_time(0.95, stream[15m]), every 1m
 Q2: quantile_over_time(0.99, stream[15m]), every 1m
 ```
 
-Using the groups introduced in Section 3, compare the cost of selecting shared versus private KLL candidates:
+Using the groups introduced in Section 3, compare the cost of selecting shared versus local KLL candidates:
 
 ```text
 G_input ──→ G_KLL: build KLL state
@@ -328,7 +328,7 @@ x[G95, KLL-reader] = x[G99, KLL-reader] = 1
 x[G_KLL, build-s] = 1
 ```
 
-The build cost is owned by `G_KLL` and appears once for a shared execution; each result group owns its estimation cost. If accuracy requires larger state, the solver compares compatible shared capacity, private states, and exact candidates. Quantile level alone does not determine capacity.
+The build cost is owned by `G_KLL` and appears once for a shared execution; each result group owns its estimation cost. If accuracy requires larger state, the solver compares compatible shared capacity, local states, and exact candidates. Quantile level alone does not determine capacity.
 
 For ingestion-time reuse, a supported implementation maintains 1m KLL panes and merges the latest 15 at evaluation. Both readers can share panes and an eligible merge result. A direct whole-window sketch cannot be assumed to delete expired samples. Different window lengths or pane widths require separate compatibility and coverage checks.
 
@@ -352,7 +352,7 @@ Reuse current structures rather than create a parallel optimizer framework:
 | Structure | Responsibility |
 | --- | --- |
 | `MemoGroup`, `Memo` | Result/state contracts, dependencies, roots, and per-group candidates. |
-| `ImplementationCandidate` | Private nodes, fusion coverage, child groups, contracts, and reuse requirements. |
+| `ImplementationCandidate` | Local nodes, fusion coverage, child groups, contracts, and reuse requirements. |
 | `CouplingSite` and thresholds | Existing shared-configuration representation; migrate state choices into intermediate-group candidates, retaining genuinely cross-group constraints. |
 | MILP `Choice` | Physical/materialization assignments, consumer context, and coefficients. |
 | `PhysicalASAPDAG`, `Selection`, reports | Selected output, validation, bounds, and search status. |
@@ -372,7 +372,7 @@ Current main places memo/rules in `search/memo` and solver code in `search/milp`
 
 ### Evaluation
 
-**Correctness:** test identity versus sharing, producer compatibility, exact-once cost ownership, active dependencies, fusion, multiple input groups, shared/private instances, zero-price resources, pane boundaries, legal materializations, end-to-end accuracy, and capacity/status handling. Validate any relaxed bounds and cuts against enumerated plans.
+**Correctness:** test identity versus sharing, producer compatibility, exact-once cost ownership, active dependencies, fusion, multiple input groups, shared/local instances, zero-price resources, pane boundaries, legal materializations, end-to-end accuracy, and capacity/status handling. Validate any relaxed bounds and cuts against enumerated plans.
 
 **Optimality:** tiny workloads must match exhaustive enumeration and memo brute force on minimum validated cost, with an explicit numerical/tie policy and the same candidate inventory.
 
