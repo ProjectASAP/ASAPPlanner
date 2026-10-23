@@ -290,7 +290,17 @@ pub(super) fn choice_parts(
                             }
                         }
                         let keys = keys_of(&physical.dag, cache.keys_mut());
+                        // The children its plan reads (a rollup reads its
+                        // finer group's state, not its own window's group).
+                        let (read_children, read_roots): (Vec<GroupId>, Vec<Option<u32>>) =
+                            kept_children
+                                .iter()
+                                .zip(&child_roots)
+                                .filter(|(_, root)| root.is_some_and(|r| keys.contains(&r)))
+                                .map(|(c, r)| (*c, *r))
+                                .unzip();
                         let shallow = shallow_keys(&physical.dag, cache.keys_mut());
+                        let widened = widened_keys_of(&physical.dag, cache.keys_mut());
                         let private: Vec<bool> =
                             keys.iter().map(|k| !children.contains(k)).collect();
                         let builds: Vec<usize> = (0..physical.dag.nodes.len())
@@ -319,8 +329,9 @@ pub(super) fn choice_parts(
                             physical,
                             &keys,
                             &shallow,
+                            &widened,
                             &private,
-                            &child_roots,
+                            &read_roots,
                             &horizons,
                             own_horizon.or_else(|| scan_lookback_ms(memo, group)),
                             &part_entries,
@@ -335,7 +346,17 @@ pub(super) fn choice_parts(
                                 group,
                                 candidate: index,
                                 implements: candidate.implements.clone(),
-                                children: kept_children.clone(),
+                                // The children it reads first (`child_via`
+                                // is theirs), then the ones its candidate
+                                // lists without reading: needed by the
+                                // plan, but no consumer passes into them.
+                                children: read_children
+                                    .iter()
+                                    .chain(
+                                        kept_children.iter().filter(|c| !read_children.contains(c)),
+                                    )
+                                    .copied()
+                                    .collect(),
                                 assignment,
                                 coefficients: parts.coefficients,
                                 copy_of,
@@ -345,6 +366,13 @@ pub(super) fn choice_parts(
                                     .map(|((i, _, _), v)| (child_groups[*i], *v))
                                     .collect(),
                                 scan_horizon_ms: *own_horizon,
+                                scan_source: match node.non_asap() {
+                                    Some(NonASAPOp::Scan { source, .. }) => {
+                                        Some(super::scans::raw_horizon_key(source))
+                                    }
+                                    _ => None,
+                                },
+                                scan_project_cost_per_unit_rate: parts.scan_project_cost,
                             },
                             lazy: LazyTerms {
                                 thresholds: thresholds.clone(),
@@ -510,6 +538,35 @@ fn raw_windows(memo: &Memo) -> HashMap<u64, BTreeSet<u64>> {
     windows
 }
 
+/// Each node's key up to scan widening, by position: its payload over its
+/// producers' keys, each scan by its source alone (the identical-expression
+/// rule may widen a source's scans to one label set), schemas left out.
+/// Equal keys of two groups' nodes mean the nodes are one node once shared.
+fn widened_keys_of(dag: &PhysicalASAPDAG, interned: &mut HashMap<String, u32>) -> Vec<u32> {
+    let mut key_of: HashMap<PhysicalASAPNodeId, u32> = HashMap::new();
+    dag.nodes
+        .iter()
+        .map(|node| {
+            let text = match &node.payload {
+                Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                    format!("widened scan {source:?}")
+                }
+                payload => {
+                    let payload = payload.map_children(|id| key_of.get(id).copied());
+                    format!(
+                        "widened {}",
+                        serde_json::to_string(&payload).expect("a physical node serializes")
+                    )
+                }
+            };
+            let next = interned.len() as u32;
+            let key = *interned.entry(text).or_insert(next);
+            key_of.insert(node.id, key);
+            key
+        })
+        .collect()
+}
+
 /// The child groups of `candidate`: its own, and every other group whose
 /// node equals a node its node reaches and that no other child already
 /// reaches, which some Pass 2 candidates read without listing (a pane
@@ -557,6 +614,8 @@ fn is_build(payload: &Operator<PhysicalASAPNodeId>) -> bool {
 
 struct Coefficients {
     coefficients: ChoiceCoefficients,
+    /// For a scan: what a pass over its output costs per computation.
+    scan_project_cost: f64,
     lazy: LazyTerms,
     root_key: u32,
     root_producer_keys: Vec<u32>,
@@ -657,6 +716,7 @@ fn coefficients_of(
     physical: &PhysicalCandidate,
     keys: &[u32],
     shallow: &[u32],
+    widened: &[u32],
     private: &[bool],
     child_roots: &[Option<u32>],
     horizons: &HashMap<u64, u64>,
@@ -757,6 +817,18 @@ fn coefficients_of(
         cost_per_unit_rate: direct.iter().map(|&id| per_rate(id) + kept_state(id)).sum(),
         work_ms: work(&direct),
     };
+    let absorbed_scans: Vec<(u64, f64, f64)> = direct
+        .iter()
+        .filter(|&&id| query_time(id))
+        .filter_map(|&id| match &dag.nodes[position[&id]].payload {
+            Operator::NonASAP(NonASAPOp::Scan { source, .. }) => Some((
+                super::scans::raw_horizon_key(source),
+                per_rate(id) + kept_state(id),
+                prices.cost_per_cpu_op * priced[&id].output.rows as f64,
+            )),
+            _ => None,
+        })
+        .collect();
     // Shareable nodes of the direct part (another copy's or group's
     // identical node may be one with it), each with what it computes when
     // built once: itself and the direct nodes only it reaches.
@@ -771,13 +843,23 @@ fn coefficients_of(
             let node = &dag.nodes[position[&id]];
             let shareable = matches!(node.payload, Operator::ASAP(_))
                 || !node.output_schema.unique_keys.is_empty();
-            id != root && shareable && !is_build(&node.payload) && query_time(id)
+            // A scan apart is its reader's own; a shared one is its scan
+            // group's choice (`Choice::scan_children`).
+            let scan = matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. }));
+            id != root && shareable && !scan && !is_build(&node.payload) && query_time(id)
         })
         .map(|id| {
+            // Its scans are charged as scans (`absorbed_scans`).
             let below = walk(id)
                 .0
                 .into_iter()
                 .filter(|n| direct_set.contains(n))
+                .filter(|n| {
+                    !matches!(
+                        dag.nodes[position[n]].payload,
+                        Operator::NonASAP(NonASAPOp::Scan { .. })
+                    )
+                })
                 .collect();
             (id, below)
         })
@@ -806,6 +888,10 @@ fn coefficients_of(
             cost_per_unit_rate: below.iter().map(|&n| per_rate(n)).sum(),
             work_ms: work(&below),
             state_bytes,
+            members: below
+                .iter()
+                .map(|n| u64::from(widened[position[n]]))
+                .collect(),
         });
         shared_node_keys.push(
             below
@@ -839,6 +925,10 @@ fn coefficients_of(
                 false => rate_cost,
             },
             work_ms: work(&part),
+            // Builds that are one node when shared (a site's build at one
+            // threshold, identical expressions, scans widened to one label
+            // set): equal over equal inputs, scans' projections aside.
+            shared_site: Some((u64::from(widened[position[&node.id]]), 0)),
         });
         slot_keys.push(shallow[position[&node.id]]);
         part_keys.push(part.iter().map(|id| keys[position[id]]).collect());
@@ -904,6 +994,24 @@ fn coefficients_of(
             slots,
             child_via,
             shared_nodes,
+            cross_shared: Vec::new(),
+            absorbed_scans,
+            direct_nodes: direct
+                .iter()
+                .filter(|&&id| query_time(id))
+                .filter(|&&id| {
+                    !matches!(
+                        dag.nodes[position[&id]].payload,
+                        Operator::NonASAP(NonASAPOp::Scan { .. })
+                    )
+                })
+                .map(|&id| {
+                    (
+                        u64::from(widened[position[&id]]),
+                        per_rate(id) + kept_state(id),
+                    )
+                })
+                .collect(),
         },
         lazy: LazyTerms {
             held,
@@ -911,6 +1019,12 @@ fn coefficients_of(
             direct_at_ingestion,
             built_once_state_bytes,
             thresholds: Vec::new(),
+        },
+        scan_project_cost: match dag.nodes[position[&root]].payload {
+            Operator::NonASAP(NonASAPOp::Scan { .. }) => {
+                prices.cost_per_cpu_op * priced[&root].output.rows as f64
+            }
+            _ => 0.0,
         },
         root_key: shallow[position[&root]],
         shared_node_keys,
@@ -1500,6 +1614,59 @@ mod tests {
                         .copied()
                         .collect();
                     lazy.held.retain(|term| !sub.contains(&term.node_key));
+                    // Its scans below are computed as it is (once when it
+                    // is built once, per consumer otherwise).
+                    let scans_below: Vec<PhysicalASAPNodeId> = below(node)
+                        .into_iter()
+                        .filter(|id| {
+                            matches!(nodes[id].payload, Operator::NonASAP(NonASAPOp::Scan { .. }))
+                        })
+                        .collect();
+                    let materialized_here =
+                        nodes[&node].materialization != Materialization::NotMaterialized;
+                    for (&scan, &(_, cost, _)) in
+                        scans_below.iter().zip(&coefficients.absorbed_scans)
+                    {
+                        if !materialized_here {
+                            break;
+                        }
+                        actual -= cost * rates[&p.root].1;
+                        // Its held memory, once at the scan's rate.
+                        let scan_key = keys[position_of[&scan]];
+                        let scan_held: Vec<HeldTerm> = lazy
+                            .held
+                            .iter()
+                            .filter(|t| t.node_key == scan_key)
+                            .copied()
+                            .collect();
+                        lazy.held.retain(|t| t.node_key != scan_key);
+                        if built_once_nodes.insert(scan) {
+                            actual += cost * rates[&scan].1;
+                            let readers: Vec<(usize, f64)> = reach
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, r)| r.contains(&scan))
+                                .map(|(q, _)| (q, query_rate(q)))
+                                .collect();
+                            let rate: f64 = readers.iter().map(|(_, r)| r).sum();
+                            for term in scan_held {
+                                let evaluation_ms = match term.per_reader && rate > 0.0 {
+                                    true => {
+                                        readers.iter().map(|&(q, r)| r * latency[q]).sum::<f64>()
+                                            / rate
+                                    }
+                                    false => {
+                                        readers.iter().map(|&(q, _)| latency[q]).fold(0.0, f64::max)
+                                    }
+                                };
+                                held_extra += prices.cost_per_memory_byte_second
+                                    * term.bytes as f64
+                                    * rates[&scan].1
+                                    * evaluation_ms
+                                    / 1_000.0;
+                            }
+                        }
+                    }
                     if built_once_nodes.insert(node) {
                         actual += shared.cost_per_unit_rate * rates[&node].1;
                         let readers: Vec<(usize, f64)> = reach
@@ -1650,6 +1817,131 @@ mod tests {
             &[60_000, 60_000],
         )
         .is_empty());
+    }
+
+    /// The model restricted to each group choice ([`super::super::milp::lower_bound_check`])
+    /// is a lower bound of the group choice's exact price.
+    fn assert_model_is_a_lower_bound(
+        queries: &[&str],
+        intervals_ms: &[u32],
+        targets: &[AccuracyTarget],
+    ) {
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true);
+    }
+
+    /// [`assert_model_is_a_lower_bound`] in a deployment that keeps raw
+    /// data or not.
+    fn assert_model_is_a_lower_bound_in(
+        queries: &[&str],
+        intervals_ms: &[u32],
+        targets: &[AccuracyTarget],
+        raw_data_retained: bool,
+    ) {
+        let roots: Vec<(usize, QueryRoot)> = queries
+            .iter()
+            .zip(targets)
+            .map(|(q, target)| {
+                let root = lower_promql(q, target.clone());
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
+            })
+            .enumerate()
+            .collect();
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let entries = entries(intervals_ms, targets);
+        let data = data();
+        let deployment =
+            asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities {
+                raw_data_retained,
+                query_time_results_retained: false,
+                ..Default::default()
+            };
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        let memo = memo(&per_computation, &entries);
+        let input = super::super::milp::model_input_of(
+            &memo,
+            &entries,
+            &data,
+            models,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        let checked = super::super::milp::lower_bound_check(
+            &memo,
+            &per_computation,
+            &input,
+            &entries,
+            &data,
+            models,
+        )
+        .unwrap();
+        assert!(!checked.is_empty());
+        for (group_choice, exact, value) in checked {
+            let value = value.unwrap_or_else(|| panic!("{queries:?} {group_choice:?}: infeasible"));
+            assert!(
+                value <= exact * (1.0 + 1e-9),
+                "{queries:?} {group_choice:?}: model {value} over exact {exact}"
+            );
+        }
+    }
+
+    /// Three quantiles of one metric over a 1-minute, a 5-minute and an
+    /// instant window (#840's shape), every 10 s; and a shared group with
+    /// a rollup.
+    #[test]
+    fn the_model_is_a_lower_bound_of_every_group_choice() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        assert_model_is_a_lower_bound(
+            &[
+                "quantile_over_time(0.5, m[1m])",
+                "quantile_over_time(0.9, m[5m])",
+                "quantile by (job) (0.5, m)",
+            ],
+            &[10_000, 10_000, 10_000],
+            &[target.clone(), target.clone(), target],
+        );
+        let exact = AccuracyTarget::exact();
+        assert_model_is_a_lower_bound(
+            &[
+                "sum by (job) (rate(m[5m]))",
+                "sum(rate(m[5m]))",
+                "sum_over_time(m[10m])",
+            ],
+            &[60_000, 30_000, 60_000],
+            &[exact.clone(), exact.clone(), exact],
+        );
+    }
+
+    /// #839's shape: sums over 10 minutes by job and in total (a rollup),
+    /// and two 100-second quantiles over scans of one metric projecting
+    /// different labels (a widened scan shares them).
+    #[test]
+    fn the_model_is_a_lower_bound_with_rollups_and_widened_scans() {
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
+        assert_model_is_a_lower_bound(
+            &[
+                "sum by (job) (sum_over_time(m[10m]))",
+                "sum(sum_over_time(m[10m]))",
+                "avg by (job) (quantile_over_time(0.99, m[100s]))",
+                "avg(quantile_over_time(0.95, m[100s]))",
+            ],
+            &[20_000, 20_000, 1_000, 1_000],
+            &[target.clone(), target.clone(), target.clone(), target],
+        );
+    }
+
+    /// #840's rollup: a quantile by host and job and its rollup by job, at
+    /// the rollup's state-size thresholds.
+    #[test]
+    fn the_model_is_a_lower_bound_with_a_sketch_rollup() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        assert_model_is_a_lower_bound(
+            &[
+                "quantile by (host, job) (0.5, m)",
+                "quantile by (job) (0.5, m)",
+            ],
+            &[10_000, 10_000],
+            &[target.clone(), target],
+        );
     }
 
     /// Two quantiles within 1% and 2% sharing one KLL build at a size

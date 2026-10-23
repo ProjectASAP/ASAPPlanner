@@ -1023,9 +1023,15 @@ pub(crate) fn rollup_rules(memo: &Memo, present: &BTreeSet<(usize, usize)>) -> V
         };
         let (coarse_group, finer_group) = (rollup.0, read.finer_group.0 as usize);
         let coarse = Rc::as_ptr(&read.coarse_build);
-        let site = read.finer_state.as_ref().map(|state| CouplingSite {
-            key: state_key(state),
-            kind: CouplingKind::SharedBuildSize,
+        // The site the rollup requires of its finer group (its own
+        // `requires_sites`): the finer build's state as the finer group's
+        // candidates key it.
+        let site = read.finer_state.as_ref().and_then(|_| {
+            candidate(rollup)
+                .requires_sites
+                .iter()
+                .find(|(g, _)| g.0 as usize == finer_group)
+                .map(|(_, site)| *site)
         });
         let r_node = (coarse_group, plan_node(rollup));
         let mut allowed = Vec::new();

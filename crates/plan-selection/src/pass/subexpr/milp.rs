@@ -57,7 +57,24 @@ pub(crate) struct SlotCoefficients {
     pub cost_per_unit_rate: f64,
     /// Work in ms per computation at query time.
     pub work_ms: f64,
+    /// The structural key of the slot's build over its inputs (and a
+    /// threshold index, 0): the slots of chosen choices with the same key
+    /// and materialization are one node when shared (a site's build at one
+    /// threshold, identical expressions), so the model charges them once.
+    pub shared_site: Option<(u64, usize)>,
 }
+
+/// A cross-group node's variables: its once charge, its charge, the
+/// binary choosing between per consumer and once, its members' once
+/// charges, its per-consumer charge and their big M.
+type CrossNodeVars = (
+    Variable,
+    Variable,
+    Variable,
+    Vec<(usize, f64)>,
+    Expression,
+    f64,
+);
 
 /// One choice's coefficients.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +88,24 @@ pub(crate) struct ChoiceCoefficients {
     /// than its own node: each may be one node for every copy of the group
     /// (the identical-expression rule), and then built once at query time.
     pub shared_nodes: Vec<SharedNodeCoefficients>,
+    /// Shareable nodes another group's choices may also have (equal keys):
+    /// one node once shared, so charged once per key, at the dearest of
+    /// the chosen ones (key, price per unit of rate). Moved out of
+    /// `direct` and `shared_nodes` by the model's input.
+    pub cross_shared: Vec<(u64, f64)>,
+    /// The query-time scans of the direct part (apart: this choice's own
+    /// copies), as (source key, price, a pass over its output) per unit of
+    /// rate. Scans of one source may be one widened scan: like the scan
+    /// choices (`Choice::scan_source`), each is charged its pass, and the
+    /// largest excess once per source. Moved out of `direct` by the
+    /// model's input.
+    pub absorbed_scans: Vec<(u64, f64, f64)>,
+    /// Each query-time node of the direct part but scans, as (key up to
+    /// scan widening, price per unit of rate). Nodes of several groups'
+    /// choices with one key are one node once shared (identical
+    /// expressions, scans widened to one label set): the model's input
+    /// moves them to `cross_shared`.
+    pub direct_nodes: Vec<(u64, f64)>,
 }
 
 /// A shareable node of a choice's direct part ([`ChoiceCoefficients::shared_nodes`]).
@@ -78,11 +113,14 @@ pub(crate) struct ChoiceCoefficients {
 /// once at query time it costs `cost_per_unit_rate` per unit of the union
 /// rate of the queries reaching it instead, and holds `state_bytes` while
 /// its longest reader runs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SharedNodeCoefficients {
     pub cost_per_unit_rate: f64,
     pub work_ms: f64,
     pub state_bytes: u64,
+    /// The widened keys of the nodes it covers ([`ChoiceCoefficients::direct_nodes`]),
+    /// itself first.
+    pub members: Vec<u64>,
 }
 
 /// One choice of a group: a candidate and an option per private slot.
@@ -107,6 +145,18 @@ pub(crate) struct Choice {
     /// For a scan group's choice: the horizon it reads, the longest window
     /// among its readers.
     pub scan_horizon_ms: Option<u64>,
+    /// For a scan group's choice: its source's raw-horizon key. Scans of
+    /// one source may be one widened scan (the identical-expression rule
+    /// over scans widened to one label set), which costs at least the
+    /// dearest of them: the model charges the most expensive scan choice
+    /// of each source, not their sum.
+    pub scan_source: Option<u64>,
+    /// For a scan group's choice: what a pass over its output costs per
+    /// unit of rate, at most its own price. A widened scan shared by a
+    /// source's scan groups costs at least the dearest scan, and each other
+    /// reader at least such a pass: the model charges each scan choice's
+    /// pass, plus the largest excess over it.
+    pub scan_project_cost_per_unit_rate: f64,
 }
 
 /// A shared group's own node, built once per evaluation when chosen.
@@ -213,14 +263,17 @@ fn held_at_query_time(
     choice: &Choice,
     lazy: &LazyTerms,
     prices: &ResourceUnitCost,
+    shared_keys: &BTreeSet<(u64, usize)>,
 ) -> HeldAtQueryTime {
     let mut held = HeldAtQueryTime::default();
     for term in &lazy.held {
         if let Via::Slot(i) = term.via {
-            if matches!(
-                choice.coefficients.slots[i].materialization,
-                Materialization::MatAtIngestion(_)
-            ) {
+            let slot = &choice.coefficients.slots[i];
+            if matches!(slot.materialization, Materialization::MatAtIngestion(_))
+                || slot
+                    .shared_site
+                    .is_some_and(|key| shared_keys.contains(&key))
+            {
                 continue;
             }
         }
@@ -281,19 +334,20 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
 /// tolerance (a relative gap of about 1e-6 at most) may have its optimum.
 const GAP_TOLERANCE: f64 = 1e-4;
 
-/// The factor that brings `input`'s largest charge to about 1.
+/// The factor that brings `input`'s largest charge per evaluation to about
+/// 1: each choice's charges at the fastest query's rate, and raw scans.
+/// A slot's fixed cost (its kept state) is left out: a huge one would
+/// shrink every other charge below the solver's tolerances (about 1e-7),
+/// where it no longer tells charges apart and stops above the optimum.
 fn price_scale(input: &ModelInput) -> f64 {
-    let fastest = input.queries.iter().map(|q| q.rate).fold(1.0, f64::max);
+    let fastest = input.queries.iter().map(|q| q.rate).fold(0.0, f64::max);
     let largest = input
         .choices
         .iter()
         .flat_map(|choice| {
             let k = &choice.coefficients;
-            std::iter::once(k.direct.cost_per_unit_rate * fastest).chain(
-                k.slots
-                    .iter()
-                    .map(move |s| s.fixed_cost + s.cost_per_unit_rate * fastest),
-            )
+            std::iter::once(k.direct.cost_per_unit_rate * fastest)
+                .chain(k.slots.iter().map(move |s| s.cost_per_unit_rate * fastest))
         })
         .chain(input.raw_scans.iter().map(|s| s.cost))
         .filter(|v| v.is_finite())
@@ -317,6 +371,14 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
         }
         for node in &mut k.shared_nodes {
             node.cost_per_unit_rate *= scale;
+        }
+        choice.scan_project_cost_per_unit_rate *= scale;
+        for (_, cost) in &mut choice.coefficients.cross_shared {
+            *cost *= scale;
+        }
+        for (_, cost, pass) in &mut choice.coefficients.absorbed_scans {
+            *cost *= scale;
+            *pass *= scale;
         }
     }
     for scan in &mut scaled.raw_scans {
@@ -486,13 +548,52 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         products_pending.push((z, a, b));
         z
     };
+    // Each scan choice's direct charge, per source (`Choice::scan_source`).
+    let mut scan_charges: BTreeMap<u64, BTreeMap<usize, Expression>> = BTreeMap::new();
+    // Each cross-group node's charges per consumer, and their largest sum.
+    let mut cross_per_consumer: BTreeMap<u64, (Expression, f64)> = BTreeMap::new();
     for (&(k, c), &v) in &y {
         let total = input.choices[c].coefficients.direct.cost_per_unit_rate;
-        let shared = shared_cost[c].min(total);
-        let cost = total - shared;
+        let rate_or_slowest = match rate(k) {
+            Some(r) => r,
+            None => slowest_rate(match k {
+                Consumer::Group(g) => g.0 as usize,
+                Consumer::Slot { choice, .. } => input.choices[choice].group.0 as usize,
+                Consumer::Query(_) => unreachable!("a query's rate is constant"),
+            }),
+        };
+        for &(key, cost) in &input.choices[c].coefficients.cross_shared {
+            let entry = cross_per_consumer
+                .entry(key)
+                .or_insert_with(|| (Expression::from(0.0), 0.0));
+            entry.0 += rate_or_slowest * cost * v;
+            entry.1 += rate_or_slowest * cost;
+        }
+        for &(source, cost, pass) in &input.choices[c].coefficients.absorbed_scans {
+            let pass = pass.min(cost);
+            objective += rate_or_slowest * pass * v;
+            *scan_charges
+                .entry(source)
+                .or_default()
+                .entry(c)
+                .or_insert_with(|| Expression::from(0.0)) += rate_or_slowest * (cost - pass) * v;
+        }
         if total == 0.0 {
             continue;
         }
+        if let Some(source) = input.choices[c].scan_source {
+            let rate = rate_or_slowest;
+            let pass = input.choices[c].scan_project_cost_per_unit_rate.min(total);
+            objective += rate * pass * v;
+            *scan_charges
+                .entry(source)
+                .or_default()
+                .entry(c)
+                .or_insert_with(|| Expression::from(0.0)) += rate * (total - pass) * v;
+            continue;
+        }
+        let shared = shared_cost[c].min(total);
+        let cost = total - shared;
         match rate(k) {
             Some(r) => {
                 objective += r * cost * v;
@@ -524,6 +625,12 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             }
         }
     }
+    let mut scan_maxima: Vec<(Variable, Vec<Expression>)> = Vec::new();
+    for charges in scan_charges.into_values() {
+        let m = vars.add(variable().min(0));
+        objective += m;
+        scan_maxima.push((m, charges.into_values().collect()));
+    }
     for (c, choice) in input.choices.iter().enumerate() {
         if shared_cost[c] == 0.0 {
             continue;
@@ -551,8 +658,65 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         }
         cheaper_of.push((a, b, u, c, big_m));
     }
+    // Slots that may be one shared node (equal builds over equal inputs):
+    // charged once, at the dearest of the chosen ones' charges with the
+    // slowest class's rate. One node shared by them costs at least each
+    // (it reads the longest of their windows), and apart they cost their
+    // sum.
+    let mut shared_slots: BTreeMap<(u64, usize, String), Vec<(usize, f64)>> = BTreeMap::new();
     for (c, choice) in input.choices.iter().enumerate() {
         for slot in &choice.coefficients.slots {
+            let Some((site, threshold)) = slot.shared_site else {
+                continue;
+            };
+            let at_query = !matches!(slot.materialization, Materialization::MatAtIngestion(_));
+            let charge = slot.fixed_cost
+                + match at_query {
+                    true => slowest_rate(choice.group.0 as usize) * slot.cost_per_unit_rate,
+                    false => 0.0,
+                };
+            shared_slots
+                .entry((site, threshold, format!("{:?}", slot.materialization)))
+                .or_default()
+                .push((c, charge));
+        }
+    }
+    // A node several groups' choices have (`cross_shared`) costs, in the
+    // plan, its charge per consumer (one node computed per consumer, or a
+    // copy per group) or, built once, at least the dearest chosen one's
+    // charge at its group's slowest rate: the model charges the smaller.
+    let mut cross_once: BTreeMap<u64, Vec<(usize, f64)>> = BTreeMap::new();
+    for (c, choice) in input.choices.iter().enumerate() {
+        for &(key, cost) in &choice.coefficients.cross_shared {
+            cross_once
+                .entry(key)
+                .or_default()
+                .push((c, slowest_rate(choice.group.0 as usize) * cost));
+        }
+    }
+    let mut cross_vars: Vec<CrossNodeVars> = Vec::new();
+    for (key, members) in cross_once {
+        let (per_consumer, per_consumer_max) = cross_per_consumer
+            .remove(&key)
+            .unwrap_or_else(|| (Expression::from(0.0), 0.0));
+        let big_m = per_consumer_max + members.iter().map(|(_, w)| *w).fold(0.0, f64::max);
+        let once = vars.add(variable().min(0));
+        let charged = vars.add(variable().min(0));
+        let u = vars.add(binary());
+        objective += charged;
+        cross_vars.push((once, charged, u, members, per_consumer, big_m));
+    }
+    let mut shared_slot_vars: Vec<(Variable, Vec<(usize, f64)>)> = Vec::new();
+    for members in shared_slots.into_values() {
+        let m = vars.add(variable().min(0));
+        objective += m;
+        shared_slot_vars.push((m, members));
+    }
+    for (c, choice) in input.choices.iter().enumerate() {
+        for slot in &choice.coefficients.slots {
+            if slot.shared_site.is_some() {
+                continue;
+            }
             objective += slot.fixed_cost * x[c];
             if slot.cost_per_unit_rate != 0.0
                 && !matches!(slot.materialization, Materialization::MatAtIngestion(_))
@@ -799,6 +963,30 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         }
         constraints.push(constraint!(into >= p));
     }
+    // A slot's consumer exists only when its choice is chosen, and a
+    // group's own consumer only when the group is built once.
+    let exists = |k: Consumer| -> Option<Variable> {
+        match k {
+            Consumer::Slot { choice, .. } => Some(x[choice]),
+            Consumer::Group(g) => once.get(&g).copied(),
+            Consumer::Query(_) => None,
+        }
+    };
+    for (&(k, _), &r) in &reach {
+        if let Some(e) = exists(k) {
+            constraints.push(constraint!(r <= e));
+        }
+    }
+    for (&(k, _), &p) in &passes {
+        if let Some(e) = exists(k) {
+            constraints.push(constraint!(p <= e));
+        }
+    }
+    for (&(k, _), &v) in &y {
+        if let Some(e) = exists(k) {
+            constraints.push(constraint!(v <= e));
+        }
+    }
     for (c, choice) in input.choices.iter().enumerate() {
         for (child, via) in choice.children.iter().zip(&choice.coefficients.child_via) {
             let h = child.0 as usize;
@@ -954,11 +1142,38 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                 .sum()
         })
         .collect();
+    // A part read by several queries runs at their classes' union rate,
+    // not their rates' sum: per reader, its held memory is charged at
+    // `union / sum` of that reader's rate (Stage 3's rate-weighted mean
+    // latency at the part's rate). The least ratio over the group's class
+    // sets bounds it from below.
+    let per_reader_share: Vec<f64> = input
+        .group_queries
+        .iter()
+        .map(|queries_of| {
+            input
+                .union_rate
+                .iter()
+                .filter_map(|(set, &union)| {
+                    let rate_sum: f64 = queries_of
+                        .iter()
+                        .filter(|&&q| set.contains(&input.schedule[q]))
+                        .map(|&q| input.queries[q].rate)
+                        .sum();
+                    let covered = set
+                        .iter()
+                        .all(|class| queries_of.iter().any(|&q| input.schedule[q] == *class));
+                    (covered && rate_sum > 0.0).then_some((union / rate_sum).min(1.0))
+                })
+                .fold(1.0, f64::min)
+        })
+        .collect();
     for (&(q, c), &w) in &work_reached {
         let held = held_of(c);
         let longest = longest_latency[q];
         if let Some(&h) = held_per_reader.get(&(q, c)) {
-            let coefficient = held.per_reader_per_ms * input.queries[q].rate;
+            let share = per_reader_share[input.choices[c].group.0 as usize];
+            let coefficient = held.per_reader_per_ms * input.queries[q].rate * share;
             constraints.push(constraint!(
                 h >= coefficient * (latency_of(q) - longest * (1 - w))
             ));
@@ -974,6 +1189,23 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             constraints.push(constraint!(
                 h >= coefficient * (latency_of(q) - longest * (1 - w))
             ));
+        }
+    }
+    for (m, charges) in scan_maxima {
+        for charge in charges {
+            constraints.push(constraint!(m >= charge));
+        }
+    }
+    for (once, charged, u, members, per_consumer, big_m) in cross_vars {
+        for (c, charge) in members {
+            constraints.push(constraint!(once >= charge * x[c]));
+        }
+        constraints.push(constraint!(charged >= per_consumer - big_m * u));
+        constraints.push(constraint!(charged >= once - big_m * (1 - u)));
+    }
+    for (m, members) in &shared_slot_vars {
+        for &(c, charge) in members {
+            constraints.push(constraint!(*m >= charge * x[c]));
         }
     }
     // Cuts.
@@ -1256,92 +1488,8 @@ pub(crate) fn search<Id: Clone>(
     let started = std::time::Instant::now();
     let memo = super::search::memo(per_computation, entries);
     let memo_stats = super::search::stats(&memo, started.elapsed().as_secs_f64() * 1e3);
-    let scale = super::pricing::frozen_calibration(&memo, entries, data, models)?;
-    let mut cache = super::pricing::PriceCache::new(scale);
-    let mut choices: Vec<Choice> = Vec::new();
-    let mut raw_scans: Vec<(usize, String, u64, Via)> = Vec::new();
-    let mut held: Vec<HeldAtQueryTime> = Vec::new();
-    let CostModel::UsageOverTime(prices) = &models.plan_selection.cost_model else {
-        unreachable!("the caller routes cost models 2 and 3 to the legacy search");
-    };
-    for g in 0..memo.groups.len() {
-        let (group_choices, lazy) = super::coefficients::choices(
-            &memo,
-            GroupId(g as u32),
-            entries,
-            data,
-            models,
-            &mut cache,
-        )?;
-        // A group's copies (apart) cost at least its shared choice with its
-        // node not built once: each copy is charged per consumer as the
-        // shared node is, its own scans read at least the shortest horizon,
-        // and its builds are sized for fewer readers but built per copy. So
-        // the model keeps the shared choices (a lower bound), and the exact
-        // pricing of a group choice prices both.
-        // Widened scans are reached through the identical-expression
-        // variants of the exact pricing, never chosen directly.
-        for (choice, lazy) in group_choices.into_iter().zip(lazy) {
-            if choice.copy_of.is_some()
-                || memo.candidates[g][choice.candidate].origin
-                    == super::CandidateOrigin::WidenedScans
-            {
-                continue;
-            }
-            held.push(held_at_query_time(&choice, &lazy, prices));
-            raw_scans.extend(
-                lazy.raw_scans
-                    .iter()
-                    .map(|(source, bytes, via)| (choices.len(), source.clone(), *bytes, *via)),
-            );
-            choices.push(choice);
-        }
-    }
+    let mut input = model_input_of(&memo, entries, data, models, started)?;
     let trace = std::env::var_os("JP_MILP_TRACE").is_some();
-    if trace {
-        for (c, choice) in choices.iter().enumerate() {
-            let k = &choice.coefficients;
-            let negative = k.direct.cost_per_unit_rate < 0.0
-                || k.direct.work_ms < 0.0
-                || k.slots
-                    .iter()
-                    .any(|s| s.fixed_cost < 0.0 || s.cost_per_unit_rate < 0.0 || s.work_ms < 0.0)
-                || k.shared_nodes.iter().any(|n| n.cost_per_unit_rate < 0.0);
-            if negative {
-                eprintln!(
-                    "milp: NEGATIVE choice {c}: g{} cand{} {:?} assignment {:?}",
-                    choice.group.0, choice.candidate, k, choice.assignment
-                );
-            }
-        }
-    }
-    if trace {
-        eprintln!(
-            "milp: memo {} groups, {} choices in {:.1}s",
-            memo.groups.len(),
-            choices.len(),
-            started.elapsed().as_secs_f64()
-        );
-    }
-    let mut input = model_input(&memo, choices, entries, models)?;
-    let mut sources: Vec<String> = Vec::new();
-    for (c, source, bytes, via) in raw_scans {
-        let index = match sources.iter().position(|s| *s == source) {
-            Some(i) => i,
-            None => {
-                sources.push(source);
-                sources.len() - 1
-            }
-        };
-        input.raw_scans.push(RawScan {
-            choice: c,
-            source: index,
-            cost: prices.cost_per_disk_byte_second * bytes as f64,
-            via,
-        });
-    }
-    input.raw_data_retained = models.deployment_capabilities.raw_data_retained;
-    input.held = held;
     let mut selector = PlanSelector::new(entries, data, models, false)?;
     let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
     let mut number = 0usize;
@@ -1501,36 +1649,9 @@ pub(crate) fn search<Id: Clone>(
         // Debugging aid: every group choice's exact price against the
         // model's value restricted to it.
         let incumbent = selector.cheapest_price().unwrap_or(f64::INFINITY);
-        for group_choice in super::search::group_choices(&memo).unwrap_or_default() {
-            let mut one = PlanSelector::new(entries, data, models, false)?;
-            let mut scratch = HashMap::new();
-            let mut k = 0usize;
-            super::search::offer_group_choice(
-                &memo,
-                per_computation,
-                &group_choice,
-                entries,
-                data,
-                models,
-                &mut one,
-                &mut scratch,
-                &mut k,
-            )?;
-            let Some(exact) = one.cheapest_price() else {
-                continue;
-            };
-            let mut restricted = model_input_clone(&input);
-            restricted.excluded.clear();
-            let outside: Vec<usize> = (0..restricted.choices.len())
-                .filter(|&c| {
-                    group_choice[restricted.choices[c].group.0 as usize]
-                        != Some(restricted.choices[c].candidate)
-                })
-                .collect();
-            restricted.excluded.push((outside, Vec::new(), 0.0));
-            let value = solve(&restricted)
-                .map_err(SelectionError::Solver)?
-                .map(|s| s.objective);
+        for (group_choice, exact, value) in
+            lower_bound_check(&memo, per_computation, &input, entries, data, models)?
+        {
             let bad = value.is_none_or(|v| v > exact * (1.0 + 1e-9));
             if bad || exact < incumbent * (1.0 - 1e-9) {
                 eprintln!(
@@ -1611,6 +1732,206 @@ pub(crate) fn search<Id: Clone>(
         .remove(&selected.from_logical)
         .expect("the selection's logical roots are kept");
     Ok((selection, selected, roots))
+}
+
+/// The model's input for `memo`: each group's shared choices (copies and
+/// widened scans are left to the exact pricing) with their lazy lower
+/// bounds, and the raw scans.
+pub(super) fn model_input_of(
+    memo: &Memo,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    started: std::time::Instant,
+) -> Result<ModelInput, SelectionError> {
+    let scale = super::pricing::frozen_calibration(memo, entries, data, models)?;
+    let mut cache = super::pricing::PriceCache::new(scale);
+    let mut choices: Vec<Choice> = Vec::new();
+    let mut raw_scans: Vec<(usize, String, u64, Via)> = Vec::new();
+    let mut lazies: Vec<LazyTerms> = Vec::new();
+    let CostModel::UsageOverTime(prices) = &models.plan_selection.cost_model else {
+        unreachable!("the caller routes cost models 2 and 3 to the legacy search");
+    };
+    for g in 0..memo.groups.len() {
+        let (group_choices, lazy) = super::coefficients::choices(
+            memo,
+            GroupId(g as u32),
+            entries,
+            data,
+            models,
+            &mut cache,
+        )?;
+        // A group's copies (apart) cost at least its shared choice with its
+        // node not built once: each copy is charged per consumer as the
+        // shared node is, its own scans read at least the shortest horizon,
+        // and its builds are sized for fewer readers but built per copy. So
+        // the model keeps the shared choices (a lower bound), and the exact
+        // pricing of a group choice prices both.
+        // Widened scans are reached through the identical-expression
+        // variants of the exact pricing, never chosen directly.
+        for (choice, lazy) in group_choices.into_iter().zip(lazy) {
+            if choice.copy_of.is_some()
+                || memo.candidates[g][choice.candidate].origin
+                    == super::CandidateOrigin::WidenedScans
+            {
+                continue;
+            }
+            lazies.push(lazy.clone());
+            raw_scans.extend(
+                lazy.raw_scans
+                    .iter()
+                    .map(|(source, bytes, via)| (choices.len(), source.clone(), *bytes, *via)),
+            );
+            choices.push(choice);
+        }
+    }
+    let trace = std::env::var_os("JP_MILP_TRACE").is_some();
+    if trace {
+        for (c, choice) in choices.iter().enumerate() {
+            let k = &choice.coefficients;
+            let negative = k.direct.cost_per_unit_rate < 0.0
+                || k.direct.work_ms < 0.0
+                || k.slots
+                    .iter()
+                    .any(|s| s.fixed_cost < 0.0 || s.cost_per_unit_rate < 0.0 || s.work_ms < 0.0)
+                || k.shared_nodes.iter().any(|n| n.cost_per_unit_rate < 0.0);
+            if negative {
+                eprintln!(
+                    "milp: NEGATIVE choice {c}: g{} cand{} {:?} assignment {:?}",
+                    choice.group.0, choice.candidate, k, choice.assignment
+                );
+            }
+        }
+    }
+    if trace {
+        eprintln!(
+            "milp: memo {} groups, {} choices in {:.1}s",
+            memo.groups.len(),
+            choices.len(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+    let mut input = model_input(memo, choices, entries, models)?;
+    let mut sources: Vec<String> = Vec::new();
+    for (c, source, bytes, via) in raw_scans {
+        let index = match sources.iter().position(|s| *s == source) {
+            Some(i) => i,
+            None => {
+                sources.push(source);
+                sources.len() - 1
+            }
+        };
+        input.raw_scans.push(RawScan {
+            choice: c,
+            source: index,
+            cost: prices.cost_per_disk_byte_second * bytes as f64,
+            via,
+        });
+    }
+    input.raw_data_retained = models.deployment_capabilities.raw_data_retained;
+    // Nodes several groups' choices have, equal up to scan widening: one
+    // node once shared, charged once per key at the dearest chosen one
+    // (`ChoiceCoefficients::cross_shared`).
+    let mut groups_of_node: HashMap<u64, BTreeSet<GroupId>> = HashMap::new();
+    for choice in &input.choices {
+        for &(key, _) in &choice.coefficients.direct_nodes {
+            groups_of_node.entry(key).or_default().insert(choice.group);
+        }
+    }
+    for choice in &mut input.choices {
+        let k = &mut choice.coefficients;
+        for &(_, cost, _) in &k.absorbed_scans {
+            k.direct.cost_per_unit_rate -= cost;
+        }
+        let cross: Vec<(u64, f64)> = k
+            .direct_nodes
+            .iter()
+            .copied()
+            .filter(|(key, _)| groups_of_node[key].len() > 1)
+            .collect();
+        for &(key, cost) in &cross {
+            k.direct.cost_per_unit_rate -= cost;
+            k.cross_shared.push((key, cost));
+            for node in &mut k.shared_nodes {
+                if node.members.contains(&key) {
+                    node.cost_per_unit_rate -= cost;
+                }
+            }
+        }
+        k.shared_nodes.retain(|node| node.cost_per_unit_rate > 0.0);
+        k.direct.cost_per_unit_rate = k.direct.cost_per_unit_rate.max(0.0);
+    }
+    // A slot whose build several groups' choices may share is one node
+    // charged once (`SlotCoefficients::shared_site`): its held memory is
+    // left out rather than charged per choice.
+    let mut groups_of_key: HashMap<(u64, usize), BTreeSet<GroupId>> = HashMap::new();
+    for choice in &input.choices {
+        for slot in &choice.coefficients.slots {
+            if let Some(key) = slot.shared_site {
+                groups_of_key.entry(key).or_default().insert(choice.group);
+            }
+        }
+    }
+    let shared_keys: BTreeSet<(u64, usize)> = groups_of_key
+        .into_iter()
+        .filter(|(_, groups)| groups.len() > 1)
+        .map(|(key, _)| key)
+        .collect();
+    input.held = input
+        .choices
+        .iter()
+        .zip(&lazies)
+        .map(|(choice, lazy)| held_at_query_time(choice, lazy, prices, &shared_keys))
+        .collect();
+    Ok(input)
+}
+
+/// Every group choice of `memo` with its exact price (the cheapest plan
+/// [`super::search::offer_group_choice`] finds) and the model's value
+/// restricted to it, which should be a lower bound of the price; group
+/// choices without a valid plan are left out.
+pub(crate) fn lower_bound_check<Id: Clone>(
+    memo: &Memo,
+    per_computation: &PerComputationCandidates<Id>,
+    input: &ModelInput,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<Vec<(super::search::GroupChoice, f64, Option<f64>)>, SelectionError> {
+    let mut out = Vec::new();
+    for group_choice in super::search::group_choices(memo).unwrap_or_default() {
+        let mut one = PlanSelector::new(entries, data, models, false)?;
+        let mut scratch = HashMap::new();
+        let mut k = 0usize;
+        super::search::offer_group_choice(
+            memo,
+            per_computation,
+            &group_choice,
+            entries,
+            data,
+            models,
+            &mut one,
+            &mut scratch,
+            &mut k,
+        )?;
+        let Some(exact) = one.cheapest_price() else {
+            continue;
+        };
+        let mut restricted = model_input_clone(input);
+        restricted.excluded.clear();
+        let outside: Vec<usize> = (0..restricted.choices.len())
+            .filter(|&c| {
+                group_choice[restricted.choices[c].group.0 as usize]
+                    != Some(restricted.choices[c].candidate)
+            })
+            .collect();
+        restricted.excluded.push((outside, Vec::new(), 0.0));
+        let value = solve(&restricted)
+            .map_err(SelectionError::Solver)?
+            .map(|s| s.objective);
+        out.push((group_choice, exact, value));
+    }
+    Ok(out)
 }
 
 fn model_input_clone(input: &ModelInput) -> ModelInput {
@@ -1829,10 +2150,15 @@ mod tests {
                 slots: Vec::new(),
                 child_via: children.iter().map(|_| Via::Direct).collect(),
                 shared_nodes: Vec::new(),
+                cross_shared: Vec::new(),
+                absorbed_scans: Vec::new(),
+                direct_nodes: Vec::new(),
             },
             copy_of: None,
             scan_children: Vec::new(),
             scan_horizon_ms: None,
+            scan_source: None,
+            scan_project_cost_per_unit_rate: 0.0,
         }
     }
 
