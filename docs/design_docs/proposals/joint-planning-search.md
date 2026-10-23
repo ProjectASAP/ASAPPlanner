@@ -365,7 +365,7 @@ The result is the plan the exhaustive search would select. It is checked by `joi
 2. **Generate** each group's implementation candidates (Pass 1, then the Pass 2 transformations), each with its child groups and its coupling sites.
 3. **Coefficient derivation.** Derive each choice's objective coefficients from Stage 3's per-node cost function (`price_node`): a candidate's private nodes per consumer rate and per materialization, and each coupling site's node at each of its thresholds. Stage 3 stays the only source of costs.
 4. **Solve one MILP over the memo** (below): one choice per needed group, its materializations and the coupling sites' thresholds.
-5. **Solution decoding, incumbent evaluation, lazy cuts.** Decode the solver's solution into its one physical plan, recompose its guarantees, and evaluate the plan's exact cost with Stage 3 (the incumbent cost). If the incumbent cost exceeds the model bound (the held-memory term), or a composed guarantee fails, add a cut that corrects or excludes that plan, and solve again. Stop when the best incumbent cost equals the model bound and every check passes. The gap must be 0 to report the plan as optimal.
+5. **Solution decoding, incumbent evaluation, lazy cuts.** Decode the solver's solution into its one physical plan, recompose its guarantees, and evaluate the plan's exact cost with Stage 3 (the incumbent cost). If the incumbent cost exceeds the MILP lower bound (the held-memory term), or a composed guarantee fails, add a cut that corrects or excludes that plan, and solve again. Stop when the best incumbent cost equals the MILP lower bound and every check passes. The gap must be 0 to report the plan as optimal.
 6. **Build late.** Run the executor's compile check on the selected plan only, and report it.
 
 ### The solver: MILP over the memo
@@ -542,7 +542,7 @@ Each cut removes or corrects at least one of finitely many combinations, so the 
 | **Solution decoding** | Turning a MILP solution (the values of `x`, `m`, `u`, …) into the one physical plan it describes. | after each solve | once per round |
 | **Incumbent evaluation** | Running Stage 3 on that decoded plan as a whole: guarantees, latency checks and its exact cost (the **incumbent cost**). | after decoding | once per round |
 
-The **model bound** is the solver's objective, a lower bound on every plan's cost. The **gap** is (incumbent cost − model bound) / incumbent cost.
+The **MILP lower bound** is the solver's objective, a lower bound on every plan's cost. The **gap** is (incumbent cost − MILP lower bound) / incumbent cost. The report keeps `incumbent_cost` at the search level and the MILP-only figures in a `milp` object: `lower_bound`, `first_lower_bound`, `gap`, `rounds`, `variable_count`, `constraint_count`, `solver_time_ms`, `time_limit_reached`.
 
 **One solution, one plan.** Every choice that changes a plan's cost is a model variable, so a solution decodes to exactly one plan, and incumbent evaluation runs Stage 3 once per round:
 - sharing an identical expression or computing it per reader is the materialization `m` (`mq` vs `nm`);
