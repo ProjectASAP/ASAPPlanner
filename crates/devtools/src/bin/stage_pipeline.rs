@@ -242,7 +242,7 @@ use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_planning_stages_over, run_search_over,
+    lower_promql_roots, lower_sql_roots, run_planning_stages_over, run_search_over, sql_catalog,
     PlanningStagesError, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
@@ -259,7 +259,6 @@ use asap_plan_selection::{
 use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
-use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
@@ -1384,60 +1383,6 @@ fn catalog_table_names(tables: &[String]) -> Result<Vec<String>, String> {
                 .ok_or_else(|| "--table: name must be a string".to_string())
         })
         .collect()
-}
-
-/// The tables `--table` declares.
-fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
-    let mut catalog = SqlCatalog::new();
-    let mut names = HashSet::new();
-    for raw in tables {
-        let table: Value = serde_json::from_str(raw).map_err(|e| format!("--table: {e}"))?;
-        let name = table["name"]
-            .as_str()
-            .ok_or("--table: name must be a string")?;
-        if !names.insert(name.to_owned()) {
-            return Err(format!("--table: table {name} is declared twice"));
-        }
-        let columns = table["columns"]
-            .as_array()
-            .ok_or("--table: columns must be an array")?
-            .iter()
-            .map(|column| {
-                let column_name = column["name"]
-                    .as_str()
-                    .ok_or("--table: column name must be a string")?;
-                let dtype = match column["type"]
-                    .as_str()
-                    .map(str::to_ascii_lowercase)
-                    .as_deref()
-                {
-                    Some("timestamp") => DataType::Timestamp,
-                    Some("utf8" | "string") => DataType::Utf8,
-                    Some("float64" | "double") => DataType::Float64,
-                    Some("int64" | "bigint") => DataType::Int64,
-                    other => return Err(format!("--table: unsupported column type {other:?}")),
-                };
-                let nullable = column["nullable"].as_bool().unwrap_or(true);
-                Ok(Field::plain(column_name, dtype, nullable))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let schema = match table.get("time_index") {
-            None | Some(Value::Null) => Schema::new(columns),
-            Some(index) => match index.as_u64().map(|index| index as usize) {
-                Some(index) if index < columns.len() => {
-                    Schema::with_time_index(columns, index, vec![])
-                }
-                _ => {
-                    return Err(format!(
-                        "--table {name}: time_index must be the index of one of its {} columns",
-                        columns.len()
-                    ))
-                }
-            },
-        };
-        catalog = catalog.with_table(name, schema);
-    }
-    Ok(catalog)
 }
 
 fn query_batch(
