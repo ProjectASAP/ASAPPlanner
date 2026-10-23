@@ -1927,8 +1927,8 @@ mod tests {
         intervals_ms: &[u32],
         targets: &[AccuracyTarget],
     ) {
-        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true);
-        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, false);
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true, &data());
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, false, &data());
     }
 
     /// [`assert_model_is_a_lower_bound`] in a deployment that keeps raw
@@ -1938,6 +1938,7 @@ mod tests {
         intervals_ms: &[u32],
         targets: &[AccuracyTarget],
         raw_data_retained: bool,
+        data: &DataWorkload,
     ) {
         let roots: Vec<(usize, QueryRoot)> = queries
             .iter()
@@ -1950,7 +1951,6 @@ mod tests {
             .collect();
         let per_computation = generate_per_computation_candidates(roots).unwrap();
         let entries = entries(intervals_ms, targets);
-        let data = data();
         let deployment =
             asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities {
                 raw_data_retained,
@@ -1959,7 +1959,7 @@ mod tests {
             };
         let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         let memo = memo(&per_computation, &entries);
-        let input = crate::search::milp::model::model_input_of(&memo, &entries, &data, models)
+        let input = crate::search::milp::model::model_input_of(&memo, &entries, data, models)
             .unwrap()
             .0;
         let checked = crate::search::milp::model::lower_bound_check(
@@ -1967,7 +1967,7 @@ mod tests {
             &per_computation,
             &input,
             &entries,
-            &data,
+            data,
             models,
         )
         .unwrap();
@@ -1980,6 +1980,38 @@ mod tests {
                 "{queries:?} {group_choice:?}: model {value} over exact {exact}"
             );
         }
+    }
+
+    /// An exact top-k of 5-minute sums every 5 minutes over 1,000 series
+    /// sampled every 15 s, without raw data: only a summary maintained at
+    /// ingestion time is valid. Its scan and window are read only through
+    /// that ingestion-time slot, so no query-time work or held memory of
+    /// theirs may be charged (a random three-way workload's cluster).
+    #[test]
+    fn the_model_is_a_lower_bound_below_an_ingestion_time_slot() {
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0 / 15.0,
+            },
+            sources: [(
+                "m".to_string(),
+                SourceFacts {
+                    series_count: Some(1_000),
+                    sample_interval: Some(asap_types::workload::DurationMs(15_000)),
+                    metric_type: Some(asap_types::workload::MetricType::Gauge),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert_model_is_a_lower_bound_in(
+            &["topk by (job) (3, sum_over_time(m[5m]))"],
+            &[300_000],
+            &[AccuracyTarget::exact()],
+            false,
+            &data,
+        );
     }
 
     /// Three quantiles of one metric over a 1-minute, a 5-minute and an

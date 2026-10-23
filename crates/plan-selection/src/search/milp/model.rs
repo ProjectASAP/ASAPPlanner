@@ -248,6 +248,11 @@ pub(crate) struct ModelInput {
     /// Per choice, the memory its parts hold while a query's evaluation
     /// runs ([`HeldAtQueryTime`]).
     pub held: Vec<HeldAtQueryTime>,
+    /// Per choice, its direct part's price per second computed at
+    /// ingestion time, under an ingestion-time slot (scans read one second
+    /// of rows; [`LazyTerms::direct_at_ingestion`]); 0 when it cannot run
+    /// at ingestion time.
+    pub direct_at_ingestion_cost: Vec<f64>,
     /// The solver's time limit in seconds, if any.
     pub time_limit_s: Option<f64>,
     /// Solve the linear relaxation (every binary in [0, 1]): a lower bound
@@ -414,6 +419,9 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
     for held in &mut scaled.held {
         held.per_reader_per_ms *= scale;
         held.longest_per_ms *= scale;
+    }
+    for cost in &mut scaled.direct_at_ingestion_cost {
+        *cost *= scale;
     }
     for (_, bound) in &mut scaled.extra_bounds {
         *bound *= scale;
@@ -586,6 +594,21 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     // Each cross-group node's charges per consumer, and their largest sum.
     let mut cross_per_consumer: BTreeMap<u64, (Expression, f64)> = BTreeMap::new();
     for (&(k, c), &v) in &y {
+        // Under an ingestion-time slot the direct part runs at ingestion
+        // time, once per second, as Stage 3 prices it there: none of the
+        // query-time charges below apply.
+        if let Consumer::Slot { choice, slot } = k {
+            let m = input.choices[choice].coefficients.slots[slot].materialization;
+            if matches!(m, Materialization::MatAtIngestion(_)) {
+                let cost = input
+                    .direct_at_ingestion_cost
+                    .get(c)
+                    .copied()
+                    .unwrap_or(0.0);
+                objective += cost * v;
+                continue;
+            }
+        }
         let total = input.choices[c].coefficients.direct.cost_per_unit_rate;
         let rate_or_slowest = match rate(k) {
             Some(r) => r,
@@ -2383,6 +2406,13 @@ pub(crate) fn model_input_of(
         .zip(&lazies)
         .map(|(choice, lazy)| held_at_query_time(choice, lazy, prices, &shared_keys))
         .collect();
+    input.direct_at_ingestion_cost = lazies
+        .iter()
+        .map(|lazy| {
+            lazy.direct_at_ingestion
+                .map_or(0.0, |p| p.cost_per_unit_rate)
+        })
+        .collect();
     input.site_thresholds = site_thresholds;
     Ok((input, versions))
 }
@@ -2461,6 +2491,7 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         raw_scans: input.raw_scans.clone(),
         raw_data_retained: input.raw_data_retained,
         held: input.held.clone(),
+        direct_at_ingestion_cost: input.direct_at_ingestion_cost.clone(),
         time_limit_s: input.time_limit_s,
         relaxed: input.relaxed,
         rollup_rules: input.rollup_rules.clone(),
@@ -2942,6 +2973,7 @@ fn model_input(
         raw_scans: Vec::new(),
         raw_data_retained: true,
         held: Vec::new(),
+        direct_at_ingestion_cost: Vec::new(),
         time_limit_s: None,
         relaxed: false,
     })
@@ -3023,6 +3055,7 @@ pub(crate) mod tests {
             raw_scans: Vec::new(),
             raw_data_retained: true,
             held: Vec::new(),
+            direct_at_ingestion_cost: Vec::new(),
             time_limit_s: None,
             relaxed: false,
         };
@@ -3539,6 +3572,7 @@ pub(crate) mod tests {
             raw_scans: Vec::new(),
             raw_data_retained: true,
             held: Vec::new(),
+            direct_at_ingestion_cost: Vec::new(),
             time_limit_s: None,
             relaxed: false,
         }
