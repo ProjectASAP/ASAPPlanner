@@ -334,19 +334,20 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, String>
 /// tolerance (a relative gap of about 1e-6 at most) may have its optimum.
 const GAP_TOLERANCE: f64 = 1e-4;
 
-/// The factor that brings `input`'s largest charge to about 1.
+/// The factor that brings `input`'s largest charge per evaluation to about
+/// 1: each choice's charges at the fastest query's rate, and raw scans.
+/// A slot's fixed cost (its kept state) is left out: a huge one would
+/// shrink every other charge below the solver's tolerances (about 1e-7),
+/// where it no longer tells charges apart and stops above the optimum.
 fn price_scale(input: &ModelInput) -> f64 {
-    let fastest = input.queries.iter().map(|q| q.rate).fold(1.0, f64::max);
+    let fastest = input.queries.iter().map(|q| q.rate).fold(0.0, f64::max);
     let largest = input
         .choices
         .iter()
         .flat_map(|choice| {
             let k = &choice.coefficients;
-            std::iter::once(k.direct.cost_per_unit_rate * fastest).chain(
-                k.slots
-                    .iter()
-                    .map(move |s| s.fixed_cost + s.cost_per_unit_rate * fastest),
-            )
+            std::iter::once(k.direct.cost_per_unit_rate * fastest)
+                .chain(k.slots.iter().map(move |s| s.cost_per_unit_rate * fastest))
         })
         .chain(input.raw_scans.iter().map(|s| s.cost))
         .filter(|v| v.is_finite())
@@ -1141,11 +1142,38 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                 .sum()
         })
         .collect();
+    // A part read by several queries runs at their classes' union rate,
+    // not their rates' sum: per reader, its held memory is charged at
+    // `union / sum` of that reader's rate (Stage 3's rate-weighted mean
+    // latency at the part's rate). The least ratio over the group's class
+    // sets bounds it from below.
+    let per_reader_share: Vec<f64> = input
+        .group_queries
+        .iter()
+        .map(|queries_of| {
+            input
+                .union_rate
+                .iter()
+                .filter_map(|(set, &union)| {
+                    let rate_sum: f64 = queries_of
+                        .iter()
+                        .filter(|&&q| set.contains(&input.schedule[q]))
+                        .map(|&q| input.queries[q].rate)
+                        .sum();
+                    let covered = set
+                        .iter()
+                        .all(|class| queries_of.iter().any(|&q| input.schedule[q] == *class));
+                    (covered && rate_sum > 0.0).then_some((union / rate_sum).min(1.0))
+                })
+                .fold(1.0, f64::min)
+        })
+        .collect();
     for (&(q, c), &w) in &work_reached {
         let held = held_of(c);
         let longest = longest_latency[q];
         if let Some(&h) = held_per_reader.get(&(q, c)) {
-            let coefficient = held.per_reader_per_ms * input.queries[q].rate;
+            let share = per_reader_share[input.choices[c].group.0 as usize];
+            let coefficient = held.per_reader_per_ms * input.queries[q].rate * share;
             constraints.push(constraint!(
                 h >= coefficient * (latency_of(q) - longest * (1 - w))
             ));
