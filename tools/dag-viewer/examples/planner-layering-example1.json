@@ -128159,6 +128159,7 @@
     "search": {
       "candidates_checked": 72,
       "components": [],
+      "incumbent_cost": 4.377000084179999,
       "queries": [],
       "raw_scan_assignments_skipped": 0,
       "raw_scan_candidates_skipped": 0,
