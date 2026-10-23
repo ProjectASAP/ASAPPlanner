@@ -4,7 +4,65 @@
 
 **Scope:** Multi-query optimization across exact operators, ASAP primitives, window implementations, sharing, and materialization.
 
-## 1. Motivation and Challenges
+## 1. Traditional Memo Groups and Rule Expansion
+
+A traditional memo, as used by Cascades-style optimizers, compactly represents equivalent query expressions. A **memo group** contains expressions that produce the same logical result under the query semantics. Each expression references child groups instead of copying complete input plans. Different parent expressions can therefore reuse the same search work.
+
+### Logical rule expansion
+
+Consider an inner join with a filter on `A`:
+
+```sql
+SELECT *
+FROM A JOIN B ON A.id = B.id
+WHERE A.x > 10;
+```
+
+Initially, the memo can contain:
+
+```text
+G1 = { Scan(A) }
+G2 = { Scan(B) }
+G3 = { Join(G1, G2, A.id = B.id) }
+G5 = { Filter(A.x > 10, G3) }               query result
+```
+
+A filter-pushdown rule matches the filter above the inner join. Because the predicate depends only on `A` and pushing it down preserves semantics, it adds a filtered-input group and another expression to the existing result group:
+
+```text
+G4 = { Filter(A.x > 10, G1) }
+
+G5 = {
+    Filter(A.x > 10, G3),
+    Join(G4, G2, A.id = B.id)
+}
+```
+
+Both members of `G5` produce the same result. The rule expands the group rather than immediately replacing its existing expression. Newly introduced computations, such as the filtered `A`, can create new groups. Further rules can match newly inserted expressions; interning avoids repeating identical expressions. Exploration may be demand-driven and interleaved with costing rather than saturating every possible rewrite.
+
+### Physical implementation expansion
+
+Implementation rules turn logical expressions into physical execution candidates. For the join expression in `G5`, eligible candidates can include:
+
+```text
+HashJoin(G4, G2)
+MergeJoin(G4, G2)
+NestedLoopJoin(G4, G2)
+```
+
+All implement the same logical join result, but impose different input requirements and costs. A merge join may require inputs ordered by the join key; a hash join does not require that order. Physical expressions continue to reference child groups, whose implementations are chosen separately. The precise storage of logical and physical expressions varies by optimizer.
+
+The optimizer typically searches and caches:
+
+```text
+Best(group, required_physical_properties)
+```
+
+For each physical candidate, it derives child requirements, optimizes the child groups under those requirements, and combines their costs with the candidate's own cost. The cheapest implementation for unordered output may differ from the cheapest one for ordered output; sorting or other property-enforcing operators may be needed. Rules generate candidates; costing and valid bounds guide exploration and selection.
+
+Sharing a memo group shares optimization representation, not necessarily runtime computation. Explicit materialization/reuse decisions are still needed to execute a common producer once. This distinction becomes central to ASAPPlanner's cross-query optimization below.
+
+## 2. Motivation and Challenges
 
 ASAP primitives create opportunities to replace expensive exact computations and share summaries, panes, rollups, scans, or retained raw data. They also enlarge the optimization search space. Enumerating complete workload candidates multiplies implementation, sharing, window, and materialization choices. Optimizing queries independently avoids that enumeration but can miss joint savings.
 
@@ -12,7 +70,7 @@ The challenge is cross-query dependence: a candidate's incremental cost changes 
 
 The design uses a memo to represent candidates compactly and a mixed-integer linear program (MILP) to select a consistent physical plan. The goals are to avoid repeated candidate generation, expose ASAP-aware sharing, and minimize the configured objective subject to accuracy, latency, and resource constraints. Optimality applies to the generated finite candidate set and configured models, not every imaginable plan. New sketch/window algorithms and runtime scheduling are outside this proposal.
 
-## 2. Memo-Based Candidate Representation
+## 3. Memo-Based Candidate Representation
 
 Terminology follows [planner-layering.md](planner-layering.md):
 
@@ -24,7 +82,7 @@ Memo grouping avoids duplicate logical exploration. Conventional CSE exposes reu
 
 In the layering document, a stage-level candidate is a DAG for the **whole workload**. Local `ImplementationCandidate` records compactly represent its component choices, avoiding construction of every complete DAG. Approximate implementations retain the original logical result as their target and carry an accuracy contract; they are not exactly equivalent expressions. Likewise, intermediate-state candidates must satisfy their group contract; different capacities or merge layouts are not automatically interchangeable. Reader compatibility constrains which state candidate can serve each reader.
 
-## 3. ASAPPlanner Optimization Workflow
+## 4. ASAPPlanner Optimization Workflow
 
 ```text
 Stage 0: frontends -> language-independent LogicalDAGs
@@ -66,7 +124,7 @@ This table describes possible strategies. Current pane support does not imply ge
 
 Use existing `Materialization` options: `NotMaterialized`, `MatAtQuery(Memory)`, `MatAtIngestion(Memory)`, and `MatAtQueryKeptAcrossEvaluations(Memory)`. Assign them to eligible internal nodes, not necessarily the entire query. For example, maintain panes at ingestion and merge at query time. Generate only supported assignments: retained query-time state currently requires deployment capability and an eligible pane chain. Ingestion timing and upstream dependencies must satisfy Stage 2 rules.
 
-## 4. Cost Model and Optimization Objective
+## 5. Cost Model and Optimization Objective
 
 Attribute resource usage to physical nodes in the selected DAG, then apply the existing Stage 3 cost model:
 
@@ -89,11 +147,11 @@ Charge shared work once per actual execution or maintained state, not once per q
 
 Accuracy is an end-to-end root requirement. Compose summary and window error only with valid contracts; locally admissible sketches do not prove a composed query accurate. Latency and resource limits must use the configured evaluator's timing and concurrency assumptions. Current latency accounting sums reached query-time work plus applicable compaction; this proposal does not silently replace it with a general parallel scheduler. Keep calibrated model inputs fixed during a solve.
 
-## 5. MILP Formulation
+## 6. MILP Formulation
 
 Query results and shared intermediate states use the same group/candidate model. There are no separate producer-selection or producer-input variables. Extend the base formulation with consumer-reach, physical-copy, and lifetime variables when execution costs depend on the selected context.
 
-### 5.1 Variables
+### 6.1 Variables
 
 #### Sets and notation
 
@@ -128,7 +186,7 @@ min  Σ_{g,c} cost[g,c] × x[g,c] + plan-level charges
 
 Selecting one state candidate does not by itself mean one execution. Materialization and consumer context determine whether it runs once per evaluation, per reader, or at ingestion. Add reach/rate and physical-copy variables for these cases; charge each actual instance correctly. Reader recurrence, phase, and range-evaluation steps affect work; a pane-alignment gcd grid is not automatically an execution rate. Raw retention and other non-computation charges remain resource/accounting variables rather than artificial computation groups.
 
-### 5.2 Constraints
+### 6.2 Constraints
 
 #### Query coverage and dependencies
 
@@ -195,7 +253,7 @@ Extend this for context-dependent rates and lifetimes. Do not use average occupa
 
 Representing sharing as group dependencies simplifies the graph but does not make costs independent. DP with complete sharing context remains possible; retaining one cheapest candidate per group can still discard the joint optimum.
 
-## 6. Worked Example: Shared KLL for P95/P99
+## 7. Worked Example: Shared KLL for P95/P99
 
 ```text
 Q1: quantile_over_time(0.95, stream[15m]), every 1m
@@ -235,7 +293,7 @@ The build cost is owned by `G_KLL` and appears once for a shared execution; each
 
 For ingestion-time reuse, a supported implementation maintains 1m KLL panes and merges the latest 15 at evaluation. Both readers can share panes and an eligible merge result. A direct whole-window sketch cannot be assumed to delete expired samples. Different window lengths or pane widths require separate compatibility and coverage checks.
 
-## 7. Search-Space Reduction and Validation
+## 8. Search-Space Reduction and Validation
 
 Reduce search without losing valid joint choices:
 
@@ -248,7 +306,7 @@ Reconstruct selected candidates, their group dependencies, and timing-specific c
 
 A complete MILP does not require LBBD. Current code uses a lower-bound model with lazy refinement for difficult costs/checks. When refinement is needed, add only sound feasibility or cost cuts conditioned on every relevant decision. Validation of one plan alone does not prove a relaxed model optimal. Report the best validated cost, certified lower bound/gap, solver status, and stop reason. Timeout without a plan is not proof of infeasibility.
 
-## 8. Implementation and Evaluation
+## 9. Implementation and Evaluation
 
 Reuse current structures rather than create a parallel optimizer framework:
 
