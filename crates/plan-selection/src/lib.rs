@@ -1057,7 +1057,9 @@ pub struct MilpReport {
     /// model is against the incumbent cost.
     pub first_lower_bound: Option<f64>,
     /// (incumbent cost − lower bound) / incumbent cost, at least 0: 0 when
-    /// the incumbent is proven optimal.
+    /// the incumbent is proven optimal over the memo, within the solver's
+    /// tolerances (a relative 1e-9 in the stopping rule, about 1e-4 when
+    /// HiGHS stops at its own gap tolerance).
     pub gap: Option<f64>,
     /// Its rounds (each: a solve, the decoded plan's incumbent evaluation,
     /// a cut).

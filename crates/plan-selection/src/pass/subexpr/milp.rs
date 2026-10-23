@@ -750,13 +750,21 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             at_query_time.insert((q, g), vars.add(variable().min(0).max(1)));
         }
     }
+    // A choice's query-time work, without its nodes another group's
+    // choice may share (shareable nodes and shared slots): Stage 3 counts a
+    // shared node once per query, so they are left out to keep latency a
+    // lower bound.
     let query_time_work = |c: usize| -> f64 {
         let coefficients = &input.choices[c].coefficients;
-        coefficients.direct.work_ms
+        let shared: f64 = coefficients.shared_nodes.iter().map(|n| n.work_ms).sum();
+        (coefficients.direct.work_ms - shared).max(0.0)
             + coefficients
                 .slots
                 .iter()
-                .filter(|s| !matches!(s.materialization, Materialization::MatAtIngestion(_)))
+                .filter(|s| {
+                    !matches!(s.materialization, Materialization::MatAtIngestion(_))
+                        && s.shared_site.is_none()
+                })
                 .map(|s| s.work_ms)
                 .sum::<f64>()
     };
@@ -1414,7 +1422,17 @@ pub(crate) fn search<Id: Clone>(
         input.time_limit_s = remaining_s;
         iterations += 1;
         let solve_started = std::time::Instant::now();
-        let solved = solve(&input).map_err(SelectionError::Solver)?;
+        let solved = match solve(&input) {
+            Ok(solved) => solved,
+            // The solver stopped at the time limit before finding any
+            // solution: the incumbent so far stands.
+            Err(error) if remaining_s.is_some() && error.contains("NoSolutionFound") => {
+                time_limit_reached = true;
+                solver_ms += solve_started.elapsed().as_secs_f64() * 1e3;
+                break;
+            }
+            Err(error) => return Err(SelectionError::Solver(error)),
+        };
         solver_ms += solve_started.elapsed().as_secs_f64() * 1e3;
         // The solver stopped at the time limit: its plan is no bound, but
         // it is still priced, as a last round, and may become the
@@ -1444,51 +1462,9 @@ pub(crate) fn search<Id: Clone>(
         for &c in &solution.chosen {
             group_choice[input.choices[c].group.0 as usize] = Some(input.choices[c].candidate);
         }
-        let chosen_candidates: Vec<(GroupId, &super::ImplementationCandidate)> = group_choice
-            .iter()
-            .enumerate()
-            .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
-            .collect();
-        if !super::windows::requirements_met(&chosen_candidates) {
-            // The model encodes every requirement (`rollup_rules`), so this
-            // is a safety net: cut the smallest failing pairs of (group,
-            // candidate), else the whole group choice below.
-            let mut cut = false;
-            for (i, a) in chosen_candidates.iter().enumerate() {
-                if a.1.rollup_of.is_none() {
-                    continue;
-                }
-                for (j, b) in chosen_candidates.iter().enumerate() {
-                    if i != j && !super::windows::requirements_met(&[*a, *b]) {
-                        let members: Vec<usize> = (0..input.choices.len())
-                            .filter(|&c| {
-                                let choice = &input.choices[c];
-                                (choice.group == a.0
-                                    && choice.candidate == group_choice[a.0 .0 as usize].unwrap())
-                                    || (choice.group == b.0
-                                        && choice.candidate
-                                            == group_choice[b.0 .0 as usize].unwrap())
-                            })
-                            .collect();
-                        input.excluded.push((members, Vec::new(), 1.0));
-                        cut = true;
-                    }
-                }
-                if !super::windows::requirements_met(&[*a]) {
-                    let members: Vec<usize> = (0..input.choices.len())
-                        .filter(|&c| {
-                            input.choices[c].group == a.0
-                                && Some(input.choices[c].candidate) == group_choice[a.0 .0 as usize]
-                        })
-                        .collect();
-                    input.excluded.push((members, Vec::new(), 0.0));
-                    cut = true;
-                }
-            }
-            if cut {
-                continue;
-            }
-        }
+        // A group choice that fails a requirement the model does not
+        // encode is offered as any other: the reference evaluation finds
+        // no valid plan in it, and the cut below removes exactly it.
         super::search::offer_group_choice(
             &memo,
             per_computation,
@@ -1548,11 +1524,11 @@ pub(crate) fn search<Id: Clone>(
         }
         if !without_plan.is_empty() {
             return Err(SelectionError::Solver(format!(
-                "no valid plan for {}{}",
+                "no valid plan for {} (raw data {})",
                 without_plan.join(", "),
                 match models.deployment_capabilities.raw_data_retained {
-                    true => "",
-                    false => " in a deployment that keeps no raw data",
+                    true => "retained",
+                    false => "not retained",
                 }
             )));
         }
