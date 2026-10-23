@@ -93,7 +93,9 @@ Accuracy is an end-to-end root requirement. Compose summary and window error onl
 
 The base formulation below separates logical coverage, shared producers, and reader attachments. Extend it with consumer-reach variables and context-dependent charges where necessary, as current code does.
 
-### 5.1 Sets and variables
+### 5.1 Variables
+
+#### Sets and notation
 
 | Symbol | Meaning |
 | --- | --- |
@@ -107,6 +109,8 @@ The base formulation below separates logical coverage, shared producers, and rea
 
 A producer input is an input slot, such as “pane chain”; it is filled by one compatible producer/configuration. `R` references logical results, while `J` references separately represented shared state. Do not encode the same dependency twice. If a producer is an ordinary memo group, its dependency can instead use `R`.
 
+#### Decision variables
+
 ```text
 a[g]             ∈ {0,1}   group g is required
 x[g,c]           ∈ {0,1}   select candidate c for g
@@ -116,7 +120,23 @@ z[g,c,j,b,s]     ∈ {0,1}   connect producer input j of (g,c) to (b,s)
 
 Configuration `s` can include summary capacity, pane width, retention, and materialization. Discrete configurations allow measured lookup-table costs without assuming a linear size/cost function. Materialization can instead use explicit legal `x[g,c,m]` variables; avoid conflicting representations. Several internal nodes can require separate assignment slots.
 
-### 5.2 Query coverage and dependencies
+#### Objective and cost attribution
+
+For fixed-context coefficients:
+
+```text
+min  Σ_{g,c} d[g,c] × x[g,c]
+   + Σ_{b,s} f[b,s] × y[b,s]
+   + Σ_{g,c,j,b,s} r[g,c,j,b,s] × z[g,c,j,b,s]
+```
+
+Here `d` is private incremental cost, `f` owns producer build/update/retention costs, and `r` is reader-specific work. All use the same horizon. Exclude shared costs from `d` to avoid duplicate charges; reuse of a merge result also needs explicit ownership.
+
+When execution rates depend on selected readers or ancestors, add consumer-reach/rate variables rather than using unconditional `f` or `r`. Reader recurrence, phase, and range-evaluation steps affect actual work; a pane-alignment gcd grid is not automatically an execution rate. Raw and pane retention depend on the longest required horizons.
+
+### 5.2 Constraints
+
+#### Query coverage and dependencies
 
 Let `Roots(q)` contain the group references needed for query `q`, including scalar roots with multiple references:
 
@@ -139,7 +159,7 @@ a[h] ≥ x[g,c]                                 for h ∈ R(g,c)
 
 Add reverse support constraints: an active group must be justified by a root, selected consuming candidate/producer, or fusion coverage. This prevents unused activation even at zero prices. Dependencies are conditional on selected candidates, not every possible child. Enforce acyclicity, exact-input requirements, and exposed-state requirements for reuse.
 
-### 5.3 Shared producers and compatibility
+#### Shared producers and compatibility
 
 For each required producer input:
 
@@ -159,19 +179,7 @@ y[b,s] ≤ Σ selected attachments requiring (b,s)
 
 Represent coexisting configurations as separate instances or explicitly permit them. This is not a global restriction to one pane width. Attachments include downstream producers; encode producers' upstream dependencies too. Compatibility covers inputs, grouping, family, reduction, windows, capacity, freshness, and timing.
 
-### 5.4 Objective and cost attribution
-
-For fixed-context coefficients:
-
-```text
-min  Σ_{g,c} d[g,c] × x[g,c]
-   + Σ_{b,s} f[b,s] × y[b,s]
-   + Σ_{g,c,j,b,s} r[g,c,j,b,s] × z[g,c,j,b,s]
-```
-
-Here `d` is private incremental cost, `f` owns producer build/update/retention costs, and `r` is reader-specific work. All use the same horizon. Exclude shared costs from `d` to avoid duplicate charges; reuse of a merge result also needs explicit ownership.
-
-When execution rates depend on selected readers or ancestors, add consumer-reach/rate variables rather than using unconditional `f` or `r`. Reader recurrence, phase, and range-evaluation steps affect actual work; a pane-alignment gcd grid is not automatically an execution rate. Raw and pane retention depend on the longest required horizons.
+#### Auxiliary-variable constraints
 
 For binary `v = u AND w`, use:
 
@@ -183,7 +191,7 @@ v ≥ u + w - 1
 
 Use valid bounds for other products and maxima. A lower-bound-only maximum is exact only when minimization or other constraints make it tight.
 
-### 5.5 Accuracy, validity, and budgets
+#### Accuracy, validity, and budgets
 
 - **Accuracy:** filter incompatible configurations and enforce proven per-query composition bounds, feasible-combination tables, or sound refinement.
 - **Physical validity:** require supported operators and legal materialization assignments, including freshness, upstream timing, and state lifetime.
