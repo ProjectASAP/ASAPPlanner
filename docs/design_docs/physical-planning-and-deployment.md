@@ -422,7 +422,11 @@ A table `Scan` the query run reads outside a raw-data-sample window (a SQL
 table) is bound at run time to the deployment's data source for that table
 (`bind_with_data_sources`). Without a reader, `scan_contract` gives its input
 contract once its predicates compile, so a compile check (the one
-`plan_installable` runs) cuts the plan there. SQL `now()` is the query's
+`plan_installable` runs) cuts the plan there. That check compiles each
+stored output's build as well as the query run: a plan the executor cannot
+build a stored output of fails it whether that output is built at ingestion
+or at query time, so no materialization of an uncompilable computation is
+selected. SQL `now()` is the query's
 evaluation time (`Scope::Query`); it has no value in an ingestion run.
 
 A SQL trailing window is a range `TimeRange(w)` over the table `Scan`, below

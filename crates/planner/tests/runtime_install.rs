@@ -3300,6 +3300,7 @@ async fn a_classic_histogram_quantile_keeps_labels_and_handles_inf_and_empty_inp
         );
         assert!((value - 0.98).abs() < 1e-9, "{value}");
     }
+}
 
 // ── PromQL absent() (issue #895) ─────────────────────────────────────────────
 
