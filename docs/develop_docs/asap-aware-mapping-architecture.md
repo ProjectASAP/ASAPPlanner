@@ -64,8 +64,8 @@ same pipeline behind the `OptimizationPass` trait that `asap-planner` calls.
 | What each summary family can merge and answer (`FamilyCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `ir/schema/family_capability.rs` |
 | Stage 2: materialization options per summary build (`NotMaterialized`, `MatAtIngestion`, `MatAtQuery`, `MatAtQueryKeptAcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-physical-asap-optimization` |
 | Timing and data-state edge rules applied from a `MaterializationAssignment` | `asap-types`, `ir/properties/timing.rs` and `ir/properties/execution_data_state.rs`; `Materialization` in `physical/materialization.rs` |
-| Stage 3: accuracy check, latency check, deployment-capability checks, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-plan-selection`, `lib.rs` and `measured_operation_costs.rs` |
-| The analytical per-operator resource model Stage 3 measures with | `asap-plan-selection`, `cost/analytical_cost.rs` and `cost/physical_operator_statistics.rs` |
+| Stage 3: accuracy check, latency check, deployment-capability checks, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-plan-selection`, `lib.rs` and `cost/measured.rs` |
+| The analytical per-operator resource model Stage 3 measures with | `asap-plan-selection`, `cost/analytical.rs` and `cost/operator_statistics.rs` |
 | The accuracy algebra: per-family guarantees, composition, budget split | `asap-logical-asap-optimization`, `accuracy/` (`AccuracyModel`, `DefaultAccuracyModel`, `estimators/`, `composition.rs`, `budget.rs`) |
 | What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs` |
 | The inputs every stage reads (`PlanningModels`: accuracy model, evidence, plan selection settings, deployment capabilities) and the `OptimizationPass` trait | `asap-plan-selection`, `pass/mod.rs` |

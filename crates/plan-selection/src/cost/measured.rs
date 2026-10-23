@@ -31,9 +31,9 @@
 //! (one sketch operation each), still loads: each entry becomes the
 //! [`OperatorCost`] of its operator at both phases.
 //!
-//! [`PlanSelectionSettings::measured_operation_costs`]: super::PlanSelectionSettings::measured_operation_costs
-//! [`ResourceUsage`]: super::ResourceUsage
-//! [`ResourceSpeed`]: super::ResourceSpeed
+//! [`PlanSelectionSettings::measured_operation_costs`]: crate::PlanSelectionSettings::measured_operation_costs
+//! [`ResourceUsage`]: crate::ResourceUsage
+//! [`ResourceSpeed`]: crate::ResourceSpeed
 
 use std::mem::discriminant;
 
@@ -44,7 +44,7 @@ use asap_types::ir::schema::{ExactKind, SketchParams};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use serde::{Deserialize, Serialize};
 
-use crate::cost::analytical_cost::AnalyticalCostError;
+use crate::cost::analytical::AnalyticalCostError;
 
 /// The deployment's measured cost table
 /// ([`PlanSelectionSettings::measured_operation_costs`]). In JSON, an object
@@ -52,7 +52,7 @@ use crate::cost::analytical_cost::AnalyticalCostError;
 /// [`MeasuredOperationCost`]. Default: empty, every node priced from the
 /// formulas.
 ///
-/// [`PlanSelectionSettings::measured_operation_costs`]: super::PlanSelectionSettings::measured_operation_costs
+/// [`PlanSelectionSettings::measured_operation_costs`]: crate::PlanSelectionSettings::measured_operation_costs
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct MeasuredOperationCosts {
     /// One entry per (operator, phase, family) the runtime measured.
@@ -215,7 +215,7 @@ pub(crate) enum StateFamily<'a> {
 
 /// A node's unit price, from its entry or interpolated between two.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct UnitPrice {
+pub(crate) struct UnitPrice {
     pub ns_per_unit: f64,
     pub ns_per_invocation: f64,
     pub memory_bytes_per_state: Option<f64>,
@@ -228,7 +228,7 @@ pub(super) struct UnitPrice {
 /// two whose sizes (`size_of`: the bytes one state allocates) are nearest
 /// below and above the node's are interpolated linearly in log size, and a
 /// size outside the measured ones takes the nearest entry's price.
-pub(super) fn lookup(
+pub(crate) fn lookup(
     table: &MeasuredOperationCosts,
     operator: OperatorKind,
     phase: ExecutionTiming,
@@ -301,7 +301,7 @@ pub(super) fn lookup(
 /// The price of an `Aggregate` at `phase` per input row: the sum over its
 /// measures, when each has an entry (one for its own phase winning over
 /// one for both).
-pub(super) fn aggregate_lookup(
+pub(crate) fn aggregate_lookup(
     table: &MeasuredOperationCosts,
     phase: ExecutionTiming,
     measures: &[AggIntent],
@@ -347,7 +347,7 @@ fn price_of(entry: &OperatorCost) -> UnitPrice {
 /// more than one of `sketch`, `exact` and `measure`, two entries for one
 /// operator, phase and family, or a non-empty table with `ms_per_cpu_op` 0
 /// (a measured time cannot then be counted in operations).
-pub(super) fn validate(
+pub(crate) fn validate(
     table: &MeasuredOperationCosts,
     ms_per_cpu_op: f64,
 ) -> Result<(), AnalyticalCostError> {
@@ -504,7 +504,7 @@ struct TableFields {
 /// node of the candidate's physical plan DAG (`PhysicalASAPDAG`), keyed by
 /// its `PhysicalASAPNodeId` in [`CandidateCost::per_node`]; not a machine.
 ///
-/// [`CandidateCost::per_node`]: super::CandidateCost::per_node
+/// [`CandidateCost::per_node`]: crate::CandidateCost::per_node
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePriceSource {

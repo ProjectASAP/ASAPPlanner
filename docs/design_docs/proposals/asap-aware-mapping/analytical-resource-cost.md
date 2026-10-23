@@ -1,7 +1,7 @@
 # Analytical resource cost model
 
 > Status: implemented model with explicit support limits. The
-> [analytical estimator](../../../../crates/plan-selection/src/cost/analytical_cost.rs)
+> [analytical estimator](../../../../crates/plan-selection/src/cost/analytical.rs)
 > is what Stage 3 measures resource usage with. The physical-plan adapter and
 > the legacy `CostModel` described below have been removed; Stage 3's cost
 > models 1–3 replace them.
@@ -45,9 +45,9 @@ The implementation keeps five layers distinct:
 
 - physical query lowering (`query_physical_lowering`), which recursively maps
   supported resolved `QueryExpr` operators to the physical representation;
-- physical evidence (`physical_operator_statistics`), which pairs every
+- physical evidence (`operator_statistics`), which pairs every
   physical operator with the statistics required by its formula;
-- analytical estimation (`analytical_cost`), which composes any evidenced DAG
+- analytical estimation (`analytical`), which composes any evidenced DAG
   whose operators have supported formulas;
 - the deployment summary physical plan provider, which maps a selected `SummaryExpr` DAG to
   physical summary operators and snapshots their evidence; and
@@ -65,9 +65,9 @@ The source modules follow those responsibilities rather than treating
 ```text
 query_physical_lowering.rs ──► EvidenceBackedPhysicalDAG
                                       │
-physical_operator_statistics.rs ──────┤ physical evidence contract
+operator_statistics.rs ───────────────┤ physical evidence contract
                                       ▼
-analytical_cost.rs ─────────── operator formulas and CPU/memory/I/O composition
+analytical.rs ──────────────── operator formulas and CPU/memory/I/O composition
         │
         └──────────────► physical_plan_cost_model.rs
                           at-rest raw/rewrite/summary comparison adapter
@@ -136,7 +136,7 @@ These schemas describe cache assumptions, not additive CPU or byte consumption.
 The mapping module re-exports the same types for existing import paths, while
 `no_cache()` and `version()` remain shared metadata methods. Workload validation
 and numeric estimation stay in mapping: callers use
-`analytical_cost::cache_hit_ratios(&profile, count, arrival)` instead of the former
+`analytical::cache_hit_ratios(&profile, count, arrival)` instead of the former
 inherent `profile.hit_ratios(...)` method. The exporter consumes the central type
 directly. Tagged JSON, required capacities, and optional invalidation are unchanged.
 
