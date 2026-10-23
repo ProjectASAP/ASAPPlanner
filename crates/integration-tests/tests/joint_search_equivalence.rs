@@ -1481,7 +1481,7 @@ fn three_way(
             "{label}: exhaustive {exhaustive:?}, memo MILP {milp:?}"
         ));
     }
-    let gap = report.solver_gap.expect("the MILP reports its gap");
+    let gap = report.gap.expect("the MILP reports its gap");
     if gap.abs() > 1e-9 {
         return Err(format!("{label}: MILP gap {gap}"));
     }

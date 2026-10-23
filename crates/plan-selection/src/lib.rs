@@ -1035,16 +1035,26 @@ pub struct SearchReport {
     /// `None` when the requested algorithm ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routed_to_legacy: Option<RoutedToLegacy>,
-    /// The MILP solver's relative gap between its best plan and its bound
-    /// at the end ([`SearchAlgorithm::MemoMilp`]); 0 when the plan is
-    /// proven optimal. `None` for every other search.
+    /// The MILP search's incumbent cost: the Stage 3 cost per second of
+    /// the best plan its rounds decoded and evaluated
+    /// ([`SearchAlgorithm::MemoMilp`]); `None` for every other search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub solver_gap: Option<f64>,
-    /// The MILP solves of the lazy loop (one per round: a solve, the exact
-    /// price of its plan, a cut); 0 (omitted in JSON) for every other
+    pub incumbent_cost: Option<f64>,
+    /// The MILP search's model bound at the end: a lower bound on the cost
+    /// per second of every plan it did not evaluate (the last solver
+    /// objective, or the incumbent cost once no plan below it is left);
+    /// `None` for every other search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_bound: Option<f64>,
+    /// (incumbent cost − model bound) / incumbent cost, at least 0: 0 when
+    /// the incumbent is proven optimal; `None` for every other search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<f64>,
+    /// The MILP search's rounds (each: a solve, the decoded plan's
+    /// incumbent evaluation, a cut); 0 (omitted in JSON) for every other
     /// search.
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub solver_iterations: u32,
+    pub rounds: u32,
     /// The wall time in milliseconds spent in the MILP solver, every round
     /// together; 0 (omitted in JSON) for every other search.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -1052,19 +1062,18 @@ pub struct SearchReport {
     /// The MILP's variables and constraints in its last round; 0 (omitted
     /// in JSON) for every other search.
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub solver_variables: u64,
+    pub model_variables: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub solver_constraints: u64,
-    /// The first round's lower bound on the cost per second, before any
-    /// cut: how tight the model is against the selected price; `None` for
-    /// every other search.
+    pub model_constraints: u64,
+    /// The first round's model bound, before any cut: how tight the model
+    /// is against the incumbent cost; `None` for every other search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub solver_first_bound_cost_per_second: Option<f64>,
+    pub first_model_bound: Option<f64>,
     /// Whether the MILP search stopped at its time limit
     /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]): its plan is
-    /// then proven optimal only if [`Self::solver_gap`] is 0.
+    /// then proven optimal only if [`Self::gap`] is 0.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub solver_time_limit_reached: bool,
+    pub time_limit_reached: bool,
 }
 
 /// The size of a sub-expression memo (planner-layering design, "The

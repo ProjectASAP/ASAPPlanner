@@ -1733,8 +1733,8 @@ fn search_flag_picks_the_search_algorithm() {
     for field in [
         "algorithm",
         "routed_to_legacy",
-        "solver_gap",
-        "solver_iterations",
+        "gap",
+        "rounds",
         "solver_time_ms",
     ] {
         assert!(report.get(field).is_none(), "{field}: {report}");
@@ -1751,11 +1751,8 @@ fn search_flag_picks_the_search_algorithm() {
     let report = &milp["stage3_plan_selection"]["search"];
     assert_eq!(report["algorithm"], "memo-milp");
     assert!(report.get("routed_to_legacy").is_none(), "{report}");
-    assert!(
-        report["solver_iterations"].as_u64().unwrap() >= 1,
-        "{report}"
-    );
-    assert!(report["solver_gap"].as_f64().unwrap() <= 1e-9, "{report}");
+    assert!(report["rounds"].as_u64().unwrap() >= 1, "{report}");
+    assert!(report["gap"].as_f64().unwrap() <= 1e-9, "{report}");
     assert!((price(&milp) - price(&legacy)).abs() <= 1e-9 * price(&legacy));
 
     let cost_model_2 = run(&[

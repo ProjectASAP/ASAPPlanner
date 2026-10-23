@@ -41,7 +41,7 @@
 // when the legacy search ran instead, why (`routed_to_legacy`). Not with
 // `--exhaustive`. `--milp-time-limit-s <f64>` limits the MILP search: at
 // the limit it selects its best plan so far and reports
-// `solver_time_limit_reached` with the gap to its bound.
+// `time_limit_reached` with the gap to its bound.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.

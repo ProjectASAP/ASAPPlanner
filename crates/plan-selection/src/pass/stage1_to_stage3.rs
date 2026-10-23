@@ -167,8 +167,8 @@ pub struct Stage1ToStage3Search {
     pub search: SearchAlgorithm,
     /// The longest the MILP search may run, in ms; `None` for no limit.
     /// Stopped at the limit, it selects its best plan so far and reports
-    /// the gap to its bound ([`crate::SearchReport::solver_gap`]) and
-    /// [`crate::SearchReport::solver_time_limit_reached`]: not proven
+    /// the gap to its bound ([`crate::SearchReport::gap`]) and
+    /// [`crate::SearchReport::time_limit_reached`]: not proven
     /// optimal unless the gap is 0.
     pub milp_time_limit_ms: Option<u64>,
 }

@@ -1587,15 +1587,19 @@ pub(crate) fn search<Id: Clone>(
     let (mut selection, selected) = selector.finish()?;
     let price = selection.costs[&selection.selected].cost_per_second;
     selection.search.memo = Some(memo_stats);
-    selection.search.solver_iterations = iterations;
-    selection.search.solver_time_ms = solver_ms as u64;
-    (
-        selection.search.solver_variables,
-        selection.search.solver_constraints,
-    ) = size;
-    selection.search.solver_first_bound_cost_per_second = first_bound;
-    selection.search.solver_time_limit_reached = time_limit_reached;
-    selection.search.solver_gap = match (price, bound) {
+    let search = &mut selection.search;
+    search.rounds = iterations;
+    search.solver_time_ms = solver_ms as u64;
+    (search.model_variables, search.model_constraints) = size;
+    search.first_model_bound = first_bound;
+    search.time_limit_reached = time_limit_reached;
+    search.incumbent_cost = price;
+    // Once no plan below the incumbent is left, the bound is the incumbent.
+    search.model_bound = bound.map(|bound| match price {
+        Some(price) => bound.min(price),
+        None => bound,
+    });
+    search.gap = match (price, search.model_bound) {
         (Some(price), Some(bound)) if price > 0.0 => Some(((price - bound) / price).max(0.0)),
         (Some(_), Some(_)) => Some(0.0),
         _ => None,
