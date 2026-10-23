@@ -1013,6 +1013,70 @@ fn logical_candidate_labels_are_distinct() {
     assert_eq!(distinct.len(), 9, "{labels:#?}");
 }
 
+/// The MILP search's final lower bound never drops below a bound an earlier
+/// round proved. `topk(32, sum by (label_0) (sum_over_time(data[1h])))`
+/// alone: round 1 proves the selected plan optimal within 1e-5, and the
+/// last round finds nothing below the incumbent. That round's bound (the
+/// incumbent less the solver's pruning tolerance, scaled by the largest
+/// charge, here the query-time top-k panes at about 308 times the
+/// selected plan) used to replace round 1's, reporting a gap of 3.09e-4.
+#[test]
+fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
+    let workload = serde_json::json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [{
+                "query": "topk(32, sum by (label_0) (sum_over_time(data[1h])))",
+                "demand": {"fixed_interval": 60000},
+                "requirements": {
+                    "accuracy": {
+                        "max_error": 0.05,
+                        "failure_probability": 0.01,
+                        "accuracy_scope": "whole_result",
+                    },
+                    "max_latency_ms": null,
+                },
+                "predictability": {"predictable": {"known_at": null}},
+            }],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 2000000.0}},
+            "sources": {"data": {
+                "series_count": 10000,
+                "metric_type": "gauge",
+                "values_non_negative": true,
+                "sample_interval": 5,
+            }},
+        },
+    });
+    let path = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_milp_final_bound.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, workload.to_string()).unwrap();
+    let document = document_of(&[
+        "--workload",
+        path.to_str().unwrap(),
+        "--deployment-capabilities",
+        r#"{"raw_data_retained": true, "query_time_results_retained": false}"#,
+        "--cost-model",
+        "aws-fargate-us-east-1",
+        "--enforce-accuracy-guarantees",
+        "--search",
+        "memo-milp",
+    ]);
+    std::fs::remove_file(&path).unwrap();
+    let milp = &document["stage3_plan_selection"]["search"]["milp"];
+    assert_eq!(milp["time_limit_reached"], false, "{milp}");
+    // The last round ran under the incumbent's cutoff and found nothing.
+    assert!(milp["rounds"].as_u64().unwrap() >= 2, "{milp}");
+    let lower_bound = milp["lower_bound"].as_f64().unwrap();
+    let first_lower_bound = milp["first_lower_bound"].as_f64().unwrap();
+    assert!(lower_bound >= first_lower_bound, "{milp}");
+    assert!(milp["gap"].as_f64().unwrap() <= 1e-4, "{milp}");
+}
+
 /// `--workload` plans a `PlanningWorkload` JSON file. A dashboard panel
 /// (`max_over_time(m[5m])` every minute over 1M series sampled every
 /// 1.5 s) answered as the last hour at 1-minute steps

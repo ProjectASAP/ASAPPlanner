@@ -2574,20 +2574,33 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         let Some(solution) = solved else {
             // No plan left below the incumbent: it is optimal, but under a
             // cutoff only to the cutoff's and the solver's tolerances, which
-            // the bound keeps, so the gap shows them.
+            // the cutoff's bound keeps. An earlier optimal round's bound
+            // still holds (see below) and may be higher: the larger is kept,
+            // so the gap shows the tolerances only when no round proved
+            // more.
             if let Some(incumbent) = self.selector.cheapest_price() {
-                self.bound = Some(match input.objective_cutoff {
+                let cutoff_bound = match input.objective_cutoff {
                     Some(_) => (incumbent * (1.0 - CUTOFF_TOLERANCE)
                         - SOLVER_PRUNING_TOLERANCE / price_scale(input))
                     .max(0.0),
                     None => incumbent,
-                });
+                };
+                self.bound = Some(self.bound.map_or(cutoff_bound, |b| b.max(cutoff_bound)));
             }
             self.done = true;
             return Ok(());
         };
         if !last_round {
-            self.bound = Some(solution.objective);
+            // An optimal round's objective bounds every plan not cut before
+            // it (to the solver's own tolerances, as every round's objective
+            // here, the first included, with or without a cutoff); every
+            // plan cut since was evaluated by Stage 3 (or is floored by the
+            // unevaluated bound in `finish`), so it holds to the end and the
+            // largest round's bound is kept.
+            self.bound = Some(
+                self.bound
+                    .map_or(solution.objective, |b| b.max(solution.objective)),
+            );
             self.first_bound.get_or_insert(solution.objective);
         }
         self.size = (solution.variables, solution.constraints);
