@@ -2249,19 +2249,22 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
 /// requirements on child groups' choices ([`ModelInput::requires`]). A
 /// plan's failure probability only grows up the plan (composition adds
 /// its inputs' failure probabilities, and a root's guarantee over a whole
-/// result is at least its per-value one), so a group's node composed over
-/// its candidate and one child candidate, every other child exact, bounds
-/// it from below. With its data-workload statistics bound and every other
-/// unknown term at zero (the optimistic floor), its failure probability
-/// above the largest target of the queries a plan may lead to the group
-/// rules the pair out: under every size threshold of the candidate's and the child's
-/// coupling sites, as a shared size may lower it. No guarantee at all (an
+/// result is at least its per-value one) unless a node is exact whatever
+/// its input (a count of rows), so a group's node composed over its
+/// candidate and one child candidate, every other child exact, bounds it
+/// from below. With its data-workload statistics
+/// bound and every other unknown term at zero (the optimistic floor), its
+/// failure probability above the largest target of the queries a plan may
+/// lead to the group rules the pair out, under every size threshold of the
+/// candidate's and the child's coupling sites. No guarantee at all (an
 /// approximate input that no rule composes) counts as failing surely. A
-/// candidate that fails
-/// with every child exact is ruled out alone. Nothing is ruled out when
-/// guarantees are not enforced or the deployment may supply evidence for
-/// an output without one. A failure only deeper compositions show is left
-/// to the exact pricing (the no-good cut of its group choice).
+/// candidate that fails with every child exact is ruled out alone. A group
+/// a plan may read through a node exact whatever its input gets no rule.
+/// Nothing is ruled out unless the built-in model's semantics hold: the
+/// deployment's accuracy model may accept an output whatever its guarantee
+/// (as when guarantees are ignored), or its evidence may supply one. A
+/// failure only deeper compositions show is left to the exact pricing (the
+/// no-good cut of its group choice).
 fn guarantee_requirements(
     memo: &Memo,
     choices: &[Choice],
@@ -2270,24 +2273,41 @@ fn guarantee_requirements(
     models: PlanningModels<'_>,
 ) -> Vec<(usize, Vec<usize>)> {
     use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
-    use asap_types::ir::properties::AccuracyMetric;
+    use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric};
     use asap_types::ir::OperatorNode;
     use std::rc::Rc;
-    if models.plan_selection.ignore_accuracy_guarantees || models.evidence.may_provide_evidence() {
+    // Only the built-in model's semantics: a model that may accept an
+    // output whatever its guarantee (also the ignore setting), or evidence,
+    // may accept what the guarantee misses.
+    if models
+        .effective_accuracy()
+        .may_accept_regardless_of_guarantee()
+        || models.evidence.may_provide_evidence()
+    {
         return Vec::new();
     }
+    // `node`'s guarantee, composed again over its inputs; `Err` when that
+    // fails.
+    let guarantee_of = |roots: &[QueryRoot]| -> Result<Option<AccuracyGuarantee>, ()> {
+        let roots = recompose_guarantees(roots).map_err(|_| ())?;
+        match &roots[0] {
+            QueryRoot::Operator(root) => Ok(root.guarantee.clone()),
+            _ => Err(()),
+        }
+    };
+    let exact = |node: &Rc<OperatorNode>| {
+        guarantee_of(&[QueryRoot::Operator(Rc::clone(node))])
+            .is_ok_and(|g| g.is_some_and(|g| g.is_exact()))
+    };
     // The optimistic floor of the failure probability of `node`'s
-    // guarantee; `Some(1.0)` for no guarantee, which no node above repairs
-    // (an approximate input no rule composes); `None` when unknown.
+    // guarantee; `Some(1.0)` for no guarantee, which no node above
+    // repairs (an approximate input no rule composes); `None` when unknown.
     let floor = |node: &Rc<OperatorNode>| -> Option<f64> {
-        let roots = recompose_guarantees(&[QueryRoot::Operator(Rc::clone(node))]).ok()?;
-        let QueryRoot::Operator(root) = &roots[0] else {
-            return None;
-        };
-        let Some(guarantee) = root.guarantee.as_ref() else {
+        let roots = [QueryRoot::Operator(Rc::clone(node))];
+        let Some(guarantee) = guarantee_of(&roots).ok()? else {
             return Some(1.0);
         };
-        crate::bind_statistics(guarantee, &|statistic| {
+        crate::bind_statistics(&guarantee, &|statistic| {
             crate::workload_statistic(statistic, None, data)
         })
         .optimistic_floor()
@@ -2296,12 +2316,33 @@ fn guarantee_requirements(
         .evaluate()
     };
     // The queries a plan may lead to each group: its roots' queries, and
-    // those of every group with a candidate reading it.
+    // those of every group with a candidate reading it. A group is free
+    // when a plan may read it with no target: a candidate's output is
+    // exact over one of its approximate candidates (a count of rows), or a
+    // free group reads it.
     let mut reaching: Vec<BTreeSet<usize>> = memo
         .groups
         .iter()
         .map(|group| group.roots_of.iter().copied().collect())
         .collect();
+    let mut free = vec![false; memo.groups.len()];
+    for candidates in &memo.candidates {
+        for candidate in candidates {
+            for &GroupId(h) in &candidate.children {
+                let h = h as usize;
+                let child_node = Rc::as_ptr(&memo.groups[h].node);
+                free[h] |= memo.candidates[h].iter().any(|d| {
+                    let replaced = HashMap::from([(child_node, Rc::clone(&d.node))]);
+                    let composed = crate::search::memo::brute_force::substituted(
+                        &candidate.node,
+                        &replaced,
+                        &mut HashMap::new(),
+                    );
+                    !exact(&d.node) && exact(&composed)
+                });
+            }
+        }
+    }
     loop {
         let mut changed = false;
         for (g, candidates) in memo.candidates.iter().enumerate() {
@@ -2311,9 +2352,11 @@ fn guarantee_requirements(
                 .flat_map(|c| c.children.iter())
                 .chain(&memo.groups[g].children);
             for child in children {
-                let before = reaching[child.0 as usize].len();
-                reaching[child.0 as usize].extend(&above);
-                changed |= reaching[child.0 as usize].len() != before;
+                let h = child.0 as usize;
+                let before = (reaching[h].len(), free[h]);
+                reaching[h].extend(&above);
+                free[h] |= free[g];
+                changed |= (reaching[h].len(), free[h]) != before;
             }
         }
         if !changed {
@@ -2321,8 +2364,12 @@ fn guarantee_requirements(
         }
     }
     // The largest target of those queries: a plan needing the group meets
-    // at least one of them through it. None when one has no target.
+    // at least one of them through it. None when one has no target, or
+    // the group is free.
     let target = |g: usize| -> Option<f64> {
+        if free[g] {
+            return None;
+        }
         let targets: Option<Vec<f64>> = reaching[g]
             .iter()
             .map(|&q| entries[q].requirements.accuracy.failure_probability)
@@ -2411,11 +2458,7 @@ fn guarantee_requirements(
         }
     }
     let metric_of = |node: &Rc<OperatorNode>| {
-        let roots = recompose_guarantees(&[QueryRoot::Operator(Rc::clone(node))]).ok()?;
-        let QueryRoot::Operator(root) = &roots[0] else {
-            return None;
-        };
-        let guarantee = root.guarantee.as_ref()?;
+        let guarantee = guarantee_of(&[QueryRoot::Operator(Rc::clone(node))]).ok()??;
         (!guarantee.is_exact()).then_some(guarantee.spec.accuracy_metric)
     };
     let metric_meets = |metric: AccuracyMetric, target: AccuracyMetric| {
@@ -2773,6 +2816,16 @@ mod tests {
     /// gauge `m` of 10,000 series) and its model's input: every choice
     /// but copies and widened scans.
     fn memo_and_input(queries: &[&str], targets: &[AccuracyTarget]) -> (Memo, ModelInput) {
+        memo_and_input_over(queries, targets, None)
+    }
+
+    /// [`memo_and_input`] with `m`'s distinct items per evaluation bound
+    /// to `max_distinct`.
+    fn memo_and_input_over(
+        queries: &[&str],
+        targets: &[AccuracyTarget],
+        max_distinct: Option<u64>,
+    ) -> (Memo, ModelInput) {
         use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
         use asap_types::ir::schema::schema_support::with_promql_series_identity;
@@ -2811,6 +2864,7 @@ mod tests {
                 "m".to_string(),
                 SourceFacts {
                     series_count: Some(10_000),
+                    max_distinct_per_evaluation: max_distinct,
                     ..SourceFacts::default()
                 },
             )]
@@ -3077,5 +3131,50 @@ mod tests {
                 .push((solution.chosen.clone(), Vec::new(), groups as f64 - 1.0));
         }
         assert!(plans > 0);
+    }
+    /// The classic HLL `params` of every summary `c`'s candidate builds.
+    fn hll_precisions(memo: &Memo, input: &ModelInput, c: usize) -> Vec<(u8, Option<f64>)> {
+        let choice = &input.choices[c];
+        asap_types::ir::OperatorNode::reachable(
+            &memo.candidates[choice.group.0 as usize][choice.candidate].node,
+        )
+        .iter()
+        .filter_map(|n| match n.asap() {
+            Some(asap_types::ir::ASAPOp::SummaryAgg {
+                family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
+                ..
+            }) => match kind.params() {
+                asap_types::ir::schema::SketchParams::Hll {
+                    precision,
+                    relative_error,
+                } => Some((*precision, *relative_error)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+    }
+
+    /// The number of series over 1,000,000 distinct items each: a count
+    /// of rows is exact whatever the per-series distinct estimates are, so
+    /// its target asks nothing of them, and an HLL that certifies no
+    /// failure probability over that many items is not ruled out.
+    #[test]
+    fn a_count_of_rows_asks_nothing_of_its_input() {
+        let (memo, input) = memo_and_input_over(
+            &["count(distinct_over_time(m[1m]))"],
+            &[AccuracyTarget::max_error(0.05).failure_probability(0.01)],
+            Some(1_000_000),
+        );
+        let hll_choices: Vec<usize> = (0..input.choices.len())
+            .filter(|&c| !hll_precisions(&memo, &input, c).is_empty())
+            .collect();
+        assert!(!hll_choices.is_empty());
+        for (c, allowed) in &input.requires {
+            assert!(
+                !(hll_choices.contains(c) && allowed.is_empty()),
+                "HLL choice {c} ruled out"
+            );
+        }
     }
 }
