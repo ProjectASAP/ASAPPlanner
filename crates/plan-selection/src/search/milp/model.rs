@@ -2592,9 +2592,11 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         };
         if !last_round {
             // An optimal round's objective bounds every plan not cut before
-            // it; every plan cut since was evaluated by Stage 3 (or is
-            // floored by the unevaluated bound in `finish`), so it holds to
-            // the end and the largest round's bound is kept.
+            // it (to the solver's own tolerances, as every round's objective
+            // here, the first included, with or without a cutoff); every
+            // plan cut since was evaluated by Stage 3 (or is floored by the
+            // unevaluated bound in `finish`), so it holds to the end and the
+            // largest round's bound is kept.
             self.bound = Some(
                 self.bound
                     .map_or(solution.objective, |b| b.max(solution.objective)),

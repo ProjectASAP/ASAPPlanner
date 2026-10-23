@@ -1069,6 +1069,8 @@ fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
     std::fs::remove_file(&path).unwrap();
     let milp = &document["stage3_plan_selection"]["search"]["milp"];
     assert_eq!(milp["time_limit_reached"], false, "{milp}");
+    // The last round ran under the incumbent's cutoff and found nothing.
+    assert!(milp["rounds"].as_u64().unwrap() >= 2, "{milp}");
     let lower_bound = milp["lower_bound"].as_f64().unwrap();
     let first_lower_bound = milp["first_lower_bound"].as_f64().unwrap();
     assert!(lower_bound >= first_lower_bound, "{milp}");
