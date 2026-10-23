@@ -5,4 +5,5 @@
 
 pub(crate) mod clusters;
 pub(crate) mod coefficients;
+pub(crate) mod decode;
 pub(crate) mod model;

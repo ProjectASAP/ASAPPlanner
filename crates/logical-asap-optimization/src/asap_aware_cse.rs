@@ -502,6 +502,18 @@ pub fn identical_expression_pass2_candidates(
         .collect()
 }
 
+/// `roots` with the sharing candidates `subset` selects made one node each
+/// (and the ones that leaves one node): one identical-expression Pass 2
+/// candidate, for a search that decides which nodes to share rather than
+/// listing every closed set ([`identical_expression_pass2_candidates`]).
+pub fn with_shared_candidates(
+    roots: &[QueryRoot],
+    candidates: &[SharingCandidate],
+    subset: &[bool],
+) -> Vec<QueryRoot> {
+    apply(roots, candidates, subset).0
+}
+
 /// `roots` with the sharing candidates in `subset` shared, and the ones
 /// that leaves shared: those whose every node still read became one node (a
 /// node below a shared node other than the one kept is no longer read).

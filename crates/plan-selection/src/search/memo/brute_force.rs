@@ -436,7 +436,7 @@ fn build(
 }
 
 /// Mark `g` and every group below it through the groups' children.
-fn mark_below(memo: &Memo, g: usize, below: &mut [bool]) {
+pub(crate) fn mark_below(memo: &Memo, g: usize, below: &mut [bool]) {
     if below[g] {
         return;
     }

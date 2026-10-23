@@ -133,6 +133,9 @@ pub(crate) struct ChoiceParts {
     pub build_keys: Vec<u32>,
     /// Per part (direct, then each slot), its nodes' keys.
     pub part_keys: Vec<HashSet<u32>>,
+    /// The candidate at the choice's site thresholds, which solution
+    /// decoding composes.
+    pub version: ImplementationCandidate,
 }
 
 pub(crate) fn choice_parts(
@@ -199,6 +202,32 @@ pub(crate) fn choice_parts(
                 models.deployment_capabilities,
             ) else {
                 continue;
+            };
+            // Built for one query twice, a build may be built once only
+            // because of the second copy: the keys of the builds Stage 2
+            // also builds once for the one query alone.
+            let built_once_alone: Option<HashSet<u32>> = match built_for.as_slice() {
+                [a, b] if a == b => {
+                    let alone = optimize_physical_asap(
+                        "S",
+                        &roots[..1],
+                        &part_entries[..1],
+                        data,
+                        models.deployment_capabilities,
+                    )
+                    .unwrap_or_default();
+                    let mut keys = HashSet::new();
+                    for physical in &alone {
+                        let all = keys_of(&physical.dag, cache.keys_mut());
+                        for (i, node) in physical.dag.nodes.iter().enumerate() {
+                            if matches!(node.materialization, Materialization::MatAtQuery(_)) {
+                                keys.insert(all[i]);
+                            }
+                        }
+                    }
+                    Some(keys)
+                }
+                _ => None,
             };
             let child_groups = children_of(memo, group, candidate);
             let child_key_sets: Vec<Rc<crate::cost::per_node::ChildKeys>> = child_groups
@@ -323,6 +352,29 @@ pub(crate) fn choice_parts(
                             .iter()
                             .map(|&i| physical.dag.nodes[i].materialization)
                             .collect();
+                        let built_once_keys: Vec<u32> = builds
+                            .iter()
+                            .filter(|&&i| {
+                                matches!(
+                                    physical.dag.nodes[i].materialization,
+                                    Materialization::MatAtQuery(_)
+                                )
+                            })
+                            .map(|&i| widened[i])
+                            .collect();
+                        let built_once_with_other_group: Vec<u32> = match &built_once_alone {
+                            Some(alone) => builds
+                                .iter()
+                                .filter(|&&i| {
+                                    matches!(
+                                        physical.dag.nodes[i].materialization,
+                                        Materialization::MatAtQuery(_)
+                                    ) && !alone.contains(&keys[i])
+                                })
+                                .map(|&i| widened[i])
+                                .collect(),
+                            None => Vec::new(),
+                        };
                         if seen.contains(&assignment) {
                             continue;
                         }
@@ -375,6 +427,8 @@ pub(crate) fn choice_parts(
                                     _ => None,
                                 },
                                 scan_project_cost_per_unit_rate: parts.scan_project_cost,
+                                built_once_with_other_group,
+                                built_once_keys,
                             },
                             lazy: LazyTerms {
                                 thresholds: thresholds.clone(),
@@ -386,6 +440,7 @@ pub(crate) fn choice_parts(
                             slot_keys: parts.slot_keys,
                             build_keys: builds.iter().map(|&i| shallow[i]).collect(),
                             part_keys: parts.part_keys,
+                            version: candidate.clone(),
                         });
                     }
                 }
@@ -1904,8 +1959,9 @@ mod tests {
             };
         let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         let memo = memo(&per_computation, &entries);
-        let input =
-            crate::search::milp::model::model_input_of(&memo, &entries, &data, models).unwrap();
+        let input = crate::search::milp::model::model_input_of(&memo, &entries, &data, models)
+            .unwrap()
+            .0;
         let checked = crate::search::milp::model::lower_bound_check(
             &memo,
             &per_computation,

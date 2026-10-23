@@ -18,7 +18,7 @@ use good_lp::{
     constraint, variable, Expression, ProblemVariables, Solution, SolverModel, Variable, WithMipGap,
 };
 
-use crate::search::memo::{GroupId, Memo};
+use crate::search::memo::{GroupId, ImplementationCandidate, Memo};
 use crate::search::milp::coefficients::LazyTerms;
 use crate::{CostModel, PlanSelector, PlanningModels, ResourceUnitCost, Selection, SelectionError};
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
@@ -169,6 +169,13 @@ pub(crate) struct Choice {
     /// pass once (readers of one scan share its node), plus the largest
     /// excess over it.
     pub scan_project_cost_per_unit_rate: f64,
+    /// The keys of its private builds built once at query time that only
+    /// another group's identical build makes so: alone, the build has one
+    /// reader and Stage 2 recomputes it. A plan with this choice also has
+    /// another group's choice building the same node once.
+    pub built_once_with_other_group: Vec<u32>,
+    /// The keys of all its private builds built once at query time.
+    pub built_once_keys: Vec<u32>,
 }
 
 /// A shared group's own node, built once per evaluation when chosen.
@@ -210,6 +217,14 @@ pub(crate) struct ModelInput {
     /// With the groups that plan does not need: a plan needing any of them
     /// is another plan, not cut.
     pub excluded: Vec<(Vec<usize>, Vec<usize>, f64)>,
+    /// Per cut of `excluded` (by position; missing for the cuts that set
+    /// none), the groups built once and the groups not built once in the
+    /// plan it excludes: a solution that differs in either describes
+    /// another plan.
+    pub excluded_once: Vec<(Vec<GroupId>, Vec<GroupId>)>,
+    /// Per choice, the threshold index it reads each coupling site at (by
+    /// site key): the choices of one plan read each site at one threshold.
+    pub site_thresholds: Vec<Vec<(u64, usize)>>,
     /// Lower bounds on the omitted cost, added as `extra ≥ bound` when all
     /// of a choice set is chosen (local cuts).
     pub extra_bounds: Vec<(Vec<usize>, f64)>,
@@ -240,7 +255,7 @@ pub(crate) struct ModelInput {
     pub relaxed: bool,
 }
 
-/// The memory a choice's parts hold while an evaluation runs, priced per
+/// The memory a choice's parts hold while an evaluation runs, charged per
 /// ms of latency: Stage 3 charges `bytes · rate · E / 1000` at the memory
 /// price, `E` the latency of the queries reaching the part.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -946,6 +961,19 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         }
     }
     let vars_exclusive = (vars.add(binary()), vars.add(binary()));
+    // One variable per (site, threshold), keyed by its first reader.
+    let mut site_threshold_vars: HashMap<(u64, usize), Variable> = HashMap::new();
+    {
+        let mut first: BTreeMap<(u64, usize), usize> = BTreeMap::new();
+        for (c, sites) in input.site_thresholds.iter().enumerate() {
+            for &(site, threshold) in sites {
+                first.entry((site, threshold)).or_insert(c);
+            }
+        }
+        for ((site, _), c) in first {
+            site_threshold_vars.insert((site, c), vars.add(binary()));
+        }
+    }
     let source_count = input
         .raw_scans
         .iter()
@@ -981,6 +1009,51 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     for (c, choice) in input.choices.iter().enumerate() {
         for child in &choice.children {
             constraints.push(constraint!(need[child.0 as usize] >= x[c]));
+        }
+    }
+    // A group is needed only as a root or as a chosen choice's child: a
+    // choice nothing reads is no part of the plan. And a scan shared by
+    // one reader is that reader's own scan (read apart), the same plan.
+    let mut readers: Vec<Expression> = (0..n).map(|_| Expression::from(0.0)).collect();
+    let mut shared_scan_readers: Vec<Expression> = (0..n).map(|_| Expression::from(0.0)).collect();
+    for (c, choice) in input.choices.iter().enumerate() {
+        for child in &choice.children {
+            readers[child.0 as usize] += x[c];
+        }
+        // A fused choice needs the other groups it implements.
+        for implemented in choice.implements.iter().skip(1) {
+            readers[implemented.0 as usize] += x[c];
+        }
+        for (scan, horizon) in &choice.scan_children {
+            if horizon.is_some() {
+                shared_scan_readers[scan.0 as usize] += x[c];
+            }
+        }
+    }
+    let is_root: Vec<bool> = (0..n)
+        .map(|g| {
+            input
+                .queries
+                .iter()
+                .any(|q| q.roots.iter().any(|r| r.0 as usize == g))
+        })
+        .collect();
+    let is_scan: Vec<bool> = (0..n)
+        .map(|g| {
+            input
+                .choices
+                .iter()
+                .any(|c| c.group.0 as usize == g && c.scan_source.is_some())
+        })
+        .collect();
+    for (g, read) in readers.into_iter().enumerate() {
+        if !is_root[g] {
+            constraints.push(constraint!(need[g] <= read));
+        }
+    }
+    for (g, read) in shared_scan_readers.into_iter().enumerate() {
+        if is_scan[g] && !is_root[g] {
+            constraints.push(constraint!(read >= 2.0 * need[g]));
         }
     }
     for (&g, &v) in &once {
@@ -1346,7 +1419,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         }
     }
     // Cuts.
-    for (set, outside, bound) in &input.excluded {
+    for (i, (set, outside, bound)) in input.excluded.iter().enumerate() {
         let mut chosen = Expression::from(0.0);
         for &c in set {
             chosen += x[c];
@@ -1354,7 +1427,57 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         for &g in outside {
             chosen -= need[g];
         }
+        if let Some((built, not_built)) = input.excluded_once.get(i) {
+            for g in built {
+                if let Some(&v) = once.get(g) {
+                    chosen += v;
+                }
+            }
+            for g in not_built {
+                if let Some(&v) = once.get(g) {
+                    chosen -= v;
+                }
+            }
+        }
         constraints.push(constraint!(chosen <= *bound));
+    }
+    // Each coupling site at one threshold: `x[c] ≤ u[site, threshold of c]`,
+    // at most one threshold per site.
+    let mut site_choice: BTreeMap<(u64, usize), Vec<usize>> = BTreeMap::new();
+    for (c, sites) in input.site_thresholds.iter().enumerate() {
+        for &(site, threshold) in sites {
+            site_choice.entry((site, threshold)).or_default().push(c);
+        }
+    }
+    let mut per_site: BTreeMap<u64, Expression> = BTreeMap::new();
+    for ((site, _), readers) in &site_choice {
+        let u = site_threshold_vars[&(*site, readers[0])];
+        *per_site.entry(*site).or_default() += u;
+        for &c in readers {
+            constraints.push(constraint!(x[c] <= u));
+        }
+    }
+    for (_, any) in per_site {
+        constraints.push(constraint!(any <= 1));
+    }
+    // A build built once only with another group's identical build: some
+    // other group's choice builds it too.
+    let mut builders: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (c, choice) in input.choices.iter().enumerate() {
+        for &key in &choice.built_once_keys {
+            builders.entry(key).or_default().push(c);
+        }
+    }
+    for (c, choice) in input.choices.iter().enumerate() {
+        for key in &choice.built_once_with_other_group {
+            let mut others = Expression::from(0.0);
+            for &o in &builders[key] {
+                if input.choices[o].group != choice.group {
+                    others += x[o];
+                }
+            }
+            constraints.push(constraint!(x[c] <= others));
+        }
     }
     for ((set, bound), &e) in input.extra_bounds.iter().zip(&extra) {
         let mut chosen = Expression::from(0.0);
@@ -1733,15 +1856,16 @@ fn run_rounds<Id: Clone>(loops: &mut [ClusterLoop<'_, Id>]) -> Result<(), Select
     })
 }
 
-/// One cluster's lazy loop: solve the model (a lower bound: it omits memory held while a
-/// query runs, and checks composed guarantees only on its incumbents);
-/// evaluate the solution's group choice exactly, as the reference search
-/// does ([`crate::search::memo::brute_force::offer_group_choice`]: every threshold,
-/// identical-expression variant and Stage 2 materialization), which
-/// updates the incumbent; add a no-good cut excluding that group choice;
-/// stop when the MILP lower bound reaches the incumbent cost. Each group
-/// choice is evaluated at most once, so the loop ends, and the incumbent is
-/// the reference search's optimum.
+/// One cluster's lazy loop (joint-planning-search design, "One solution,
+/// one plan"): solve the model, whose objective is the MILP lower bound
+/// (coefficient derivation gives lower bounds); decode the solution to the
+/// one plan it describes ([`crate::search::milp::decode`]); run incumbent
+/// evaluation (Stage 3 on that plan, and on the few variants the model has
+/// no variable for yet: its widened scans, and the materializations of the
+/// nodes no variable sets), which may improve the incumbent; cut exactly that solution's choice set; stop when the MILP
+/// lower bound reaches the incumbent cost. Each choice set is evaluated at
+/// most once, so the loop ends. The decoding gaps listed in
+/// [`crate::search::milp::decode`] are plans no solution decodes to.
 ///
 /// A round is [`Self::next_round`], [`solve`] of [`Self::input`] (on a
 /// solver thread, [`run_rounds`]), then [`Self::take_solution`].
@@ -1758,6 +1882,9 @@ struct ClusterLoop<'a, Id> {
     time_limit_ms: Option<u64>,
     /// The model; `None` while a solver thread has it.
     input: Option<ModelInput>,
+    /// Per choice of the model, its candidate at its site thresholds,
+    /// which solution decoding composes.
+    versions: Vec<ImplementationCandidate>,
     selector: PlanSelector<'a>,
     logical: HashMap<String, Vec<QueryRoot>>,
     number: usize,
@@ -1783,7 +1910,7 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         started: std::time::Instant,
         time_limit_ms: Option<u64>,
     ) -> Result<Self, SelectionError> {
-        let input = model_input_of(&memo, entries, data, models)?;
+        let (input, versions) = model_input_of(&memo, entries, data, models)?;
         Ok(Self {
             memo,
             per_computation,
@@ -1794,6 +1921,7 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             started,
             time_limit_ms,
             input: Some(input),
+            versions,
             selector: PlanSelector::new(entries, data, models, false)?,
             logical: HashMap::new(),
             number: 0,
@@ -1876,48 +2004,57 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
                 return Ok(());
             }
         }
-        // The solution's group choice: the candidate each chosen choice
-        // takes for its group.
-        let mut group_choice: crate::search::memo::brute_force::GroupChoice =
-            vec![None; memo.groups.len()];
-        for &c in &solution.chosen {
-            group_choice[input.choices[c].group.0 as usize] = Some(input.choices[c].candidate);
-        }
-        // A group choice that fails a requirement the model does not
-        // encode is evaluated as any other: the incumbent evaluation finds
-        // no valid plan in it, and the cut below removes exactly it.
-        crate::search::memo::brute_force::offer_group_choice(
+        // Solution decoding, then incumbent evaluation: Stage 3 on the plan
+        // the solution describes and its variants.
+        self.number += 1;
+        let id = format!("L{}", self.number);
+        let decoded = crate::search::milp::decode::decode(
             memo,
             self.per_computation,
-            &group_choice,
+            &input.choices,
+            &self.versions,
+            &solution.chosen,
+            &solution.built_once,
             self.entries,
             self.data,
             self.models,
-            &mut self.selector,
-            &mut self.logical,
-            &mut self.number,
-        )?;
-        // Exclude it: every choice of each chosen (group, candidate).
-        let groups = group_choice.iter().flatten().count();
-        let excluded: Vec<usize> = input
-            .choices
-            .iter()
-            .enumerate()
-            .filter(|(_, choice)| group_choice[choice.group.0 as usize] == Some(choice.candidate))
-            .map(|(c, _)| c)
-            .collect();
+            &id,
+        );
+        for (k, decoded) in decoded.into_iter().enumerate() {
+            let logical_id = decoded.physical.from_logical.clone();
+            let mut physical = decoded.physical;
+            physical.id = format!("P{}-{k}", self.number);
+            self.selector.offer(&physical)?;
+            if self.selector.keeps_from_logical(&logical_id) {
+                self.logical.insert(logical_id, decoded.roots);
+            }
+            let selector = &self.selector;
+            self.logical.retain(|id, _| selector.keeps_from_logical(id));
+        }
+        // Cut exactly the decoded choice set: these choices, these groups
+        // built once or not, no other group needed.
         let mut covered = vec![false; memo.groups.len()];
-        for (g, c) in group_choice.iter().enumerate() {
-            if let Some(c) = c {
-                for i in &memo.candidates[g][*c].implements {
-                    covered[i.0 as usize] = true;
-                }
+        for &c in &solution.chosen {
+            for i in &input.choices[c].implements {
+                covered[i.0 as usize] = true;
             }
         }
         let outside = (0..memo.groups.len()).filter(|&g| !covered[g]).collect();
+        let built: Vec<GroupId> = solution.built_once.iter().copied().collect();
+        let not_built: Vec<GroupId> = input
+            .group_slots
+            .iter()
+            .map(|slot| slot.group)
+            .filter(|g| !solution.built_once.contains(g))
+            .collect();
+        let bound = (solution.chosen.len() + built.len()) as f64 - 1.0;
+        while input.excluded_once.len() < input.excluded.len() {
+            input.excluded_once.push((Vec::new(), Vec::new()));
+        }
         input
             .excluded
-            .push((excluded, outside, groups as f64 - 1.0));
+            .push((solution.chosen.clone(), outside, bound));
+        input.excluded_once.push((built, not_built));
         Ok(())
     }
 
@@ -2051,7 +2188,7 @@ pub(crate) fn model_input_of(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
-) -> Result<ModelInput, SelectionError> {
+) -> Result<(ModelInput, Vec<ImplementationCandidate>), SelectionError> {
     let scale = crate::cost::per_node::frozen_calibration(memo, entries, data, models)?;
     let mut cache = crate::cost::per_node::PriceCache::new(scale);
     let mut choices: Vec<Choice> = Vec::new();
@@ -2060,8 +2197,13 @@ pub(crate) fn model_input_of(
     let CostModel::UsageOverTime(prices) = &models.plan_selection.cost_model else {
         unreachable!("the caller routes cost models 2 and 3 to the legacy search");
     };
+    // Per choice, its candidate at its site thresholds (for solution
+    // decoding) and the threshold it reads each site at.
+    let mut versions: Vec<ImplementationCandidate> = Vec::new();
+    let mut site_thresholds: Vec<Vec<(u64, usize)>> = Vec::new();
+    let mut kept = Vec::new();
     for g in 0..memo.groups.len() {
-        let (group_choices, lazy) = crate::search::milp::coefficients::choices(
+        let parts = crate::search::milp::coefficients::choice_parts(
             memo,
             GroupId(g as u32),
             entries,
@@ -2075,23 +2217,54 @@ pub(crate) fn model_input_of(
         // and its builds are sized for fewer readers but built per copy. So
         // the model keeps the shared choices (a lower bound), and the exact
         // pricing of a group choice prices both.
-        // Widened scans are reached through the identical-expression
-        // variants of the exact pricing, never chosen directly.
-        for (choice, lazy) in group_choices.into_iter().zip(lazy) {
-            if choice.copy_of.is_some()
-                || memo.candidates[g][choice.candidate].origin
-                    == crate::search::memo::CandidateOrigin::WidenedScans
-            {
-                continue;
+        // Widened scans are not model variables: a solution also decodes
+        // to its widened plan ([`crate::search::milp::decode`]).
+        kept.extend(parts.into_iter().filter(|part| {
+            part.choice.copy_of.is_none()
+                && memo.candidates[g][part.choice.candidate].origin
+                    != crate::search::memo::CandidateOrigin::WidenedScans
+        }));
+    }
+    // A choice whose build is built once only with another group's
+    // identical build needs such a choice: without any, it describes no plan.
+    loop {
+        let mut groups_of_key: HashMap<u32, BTreeSet<GroupId>> = HashMap::new();
+        for part in &kept {
+            for &key in &part.choice.built_once_keys {
+                groups_of_key
+                    .entry(key)
+                    .or_default()
+                    .insert(part.choice.group);
             }
-            lazies.push(lazy.clone());
-            raw_scans.extend(
-                lazy.raw_scans
-                    .iter()
-                    .map(|(source, bytes, via)| (choices.len(), source.clone(), *bytes, *via)),
-            );
-            choices.push(choice);
         }
+        let before = kept.len();
+        kept.retain(|part| {
+            part.choice
+                .built_once_with_other_group
+                .iter()
+                .all(|key| groups_of_key[key].iter().any(|&g| g != part.choice.group))
+        });
+        if kept.len() == before {
+            break;
+        }
+    }
+    for part in kept {
+        let (choice, lazy) = (part.choice, part.lazy);
+        versions.push(part.version);
+        site_thresholds.push(
+            lazy.thresholds
+                .iter()
+                .filter(|(site, _)| site.kind != crate::search::memo::CouplingKind::RawHorizon)
+                .map(|(site, t)| (site.key, *t))
+                .collect(),
+        );
+        lazies.push(lazy.clone());
+        raw_scans.extend(
+            lazy.raw_scans
+                .iter()
+                .map(|(source, bytes, via)| (choices.len(), source.clone(), *bytes, *via)),
+        );
+        choices.push(choice);
     }
     let mut input = model_input(memo, choices, entries, data, models)?;
     let mut sources: Vec<String> = Vec::new();
@@ -2165,7 +2338,8 @@ pub(crate) fn model_input_of(
         .zip(&lazies)
         .map(|(choice, lazy)| held_at_query_time(choice, lazy, prices, &shared_keys))
         .collect();
-    Ok(input)
+    input.site_thresholds = site_thresholds;
+    Ok((input, versions))
 }
 
 /// Every group choice of `memo` with its exact price (the cheapest plan
@@ -2233,6 +2407,8 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         schedule: input.schedule.clone(),
         union_rate: input.union_rate.clone(),
         excluded: input.excluded.clone(),
+        excluded_once: input.excluded_once.clone(),
+        site_thresholds: input.site_thresholds.clone(),
         extra_bounds: input.extra_bounds.clone(),
         requires: input.requires.clone(),
         exclusive: input.exclusive.clone(),
@@ -2711,6 +2887,8 @@ fn model_input(
         schedule,
         union_rate,
         excluded: Vec::new(),
+        excluded_once: Vec::new(),
+        site_thresholds: Vec::new(),
         extra_bounds: Vec::new(),
         requires,
         exclusive,
@@ -2753,6 +2931,8 @@ mod tests {
             scan_horizon_ms: None,
             scan_source: None,
             scan_project_cost_per_unit_rate: 0.0,
+            built_once_with_other_group: Vec::new(),
+            built_once_keys: Vec::new(),
         }
     }
 
@@ -2788,6 +2968,8 @@ mod tests {
             schedule: vec![0, 0],
             union_rate: [(vec![0], 1.0)].into(),
             excluded: Vec::new(),
+            excluded_once: Vec::new(),
+            site_thresholds: Vec::new(),
             extra_bounds: Vec::new(),
             requires: Vec::new(),
             exclusive: (Vec::new(), Vec::new()),
