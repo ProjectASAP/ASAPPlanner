@@ -1587,23 +1587,26 @@ pub(crate) fn search<Id: Clone>(
     let (mut selection, selected) = selector.finish()?;
     let price = selection.costs[&selection.selected].cost_per_second;
     selection.search.memo = Some(memo_stats);
-    let search = &mut selection.search;
-    search.rounds = iterations;
-    search.solver_time_ms = solver_ms as u64;
-    (search.model_variables, search.model_constraints) = size;
-    search.first_model_bound = first_bound;
-    search.time_limit_reached = time_limit_reached;
-    search.incumbent_cost = price;
     // Once no plan below the incumbent is left, the bound is the incumbent.
-    search.model_bound = bound.map(|bound| match price {
+    let lower_bound = bound.map(|bound| match price {
         Some(price) => bound.min(price),
         None => bound,
     });
-    search.gap = match (price, search.model_bound) {
-        (Some(price), Some(bound)) if price > 0.0 => Some(((price - bound) / price).max(0.0)),
-        (Some(_), Some(_)) => Some(0.0),
-        _ => None,
-    };
+    selection.search.incumbent_cost = price;
+    selection.search.milp = Some(crate::MilpReport {
+        lower_bound,
+        first_lower_bound: first_bound,
+        gap: match (price, lower_bound) {
+            (Some(price), Some(bound)) if price > 0.0 => Some(((price - bound) / price).max(0.0)),
+            (Some(_), Some(_)) => Some(0.0),
+            _ => None,
+        },
+        rounds: iterations,
+        variable_count: size.0,
+        constraint_count: size.1,
+        solver_time_ms: solver_ms as u64,
+        time_limit_reached,
+    });
     let roots = logical
         .remove(&selected.from_logical)
         .expect("the selection's logical roots are kept");

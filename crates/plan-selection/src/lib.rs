@@ -1035,44 +1035,42 @@ pub struct SearchReport {
     /// `None` when the requested algorithm ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routed_to_legacy: Option<RoutedToLegacy>,
-    /// The MILP search's incumbent cost: the Stage 3 cost per second of
-    /// the best plan its rounds decoded and evaluated
-    /// ([`SearchAlgorithm::MemoMilp`]); `None` for every other search.
+    /// The selected plan's cost per second (Stage 3's exact cost); `None`
+    /// when no plan was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incumbent_cost: Option<f64>,
-    /// The MILP search's model bound at the end: a lower bound on the cost
-    /// per second of every plan it did not evaluate (the last solver
+    /// What the MILP search ([`SearchAlgorithm::MemoMilp`]) did; `None`
+    /// for every other search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milp: Option<MilpReport>,
+}
+
+/// The MILP search's report: its bound, gap and effort.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MilpReport {
+    /// The MILP lower bound at the end: a lower bound on the cost per
+    /// second of every plan the search did not evaluate (the last solver
     /// objective, or the incumbent cost once no plan below it is left);
-    /// `None` for every other search.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_bound: Option<f64>,
-    /// (incumbent cost − model bound) / incumbent cost, at least 0: 0 when
-    /// the incumbent is proven optimal; `None` for every other search.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `None` when no round finished and no relaxation was solved.
+    pub lower_bound: Option<f64>,
+    /// The first round's MILP lower bound, before any cut: how tight the
+    /// model is against the incumbent cost.
+    pub first_lower_bound: Option<f64>,
+    /// (incumbent cost − lower bound) / incumbent cost, at least 0: 0 when
+    /// the incumbent is proven optimal.
     pub gap: Option<f64>,
-    /// The MILP search's rounds (each: a solve, the decoded plan's
-    /// incumbent evaluation, a cut); 0 (omitted in JSON) for every other
-    /// search.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// Its rounds (each: a solve, the decoded plan's incumbent evaluation,
+    /// a cut).
     pub rounds: u32,
-    /// The wall time in milliseconds spent in the MILP solver, every round
-    /// together; 0 (omitted in JSON) for every other search.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// The MILP's variables and constraints in its last round.
+    pub variable_count: u64,
+    pub constraint_count: u64,
+    /// The wall time in milliseconds spent in the solver, every round
+    /// together.
     pub solver_time_ms: u64,
-    /// The MILP's variables and constraints in its last round; 0 (omitted
-    /// in JSON) for every other search.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub model_variables: u64,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub model_constraints: u64,
-    /// The first round's model bound, before any cut: how tight the model
-    /// is against the incumbent cost; `None` for every other search.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_model_bound: Option<f64>,
-    /// Whether the MILP search stopped at its time limit
-    /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]): its plan is
-    /// then proven optimal only if [`Self::gap`] is 0.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Whether it stopped at its time limit
+    /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]): the plan is
+    /// then proven optimal only if `gap` is 0.
     pub time_limit_reached: bool,
 }
 
@@ -1122,9 +1120,6 @@ impl SearchAlgorithm {
     }
 }
 
-fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
-    *value == T::default()
-}
 
 /// Why the legacy search ran instead of the requested memo search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2112,6 +2107,7 @@ impl<'a> PlanSelector<'a> {
             &query_reach(&sized.dag, &node_map(&sized.dag)),
             &self.range_evaluations,
         );
+        let incumbent_cost = self.costs.get(&selected).and_then(|c| c.cost_per_second);
         let selection = Selection {
             selected,
             plan,
@@ -2123,24 +2119,26 @@ impl<'a> PlanSelector<'a> {
             search: SearchReport {
                 candidates_checked: self.candidates_checked,
                 runner_up_cost_per_second: self.runner_up,
+                incumbent_cost,
                 ..SearchReport::default()
             },
         };
         Ok((selection, built))
     }
 
-    /// Under a price ranking, fold the price of valid candidate `cost`
-    /// into the cheapest price and the runner-up ([`ROUNDING`]).
-    /// Under a price ranking, the cheapest price of the valid candidates
-    /// offered so far.
+    /// The rejections recorded so far.
     pub(crate) fn rejections(&self) -> &[Rejection] {
         &self.rejected
     }
 
+    /// Under a price ranking, the cheapest price of the valid candidates
+    /// offered so far.
     pub(crate) fn cheapest_price(&self) -> Option<f64> {
         self.cheapest
     }
 
+    /// Under a price ranking, fold the price of valid candidate `cost`
+    /// into the cheapest price and the runner-up ([`ROUNDING`]).
     fn track_runner_up(&mut self, cost: &CandidateCost) {
         let (Ranking::Price, Some(price)) = (self.ranking, cost.cost_per_second) else {
             return;

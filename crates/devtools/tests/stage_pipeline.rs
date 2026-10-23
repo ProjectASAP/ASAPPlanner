@@ -1728,17 +1728,12 @@ fn search_flag_picks_the_search_algorithm() {
     let legacy = run(&["--search", "legacy"]);
     assert_eq!(legacy["search"], "default");
     let report = &legacy["stage3_plan_selection"]["search"];
-    // The legacy search's report omits the algorithm and the solver's
-    // fields, which only the MILP fills.
-    for field in [
-        "algorithm",
-        "routed_to_legacy",
-        "gap",
-        "rounds",
-        "solver_time_ms",
-    ] {
+    // The legacy search's report omits the algorithm and the MILP's
+    // report; every search reports its selected plan's cost.
+    for field in ["algorithm", "routed_to_legacy", "milp"] {
         assert!(report.get(field).is_none(), "{field}: {report}");
     }
+    assert_eq!(report["incumbent_cost"].as_f64(), Some(price(&legacy)));
 
     let brute_force = run(&["--search", "memo-brute-force"]);
     assert_eq!(brute_force["search"], "memo-brute-force");
@@ -1751,8 +1746,14 @@ fn search_flag_picks_the_search_algorithm() {
     let report = &milp["stage3_plan_selection"]["search"];
     assert_eq!(report["algorithm"], "memo-milp");
     assert!(report.get("routed_to_legacy").is_none(), "{report}");
-    assert!(report["rounds"].as_u64().unwrap() >= 1, "{report}");
-    assert!(report["gap"].as_f64().unwrap() <= 1e-9, "{report}");
+    let milp_report = &report["milp"];
+    assert!(milp_report["rounds"].as_u64().unwrap() >= 1, "{report}");
+    assert!(milp_report["gap"].as_f64().unwrap() <= 1e-9, "{report}");
+    assert!(
+        milp_report["lower_bound"].as_f64().unwrap() <= price(&milp) * (1.0 + 1e-9),
+        "{report}"
+    );
+    assert_eq!(milp_report["time_limit_reached"], false, "{report}");
     assert!((price(&milp) - price(&legacy)).abs() <= 1e-9 * price(&legacy));
 
     let cost_model_2 = run(&[
