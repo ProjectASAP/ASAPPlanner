@@ -1906,6 +1906,76 @@ fn a_sketch_rollup_beside_other_quantiles_selects_the_exhaustive_price() {
     assert_memo_selects_the_exhaustive_price("Q2, Q3, Q4", &workload(&[q2, q3, q4]));
 }
 
+/// #839's workload (two 10-minute sums every 20 s, two 100-second
+/// quantiles of one metric at different label sets every second): the
+/// cheapest plan widens the quantiles' scans to one label set and shares
+/// one scan. With its term cuts (a source's scans apart or widened, held
+/// memory, ingestion copies) the memo MILP certifies the memo brute
+/// force's price.
+#[test]
+fn term_cuts_certify_the_brute_force_price_on_839() {
+    let entries: Vec<serde_json::Value> = [
+        (
+            "sum by (region, service, job) (sum_over_time(m[10m]))",
+            20000,
+        ),
+        ("sum by (region, service) (sum_over_time(m[10m]))", 20000),
+        (
+            "avg by (region, service, job) (quantile_over_time(0.99, m[100s]))",
+            1000,
+        ),
+        ("avg by (region) (quantile_over_time(0.95, m[100s]))", 1000),
+    ]
+    .iter()
+    .map(|(q, interval)| {
+        serde_json::json!({
+            "query": q,
+            "demand": {"fixed_interval": interval},
+            "requirements": {"accuracy": {"max_error": 0.05, "failure_probability": 0.3}},
+            "predictability": {"predictable": {"known_at": null}}
+        })
+    })
+    .collect();
+    let workload: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": entries},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 100000.0}},
+            "sources": {"m": {"series_count": 10000, "metric_type": "gauge", "values_non_negative": true, "sample_interval": 100}}
+        }
+    }))
+    .unwrap();
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let models = PlanningModels::builtin();
+    let run = |search| {
+        run_stage1_to_stage3_with(
+            roots.iter().cloned().enumerate().collect(),
+            &entries,
+            &data,
+            models,
+            search,
+        )
+        .unwrap()
+        .stage3_plan_selection
+        .unwrap()
+    };
+    let brute_force = run(Stage1ToStage3Search::with_algorithm(
+        SearchAlgorithm::MemoBruteForce,
+    ));
+    let milp = run(Stage1ToStage3Search::with_algorithm(
+        SearchAlgorithm::MemoMilp,
+    ));
+    let price = |s: &asap_plan_selection::Selection| s.costs[&s.selected].cost_per_second.unwrap();
+    let (b, m) = (price(&brute_force), price(&milp));
+    assert!(
+        (b - m).abs() <= 1e-9 * b,
+        "memo brute force {b}, memo MILP {m}"
+    );
+    let gap = milp.search.milp.and_then(|milp| milp.gap);
+    assert!(gap.is_some_and(|gap| gap <= 1e-9), "gap {gap:?}");
+}
+
 /// Debugging aid: the random workload of seed `JP_SEED` (over the gauge
 /// `m`) as stage_pipeline's `--workload` JSON, at `JP_SEED_OUT`.
 #[test]

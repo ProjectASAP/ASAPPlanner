@@ -351,6 +351,29 @@ fn site_scan_readers(memo: &Memo, site: &CouplingSite) -> Vec<ScanReader> {
     out
 }
 
+/// The labels of each metric's scans `candidate` reads (its own node, its
+/// private nodes and its child groups' nodes), by the raw-horizon key of
+/// the metric's source ([`raw_horizon_key`]).
+pub(crate) fn scan_labels_read(
+    memo: &Memo,
+    candidate: &ImplementationCandidate,
+) -> Vec<(u64, BTreeSet<String>)> {
+    scan_reader(&candidate.node)
+        .into_iter()
+        .chain(reads(memo, candidate, scan_reader))
+        .filter_map(|reader| match reader.scan.non_asap() {
+            Some(NonASAPOp::Scan { source, .. }) => Some((raw_horizon_key(source), reader.labels)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The raw-horizon key ([`raw_horizon_key`]) of a scan-labels site's
+/// metric.
+pub(crate) fn site_source_key(memo: &Memo, site: &CouplingSite) -> Option<u64> {
+    metric_of_site(memo, site).map(|source| raw_horizon_key(&source))
+}
+
 /// The metric of a scan-labels site.
 fn metric_of_site(memo: &Memo, site: &CouplingSite) -> Option<Source> {
     site_scan_readers(memo, site)

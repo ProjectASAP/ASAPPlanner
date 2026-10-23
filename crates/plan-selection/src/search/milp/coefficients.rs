@@ -1935,8 +1935,8 @@ mod tests {
         intervals_ms: &[u32],
         targets: &[AccuracyTarget],
     ) {
-        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true, &data());
-        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, false, &data());
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true, &data(), 0);
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, false, &data(), 0);
     }
 
     /// [`assert_model_is_a_lower_bound`] in a deployment that keeps raw
@@ -1947,6 +1947,7 @@ mod tests {
         targets: &[AccuracyTarget],
         raw_data_retained: bool,
         data: &DataWorkload,
+        term_cuts_from_rounds: usize,
     ) {
         let roots: Vec<(usize, QueryRoot)> = queries
             .iter()
@@ -1970,6 +1971,11 @@ mod tests {
         let input = crate::search::milp::model::model_input_of(&memo, &entries, data, models)
             .unwrap()
             .0;
+        // With the term cuts the lazy loop may add from its first rounds.
+        let input = match term_cuts_from_rounds {
+            0 => input,
+            rounds => crate::search::milp::model::with_every_term_cut(&input, rounds),
+        };
         let checked = crate::search::milp::model::lower_bound_check(
             &memo,
             &per_computation,
@@ -2019,6 +2025,7 @@ mod tests {
             &[AccuracyTarget::exact()],
             false,
             &data,
+            0,
         );
     }
 
@@ -2049,6 +2056,7 @@ mod tests {
                     &[within.clone(), within.clone()],
                     false,
                     &data(),
+                    0,
                 );
             }
             assert_model_is_a_lower_bound_in(
@@ -2057,6 +2065,7 @@ mod tests {
                 &[within.clone(), AccuracyTarget::exact()],
                 false,
                 &data(),
+                0,
             );
             assert_model_is_a_lower_bound_in(
                 &["quantile_over_time(0.9, m[5m])", "max_over_time(m[1m])"],
@@ -2064,6 +2073,7 @@ mod tests {
                 &[within.clone(), AccuracyTarget::exact()],
                 false,
                 &data(),
+                0,
             );
             let exact = AccuracyTarget::exact();
             assert_model_is_a_lower_bound_in(
@@ -2075,6 +2085,7 @@ mod tests {
                 &[exact.clone(), exact.clone()],
                 false,
                 &data(),
+                0,
             );
         }
     }
@@ -2122,6 +2133,34 @@ mod tests {
             &[20_000, 20_000, 1_000, 1_000],
             &[target.clone(), target.clone(), target.clone(), target],
         );
+    }
+
+    /// #839's shape with the term cuts of the lazy loop's first 30 rounds
+    /// (a source's scans apart or widened, held memory, ingestion copies):
+    /// each cut stays a lower bound of every plan it applies to.
+    #[test]
+    fn the_model_with_term_cuts_is_a_lower_bound() {
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
+        for raw_data_retained in [true, false] {
+            assert_model_is_a_lower_bound_in(
+                &[
+                    "sum by (job) (sum_over_time(m[10m]))",
+                    "sum(sum_over_time(m[10m]))",
+                    "avg by (job) (quantile_over_time(0.99, m[100s]))",
+                    "avg(quantile_over_time(0.95, m[100s]))",
+                ],
+                &[20_000, 20_000, 1_000, 1_000],
+                &[
+                    target.clone(),
+                    target.clone(),
+                    target.clone(),
+                    target.clone(),
+                ],
+                raw_data_retained,
+                &data(),
+                30,
+            );
+        }
     }
 
     /// One query reading two groups over one metric, whose scans may be one

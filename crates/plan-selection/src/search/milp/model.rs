@@ -20,6 +20,7 @@ use good_lp::{
 
 use crate::search::memo::{GroupId, ImplementationCandidate, Memo};
 use crate::search::milp::coefficients::LazyTerms;
+use crate::search::milp::cuts::{SharedBuildHeld, Term, TermCuts, WidenedScan};
 use crate::{CostModel, PlanSelector, PlanningModels, ResourceUnitCost, Selection, SelectionError};
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
 use asap_physical_asap_optimization::PhysicalCandidate;
@@ -253,6 +254,9 @@ pub(crate) struct ModelInput {
     /// of rows; [`LazyTerms::direct_at_ingestion`]); `None` when it cannot
     /// run at ingestion time.
     pub direct_at_ingestion_cost: Vec<Option<f64>>,
+    /// The term cuts so far and the facts they read
+    /// ([`crate::search::milp::cuts`]).
+    pub cuts: TermCuts,
     /// The solver's time limit in seconds, if any.
     pub time_limit_s: Option<f64>,
     /// Only solutions cheaper than this (the incumbent's price), by more
@@ -321,6 +325,34 @@ fn held_at_query_time(
         }
     }
     held
+}
+
+/// The memory `choice`'s query-time builds that several groups' choices
+/// may share hold while an evaluation runs (left out of
+/// [`held_at_query_time`]).
+fn shared_build_held(
+    choice: &Choice,
+    lazy: &LazyTerms,
+    prices: &ResourceUnitCost,
+    shared_keys: &BTreeSet<(u64, usize)>,
+) -> Vec<SharedBuildHeld> {
+    lazy.held
+        .iter()
+        .filter_map(|term| {
+            let Via::Slot(i) = term.via else {
+                return None;
+            };
+            let slot = &choice.coefficients.slots[i];
+            let key = slot.shared_site.filter(|key| shared_keys.contains(key))?;
+            (!matches!(slot.materialization, Materialization::MatAtIngestion(_))).then_some(
+                SharedBuildHeld {
+                    key,
+                    cost_per_ms: prices.cost_per_memory_byte_second * term.bytes as f64 / 1000.0,
+                    per_reader: term.per_reader,
+                },
+            )
+        })
+        .collect()
 }
 
 /// The model's optimum.
@@ -493,6 +525,9 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
     }
     if let Some(cutoff) = &mut scaled.objective_cutoff {
         *cutoff *= scale;
+    }
+    for cut in &mut scaled.cuts.cuts {
+        cut.bound *= scale;
     }
     scaled
 }
@@ -863,13 +898,26 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
         objective += m;
         scan_maxima.push((m, charges));
     }
-    for charges in scan_charges
-        .into_values()
-        .chain(pass_charges.into_values())
-        .chain(ingestion_charges.into_values())
-    {
+    // Each source's scan charges, for its term cuts.
+    let mut source_scan_charges: BTreeMap<u64, Vec<Variable>> = BTreeMap::new();
+    let sources = scan_charges
+        .keys()
+        .copied()
+        .chain(pass_charges.keys().map(|&(source, _)| source))
+        .map(Some)
+        .chain(ingestion_charges.keys().map(|_| None))
+        .collect::<Vec<Option<u64>>>();
+    for (source, charges) in sources.into_iter().zip(
+        scan_charges
+            .into_values()
+            .chain(pass_charges.into_values())
+            .chain(ingestion_charges.into_values()),
+    ) {
         let m = vars.add(variable().min(0));
         objective += m;
+        if let Some(source) = source {
+            source_scan_charges.entry(source).or_default().push(m);
+        }
         scan_maxima.push((m, charges.into_values().collect()));
     }
     for (c, choice) in input.choices.iter().enumerate() {
@@ -933,6 +981,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
         }
     }
     let mut cross_vars: Vec<CrossNodeVars> = Vec::new();
+    let mut cross_charged: BTreeMap<u64, Variable> = BTreeMap::new();
     for (key, members) in cross_once {
         let (per_consumer, per_consumer_max) = cross_per_consumer
             .remove(&key)
@@ -942,6 +991,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
         let charged = vars.add(variable().min(0));
         let u = vars.add(binary());
         objective += charged;
+        cross_charged.insert(key, charged);
         cross_vars.push((once, charged, u, members, per_consumer, big_m));
     }
     let mut shared_slot_vars: Vec<(Variable, Vec<(usize, f64)>)> = Vec::new();
@@ -1073,6 +1123,31 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             let h = vars.add(variable().min(0));
             objective += h;
             held_longest.insert(c, h);
+        }
+    }
+    // The held memory of builds several groups share, charged only
+    // through their term cuts.
+    let mut shared_build_held: BTreeMap<(u64, usize), Variable> = BTreeMap::new();
+    let mut ingestion_copy: BTreeMap<usize, (Variable, Variable)> = BTreeMap::new();
+    for cut in &input.cuts.cuts {
+        match cut.term {
+            Term::SharedBuildHeld(key) => {
+                shared_build_held.entry(key).or_insert_with(|| {
+                    let h = vars.add(variable().min(0));
+                    objective += h;
+                    h
+                });
+            }
+            Term::IngestionCopy(g) => {
+                ingestion_copy.entry(g).or_insert_with(|| {
+                    let v = vars.add(variable().min(0));
+                    objective += v;
+                    // Whether a chosen choice's ingestion-time slot reads
+                    // the group: at least each such choice's `x`.
+                    (v, vars.add(variable().min(0).max(1)))
+                });
+            }
+            _ => {}
         }
     }
     let vars_exclusive = (vars.add(binary()), vars.add(binary()));
@@ -1689,6 +1764,75 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             }
             constraints.push(constraint!(x[c] <= others));
         }
+    }
+    for (&g, &(_, read)) in &ingestion_copy {
+        for (p, choice) in input.choices.iter().enumerate() {
+            let reads = choice
+                .children
+                .iter()
+                .zip(&choice.coefficients.child_via)
+                .any(|(child, via)| {
+                    child.0 as usize == g
+                        && matches!(via, Via::Slot(i) if matches!(
+                            choice.coefficients.slots[*i].materialization,
+                            Materialization::MatAtIngestion(_)
+                        ))
+                });
+            if reads {
+                constraints.push(constraint!(read >= x[p]));
+            }
+        }
+    }
+    // Term cuts: when all of a cut's choices are chosen, its term's
+    // charge is at least its bound.
+    for cut in &input.cuts.cuts {
+        let mut charge = Expression::from(0.0);
+        match cut.term {
+            Term::SourceScans(source) => {
+                for &m in source_scan_charges.get(&source).into_iter().flatten() {
+                    charge += m;
+                }
+                for key in &cut.nodes {
+                    if let Some(&m) = cross_charged.get(key) {
+                        charge += m;
+                    }
+                }
+            }
+            Term::HeldPerReader(q, c) => {
+                if let Some(&h) = held_per_reader.get(&(q, c)) {
+                    charge += h;
+                }
+            }
+            Term::HeldLongest(c) => {
+                if let Some(&h) = held_longest.get(&c) {
+                    charge += h;
+                }
+            }
+            Term::SharedBuildHeld(key) => {
+                charge += shared_build_held[&key];
+            }
+            Term::IngestionCopy(g) => {
+                charge += ingestion_copy[&g].0;
+            }
+        }
+        let mut chosen = Expression::from(0.0);
+        for &c in &cut.choices {
+            chosen += x[c];
+        }
+        for qc in &cut.reached {
+            chosen += work_reached[qc];
+        }
+        for g in &cut.built_once {
+            chosen += once[&GroupId(*g as u32)];
+        }
+        let mut conditions = (cut.choices.len() + cut.reached.len() + cut.built_once.len()) as f64;
+        if let Term::IngestionCopy(g) = cut.term {
+            chosen += ingestion_copy[&g].1;
+            conditions += 1.0;
+        }
+        constraints.push(constraint!(
+            charge >= cut.bound * (chosen - (conditions - 1.0))
+        ));
     }
     for ((set, bound), &e) in input.extra_bounds.iter().zip(&extra) {
         let mut chosen = Expression::from(0.0);
@@ -2478,6 +2622,19 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
                     .map_or(solution.objective, |b| b.min(solution.objective)),
             );
         }
+        // Term cuts: each underestimated term, conditioned on the choices
+        // it depends on.
+        let mut term_cuts = crate::search::milp::cuts::term_cuts_of(input, &solution.chosen);
+        term_cuts.extend(crate::search::milp::cuts::held_cuts_of(
+            input,
+            &solution.chosen,
+        ));
+        term_cuts.extend(crate::search::milp::cuts::ingestion_copy_cuts_of(
+            input,
+            &solution.chosen,
+            &solution.built_once,
+        ));
+        input.cuts.cuts.extend(term_cuts);
         // Cut exactly the decoded choice set: these choices, these groups
         // built once or not, no other group needed.
         let mut covered = vec![false; memo.groups.len()];
@@ -2668,6 +2825,14 @@ pub(crate) fn model_input_of(
     let mut versions: Vec<ImplementationCandidate> = Vec::new();
     let mut site_thresholds: Vec<Vec<(u64, usize)>> = Vec::new();
     let mut kept = Vec::new();
+    // Per candidate node (its group and node), its widened-scans twins'
+    // scans: (source key, label set, price per unit of rate).
+    let mut widened_of: HashMap<(usize, *const asap_types::ir::OperatorNode), Vec<WidenedScan>> =
+        HashMap::new();
+    let mut label_sets: HashMap<
+        crate::search::memo::CouplingSite,
+        (Option<u64>, Vec<BTreeSet<String>>),
+    > = HashMap::new();
     for g in 0..memo.groups.len() {
         let parts = crate::search::milp::coefficients::choice_parts(
             memo,
@@ -2683,6 +2848,47 @@ pub(crate) fn model_input_of(
         // and its builds are sized for fewer readers but built per copy. So
         // the model keeps the shared choices (a lower bound), and the exact
         // pricing of a group choice prices both.
+        for part in &parts {
+            let candidate = &memo.candidates[g][part.choice.candidate];
+            if candidate.origin != crate::search::memo::CandidateOrigin::WidenedScans {
+                continue;
+            }
+            for (site, t) in &part.lazy.thresholds {
+                if site.kind != crate::search::memo::CouplingKind::ScanLabels {
+                    continue;
+                }
+                let (source, sets) = label_sets.entry(*site).or_insert_with(|| {
+                    (
+                        crate::search::memo::rules::scans::site_source_key(memo, site),
+                        crate::search::memo::rules::scans::label_thresholds(memo, site)
+                            .into_iter()
+                            .map(|t| t.labels)
+                            .collect(),
+                    )
+                });
+                let (Some(source), Some(labels)) = (*source, sets.get(*t)) else {
+                    continue;
+                };
+                let cost = part
+                    .choice
+                    .coefficients
+                    .absorbed_scans
+                    .iter()
+                    .filter(|(s, _, _)| *s == source)
+                    .map(|(_, cost, _)| *cost)
+                    .fold(0.0, f64::max);
+                if cost > 0.0 {
+                    widened_of
+                        .entry((g, std::rc::Rc::as_ptr(&candidate.node)))
+                        .or_default()
+                        .push(WidenedScan {
+                            source,
+                            labels: labels.clone(),
+                            cost_per_unit_rate: cost,
+                        });
+                }
+            }
+        }
         // Widened scans are not model variables: a solution also decodes
         // to its widened plan ([`crate::search::milp::decode`]).
         kept.extend(parts.into_iter().filter(|part| {
@@ -2714,7 +2920,20 @@ pub(crate) fn model_input_of(
             break;
         }
     }
+    let mut scan_labels = Vec::new();
+    let mut widened_scans = Vec::new();
     for part in kept {
+        let g = part.choice.group.0 as usize;
+        let candidate = &memo.candidates[g][part.choice.candidate];
+        scan_labels.push(crate::search::memo::rules::scans::scan_labels_read(
+            memo, candidate,
+        ));
+        widened_scans.push(
+            widened_of
+                .get(&(g, std::rc::Rc::as_ptr(&candidate.node)))
+                .cloned()
+                .unwrap_or_default(),
+        );
         let (choice, lazy) = (part.choice, part.lazy);
         versions.push(part.version);
         site_thresholds.push(
@@ -2809,6 +3028,24 @@ pub(crate) fn model_input_of(
         .map(|lazy| lazy.direct_at_ingestion.map(|p| p.cost_per_unit_rate))
         .collect();
     input.site_thresholds = site_thresholds;
+    input.cuts.shared_slot_held = input
+        .choices
+        .iter()
+        .zip(&lazies)
+        .map(|(choice, lazy)| shared_build_held(choice, lazy, prices, &shared_keys))
+        .collect();
+    input.cuts.at_ingestion_cost = lazies
+        .iter()
+        .map(|lazy| {
+            lazy.direct_at_ingestion
+                .map_or(0.0, |part| part.cost_per_unit_rate)
+        })
+        .collect();
+    input.cuts.scan_labels = scan_labels;
+    input.cuts.widened_scans = widened_scans;
+    let mut cuts = std::mem::take(&mut input.cuts);
+    crate::search::milp::cuts::fill_from_input(&input, &mut cuts);
+    input.cuts = cuts;
     Ok((input, versions))
 }
 
@@ -2869,6 +3106,47 @@ pub(crate) fn lower_bound_check<Id: Clone>(
     Ok(out)
 }
 
+/// `input` with every term cut ([`crate::search::milp::cuts`]) the lazy
+/// loop may add from any of its first `max_solutions` solutions (each
+/// excluded in turn by its no-good cut, as the loop does), the no-good
+/// cuts dropped: a model that must stay a lower bound of every plan.
+#[cfg(test)]
+pub(crate) fn with_every_term_cut(input: &ModelInput, max_solutions: usize) -> ModelInput {
+    let mut cut = model_input_clone(input);
+    for _ in 0..max_solutions {
+        let Some(solution) = solve(&cut).unwrap() else {
+            break;
+        };
+        let mut found = crate::search::milp::cuts::term_cuts_of(&cut, &solution.chosen);
+        found.extend(crate::search::milp::cuts::held_cuts_of(
+            &cut,
+            &solution.chosen,
+        ));
+        found.extend(crate::search::milp::cuts::ingestion_copy_cuts_of(
+            &cut,
+            &solution.chosen,
+            &solution.built_once,
+        ));
+        cut.cuts.cuts.extend(found);
+        let built: Vec<GroupId> = solution.built_once.iter().copied().collect();
+        let not_built: Vec<GroupId> = cut
+            .group_slots
+            .iter()
+            .map(|slot| slot.group)
+            .filter(|g| !solution.built_once.contains(g))
+            .collect();
+        let bound = (solution.chosen.len() + built.len()) as f64 - 1.0;
+        while cut.excluded_once.len() < cut.excluded.len() {
+            cut.excluded_once.push((Vec::new(), Vec::new()));
+        }
+        cut.excluded.push((solution.chosen, Vec::new(), bound));
+        cut.excluded_once.push((built, not_built));
+    }
+    cut.excluded.clear();
+    cut.excluded_once.clear();
+    cut
+}
+
 fn model_input_clone(input: &ModelInput) -> ModelInput {
     ModelInput {
         group_count: input.group_count,
@@ -2888,6 +3166,7 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         raw_data_retained: input.raw_data_retained,
         held: input.held.clone(),
         direct_at_ingestion_cost: input.direct_at_ingestion_cost.clone(),
+        cuts: input.cuts.clone(),
         time_limit_s: input.time_limit_s,
         objective_cutoff: input.objective_cutoff,
         relaxed: input.relaxed,
@@ -3371,6 +3650,7 @@ fn model_input(
         raw_data_retained: true,
         held: Vec::new(),
         direct_at_ingestion_cost: Vec::new(),
+        cuts: TermCuts::default(),
         time_limit_s: None,
         objective_cutoff: None,
         relaxed: false,
@@ -3454,6 +3734,7 @@ pub(crate) mod tests {
             raw_data_retained: true,
             held: Vec::new(),
             direct_at_ingestion_cost: Vec::new(),
+            cuts: TermCuts::default(),
             time_limit_s: None,
             objective_cutoff: None,
             relaxed: false,
@@ -3526,6 +3807,7 @@ pub(crate) mod tests {
                 2
             ],
             direct_at_ingestion_cost: Vec::new(),
+            cuts: TermCuts::default(),
             time_limit_s: None,
             relaxed: false,
             objective_cutoff: None,
@@ -4052,6 +4334,7 @@ pub(crate) mod tests {
             raw_data_retained: true,
             held: Vec::new(),
             direct_at_ingestion_cost: Vec::new(),
+            cuts: TermCuts::default(),
             time_limit_s: None,
             objective_cutoff: None,
             relaxed: false,
