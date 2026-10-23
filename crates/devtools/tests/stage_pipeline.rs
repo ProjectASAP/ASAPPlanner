@@ -1306,11 +1306,9 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
         &std::fs::read_to_string(root.join(example["file"].as_str().unwrap())).unwrap(),
     )
     .unwrap();
-    if search == Some("memo-milp") {
-        check_memo_example(document, committed, example);
-        return;
+    if search != Some("memo-milp") {
+        assert!(document == committed, "regenerate {}", example["file"]);
     }
-    assert!(document == committed, "regenerate {}", example["file"]);
 
     let workload: PlanningWorkload =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1322,6 +1320,10 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
     assert!(queries
         .iter()
         .all(|q| q["recurrence"]["repeated"].is_object() && q["predictability"].is_object()));
+    if search == Some("memo-milp") {
+        check_memo_example(document, committed, example);
+        return;
+    }
 
     let selection = &document["stage3_plan_selection"];
     let selected = selection["selected"].as_str().unwrap();
@@ -1395,14 +1397,28 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
 fn check_memo_example(document: Value, committed: Value, example: &Value) {
     // Equally cheap solutions decode to the same plan in any order, so
     // the memo plan, the rounds and the solver's bounds may vary between
-    // runs; the selected plan and its cost do not.
+    // runs, and with the rounds the candidate ids (`P<round>-<k>`, from
+    // `L<round>…`); the selected plan and its cost do not.
     let without_search = |document: &Value| {
         let mut document = document.clone();
+        let physical = document["stage3_plan_selection"]["selected"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let logical = document["stage2_physical_asap_optimization"]["candidates"][0]
+            ["from_logical"]
+            .as_str()
+            .unwrap()
+            .to_string();
         document["stage3_plan_selection"]
             .as_object_mut()
             .unwrap()
             .remove("search");
-        document
+        let text = document
+            .to_string()
+            .replace(&format!("\"{physical}\""), "\"<selected>\"")
+            .replace(&format!("\"{logical}\""), "\"<selected logical>\"");
+        serde_json::from_str::<Value>(&text).unwrap()
     };
     assert!(
         without_search(&document) == without_search(&committed),
@@ -1441,8 +1457,18 @@ fn check_memo_example(document: Value, committed: Value, example: &Value) {
             assert!(at.iter().all(|s| (s.as_u64().unwrap() as usize) < sites));
         }
     }
+    // A group the plan shares: read by two or more chosen candidates or
+    // query roots.
     let readers = |g: &Value| {
-        g["parents"].as_array().unwrap().len() + g["roots_of"].as_array().unwrap().len()
+        let read_by = groups
+            .iter()
+            .filter(|p| {
+                p["chosen"]["reads"]
+                    .as_array()
+                    .is_some_and(|reads| reads.contains(&g["group"]))
+            })
+            .count();
+        read_by + g["roots_of"].as_array().unwrap().len()
     };
     assert!(
         groups

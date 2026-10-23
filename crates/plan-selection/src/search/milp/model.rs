@@ -2825,12 +2825,14 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
                         &built_once,
                         queries,
                     );
-                    // Decoding names a widened variant `L<n>w<k>`.
+                    // Decoding names its widened variants `L<n>w0`
+                    // (labels widened) and `L<n>w1` (identical scans also
+                    // one node).
                     report.scans_widened = selected
                         .from_logical
                         .trim_start_matches('L')
                         .trim_start_matches(|c: char| c.is_ascii_digit())
-                        .starts_with('w');
+                        .starts_with("w1");
                     report
                 });
         let roots = logical

@@ -1045,7 +1045,9 @@ pub struct SearchReport {
     /// The memo-MILP search's selected plan over the memo: each group with
     /// the implementation candidate chosen for it, and the coupling sites
     /// at their chosen thresholds; `None` for every other search, or when
-    /// the selected plan is the warm start (each query planned alone).
+    /// the selected plan is the warm start (each query planned alone) in
+    /// every cluster; a cluster whose warm start was selected adds no
+    /// groups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo_plan: Option<MemoPlanReport>,
 }
@@ -1061,7 +1063,7 @@ pub struct MemoPlanReport {
     /// the plan chose.
     pub coupling_sites: Vec<CouplingSiteReport>,
     /// Whether the selected plan is the solution's variant with every
-    /// metric's scans widened to one label set, identical scans one node
+    /// metric's scans widened to one label set and identical scans one node
     /// (scan widening is no model variable yet, so solution decoding
     /// evaluates it beside the plan the choices describe).
     #[serde(default)]
@@ -1115,7 +1117,8 @@ pub struct ChosenCandidateReport {
 /// depend on, at the threshold the plan chose.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingSiteReport {
-    /// `SharedBuildSize`, `PaneChain`, `ScanLabels` or `RawHorizon`.
+    /// `SharedBuildSize`, `PaneChain` or `ScanLabels` (raw horizons are
+    /// priced per scan, not chosen as a threshold, so none is reported).
     pub kind: String,
     /// The chosen threshold: a shared build's size parameters (`params`,
     /// null for an exact accumulator), a pane chain's `pane_width_ms`,

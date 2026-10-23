@@ -585,6 +585,15 @@ function paneWindowText(k, width) {
   return `t−${durationText((k + 1) * width)} … ${end}`;
 }
 
+// A physical node's timing as its lane class, which colors its fill:
+// `ingestionTime`, `queryTime`, or "" without a timing (a logical node).
+function timingClass(timing) {
+  const text = timing === undefined || timing === null ? '' : formatTiming(timing);
+  if (text === 'ingestion time') return 'ingestionTime';
+  if (text === 'query time') return 'queryTime';
+  return '';
+}
+
 // A stage DAG (`dag`, as the document writes it) as cytoscape elements:
 // one node per operator (`n<id>`), one `Scalar` node per standalone scalar
 // query (`s<query position>`) over the nodes it reads, and one edge per
@@ -597,15 +606,6 @@ function paneWindowText(k, width) {
 // none for the newest), a TimeRange of one pane (`n<id>p<k>r`) and the
 // pane's build (`n<id>p<k>`), each pane fed by the chain's input and read by
 // the chain's readers). Display only: the document keeps the chain.
-// A physical node's timing as its lane class, which colors its fill:
-// `ingestionTime`, `queryTime`, or "" without a timing (a logical node).
-function timingClass(timing) {
-  const text = timing === undefined || timing === null ? '' : formatTiming(timing);
-  if (text === 'ingestion time') return 'ingestionTime';
-  if (text === 'query time') return 'queryTime';
-  return '';
-}
-
 function stageLaneElements(dag, options) {
   const { physical = false, costPerNode = null, queryIds = [], expandedChains = [] } = options || {};
   const group = typeof nodeGroup === 'function' ? nodeGroup : () => 'rel';
@@ -1097,14 +1097,28 @@ function memoSearchView(doc) {
       shared: g.parents.length + g.roots_of.length > 1,
     };
   });
+  // The plan's readers of group g: the queries whose root it is, and the
+  // parents whose chosen candidate (or the candidate fusing them) reads it.
+  const chosenOf = (p) => {
+    const parent = plan.groups[p];
+    if (parent.chosen) return [p, parent.chosen];
+    const by = parent.implemented_by;
+    return by === null || by === undefined ? [null, null] : [by, plan.groups[by].chosen];
+  };
+  const planReaders = (g) => {
+    const parents = [...new Set(g.parents.map(chosenOf).filter(([, c]) => c && c.reads.includes(g.group)).map(([p]) => p))];
+    return parents.map(gid).concat(g.roots_of.map(qid));
+  };
   const sharedUnits = [];
   plan.groups.forEach((g) => {
-    if (g.parents.length + g.roots_of.length < 2 || (!g.chosen && (g.implemented_by === null || g.implemented_by === undefined))) return;
+    if (!g.chosen && (g.implemented_by === null || g.implemented_by === undefined)) return;
+    const readers = planReaders(g);
+    if (readers.length < 2) return;
     const qs = g.queries;
     sharedUnits.push({
       unit: `${gid(g.group)} · ${groups[g.group].label}`,
       kind: 'shared group',
-      readers: g.parents.map(gid).concat(g.roots_of.map(qid)),
+      readers,
       queries: qs.map(qid),
       threshold: g.chosen ? (g.chosen.built_once ? 'one node, built once per evaluation' : 'one node; its query-time part runs per reader') : `inside ${gid(g.implemented_by)}'s candidate`,
       schedule: schedule(qs),
