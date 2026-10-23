@@ -2302,13 +2302,19 @@ fn guarantee_requirements(
     };
     // The optimistic floor of the failure probability of `node`'s
     // guarantee with its summaries at the largest size Stage 3's resizing
-    // can give them; `Some(1.0)` for no guarantee, which no node above
-    // repairs (an approximate input no rule composes); `None` when unknown.
+    // can give them; `Some(1.0)` for no guarantee at its own size, which
+    // no resizing or node above repairs (an approximate input no rule
+    // composes); `None` when unknown. A guarantee lost only at the largest
+    // size (a family whose size cap lets its error grow there, e.g. a
+    // UnivMon heap at a tiny failure probability) is unknown, never 1.0.
     let floor = |node: &Rc<OperatorNode>| -> Option<f64> {
         let largest =
             crate::resized_to_the_largest(&[QueryRoot::Operator(Rc::clone(node))]).ok()?;
         let Some(guarantee) = guarantee_of(&largest).ok()? else {
-            return Some(1.0);
+            return guarantee_of(&[QueryRoot::Operator(Rc::clone(node))])
+                .ok()?
+                .is_none()
+                .then_some(1.0);
         };
         crate::bind_statistics(&guarantee, &|statistic| {
             crate::workload_statistic(statistic, None, data)
