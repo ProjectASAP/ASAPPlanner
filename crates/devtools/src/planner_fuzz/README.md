@@ -173,7 +173,30 @@ Each reuse pattern that the design docs say the planner supports (or plans to
 support) is listed below with the relation that checks it. Doc paths are under
 `docs/design_docs/`, with line ranges on main at the time of writing.
 `summary.md` repeats the table with each run's status. The status column here
-is from the one-hour run in the PR that added the tool (12 seeds, default and
-memo searches).
+is from a one-hour run when the tool was added: 12 seeds, the default search
+and the memo search, 1,697 cases and 46,927 checks. In the status column,
+"conclusive" means the check either held or was violated.
 
-<!-- coverage-status -->
+| Pattern | Doc reference | Relation | Status on main (one-hour run) |
+|---|---|---|---|
+| Looser accuracy target reads the tighter build (an exact result meets any ε) | accuracy-models.md "Sharing across consumers" L308–368; planner-layering.md L530–533, L640–641 | `a-looser-accuracy` | VIOLATED (208 of 2,596 conclusive checks): #903 |
+| Slice: a filter on a group key over a grouped result or summary (planned) | asap-primitive-schema.md "Other uses of coverage" L846–848, L118 | `b-filter-on-group-key` | VIOLATED (995 of 1,003): #891, #902 (#689 for approximate inputs) |
+| Rollup to a coarser grouping: exact, or sketch `SummaryMerge{group_by}` | planner-layering.md rule table L588; asap-primitive-schema.md §5.6 L670, L754–794, L830–844; joint-planning-search.md L324 | `c-coarser-grouping` | VIOLATED (167 of 389): new drafts (exact rollup; sketch rollup over an inner range function) |
+| Scan widening: scans of one metric with different labels share one scan | planner-layering.md Pass 2 L597–607 | `c-coarser-grouping` (sketch rollup witness) | covered by c; no separate violation |
+| Nested window: a shorter window merges the newest panes of a longer window's chain | planner-layering.md L790–807; asap-primitive-schema.md §5.6 L669 | `d-nested-shorter-window` | VIOLATED (73 of 250): new draft (exact sums); compare #873 (rate/increase) |
+| Another quantile rank from the same sketch | planner-layering.md L631–634, L804–817 | `e-other-quantile-rank` | VIOLATED (39 of 465), exact percentiles only: new draft (unshared exact aggregates) |
+| Identical expressions (common-subexpression elimination) | planner-layering.md rule table L583–585, Algorithm 2 L655–658 | `f-exact-duplicate` | VIOLATED (92 of 2,915), exact query-time aggregates: new draft |
+| A query over another query's result (top-k over a shared sum) | joint-planning-search.md L177–187; planner-layering.md L583–585 | `g-outer-over-result` | holds (552 conclusive checks) |
+| Summary capability: another statistic the family answers (`FamilyCapability::answers`) | planner-layering.md rule table L586, L611–617, Example 2 L1306–1370 | `h-other-statistic` | never conclusive: selected families (KLL, KMV) do not answer Total |
+| gcd pane grid across repeat intervals | planner-layering.md L791–809 | `i-other-repeat-interval` | VIOLATED (49 of 2,717): new draft; compare #731 |
+| Exact top-k reuse (smaller k) | planner-layering.md rule table L589; joint-planning-search.md L325 | `j-smaller-topk` | holds (62 conclusive checks) |
+| Merge of disjoint selections | asap-primitive-schema.md §4.2 L194–232, §5.6 Example B L721–752 | `k-union-of-selections` | never conclusive: Stage 1 composes no guarantee for the merged estimate |
+| Panes kept across evaluations when query-time results are retained | planner-layering.md Materialization L889–893 | `results-retained` | holds (1,442 conclusive checks) |
+| Window = interval: the whole window as a one-pane tumbling chain | planner-layering.md Materialization L895–905 | — | not checked: a Stage 2 choice within one query |
+| Rollup over newest panes (windowed rollup) | planner-layering.md L809–823 | — | not checked: a composition of c and d |
+| avg as sum/count: shared exact accumulators | planner-layering.md L372–383, L502–503 | — | not checked: the derivation needs two accumulators |
+| Stored-state reuse; sliding windows, exponential histograms, SummarySubtract | asap-primitive-schema.md L849, L851–869; planner-layering.md L618–630, L827 | — | not checked: planned or not implemented |
+
+Monotonicity and invariance relations (no doc pattern; they guard the search):
+- `added-query`, `no-raw-retention`, `relaxed-latency`, `renamed`, `reordered` and `disjoint-copy` held in every conclusive check.
+- `tighter-accuracy` was violated 4 times in 2,152 checks. One case is a default-search miss: `--exhaustive` finds the plan. The others are #903.
