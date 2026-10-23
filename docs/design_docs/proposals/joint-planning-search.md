@@ -102,16 +102,16 @@ The base formulation below separates logical coverage, shared producers, and rea
 | `B`, `S_b` | Potential producer instances and their finite configurations. |
 | `I(g,c)` | Groups implemented by candidate `(g,c)`, including fusion. |
 | `R(g,c)` | Input groups required when `(g,c)` is selected. |
-| `J(g,c)` | Shared-producer input roles required by `(g,c)`. |
-| `A(g,c,j)` | Compatible producer/configuration pairs for role `j`. |
+| `J(g,c)` | Producer inputs required by `(g,c)`. |
+| `A(g,c,j)` | Compatible producer/configuration pairs for producer input `j`. |
 
-A role is an input slot, such as “pane chain”; it is filled by one compatible producer/configuration. `R` references logical results, while `J` references separately represented shared state. Do not encode the same dependency twice. If a producer is an ordinary memo group, its dependency can instead use `R`.
+A producer input is an input slot, such as “pane chain”; it is filled by one compatible producer/configuration. `R` references logical results, while `J` references separately represented shared state. Do not encode the same dependency twice. If a producer is an ordinary memo group, its dependency can instead use `R`.
 
 ```text
 a[g]             ∈ {0,1}   group g is required
 x[g,c]           ∈ {0,1}   select candidate c for g
 y[b,s]           ∈ {0,1}   enable producer b at configuration s
-z[g,c,j,b,s]     ∈ {0,1}   attach role j of (g,c) to (b,s)
+z[g,c,j,b,s]     ∈ {0,1}   connect producer input j of (g,c) to (b,s)
 ```
 
 Configuration `s` can include summary capacity, pane width, retention, and materialization. Discrete configurations allow measured lookup-table costs without assuming a linear size/cost function. Materialization can instead use explicit legal `x[g,c,m]` variables; avoid conflicting representations. Several internal nodes can require separate assignment slots.
@@ -141,14 +141,14 @@ Add reverse support constraints: an active group must be justified by a root, se
 
 ### 5.3 Shared producers and compatibility
 
-For each required role:
+For each required producer input:
 
 ```text
 Σ_{(b,s) ∈ A(g,c,j)} z[g,c,j,b,s] = x[g,c]       for j ∈ J(g,c)
 z[g,c,j,b,s] ≤ y[b,s]
 ```
 
-Use one equality per role: a candidate needing a scan and a pane chain needs both inputs. Local execution is a separate candidate or explicit fallback choice.
+Use one equality per producer input: a candidate needing a scan and a pane chain needs both inputs. Local execution is a separate candidate or explicit fallback choice.
 
 For one configurable producer instance:
 
@@ -265,7 +265,7 @@ Reuse current structures rather than create a parallel optimizer framework:
 | MILP `Choice` | Physical/materialization assignments, consumer context, and coefficients. |
 | `PhysicalASAPDAG`, `Selection`, reports | Selected output, validation, bounds, and search status. |
 
-Shared-producer and role notation maps onto existing sites and shared-node identities; it does not imply a separate catalog already exists. Add explicit records only where the existing representation cannot express ownership or dependencies.
+Shared-producer and producer-input notation maps onto existing sites and shared-node identities; it does not imply a separate catalog already exists. Add explicit records only where the existing representation cannot express ownership or dependencies.
 
 Current main places memo/rules in `search/memo` and solver code in `search/milp`, with Stage 2 physical generation and Stage 3 pricing remaining authoritative. `Legacy` is the default; `MemoBruteForce` is the reference and `MemoMilp` the solver path. Early memo construction, broader cost-model support, EH/direct sliding algorithms, and arbitrary pane hierarchies are proposed extensions.
 
@@ -274,13 +274,13 @@ Current main places memo/rules in `search/memo` and solver code in `search/milp`
 | Phase | Deliverable and acceptance criterion |
 | --- | --- |
 | 1. Memo generation | Move identity construction before Pass 1 and generate candidates directly into groups without losing semantics, reader obligations, or fusion. |
-| 2. Sharing and physical choices | Reuse sites and materialization rules; represent producers/roles and shared charges consistently. |
+| 2. Sharing and physical choices | Reuse sites and materialization rules; represent producers, producer inputs, and shared charges consistently. |
 | 3. Joint selection | Extend MILP coverage as required; match exhaustive and memo brute force under the same inventory/models. |
 | 4. Validation and scaling | Validate reconstructed plans, prove safe reductions, and measure generation/model/solve costs under budgets. |
 
 ### Evaluation
 
-**Correctness:** test identity versus sharing, producer compatibility, exact-once cost ownership, active dependencies, fusion, multiple roles, zero-price resources, pane boundaries, legal materializations, end-to-end accuracy, and capacity/status handling. Validate any relaxed bounds and cuts against enumerated plans.
+**Correctness:** test identity versus sharing, producer compatibility, exact-once cost ownership, active dependencies, fusion, multiple producer inputs, zero-price resources, pane boundaries, legal materializations, end-to-end accuracy, and capacity/status handling. Validate any relaxed bounds and cuts against enumerated plans.
 
 **Optimality:** tiny workloads must match exhaustive enumeration and memo brute force on minimum validated cost, with an explicit numerical/tie policy and the same candidate inventory.
 
