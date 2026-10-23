@@ -2027,11 +2027,18 @@ mod tests {
     /// copy, so the model charges its ingestion-time part once, not once
     /// per slot reading it. Every 10 s, the two quantiles' query-time
     /// node over their shared build is one node read by both queries of
-    /// one class: its held memory is charged at their union rate.
+    /// one class: its held memory is charged at their union rate. Every
+    /// 10 s and every 20 s, its readers are in two classes no group's
+    /// class set joins: their union rate is at least the faster's.
     #[test]
     fn the_model_is_a_lower_bound_for_a_child_of_two_ingestion_time_slots() {
         let within = AccuracyTarget::max_error(0.01);
-        for intervals in [[300_000, 300_000], [60_000, 300_000], [10_000, 10_000]] {
+        for intervals in [
+            [300_000, 300_000],
+            [60_000, 300_000],
+            [10_000, 10_000],
+            [10_000, 20_000],
+        ] {
             for window in ["5m", "1m"] {
                 assert_model_is_a_lower_bound_in(
                     &[

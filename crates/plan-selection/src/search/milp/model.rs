@@ -1423,6 +1423,27 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                 .insert(choice.group.0 as usize);
         }
     }
+    // Readers from several groups may be in classes no `union_rate` key
+    // joins; their union rate is still at least their fastest's rate. So
+    // `fastest / sum` bounds the share from below for each possible
+    // fastest reader, the sum over the readers no faster than it.
+    let fastest_over_sum = |queries_of: &BTreeSet<usize>| -> Option<f64> {
+        queries_of
+            .iter()
+            .map(|&q| {
+                let fastest = input.queries[q].rate;
+                let sum: f64 = queries_of
+                    .iter()
+                    .map(|&r| input.queries[r].rate)
+                    .filter(|&rate| rate <= fastest)
+                    .sum();
+                match sum > 0.0 {
+                    true => (fastest / sum).min(1.0),
+                    false => 1.0,
+                }
+            })
+            .reduce(f64::min)
+    };
     let per_reader_share: Vec<f64> = (0..input.choices.len())
         .map(|c| {
             let mut queries_of: BTreeSet<usize> = input.group_queries
@@ -1449,6 +1470,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                         .all(|class| queries_of.iter().any(|&q| input.schedule[q] == *class));
                     (covered && rate_sum > 0.0).then_some((union / rate_sum).min(1.0))
                 })
+                .chain(fastest_over_sum(&queries_of))
                 .fold(1.0, f64::min)
         })
         .collect();
@@ -3181,6 +3203,67 @@ pub(crate) mod tests {
         assert!(
             (solution.objective - 2.1).abs() < 1e-9,
             "{}",
+            solution.objective
+        );
+    }
+
+    /// One node (work key 7) computed by two groups' choices, each read by
+    /// one query: every 10 s and every 20 s, two classes no group's class
+    /// set joins (`union_rate` has only `[0]` and `[1]`). Stage 3 charges
+    /// its held memory per reader at union / sum of their rates, the union
+    /// at least the faster's: 0.1 / 0.15. The model charges no more.
+    #[test]
+    fn held_memory_of_a_node_read_from_two_classes_is_shared() {
+        let shared = |group: u32| {
+            let mut c = choice(group, &[], 0.0);
+            c.coefficients.query_work = vec![(7, 1.0)];
+            c
+        };
+        let input = ModelInput {
+            group_count: 2,
+            group_queries: vec![vec![0], vec![1]],
+            choices: vec![shared(0), shared(1)],
+            group_slots: Vec::new(),
+            queries: vec![
+                ModelQuery {
+                    rate: 0.1,
+                    roots: vec![GroupId(0)],
+                    max_latency_ms: None,
+                },
+                ModelQuery {
+                    rate: 0.05,
+                    roots: vec![GroupId(1)],
+                    max_latency_ms: None,
+                },
+            ],
+            schedule: vec![0, 1],
+            union_rate: [(vec![0], 0.1), (vec![1], 0.05)].into(),
+            excluded: Vec::new(),
+            excluded_once: Vec::new(),
+            site_thresholds: Vec::new(),
+            extra_bounds: Vec::new(),
+            requires: Vec::new(),
+            exclusive: (Vec::new(), Vec::new()),
+            rollup_rules: Vec::new(),
+            raw_scans: Vec::new(),
+            raw_data_retained: true,
+            held: vec![
+                HeldAtQueryTime {
+                    per_reader_per_ms: 1.0,
+                    longest_per_ms: 0.0,
+                };
+                2
+            ],
+            direct_at_ingestion_cost: Vec::new(),
+            time_limit_s: None,
+            relaxed: false,
+        };
+        // Each reader: 1.0 per ms × its rate × 1 ms × 0.1 / 0.15.
+        let stage_3 = (0.1 + 0.05) * (0.1 / 0.15);
+        let solution = solve(&input).unwrap().unwrap();
+        assert!(
+            solution.objective <= stage_3 * (1.0 + 1e-9),
+            "model {} over {stage_3}",
             solution.objective
         );
     }
