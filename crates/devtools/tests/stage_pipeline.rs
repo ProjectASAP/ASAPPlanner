@@ -1981,9 +1981,13 @@ fn mixed_language_workload_files(sql_arrival: Value, sql_facts: Value) -> (PathB
         },
         "data_workload": {"arrival": sql_arrival, "sources": {"flows": sql_facts}},
     });
+    // Tests run as threads of one process, so the names need a per-call
+    // counter.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = |name: &str| {
         std::env::temp_dir().join(format!(
-            "stage_pipeline_{}_mixed_{name}.json",
+            "stage_pipeline_{}_{call}_mixed_{name}.json",
             std::process::id()
         ))
     };
