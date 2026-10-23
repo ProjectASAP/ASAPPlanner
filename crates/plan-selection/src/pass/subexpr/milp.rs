@@ -81,6 +81,19 @@ pub(crate) struct ChoiceCoefficients {
     /// the chosen ones (key, price per unit of rate). Moved out of
     /// `direct` and `shared_nodes` by the model's input.
     pub cross_shared: Vec<(u64, f64)>,
+    /// The query-time scans of the direct part (apart: this choice's own
+    /// copies), as (source key, price, a pass over its output) per unit of
+    /// rate. Scans of one source may be one widened scan: like the scan
+    /// choices (`Choice::scan_source`), each is charged its pass, and the
+    /// largest excess once per source. Moved out of `direct` by the
+    /// model's input.
+    pub absorbed_scans: Vec<(u64, f64, f64)>,
+    /// Each query-time node of the direct part but scans, as (key up to
+    /// scan widening, price per unit of rate). Nodes of several groups'
+    /// choices with one key are one node once shared (identical
+    /// expressions, scans widened to one label set): the model's input
+    /// moves them to `cross_shared`.
+    pub direct_nodes: Vec<(u64, f64)>,
 }
 
 /// A shareable node of a choice's direct part ([`ChoiceCoefficients::shared_nodes`]).
@@ -88,14 +101,14 @@ pub(crate) struct ChoiceCoefficients {
 /// once at query time it costs `cost_per_unit_rate` per unit of the union
 /// rate of the queries reaching it instead, and holds `state_bytes` while
 /// its longest reader runs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SharedNodeCoefficients {
     pub cost_per_unit_rate: f64,
     pub work_ms: f64,
     pub state_bytes: u64,
-    /// A loose key of the node (kind, family, panes, raw sources): equal
-    /// for nodes of different groups that may be one node once shared.
-    pub key: u64,
+    /// The widened keys of the nodes it covers ([`ChoiceCoefficients::direct_nodes`]),
+    /// itself first.
+    pub members: Vec<u64>,
 }
 
 /// One choice of a group: a candidate and an option per private slot.
@@ -350,6 +363,10 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
         for (_, cost) in &mut choice.coefficients.cross_shared {
             *cost *= scale;
         }
+        for (_, cost, pass) in &mut choice.coefficients.absorbed_scans {
+            *cost *= scale;
+            *pass *= scale;
+        }
     }
     for scan in &mut scaled.raw_scans {
         scan.cost *= scale;
@@ -522,18 +539,28 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     let mut scan_charges: BTreeMap<u64, BTreeMap<usize, Expression>> = BTreeMap::new();
     for (&(k, c), &v) in &y {
         let total = input.choices[c].coefficients.direct.cost_per_unit_rate;
+        let rate_or_slowest = match rate(k) {
+            Some(r) => r,
+            None => slowest_rate(match k {
+                Consumer::Group(g) => g.0 as usize,
+                Consumer::Slot { choice, .. } => input.choices[choice].group.0 as usize,
+                Consumer::Query(_) => unreachable!("a query's rate is constant"),
+            }),
+        };
+        for &(source, cost, pass) in &input.choices[c].coefficients.absorbed_scans {
+            let pass = pass.min(cost);
+            objective += rate_or_slowest * pass * v;
+            *scan_charges
+                .entry(source)
+                .or_default()
+                .entry(c)
+                .or_insert_with(|| Expression::from(0.0)) += rate_or_slowest * (cost - pass) * v;
+        }
         if total == 0.0 {
             continue;
         }
         if let Some(source) = input.choices[c].scan_source {
-            let rate = match rate(k) {
-                Some(r) => r,
-                None => slowest_rate(match k {
-                    Consumer::Group(g) => g.0 as usize,
-                    Consumer::Slot { choice, .. } => input.choices[choice].group.0 as usize,
-                    Consumer::Query(_) => unreachable!("a query's rate is constant"),
-                }),
-            };
+            let rate = rate_or_slowest;
             let pass = input.choices[c].scan_project_cost_per_unit_rate.min(total);
             objective += rate * pass * v;
             *scan_charges
@@ -1705,28 +1732,36 @@ pub(super) fn model_input_of(
         });
     }
     input.raw_data_retained = models.deployment_capabilities.raw_data_retained;
-    // Shareable nodes several groups' choices may have: one node once
-    // shared, charged once per key (`ChoiceCoefficients::cross_shared`).
+    // Nodes several groups' choices have, equal up to scan widening: one
+    // node once shared, charged once per key at the dearest chosen one
+    // (`ChoiceCoefficients::cross_shared`).
     let mut groups_of_node: HashMap<u64, BTreeSet<GroupId>> = HashMap::new();
     for choice in &input.choices {
-        for node in &choice.coefficients.shared_nodes {
-            groups_of_node
-                .entry(node.key)
-                .or_default()
-                .insert(choice.group);
+        for &(key, _) in &choice.coefficients.direct_nodes {
+            groups_of_node.entry(key).or_default().insert(choice.group);
         }
     }
     for choice in &mut input.choices {
         let k = &mut choice.coefficients;
-        let (cross, own): (Vec<_>, Vec<_>) = k
-            .shared_nodes
-            .drain(..)
-            .partition(|node| groups_of_node[&node.key].len() > 1);
-        k.shared_nodes = own;
-        for node in cross {
-            k.direct.cost_per_unit_rate -= node.cost_per_unit_rate;
-            k.cross_shared.push((node.key, node.cost_per_unit_rate));
+        for &(_, cost, _) in &k.absorbed_scans {
+            k.direct.cost_per_unit_rate -= cost;
         }
+        let cross: Vec<(u64, f64)> = k
+            .direct_nodes
+            .iter()
+            .copied()
+            .filter(|(key, _)| groups_of_node[key].len() > 1)
+            .collect();
+        for &(key, cost) in &cross {
+            k.direct.cost_per_unit_rate -= cost;
+            k.cross_shared.push((key, cost));
+            for node in &mut k.shared_nodes {
+                if node.members.contains(&key) {
+                    node.cost_per_unit_rate -= cost;
+                }
+            }
+        }
+        k.shared_nodes.retain(|node| node.cost_per_unit_rate > 0.0);
         k.direct.cost_per_unit_rate = k.direct.cost_per_unit_rate.max(0.0);
     }
     // A slot whose build several groups' choices may share is one node
@@ -2019,6 +2054,8 @@ mod tests {
                 child_via: children.iter().map(|_| Via::Direct).collect(),
                 shared_nodes: Vec::new(),
                 cross_shared: Vec::new(),
+                absorbed_scans: Vec::new(),
+                direct_nodes: Vec::new(),
             },
             copy_of: None,
             scan_children: Vec::new(),

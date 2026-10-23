@@ -290,6 +290,15 @@ pub(super) fn choice_parts(
                             }
                         }
                         let keys = keys_of(&physical.dag, cache.keys_mut());
+                        // The children its plan reads (a rollup reads its
+                        // finer group's state, not its own window's group).
+                        let (read_children, read_roots): (Vec<GroupId>, Vec<Option<u32>>) =
+                            kept_children
+                                .iter()
+                                .zip(&child_roots)
+                                .filter(|(_, root)| root.is_some_and(|r| keys.contains(&r)))
+                                .map(|(c, r)| (*c, *r))
+                                .unzip();
                         let shallow = shallow_keys(&physical.dag, cache.keys_mut());
                         let widened = widened_keys_of(&physical.dag, cache.keys_mut());
                         let private: Vec<bool> =
@@ -322,7 +331,7 @@ pub(super) fn choice_parts(
                             &shallow,
                             &widened,
                             &private,
-                            &child_roots,
+                            &read_roots,
                             &horizons,
                             own_horizon.or_else(|| scan_lookback_ms(memo, group)),
                             &part_entries,
@@ -337,7 +346,17 @@ pub(super) fn choice_parts(
                                 group,
                                 candidate: index,
                                 implements: candidate.implements.clone(),
-                                children: kept_children.clone(),
+                                // The children it reads first (`child_via`
+                                // is theirs), then the ones its candidate
+                                // lists without reading: needed by the
+                                // plan, but no consumer passes into them.
+                                children: read_children
+                                    .iter()
+                                    .chain(
+                                        kept_children.iter().filter(|c| !read_children.contains(c)),
+                                    )
+                                    .copied()
+                                    .collect(),
                                 assignment,
                                 coefficients: parts.coefficients,
                                 copy_of,
@@ -798,6 +817,18 @@ fn coefficients_of(
         cost_per_unit_rate: direct.iter().map(|&id| per_rate(id) + kept_state(id)).sum(),
         work_ms: work(&direct),
     };
+    let absorbed_scans: Vec<(u64, f64, f64)> = direct
+        .iter()
+        .filter(|&&id| query_time(id))
+        .filter_map(|&id| match &dag.nodes[position[&id]].payload {
+            Operator::NonASAP(NonASAPOp::Scan { source, .. }) => Some((
+                super::scans::raw_horizon_key(source),
+                per_rate(id) + kept_state(id),
+                prices.cost_per_cpu_op * priced[&id].output.rows as f64,
+            )),
+            _ => None,
+        })
+        .collect();
     // Shareable nodes of the direct part (another copy's or group's
     // identical node may be one with it), each with what it computes when
     // built once: itself and the direct nodes only it reaches.
@@ -850,7 +881,10 @@ fn coefficients_of(
             cost_per_unit_rate: below.iter().map(|&n| per_rate(n)).sum(),
             work_ms: work(&below),
             state_bytes,
-            key: u64::from(widened[position[&id]]),
+            members: below
+                .iter()
+                .map(|n| u64::from(widened[position[n]]))
+                .collect(),
         });
         shared_node_keys.push(
             below
@@ -954,6 +988,23 @@ fn coefficients_of(
             child_via,
             shared_nodes,
             cross_shared: Vec::new(),
+            absorbed_scans,
+            direct_nodes: direct
+                .iter()
+                .filter(|&&id| query_time(id))
+                .filter(|&&id| {
+                    !matches!(
+                        dag.nodes[position[&id]].payload,
+                        Operator::NonASAP(NonASAPOp::Scan { .. })
+                    )
+                })
+                .map(|&id| {
+                    (
+                        u64::from(widened[position[&id]]),
+                        per_rate(id) + kept_state(id),
+                    )
+                })
+                .collect(),
         },
         lazy: LazyTerms {
             held,
