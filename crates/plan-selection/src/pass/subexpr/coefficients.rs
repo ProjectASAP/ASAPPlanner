@@ -145,6 +145,11 @@ pub(super) fn choice_parts(
 ) -> Result<Vec<ChoiceParts>, SelectionError> {
     let node = &memo.groups[group.0 as usize].node;
     let queries = &memo.groups[group.0 as usize].queries;
+    let windows_of_raw = Rc::clone(
+        cache
+            .raw_windows
+            .get_or_insert_with(|| Rc::new(raw_windows(memo))),
+    );
     let is_scan = matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
     // Shared (one node for every query), and for a group several queries
     // read, apart (a copy per query); a scan apart is its reader's.
@@ -155,7 +160,7 @@ pub(super) fn choice_parts(
     // A shared scan reads the longest window of its readers: one choice
     // per horizon a reader may read.
     let own_horizons: Vec<Option<u64>> = match node.non_asap() {
-        Some(NonASAPOp::Scan { source, .. }) => raw_windows(memo)
+        Some(NonASAPOp::Scan { source, .. }) => windows_of_raw
             .get(&super::scans::raw_horizon_key(source))
             .map(|windows| windows.iter().map(|&w| Some(w)).collect())
             .unwrap_or_else(|| vec![None]),
@@ -211,7 +216,7 @@ pub(super) fn choice_parts(
                             let key = super::scans::raw_horizon_key(source);
                             let mut variants = vec![None];
                             variants.extend(
-                                raw_windows(memo)
+                                windows_of_raw
                                     .get(&key)
                                     .into_iter()
                                     .flatten()

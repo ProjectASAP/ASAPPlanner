@@ -177,6 +177,9 @@ pub(crate) struct ModelInput {
     pub cutoff: Option<f64>,
     /// The solver's time limit in seconds, if any.
     pub time_limit_s: Option<f64>,
+    /// Solve the linear relaxation (every binary in [0, 1]): a lower bound
+    /// on the model's optimum.
+    pub relaxed: bool,
 }
 
 /// The memory a choice's parts hold while an evaluation runs, priced per
@@ -333,7 +336,7 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
 fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     let mut vars = ProblemVariables::new();
     let n = input.group_count;
-    let relaxed = std::env::var_os("JP_MILP_LP").is_some();
+    let relaxed = input.relaxed || std::env::var_os("JP_MILP_LP").is_some();
     let binary = || {
         if relaxed {
             variable().min(0).max(1)
@@ -1349,6 +1352,9 @@ pub(crate) fn search<Id: Clone>(
     let mut size = (0, 0);
     let mut time_limit_reached = false;
     loop {
+        if time_limit_reached {
+            break;
+        }
         let remaining_s =
             time_limit_ms.map(|limit| limit as f64 / 1e3 - started.elapsed().as_secs_f64());
         if remaining_s.is_some_and(|s| s <= 0.0) {
@@ -1363,11 +1369,11 @@ pub(crate) fn search<Id: Clone>(
             .map(|incumbent| incumbent - 1e-9 * incumbent.abs());
         let solved = solve(&input).map_err(SelectionError::Solver)?;
         solver_ms += solve_started.elapsed().as_secs_f64() * 1e3;
-        if solved.as_ref().is_some_and(|s| !s.optimal) {
-            // The solver stopped at the time limit: its plan is no bound.
-            time_limit_reached = true;
-            break;
-        }
+        // The solver stopped at the time limit: its plan is no bound, but
+        // it is still priced, as a last round, and may become the
+        // incumbent.
+        let last_round = solved.as_ref().is_some_and(|s| !s.optimal);
+        time_limit_reached |= last_round;
         let Some(solution) = solved else {
             // No plan left below the incumbent: it is optimal.
             if let Some(incumbent) = selector.cheapest_price() {
@@ -1375,14 +1381,16 @@ pub(crate) fn search<Id: Clone>(
             }
             break;
         };
-        bound = Some(solution.objective);
-        first_bound.get_or_insert(solution.objective);
+        if !last_round {
+            bound = Some(solution.objective);
+            first_bound.get_or_insert(solution.objective);
+        }
         if trace {
             eprintln!("milp: round {iterations} bound {:.6e} incumbent {:?} solve {:.0}ms vars {} cons {} at {:.1}s", solution.objective, selector.cheapest_price(), solve_started.elapsed().as_secs_f64()*1e3, solution.variables, solution.constraints, started.elapsed().as_secs_f64());
         }
         size = (solution.variables, solution.constraints);
         if let Some(incumbent) = selector.cheapest_price() {
-            if solution.objective >= incumbent - 1e-9 * incumbent.abs() {
+            if !last_round && solution.objective >= incumbent - 1e-9 * incumbent.abs() {
                 break;
             }
         }
@@ -1536,6 +1544,41 @@ pub(crate) fn search<Id: Clone>(
             }
         }
     }
+    if time_limit_reached && bound.is_none() {
+        // No round solved to optimality: the relaxation's optimum (all cuts
+        // kept) is still a lower bound for the gap.
+        input.relaxed = true;
+        input.time_limit_s = None;
+        if let Some(relaxation) = solve(&input).map_err(SelectionError::Solver)? {
+            bound = Some(relaxation.objective);
+        }
+    }
+    if !time_limit_reached && iterations == 1 && selector.cheapest_price().is_none() {
+        // Infeasible from the first round: name the queries with no plan
+        // of their own.
+        let mut without_plan = Vec::new();
+        for (q, entry) in entries.iter().enumerate().take(input.queries.len()) {
+            let mut alone = model_input_clone(&input);
+            for (r, query) in alone.queries.iter_mut().enumerate() {
+                if r != q {
+                    query.roots.clear();
+                }
+            }
+            if solve(&alone).map_err(SelectionError::Solver)?.is_none() {
+                without_plan.push(format!("query {q} ({})", entry.query.0));
+            }
+        }
+        if !without_plan.is_empty() {
+            return Err(SelectionError::Solver(format!(
+                "no valid plan for {}{}",
+                without_plan.join(", "),
+                match models.deployment_capabilities.raw_data_retained {
+                    true => "",
+                    false => " in a deployment that keeps no raw data",
+                }
+            )));
+        }
+    }
     if time_limit_reached && selector.cheapest_price().is_none() {
         return Err(SelectionError::Solver(format!(
             "the MILP search reached its time limit after {iterations} rounds before finding a valid plan"
@@ -1581,6 +1624,7 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         held: input.held.clone(),
         cutoff: input.cutoff,
         time_limit_s: input.time_limit_s,
+        relaxed: input.relaxed,
         rollup_rules: input.rollup_rules.clone(),
     }
 }
@@ -1754,6 +1798,7 @@ fn model_input(
         held: Vec::new(),
         cutoff: None,
         time_limit_s: None,
+        relaxed: false,
     })
 }
 
@@ -1825,6 +1870,7 @@ mod tests {
             held: Vec::new(),
             cutoff: None,
             time_limit_s: None,
+            relaxed: false,
         };
         let solution = solve(&input).unwrap().unwrap();
         assert_eq!(solution.built_once, [GroupId(0)].into());

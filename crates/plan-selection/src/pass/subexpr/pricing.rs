@@ -137,6 +137,9 @@ pub(crate) struct PriceCache {
     /// Local prices by (candidate's structural key, consumers,
     /// materialization, children's outputs).
     prices: HashMap<PriceKey, Option<(LocalUsage, EdgeStatistics)>>,
+    /// The raw windows of each scan horizon key of the memo
+    /// (`coefficients::raw_windows`), computed once per memo.
+    pub(super) raw_windows: Option<Rc<HashMap<u64, std::collections::BTreeSet<u64>>>>,
     /// Local prices found in the cache.
     pub hits: u64,
     /// Local prices computed.
