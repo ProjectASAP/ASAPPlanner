@@ -2107,19 +2107,25 @@ mod tests {
 
     /// Two quantiles of one metric and their ratio, each within 5%: the
     /// ratio's pair rule (`pair_guarantee_rules`) rules out no group choice
-    /// with a valid plan, and the model stays a lower bound of each.
+    /// with a valid plan, and the model stays a lower bound of each; also
+    /// at 2,000,000 rows per second, where the quantiles' pane summaries
+    /// share a size site whose smaller size fails the ratio and whose
+    /// larger one meets it.
     #[test]
     fn the_model_is_a_lower_bound_for_a_ratio_of_two_quantiles() {
         let target = AccuracyTarget::max_error(0.05).failure_probability(0.01);
-        assert_model_is_a_lower_bound(
-            &[
-                "quantile_over_time(0.9, m[1h])",
-                "quantile_over_time(0.5, m[1h])",
-                "quantile_over_time(0.9, m[1h]) / quantile_over_time(0.5, m[1h])",
-            ],
-            &[60_000, 60_000, 60_000],
-            &[target.clone(), target.clone(), target],
-        );
+        let queries = [
+            "quantile_over_time(0.9, m[1h])",
+            "quantile_over_time(0.5, m[1h])",
+            "quantile_over_time(0.9, m[1h]) / quantile_over_time(0.5, m[1h])",
+        ];
+        let targets = [target.clone(), target.clone(), target];
+        assert_model_is_a_lower_bound(&queries, &[60_000; 3], &targets);
+        let mut fast = data();
+        fast.arrival = DataArrival::Ingesting {
+            rows_per_second: 2_000_000.0,
+        };
+        assert_model_is_a_lower_bound_in(&queries, &[60_000; 3], &targets, true, &fast, 0);
     }
 
     /// Three quantiles of one metric over a 1-minute, a 5-minute and an

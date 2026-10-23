@@ -2973,6 +2973,8 @@ pub(crate) fn model_input_of(
         choices.push(choice);
     }
     let mut input = model_input(memo, choices, entries, data, models)?;
+    let pair_rules = pair_guarantee_rules(memo, &input.choices, &versions, entries, data, models);
+    input.rollup_rules.extend(pair_rules);
     let mut sources: Vec<String> = Vec::new();
     for (c, source, bytes, via) in raw_scans {
         let index = match sources.iter().position(|s| *s == source) {
@@ -3501,9 +3503,10 @@ fn guarantee_requirements(
 /// ([`guarantee_requirements`] tries one approximate child at a time): for
 /// a root group's choice with exactly two children that may approximate
 /// (each child candidate reading only exact groups), each pair of child
-/// candidates whose composed root fails one of the group's queries'
-/// targets (Stage 3's guarantee check) at every size threshold of the
-/// three and at the largest size Stage 3 can give its summaries (e.g. two
+/// choices (`versions`: each choice's candidate at its site thresholds)
+/// whose composed root fails one of the group's queries' targets (Stage
+/// 3's guarantee check) at those thresholds and at the largest size Stage
+/// 3 can give its summaries (e.g. two
 /// quantiles each within 5% under a ratio that must be within 5%). As
 /// rules for [`ModelInput::rollup_rules`] (not all three chosen). A plan
 /// with that root fails its query whatever else it chooses, so no valid
@@ -3512,6 +3515,7 @@ fn guarantee_requirements(
 fn pair_guarantee_rules(
     memo: &Memo,
     choices: &[Choice],
+    versions: &[ImplementationCandidate],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
@@ -3536,19 +3540,6 @@ fn pair_guarantee_rules(
                 && candidate.children.iter().all(|c| exact_only[c.0 as usize])
         });
     }
-    let mut choices_of: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-    for (c, choice) in choices.iter().enumerate() {
-        choices_of
-            .entry((choice.group.0 as usize, choice.candidate))
-            .or_default()
-            .push(c);
-    }
-    let versions = |g: usize, c: usize| -> Vec<Rc<asap_types::ir::OperatorNode>> {
-        crate::search::milp::coefficients::at_site_thresholds(memo, &memo.candidates[g][c])
-            .into_iter()
-            .map(|(version, _)| version.node)
-            .collect()
-    };
     // Whether `node`, a root of the queries `queries`, fails one of them at
     // its own size and at the largest size.
     let fails = |node: &Rc<asap_types::ir::OperatorNode>, queries: &[usize]| -> bool {
@@ -3565,14 +3556,26 @@ fn pair_guarantee_rules(
                 .all(|root| crate::guarantee_check(q, root, target, data, &models).is_err())
         })
     };
+    // Per group, its choices whose candidate reads only exact groups.
+    let mut exact_inputs: Vec<Vec<usize>> = vec![Vec::new(); memo.groups.len()];
+    for (c, choice) in choices.iter().enumerate() {
+        let h = choice.group.0 as usize;
+        if memo.candidates[h][choice.candidate]
+            .children
+            .iter()
+            .all(|k| exact_only[k.0 as usize])
+        {
+            exact_inputs[h].push(c);
+        }
+    }
     let mut rules = Vec::new();
-    for (&(g, c), own) in &choices_of {
+    for (c, choice) in choices.iter().enumerate() {
+        let g = choice.group.0 as usize;
         let queries = &memo.groups[g].roots_of;
         if queries.is_empty() {
             continue;
         }
-        let candidate = &memo.candidates[g][c];
-        let open: Vec<usize> = candidate
+        let open: Vec<usize> = memo.candidates[g][choice.candidate]
             .children
             .iter()
             .map(|h| h.0 as usize)
@@ -3581,51 +3584,23 @@ fn pair_guarantee_rules(
         let [h1, h2] = open[..] else {
             continue;
         };
-        let of_child = |h: usize| -> Vec<usize> {
-            choices_of
-                .keys()
-                .filter(|&&(k, d)| {
-                    k == h
-                        && memo.candidates[h][d]
-                            .children
-                            .iter()
-                            .all(|k| exact_only[k.0 as usize])
-                })
-                .map(|&(_, d)| d)
-                .collect()
-        };
-        let own_versions = versions(g, c);
         let (node1, node2) = (
             Rc::as_ptr(&memo.groups[h1].node),
             Rc::as_ptr(&memo.groups[h2].node),
         );
-        for d1 in of_child(h1) {
-            let versions1 = versions(h1, d1);
-            for d2 in of_child(h2) {
-                let versions2 = versions(h2, d2);
-                let every_version_fails = own_versions.iter().all(|node| {
-                    versions1.iter().all(|v1| {
-                        versions2.iter().all(|v2| {
-                            let replaced =
-                                HashMap::from([(node1, Rc::clone(v1)), (node2, Rc::clone(v2))]);
-                            let composed = crate::search::memo::brute_force::substituted(
-                                node,
-                                &replaced,
-                                &mut HashMap::new(),
-                            );
-                            fails(&composed, queries)
-                        })
-                    })
-                });
-                if every_version_fails {
-                    rules.push((
-                        vec![
-                            own.clone(),
-                            choices_of[&(h1, d1)].clone(),
-                            choices_of[&(h2, d2)].clone(),
-                        ],
-                        Vec::new(),
-                    ));
+        for &d1 in &exact_inputs[h1] {
+            for &d2 in &exact_inputs[h2] {
+                let replaced = HashMap::from([
+                    (node1, Rc::clone(&versions[d1].node)),
+                    (node2, Rc::clone(&versions[d2].node)),
+                ]);
+                let composed = crate::search::memo::brute_force::substituted(
+                    &versions[c].node,
+                    &replaced,
+                    &mut HashMap::new(),
+                );
+                if fails(&composed, queries) {
+                    rules.push((vec![vec![c], vec![d1], vec![d2]], Vec::new()));
                 }
             }
         }
@@ -3754,7 +3729,7 @@ fn model_input(
             .push(c);
     }
     let present: BTreeSet<(usize, usize)> = choices_of.keys().copied().collect();
-    let mut rollup_rules: Vec<(Vec<Vec<usize>>, Vec<usize>)> =
+    let rollup_rules: Vec<(Vec<Vec<usize>>, Vec<usize>)> =
         crate::search::memo::rules::windows::rollup_rules(memo, &present)
             .into_iter()
             .map(|rule| {
@@ -3767,7 +3742,6 @@ fn model_input(
                 )
             })
             .collect();
-    rollup_rules.extend(pair_guarantee_rules(memo, &choices, entries, data, models));
     let of_origin = |origin: crate::search::memo::CandidateOrigin| -> Vec<usize> {
         (0..choices.len())
             .filter(|&c| candidate_of(&choices[c]).origin == origin)
@@ -4051,14 +4025,45 @@ pub(crate) mod tests {
     /// many it rejects for the ratio's target, each cut one per round.
     #[test]
     fn the_first_solution_for_a_ratio_of_two_quantiles_meets_its_target() {
+        assert_first_solution_meets_targets(
+            &[
+                "quantile_over_time(0.9, m[1h])",
+                "quantile_over_time(0.5, m[1h])",
+                "quantile_over_time(0.9, m[1h]) / quantile_over_time(0.5, m[1h])",
+            ],
+            10_000.0,
+        );
+    }
+
+    /// The ratio and its two quantiles beside two more quantiles of the
+    /// metric, each within 5% (RangeHeavy's 1-hour quantiles): the
+    /// quantiles' pane summaries share a size site, the ratio fails at its
+    /// smaller size and meets its target at the larger one. The pair rule
+    /// rules out each pair of size versions that fails
+    /// ([`pair_guarantee_rules`]), so the first solution is a plan Stage 3
+    /// accepts, rather than one of the many at the smaller size it
+    /// rejects for the ratio, each cut one per round.
+    #[test]
+    fn the_first_solution_for_a_ratio_beside_three_quantiles_meets_its_target() {
+        assert_first_solution_meets_targets(
+            &[
+                "quantile_over_time(0.9, m[1h])",
+                "quantile_over_time(0.95, m[1h])",
+                "quantile_over_time(0.99, m[1h])",
+                "quantile_over_time(0.9, m[1h]) / quantile_over_time(0.5, m[1h])",
+                "quantile_over_time(0.5, m[1h])",
+            ],
+            2_000_000.0,
+        );
+    }
+
+    /// The model's first solution over `queries`, each within 5%, with
+    /// `rows_per_second` arriving, decodes to a plan Stage 3 accepts.
+    fn assert_first_solution_meets_targets(queries: &[&str], rows_per_second: f64) {
         let target = AccuracyTarget::max_error(0.05).failure_probability(0.01);
-        let queries = [
-            "quantile_over_time(0.9, m[1h])",
-            "quantile_over_time(0.5, m[1h])",
-            "quantile_over_time(0.9, m[1h]) / quantile_over_time(0.5, m[1h])",
-        ];
         let targets = vec![target; queries.len()];
-        let (per_computation, entries, data) = workload(&queries, &targets, None);
+        let (per_computation, entries, mut data) = workload(queries, &targets, None);
+        data.arrival = asap_types::workload::DataArrival::Ingesting { rows_per_second };
         let models = PlanningModels::builtin();
         let memo = crate::search::memo::brute_force::memo(&per_computation, &entries);
         let (input, versions) = model_input_of(&memo, &entries, &data, models).unwrap();
