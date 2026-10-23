@@ -31,18 +31,21 @@
 //! [`scans::widened_at_threshold`]; [`scans::horizon_thresholds`] (no
 //! rewrite: Stage 3 prices the horizon).
 //!
-//! [`search::brute_force`] is the reference search, run when
-//! [`crate::pass::Stage1ToStage3Search::memo_groups`] is set: every
+//! [`search::brute_force`] is the reference search, run for
+//! [`crate::SearchAlgorithm::MemoBruteForce`]: every
 //! consistent choice of one candidate per needed group and one threshold
 //! per site its candidates read, composed into one plan (identical nodes
 //! shared, equal resized builds made one), implemented by Stage 2 in every
-//! materialization and priced by Stage 3. [`pricing`] holds the per-node
-//! local prices, plan-level charges and frontiers the decomposed search
-//! will use in its place.
+//! materialization and priced by Stage 3. [`coefficients`] turns Stage 3's per-node
+//! prices into the coefficients of [`milp`], the memo solved as a
+//! mixed-integer linear program ([`crate::SearchAlgorithm::MemoMilp`]).
+
 #![allow(dead_code)]
 
 pub(crate) mod capability;
+pub(crate) mod coefficients;
 pub(crate) mod groups;
+pub(crate) mod milp;
 pub(crate) mod pricing;
 pub(crate) mod scans;
 pub(crate) mod search;

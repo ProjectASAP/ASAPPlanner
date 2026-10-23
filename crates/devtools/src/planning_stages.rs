@@ -236,8 +236,8 @@ pub fn run_default_search_over(
     )
 }
 
-/// [`run_default_search_over`] with the search `search` (e.g. the
-/// reference search over the memo, `memo_groups`).
+/// [`run_default_search_over`] with the search `search` (e.g. the memo
+/// over logical sub-expressions searched as a MILP, with a time limit).
 pub fn run_search_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],

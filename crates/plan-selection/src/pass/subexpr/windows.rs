@@ -960,6 +960,167 @@ pub(crate) fn requirements_met(chosen: &[(GroupId, &ImplementationCandidate)]) -
         .all(|(coarse, _)| rolled_coarse.contains(coarse))
 }
 
+/// One rollup requirement of [`requirements_met`] as a rule over
+/// candidates, by `(group, candidate index)`: when every candidate of
+/// `all_of` is chosen, one of `one_of` is (none: they may not be chosen
+/// together).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RollupRule {
+    pub all_of: Vec<(usize, usize)>,
+    pub one_of: Vec<(usize, usize)>,
+}
+
+/// The rollup requirements of [`requirements_met`] over the candidates in
+/// `present` (one per group in a plan), as rules: a plan of one present
+/// candidate per needed group meets every rollup requirement iff it meets
+/// every rule. The joint rule's source of a coarse build is the best build
+/// over the plan's nodes (each rollup undone, in group order): fewest keys
+/// for an exact accumulator, most for a sketch, the first in walk order
+/// among equals, so a total order over the builds present, and a build is
+/// the source iff no single other candidate's build beats it. For a rollup
+/// `R` of coarse build `C` reading group `f`:
+///
+/// - `R` needs one of `f`'s candidates whose build is `C`'s source with `R`
+///   alone, exposing the state at `R`'s site for a sketch;
+/// - `R`, such a candidate `F` and a candidate `Y` of a third group whose
+///   build beats `F`'s for `C` are never chosen together;
+/// - for a sketch, every unrolled coarse build `C'` (of `R`'s rewritten
+///   candidate, of `F`, or of a third group's `Y`) whose source would be
+///   `F`'s build needs a candidate `Z` of a fourth group whose build beats
+///   it for `C'`.
+pub(crate) fn rollup_rules(memo: &Memo, present: &BTreeSet<(usize, usize)>) -> Vec<RollupRule> {
+    let candidate = |(g, c): (usize, usize)| &memo.candidates[g][c];
+    // A candidate's node in the joint rule's plan: a rollup undone.
+    let plan_node = |key: (usize, usize)| match &candidate(key).rollup_of {
+        Some(read) => Rc::clone(&read.coarse_candidate),
+        None => Rc::clone(&candidate(key).node),
+    };
+    // The joint rule's source of each coarse build over `nodes`, in group
+    // order.
+    let sources =
+        |nodes: &[(usize, Rc<OperatorNode>)]| -> Vec<(*const OperatorNode, Rc<OperatorNode>)> {
+            let mut nodes = nodes.to_vec();
+            nodes.sort_by_key(|(g, _)| *g);
+            let roots: Vec<QueryRoot> = nodes
+                .into_iter()
+                .map(|(_, node)| QueryRoot::Operator(node))
+                .collect();
+            rollup_candidates(&roots)
+                .into_iter()
+                .map(|r| (Rc::as_ptr(&r.coarse), r.finer))
+                .collect()
+        };
+    let source_of = |coarse: *const OperatorNode, nodes: &[(usize, Rc<OperatorNode>)]| {
+        sources(nodes)
+            .into_iter()
+            .find(|(c, _)| *c == coarse)
+            .map(|(_, finer)| finer)
+    };
+    let mut rules = Vec::new();
+    for &rollup in present {
+        let Some(read) = &candidate(rollup).rollup_of else {
+            continue;
+        };
+        let (coarse_group, finer_group) = (rollup.0, read.finer_group.0 as usize);
+        let coarse = Rc::as_ptr(&read.coarse_build);
+        // The site the rollup requires of its finer group (its own
+        // `requires_sites`): the finer build's state as the finer group's
+        // candidates key it.
+        let site = read.finer_state.as_ref().and_then(|_| {
+            candidate(rollup)
+                .requires_sites
+                .iter()
+                .find(|(g, _)| g.0 as usize == finer_group)
+                .map(|(_, site)| *site)
+        });
+        let r_node = (coarse_group, plan_node(rollup));
+        let mut allowed = Vec::new();
+        for &finer in present.iter().filter(|(g, _)| *g == finer_group) {
+            let f_node = (finer_group, plan_node(finer));
+            let Some(build) = source_of(coarse, &[r_node.clone(), f_node.clone()]) else {
+                continue;
+            };
+            let in_finer = reached(&candidate(finer).node).contains(&Rc::as_ptr(&build));
+            let state_ok = site.is_none_or(|site| {
+                candidate(finer).coupling_sites.contains(&site) && state_key(&build) == site.key
+            });
+            if !in_finer || !state_ok {
+                continue;
+            }
+            allowed.push(finer);
+            let others = || {
+                present
+                    .iter()
+                    .copied()
+                    .filter(move |(g, _)| *g != coarse_group && *g != finer_group)
+            };
+            // A third group's build that beats the finer build for `C`.
+            for other in others() {
+                let nodes = [r_node.clone(), f_node.clone(), (other.0, plan_node(other))];
+                if source_of(coarse, &nodes).is_none_or(|b| !Rc::ptr_eq(&b, &build)) {
+                    rules.push(RollupRule {
+                        all_of: vec![rollup, finer, other],
+                        one_of: Vec::new(),
+                    });
+                }
+            }
+            if site.is_none() {
+                continue;
+            }
+            // Every unrolled coarse build whose source the state is rolls up
+            // too, unless a fourth group's build beats it.
+            let mut holders: Vec<Option<(usize, usize)>> = vec![None, Some(finer)];
+            holders.extend(
+                others()
+                    .filter(|&o| candidate(o).rollup_of.is_none())
+                    .map(Some),
+            );
+            for holder in holders {
+                let mut nodes = vec![r_node.clone(), f_node.clone()];
+                if let Some(h) = holder.filter(|&h| h != finer) {
+                    nodes.push((h.0, plan_node(h)));
+                }
+                let holder_node = match holder {
+                    None => Rc::clone(&r_node.1),
+                    Some(h) => plan_node(h),
+                };
+                let in_holder = reached(&holder_node);
+                for (other_coarse, finer_build) in sources(&nodes) {
+                    if other_coarse == coarse
+                        || !Rc::ptr_eq(&finer_build, &build)
+                        || !in_holder.contains(&other_coarse)
+                    {
+                        continue;
+                    }
+                    let mut all_of = vec![rollup, finer];
+                    if let Some(h) = holder.filter(|&h| h != finer) {
+                        all_of.push(h);
+                    }
+                    let groups: Vec<usize> = all_of.iter().map(|(g, _)| *g).collect();
+                    let one_of = present
+                        .iter()
+                        .copied()
+                        .filter(|(g, _)| !groups.contains(g))
+                        .filter(|&z| {
+                            let mut with = nodes.clone();
+                            with.push((z.0, plan_node(z)));
+                            source_of(other_coarse, &with).is_none_or(|b| !Rc::ptr_eq(&b, &build))
+                        })
+                        .collect();
+                    rules.push(RollupRule { all_of, one_of });
+                }
+            }
+        }
+        rules.push(RollupRule {
+            all_of: vec![rollup],
+            one_of: allowed,
+        });
+    }
+    rules.sort_by(|a, b| (&a.all_of, &a.one_of).cmp(&(&b.all_of, &b.one_of)));
+    rules.dedup();
+    rules
+}
+
 /// Whether `candidate` computes exactly: no node it reaches builds an
 /// approximate summary (every summary an exact accumulator).
 pub(crate) fn is_exact(candidate: &ImplementationCandidate) -> bool {

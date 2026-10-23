@@ -20398,6 +20398,7 @@
     "search": {
       "candidates_checked": 933,
       "components": [],
+      "incumbent_cost": 4.5581790928001605e-6,
       "interchangeable_queries": [
         [
           2,

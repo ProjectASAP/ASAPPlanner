@@ -1027,6 +1027,54 @@ pub struct SearchReport {
     /// the search built none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo: Option<MemoStats>,
+    /// The search algorithm that ran; omitted in JSON for the legacy
+    /// search.
+    #[serde(default, skip_serializing_if = "SearchAlgorithm::is_legacy")]
+    pub algorithm: SearchAlgorithm,
+    /// Why the legacy search ran instead of the requested memo search;
+    /// `None` when the requested algorithm ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_to_legacy: Option<RoutedToLegacy>,
+    /// The selected plan's cost per second (Stage 3's exact cost); `None`
+    /// when no plan was selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incumbent_cost: Option<f64>,
+    /// What the MILP search ([`SearchAlgorithm::MemoMilp`]) did; `None`
+    /// for every other search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milp: Option<MilpReport>,
+}
+
+/// The MILP search's report: its bound, gap and effort.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MilpReport {
+    /// The MILP lower bound at the end: a lower bound on the cost per
+    /// second of every plan the search did not evaluate (the last solver
+    /// objective, or the incumbent cost once no plan below it is left);
+    /// `None` when no round finished and no relaxation was solved.
+    pub lower_bound: Option<f64>,
+    /// The first round's MILP lower bound, before any cut: how tight the
+    /// model is against the incumbent cost.
+    pub first_lower_bound: Option<f64>,
+    /// (incumbent cost − lower bound) / incumbent cost, at least 0: 0 when
+    /// the incumbent is proven optimal over the memo, within the solver's
+    /// tolerances (a relative 1e-9 in the stopping rule, about 1e-4 when
+    /// HiGHS stops at its own gap tolerance).
+    pub gap: Option<f64>,
+    /// Its rounds (each: a solve, the decoded plan's incumbent evaluation,
+    /// a cut).
+    pub rounds: u32,
+    /// The MILP's variables and constraints in its last round.
+    pub variable_count: u64,
+    pub constraint_count: u64,
+    /// The wall time in milliseconds spent in the solver, every round
+    /// together.
+    pub solver_time_ms: u64,
+    /// Whether it stopped at its time limit
+    /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]) or another
+    /// solver limit (iterations, memory, interrupt): the plan is then
+    /// proven optimal only if `gap` is 0.
+    pub time_limit_reached: bool,
 }
 
 /// The size of a sub-expression memo (planner-layering design, "The
@@ -1047,6 +1095,44 @@ pub struct MemoStats {
     pub coupling_sites_by_kind: BTreeMap<String, usize>,
     /// The time building it took, in milliseconds.
     pub build_ms: f64,
+}
+
+/// How the Stage 1 to Stage 3 search explores the plans
+/// ([`Stage1ToStage3Search::search`]).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum SearchAlgorithm {
+    /// The search over whole-workload candidates: each query's own
+    /// candidates checked first, independent components searched
+    /// separately, only the best so far kept.
+    #[default]
+    Legacy,
+    /// Every plan of the memo over logical sub-expressions, each priced by
+    /// Stage 3: the reference the MILP is checked against.
+    MemoBruteForce,
+    /// The memo over logical sub-expressions solved as a mixed-integer
+    /// linear program.
+    MemoMilp,
+}
+
+impl SearchAlgorithm {
+    fn is_legacy(&self) -> bool {
+        *self == SearchAlgorithm::Legacy
+    }
+}
+
+/// Why the legacy search ran instead of the requested memo search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutedToLegacy {
+    /// The caller asked for the exhaustive search, which the memo searches
+    /// do not replace.
+    ExhaustiveRequested,
+    /// The MILP's objective is cost model 1's sum of local prices; cost
+    /// models 2 and 3 are searched by the legacy search.
+    CostModelNotSupported,
 }
 
 /// One independent component of the workload: queries that can read no
@@ -1142,6 +1228,9 @@ pub enum SelectionError {
     },
     #[error("no valid candidate: {0:?}")]
     NoValidCandidate(Vec<Rejection>),
+    /// The memo search's MILP solver failed.
+    #[error("MILP solver: {0}")]
+    Solver(String),
 }
 
 /// Stage 3 (plan selection): reject candidates that the executor cannot
@@ -2020,6 +2109,7 @@ impl<'a> PlanSelector<'a> {
             &query_reach(&sized.dag, &node_map(&sized.dag)),
             &self.range_evaluations,
         );
+        let incumbent_cost = self.costs.get(&selected).and_then(|c| c.cost_per_second);
         let selection = Selection {
             selected,
             plan,
@@ -2031,10 +2121,17 @@ impl<'a> PlanSelector<'a> {
             search: SearchReport {
                 candidates_checked: self.candidates_checked,
                 runner_up_cost_per_second: self.runner_up,
+                incumbent_cost,
                 ..SearchReport::default()
             },
         };
         Ok((selection, built))
+    }
+
+    /// Under a price ranking, the cheapest price of the valid candidates
+    /// offered so far.
+    pub(crate) fn cheapest_price(&self) -> Option<f64> {
+        self.cheapest
     }
 
     /// Under a price ranking, fold the price of valid candidate `cost`

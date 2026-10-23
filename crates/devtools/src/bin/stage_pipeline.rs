@@ -38,6 +38,15 @@
 // `"default"`. `--exhaustive` instead composes and prices every candidate
 // (the search the default one is tested against, for small workloads and
 // comparison) and the document lists them; `search` is `"exhaustive"`.
+// `--search legacy|memo-brute-force|memo-milp` picks the default search's
+// algorithm (`SearchAlgorithm`): `legacy` (the default, `search` is
+// `"default"`), the memo over logical sub-expressions searched by brute
+// force (the reference), or solved as a MILP; `search` names it, and the
+// search report says which ran (`algorithm`, omitted for legacy) and,
+// when the legacy search ran instead, why (`routed_to_legacy`). Not with
+// `--exhaustive`. `--milp-time-limit-s <f64>` limits the MILP search: at
+// the limit it selects its best plan so far and reports
+// `time_limit_reached` with the gap to its bound.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.
@@ -244,8 +253,8 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
-    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection,
-    SelectionError, Stage1ToStage3Search,
+    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
+    SearchAlgorithm, Selection, SelectionError, Stage1ToStage3Search,
 };
 use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -264,7 +273,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force] [--max-displayed <n>] --out <file>\n\
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp [--milp-time-limit-s <f64>]] [--max-displayed <n>] --out <file>\n\
 --search legacy is the default search (the document's \"search\" is \"default\").";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
@@ -370,9 +379,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_selection_settings_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
-    // `--search memo-brute-force`: the reference search over the memo of
-    // sub-expressions instead of the default search.
-    let mut memo_brute_force = false;
+    // `--search`: the default search's algorithm, legacy unless given;
+    // `--milp-time-limit-s` limits the MILP search.
+    let mut search_algorithm: Option<SearchAlgorithm> = None;
+    let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -436,11 +446,23 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
             "--search" => {
-                memo_brute_force = match value()?.as_str() {
-                    "legacy" => false,
-                    "memo-brute-force" => true,
-                    other => return Err(format!("unknown search {other}").into()),
-                }
+                search_algorithm = Some(match value()?.as_str() {
+                    "legacy" => SearchAlgorithm::Legacy,
+                    "memo-brute-force" => SearchAlgorithm::MemoBruteForce,
+                    "memo-milp" => SearchAlgorithm::MemoMilp,
+                    other => {
+                        return Err(format!(
+                            "--search {other}: expected legacy, memo-brute-force or memo-milp"
+                        )
+                        .into())
+                    }
+                })
+            }
+            "--milp-time-limit-s" => {
+                let seconds: f64 = value()?
+                    .parse()
+                    .map_err(|e| format!("--milp-time-limit-s: {e}"))?;
+                milp_time_limit_ms = Some((seconds * 1e3) as u64);
             }
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -464,8 +486,16 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
     }
-    if exhaustive && memo_brute_force {
-        return Err("--exhaustive and --search memo-brute-force are two searches: give one".into());
+    if exhaustive && search_algorithm.is_some() {
+        return Err(
+            "--search picks the default search's algorithm: drop it with --exhaustive".into(),
+        );
+    }
+    let search_algorithm = search_algorithm.unwrap_or_default();
+    if milp_time_limit_ms.is_some() && search_algorithm != SearchAlgorithm::MemoMilp {
+        return Err(
+            "--milp-time-limit-s limits the MILP search: it needs --search memo-milp".into(),
+        );
     }
     if plan_selection_settings_path.is_some()
         && (cost_model.is_some()
@@ -692,8 +722,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             &data,
             models,
             Stage1ToStage3Search {
-                memo_groups: memo_brute_force,
-                ..Stage1ToStage3Search::default()
+                milp_time_limit_ms,
+                ..Stage1ToStage3Search::with_algorithm(search_algorithm)
             },
         ),
     };
@@ -719,10 +749,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     document["workload"]["data_workload"] =
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
-    document["search"] = json!(match (exhaustive, memo_brute_force) {
+    document["search"] = json!(match (exhaustive, search_algorithm) {
         (true, _) => "exhaustive",
-        (false, true) => "memo-brute-force",
-        (false, false) => "default",
+        (false, SearchAlgorithm::Legacy) => "default",
+        (false, SearchAlgorithm::MemoBruteForce) => "memo-brute-force",
+        (false, SearchAlgorithm::MemoMilp) => "memo-milp",
     });
     document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
         "enforced"

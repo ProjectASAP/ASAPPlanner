@@ -1706,6 +1706,118 @@ fn scans_projecting_different_labels_are_shared() {
     );
 }
 
+/// `--search` picks the default search's algorithm. Example 3b's p99 panel
+/// under cost model 1: the memo searched by brute force selects a plan of
+/// the legacy search's price; the MILP, not built yet, runs the legacy
+/// search and says why; under cost model 2 the MILP runs the legacy search
+/// because it prices cost model 1 only.
+#[test]
+fn search_flag_picks_the_search_algorithm() {
+    let run = |extra: &[&str]| {
+        let mut args = vec!["--example", "planner-layering-3b"];
+        args.extend_from_slice(extra);
+        document_of(&args)
+    };
+    let price = |document: &Value| {
+        let selection = &document["stage3_plan_selection"];
+        let selected = selection["selected"].as_str().unwrap();
+        selection["costs"][selected]["cost_per_second"]
+            .as_f64()
+            .unwrap()
+    };
+    let legacy = run(&["--search", "legacy"]);
+    assert_eq!(legacy["search"], "default");
+    let report = &legacy["stage3_plan_selection"]["search"];
+    // The legacy search's report omits the algorithm and the MILP's
+    // report; every search reports its selected plan's cost.
+    for field in ["algorithm", "routed_to_legacy", "milp"] {
+        assert!(report.get(field).is_none(), "{field}: {report}");
+    }
+    assert_eq!(report["incumbent_cost"].as_f64(), Some(price(&legacy)));
+
+    let brute_force = run(&["--search", "memo-brute-force"]);
+    assert_eq!(brute_force["search"], "memo-brute-force");
+    let report = &brute_force["stage3_plan_selection"]["search"];
+    assert_eq!(report["algorithm"], "memo-brute-force");
+    assert!((price(&brute_force) - price(&legacy)).abs() <= 1e-9 * price(&legacy));
+
+    let milp = run(&["--search", "memo-milp"]);
+    assert_eq!(milp["search"], "memo-milp");
+    let report = &milp["stage3_plan_selection"]["search"];
+    assert_eq!(report["algorithm"], "memo-milp");
+    assert!(report.get("routed_to_legacy").is_none(), "{report}");
+    let milp_report = &report["milp"];
+    assert!(milp_report["rounds"].as_u64().unwrap() >= 1, "{report}");
+    assert!(milp_report["gap"].as_f64().unwrap() <= 1e-9, "{report}");
+    assert!(
+        milp_report["lower_bound"].as_f64().unwrap() <= price(&milp) * (1.0 + 1e-9),
+        "{report}"
+    );
+    assert_eq!(milp_report["time_limit_reached"], false, "{report}");
+    assert!((price(&milp) - price(&legacy)).abs() <= 1e-9 * price(&legacy));
+
+    let cost_model_2 = run(&[
+        "--search",
+        "memo-milp",
+        "--cost-model",
+        "provisioned-capacity",
+    ]);
+    assert_eq!(
+        cost_model_2["stage3_plan_selection"]["search"]["routed_to_legacy"],
+        "cost_model_not_supported"
+    );
+}
+
+/// `--search` takes one of its three algorithms, and not with
+/// `--exhaustive`, which is its own search.
+#[test]
+fn search_flag_is_checked() {
+    let (status, stderr) = failure(&["--promql", "sum(m)", "--search", "milp"]);
+    assert_eq!(status, Some(2));
+    assert!(
+        stderr.contains("expected legacy, memo-brute-force or memo-milp"),
+        "{stderr}"
+    );
+    let (status, stderr) = failure(&[
+        "--promql",
+        "sum(m)",
+        "--exhaustive",
+        "--search",
+        "memo-milp",
+    ]);
+    assert_eq!(status, Some(2));
+    assert!(stderr.contains("drop it with --exhaustive"), "{stderr}");
+}
+
+/// The MILP search stopped by its time limit before any valid plan says
+/// so (never a plan called optimal), and the limit needs the MILP search.
+#[test]
+fn milp_time_limit_is_reported_and_needs_the_milp_search() {
+    let document = document_of(&[
+        "--example",
+        "planner-layering-3b",
+        "--search",
+        "memo-milp",
+        "--milp-time-limit-s",
+        "0",
+    ]);
+    let selection = &document["stage3_plan_selection"];
+    assert!(selection["selected"].is_null(), "{selection}");
+    assert!(
+        selection["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("reached its time limit")),
+        "{selection}"
+    );
+    let (_, stderr) = failure(&[
+        "--example",
+        "planner-layering-3b",
+        "--milp-time-limit-s",
+        "1",
+    ]);
+    assert!(stderr.contains("needs --search memo-milp"), "{stderr}");
+}
+
 /// The memo search's document names its selected plan's logical candidate
 /// under the id its physical candidates read (`from_logical`), as the
 /// viewer's validator requires: the brute force numbers its logical plans,
@@ -1741,20 +1853,6 @@ fn the_memo_search_document_names_the_selected_logical_candidate() {
         .as_str()
         .unwrap();
     assert!(physical.iter().any(|c| c["id"] == selected));
-}
-
-/// `--exhaustive` and `--search memo-brute-force` are two searches.
-#[test]
-fn exhaustive_and_the_memo_search_are_not_both_given() {
-    let (status, stderr) = failure(&[
-        "--promql",
-        "sum(m)",
-        "--exhaustive",
-        "--search",
-        "memo-brute-force",
-    ]);
-    assert_eq!(status, Some(2));
-    assert!(stderr.contains("give one"), "{stderr}");
 }
 
 /// Each shown candidate's `per_node` entries carry the node's operator,
@@ -1883,9 +1981,13 @@ fn mixed_language_workload_files(sql_arrival: Value, sql_facts: Value) -> (PathB
         },
         "data_workload": {"arrival": sql_arrival, "sources": {"flows": sql_facts}},
     });
+    // Tests run as threads of one process, so the names need a per-call
+    // counter.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = |name: &str| {
         std::env::temp_dir().join(format!(
-            "stage_pipeline_{}_mixed_{name}.json",
+            "stage_pipeline_{}_{call}_mixed_{name}.json",
             std::process::id()
         ))
     };
