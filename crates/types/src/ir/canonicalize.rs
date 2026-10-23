@@ -18,7 +18,14 @@
 //!
 //! Count supplies unit weights and Sum supplies value weights. Because the
 //! match is positional, aliases do not affect it. Other ranked expressions
-//! retain Sort + Limit.
+//! retain Sort + Limit. The promotion changes the node's columns, so it
+//! applies only where no consumer reads them by position: at the root or
+//! in a `Concat` branch.
+//!
+//! SQL's per-partition top-k, `WHERE rn <= k` over `ROW_NUMBER() OVER
+//! (PARTITION BY p ORDER BY o)` under a SELECT list that drops `rn`, is
+//! first rewritten to the per-partition `Limit{k}{Sort{o}}` PromQL `topk by
+//! (p)` lowers to, which the promotion then applies to as to any other.
 //!
 //! ## Subquery lowering
 //!
@@ -27,14 +34,14 @@
 //! zero-row NULL or multiple-row error semantics. All scalar plan references
 //! participate in DAG traversal and canonicalization.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 use crate::ir::operator::agg_intent::{topk, AggIntent};
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
-use crate::ir::operator::operator_properties::{JoinKind, Reduction};
+use crate::ir::operator::operator_properties::{GroupKeys, JoinKind, Reduction, WindowFuncKind};
 use crate::ir::properties::AccuracyTarget;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::SchemaDerivationError;
@@ -45,7 +52,21 @@ use crate::ir::SchemaDerivationError;
 /// sub-DAG keeps its pointer identity, and a shared sub-DAG that is rewritten
 /// stays shared.
 pub fn canonicalize(root: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    canon(&root, &mut Memo::new())
+    canon(&root, &mut Memo::new(), &read_by_position(&root))
+}
+
+/// The nodes under `root` some consumer reads by column position: every
+/// input of an operator other than `Concat` (whose branches each give the
+/// whole output). A rewrite that changes a node's columns, as heavy-hitter
+/// promotion does, applies only to a node outside this set, whose columns
+/// are the query's answer: rewritten under a positional reader, a column
+/// index would name another column.
+fn read_by_position(root: &Rc<OperatorNode>) -> HashSet<*const OperatorNode> {
+    OperatorNode::reachable(root)
+        .iter()
+        .filter(|node| !matches!(node.non_asap(), Some(NonASAPOp::Concat { .. })))
+        .flat_map(|node| node.children().into_iter().map(Rc::as_ptr))
+        .collect()
 }
 
 /// Already-canonicalized nodes, by pointer. The recursion needs this table so
@@ -56,6 +77,7 @@ type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 fn canon(
     node: &Rc<OperatorNode>,
     memo: &mut Memo,
+    read_by_position: &HashSet<*const OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     if let Some(done) = memo.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
@@ -82,7 +104,7 @@ fn canon(
     let mut rebuilt: Vec<(*const OperatorNode, Rc<OperatorNode>)> = Vec::new();
     let mut changed = false;
     for child in node.operator.children() {
-        let new = canon(child, memo)?;
+        let new = canon(child, memo, read_by_position)?;
         changed |= !Rc::ptr_eq(&new, child);
         rebuilt.push((Rc::as_ptr(child), new));
     }
@@ -117,7 +139,8 @@ fn canon(
         }
     }
 
-    let current = apply_local_rules(current, memo)?;
+    let columns_may_change = !read_by_position.contains(&Rc::as_ptr(node));
+    let current = apply_local_rules(current, columns_may_change, memo, read_by_position)?;
 
     memo.insert(Rc::as_ptr(node), Rc::clone(&current));
     Ok(current)
@@ -125,16 +148,26 @@ fn canon(
 
 /// Apply the local rewrite rules at `node` (whose inputs are already
 /// canonical) until none matches. A `Filter` with several subquery
-/// conjuncts sheds one per round. Each rule removes one `Limit{Sort}` idiom
-/// or one subquery conjunct, so the loop terminates.
+/// conjuncts sheds one per round. Each rule removes one window, one
+/// `Limit{Sort}` idiom or one subquery conjunct, so the loop terminates.
+/// Heavy-hitter promotion changes the node's columns, so it applies only
+/// when `columns_may_change` (no consumer reads them by position).
 fn apply_local_rules(
     mut current: Rc<OperatorNode>,
+    columns_may_change: bool,
     memo: &mut Memo,
+    read_by_position: &HashSet<*const OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     loop {
-        let next = if let Some(next) = try_promote_additive_top_ranking(&current)? {
+        let promoted = || match columns_may_change {
+            true => try_promote_additive_top_ranking(&current),
+            false => Ok(None),
+        };
+        let next = if let Some(next) = try_rewrite_row_number_top_k(&current)? {
             next
-        } else if let Some(next) = try_lower_subquery_conjunct(&current, memo)? {
+        } else if let Some(next) = promoted()? {
+            next
+        } else if let Some(next) = try_lower_subquery_conjunct(&current, memo, read_by_position)? {
             next
         } else {
             break;
@@ -186,20 +219,26 @@ fn try_promote_additive_top_ranking(
     };
 
     // The ordered relation is an `Aggregate`, optionally behind a passthrough
-    // projection (a bare-column SELECT list). Map the sort key through the
-    // projection to the aggregate's own output column.
-    let (agg_node, ranked_col) = match sort_child.non_asap() {
+    // projection (a bare-column SELECT list). Map the sort key and the
+    // partition through the projection to the aggregate's own output columns.
+    let (agg_node, ranked_col, partition) = match sort_child.non_asap() {
         Some(NonASAPOp::Project { cols, child, .. }) => {
-            let Some(ProjectItem {
-                expr: ScalarExpr::Column(underlying),
-                ..
-            }) = cols.get(*sort_col)
-            else {
+            let underlying = |column: usize| match cols.get(column) {
+                Some(ProjectItem {
+                    expr: ScalarExpr::Column(underlying),
+                    ..
+                }) => Some(*underlying),
+                _ => None,
+            };
+            let Some(ranked_col) = underlying(*sort_col) else {
                 return Ok(None);
             };
-            (child, *underlying)
+            let Some(partition) = partition_by.iter().map(|&c| underlying(c)).collect() else {
+                return Ok(None);
+            };
+            (child, ranked_col, partition)
         }
-        _ => (sort_child, *sort_col),
+        _ => (sort_child, *sort_col, partition_by.to_vec()),
     };
 
     // Exactly one aggregate, ranked by *its* output column — the measure sits
@@ -258,7 +297,7 @@ fn try_promote_additive_top_ranking(
     // a global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk
     // by`), over the unchanged inner additive aggregate.
     OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Aggregate {
-        reduction: Reduction::by(partition_by.to_vec()),
+        reduction: Reduction::by(partition),
         measures: vec![AggIntent::TopK { k: *k, accuracy }],
         output_names: Vec::new(),
         filters: vec![],
@@ -268,8 +307,156 @@ fn try_promote_additive_top_ranking(
     .map(Some)
 }
 
-// ROW_NUMBER filters retain the window output. Eliminating it without a
-// consumer-aware rewrite drops a visible column and invalidates outer scopes.
+/// Recognise the SQL per-partition top-k idiom
+///
+/// ```text
+/// Project{P} { Filter{ rn <= k } { [Project{Q}] {
+///     SQLWindowFunc{ RowNumber, PARTITION BY p, ORDER BY o } { X } } } }
+/// ```
+///
+/// where the SELECT list `P` drops `rn` and keeps only columns of `X`, and
+/// rewrite it to the per-partition `Limit{k}{Sort{o}}` over `X` that PromQL
+/// `topk by (p)` lowers to. Two shapes, both with `P`'s columns:
+///
+/// - `P` keeps the partition and ordering columns: `Limit{k, p}{Sort{o,
+///   p}{Project{P}{X}}}`, which the heavy-hitter rule then promotes to
+///   `Aggregate{ Reduce(p), [TopK{k}] }` when `o` is one descending count
+///   or sum of an aggregate `X`.
+/// - otherwise: `Project{P}{Limit{k, p}{Sort{o, p}{X}}}`.
+///
+/// `rn < k` is `rn <= k - 1`. Rows tied on `o` at the k-th place are cut
+/// arbitrarily, as by `ROW_NUMBER` itself. `None` when the shape does not
+/// match: a visible `rn`, another window function or predicate, a computed
+/// SELECT item.
+fn try_rewrite_row_number_top_k(
+    node: &OperatorNode,
+) -> Result<Option<Rc<OperatorNode>>, SchemaDerivationError> {
+    let Some(NonASAPOp::Project {
+        cols: select_list,
+        qualifier,
+        child: filter,
+    }) = node.non_asap()
+    else {
+        return Ok(None);
+    };
+    let Some(NonASAPOp::Filter {
+        pred: Predicate(ScalarExpr::Compare {
+            left, op, right, ..
+        }),
+        child: filter_child,
+    }) = filter.non_asap()
+    else {
+        return Ok(None);
+    };
+    let (ScalarExpr::Column(rn_column), ScalarExpr::Literal(ScalarValue::Int64(bound))) =
+        (left.as_ref(), right.as_ref())
+    else {
+        return Ok(None);
+    };
+    let rows_per_partition = match op {
+        CompareOpKind::Le => *bound,
+        CompareOpKind::Lt => bound.saturating_sub(1),
+        _ => return Ok(None),
+    };
+    let Ok(rows_per_partition @ 1..) = usize::try_from(rows_per_partition) else {
+        return Ok(None);
+    };
+    // The derived table's SELECT between the filter and the window, if any:
+    // each column the filter or `P` reads must pass a window column through.
+    let (window, through_derived_table): (&Rc<OperatorNode>, Option<&[ProjectItem]>) =
+        match filter_child.non_asap() {
+            Some(NonASAPOp::Project { cols, child, .. }) => (child, Some(cols)),
+            _ => (filter_child, None),
+        };
+    let window_column = |column: usize| match through_derived_table {
+        Some(cols) => match cols.get(column) {
+            Some(ProjectItem {
+                expr: ScalarExpr::Column(underlying),
+                ..
+            }) => Some(*underlying),
+            _ => None,
+        },
+        None => Some(column),
+    };
+    let Some(NonASAPOp::SQLWindowFunc {
+        func: WindowFuncKind::RowNumber,
+        args,
+        partition_by,
+        order_by,
+        child: ranked,
+        ..
+    }) = window.non_asap()
+    else {
+        return Ok(None);
+    };
+    // `ROW_NUMBER` appends its column after its input's.
+    let row_number = ranked.schema.fields.len();
+    if !args.is_empty() || order_by.is_empty() || window_column(*rn_column) != Some(row_number) {
+        return Ok(None);
+    }
+    // Each SELECT item as a column of the window's input, under its output
+    // name; `rn` itself is not one.
+    let mut kept = Vec::with_capacity(select_list.len());
+    for (item, field) in select_list.iter().zip(&node.schema.fields) {
+        let ScalarExpr::Column(column) = item.expr else {
+            return Ok(None);
+        };
+        match window_column(column) {
+            Some(underlying) if underlying < row_number => kept.push(ProjectItem {
+                alias: Some(field.name.clone()),
+                expr: ScalarExpr::Column(underlying),
+            }),
+            _ => return Ok(None),
+        }
+    }
+    let new = |operator: NonASAPOp| OperatorNode::new_shared(Operator::NonASAP(operator));
+    let limit = |partition_by: GroupKeys, keys: Vec<SortKey>, child: Rc<OperatorNode>| {
+        let sorted = new(NonASAPOp::Sort {
+            keys,
+            partition_by: partition_by.clone(),
+            child,
+        })?;
+        new(NonASAPOp::Limit {
+            n: Some(rows_per_partition),
+            offset: 0,
+            partition_by,
+            child: sorted,
+        })
+    };
+    // A column of `X` as a column of `Project{P}{X}`, if `P` keeps it.
+    let position_in_kept = |column: usize| {
+        kept.iter()
+            .position(|item| item.expr == ScalarExpr::Column(column))
+    };
+    let partition_in_kept: Option<Vec<usize>> =
+        partition_by.iter().map(|&c| position_in_kept(c)).collect();
+    let order_in_kept: Option<Vec<SortKey>> = order_by
+        .iter()
+        .map(|key| match key.expr {
+            ScalarExpr::Column(column) => position_in_kept(column).map(|position| SortKey {
+                expr: ScalarExpr::Column(position),
+                ..key.clone()
+            }),
+            _ => None,
+        })
+        .collect();
+    let rewritten = match (partition_in_kept, order_in_kept) {
+        (Some(partition), Some(order)) if !partition_by.is_without() => {
+            let selected = new(NonASAPOp::Project {
+                cols: kept,
+                qualifier: qualifier.clone(),
+                child: Rc::clone(ranked),
+            })?;
+            limit(GroupKeys::by(partition), order, selected)?
+        }
+        _ => new(NonASAPOp::Project {
+            cols: kept,
+            qualifier: qualifier.clone(),
+            child: limit(partition_by.clone(), order_by.clone(), Rc::clone(ranked))?,
+        })?,
+    };
+    Ok(Some(rewritten))
+}
 
 /// `Predicate(true)`: the unconditional join predicate the SQL front end
 /// emits for an uncorrelated `EXISTS` and for a `CROSS JOIN`.
@@ -302,6 +489,7 @@ fn is_join_conjunct(conjunct: &ScalarExpr) -> bool {
 fn try_lower_subquery_conjunct(
     node: &OperatorNode,
     memo: &mut Memo,
+    read_by_position: &HashSet<*const OperatorNode>,
 ) -> Result<Option<Rc<OperatorNode>>, SchemaDerivationError> {
     let Some(NonASAPOp::Filter {
         pred: Predicate(pred),
@@ -345,7 +533,7 @@ fn try_lower_subquery_conjunct(
         kind,
         pred: join_pred,
         left: Rc::clone(child),
-        right: canon(subquery, memo)?,
+        right: canon(subquery, memo, read_by_position)?,
     }))?;
     let mut rest: Vec<ScalarExpr> = conjuncts
         .iter()
@@ -583,6 +771,25 @@ mod tests {
         assert!(Rc::ptr_eq(&out, &q));
     }
 
+    /// `SELECT service FROM (SELECT service, COUNT(*) … ORDER BY 2 DESC
+    /// LIMIT 5)`: the outer projection reads `service` by position, so the
+    /// top-k under it stays `Limit{Sort}`; promoted, its column 0 would be
+    /// the ranked value.
+    #[test]
+    fn does_not_promote_a_ranking_read_by_position() {
+        let ranking = limit(5, 0, sort(desc(1), count_by_service()));
+        let q = node(NonASAPOp::Project {
+            cols: vec![ProjectItem {
+                alias: None,
+                expr: ScalarExpr::Column(0),
+            }],
+            qualifier: None,
+            child: Rc::clone(&ranking),
+        });
+        let out = canonicalize(Rc::clone(&q)).unwrap();
+        assert!(Rc::ptr_eq(&out, &q), "left as the same Project{{Limit}}");
+    }
+
     #[test]
     fn rewritten_shared_subtree_stays_shared() {
         // One promotable sub-DAG referenced twice is rewritten once.
@@ -810,70 +1017,235 @@ mod tests {
         }
     }
 
-    /// `SQLWindowFunc{ RowNumber, PARTITION BY region(2), ORDER BY col(2) DESC } { agg }`.
-    fn rownumber_window(agg: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    /// `SQLWindowFunc{ RowNumber, PARTITION BY region(1), ORDER BY <order> }
+    /// { agg }`, over `agg`'s `[service, region, <agg>]`; appends `rn` at 3.
+    fn rownumber_window_by(order_by: Vec<SortKey>, agg: Rc<OperatorNode>) -> Rc<OperatorNode> {
         node(NonASAPOp::SQLWindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
-            partition_by: GroupKeys::by(vec![2]), // region
-            order_by: vec![SortKey {
-                expr: ScalarExpr::Column(2), // the aggregate output column
-                ascending: false,
-                nulls_first: true,
-            }],
+            partition_by: GroupKeys::by(vec![1]), // region
+            order_by,
             frame: Some(rownumber_frame()),
             output_name: "rn".into(),
             child: agg,
         })
     }
 
-    /// `Filter{ col <= 5 } { child }`.
-    fn filter_le_5(col: usize, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    /// [`rownumber_window_by`] ordered by the aggregate output (col 2),
+    /// descending, as `ORDER BY COUNT(*) DESC` lowers.
+    fn rownumber_window(agg: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        rownumber_window_by(
+            vec![SortKey {
+                expr: ScalarExpr::Column(2),
+                ascending: false,
+                nulls_first: true,
+            }],
+            agg,
+        )
+    }
+
+    /// `Filter{ col <op> k } { child }`.
+    fn filter_cmp(
+        col: usize,
+        op: CompareOpKind,
+        k: i64,
+        child: Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
         node(NonASAPOp::Filter {
             pred: Predicate(ScalarExpr::Compare {
                 left: Box::new(ScalarExpr::Column(col)),
-                op: CompareOpKind::Le,
-                right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(5))),
+                op,
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(k))),
                 semantics: ExprSemantics::Sql,
             }),
             child,
         })
     }
 
-    /// `Filter{ rn(3) <= 5 } { ROW_NUMBER window { agg } }`.
-    fn rownumber_topk(agg: Rc<OperatorNode>) -> Rc<OperatorNode> {
-        filter_le_5(3, rownumber_window(agg))
+    /// `Filter{ col <= 5 } { child }`.
+    fn filter_le_5(col: usize, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        filter_cmp(col, CompareOpKind::Le, 5, child)
     }
 
+    /// `Project{ cols }` naming each kept column as SQL does (`c` for the
+    /// aggregate output).
+    fn select(cols: &[usize], child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        node(NonASAPOp::Project {
+            cols: cols
+                .iter()
+                .map(|&col| ProjectItem {
+                    alias: (col == 2).then(|| "c".to_string()),
+                    expr: ScalarExpr::Column(col),
+                })
+                .collect(),
+            qualifier: None,
+            child,
+        })
+    }
+
+    /// `SELECT service, region, c FROM (SELECT …, ROW_NUMBER() OVER
+    /// (PARTITION BY region ORDER BY <agg> DESC) AS rn …) WHERE rn <= 5`:
+    /// `Project{0,1,2} { Filter{ rn(3) <= 5 } { Project{0,1,2,3} { window
+    /// { agg } } } }`, as the SQL frontend lowers it.
+    fn rownumber_topk(agg: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        select(
+            &[0, 1, 2],
+            filter_le_5(3, select(&[0, 1, 2, 3], rownumber_window(agg))),
+        )
+    }
+
+    fn assert_partitioned_sort_limit(out: &OperatorNode, k: usize, partition: usize) {
+        let Some(NonASAPOp::Limit {
+            n,
+            offset: 0,
+            partition_by,
+            child,
+        }) = out.non_asap()
+        else {
+            panic!("expected a Limit, got {out:?}");
+        };
+        assert_eq!(*n, Some(k));
+        assert_eq!(*partition_by, vec![partition]);
+        let Some(NonASAPOp::Sort { partition_by, .. }) = child.non_asap() else {
+            panic!("expected a Sort under the Limit, got {child:?}");
+        };
+        assert_eq!(*partition_by, vec![partition]);
+    }
+
+    fn reaches_window(out: &Rc<OperatorNode>) -> bool {
+        OperatorNode::reachable(out)
+            .iter()
+            .any(|n| matches!(n.non_asap(), Some(NonASAPOp::SQLWindowFunc { .. })))
+    }
+
+    /// A count-ranked `ROW_NUMBER` top-k is the heavy-hitter `TopK` PromQL
+    /// `topk by (region)` lowers to: grouped by the window's partition
+    /// (region, col 1 of the inner aggregate), over the inner Count.
     #[test]
     fn rownumber_count_topk_becomes_a_partitioned_heavy_hitter() {
-        let original = rownumber_topk(grouped(count()));
-        let out = canonicalize(Rc::clone(&original)).unwrap();
-        assert_eq!(out.schema, original.schema);
-        assert!(
-            matches!(out.non_asap(),Some(NonASAPOp::Filter { child,.. }) if matches!(child.non_asap(),Some(NonASAPOp::SQLWindowFunc { .. })))
-        );
+        let agg = grouped(count());
+        let out = canonicalize(rownumber_topk(Rc::clone(&agg))).unwrap();
+        let Some(NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            child,
+            ..
+        }) = out.non_asap()
+        else {
+            panic!("expected an outer Aggregate([TopK]), got {out:?}");
+        };
+        assert!(matches!(
+            measures.as_slice(),
+            [AggIntent::TopK { k: 5, .. }]
+        ));
+        assert_eq!(*reduction.expect_reduce(), vec![1], "grouped by region");
+        assert!(Rc::ptr_eq(child, &agg), "over the unchanged inner Count");
         assert_idempotent(&out);
     }
 
+    /// `rn < 6` keeps the same rows as `rn <= 5`.
+    #[test]
+    fn rownumber_less_than_is_the_same_topk() {
+        let lt = select(
+            &[0, 1, 2],
+            filter_cmp(
+                3,
+                CompareOpKind::Lt,
+                6,
+                select(&[0, 1, 2, 3], rownumber_window(grouped(count()))),
+            ),
+        );
+        assert!(is_topk_over_count(&canonicalize(lt).unwrap()));
+    }
+
+    /// An avg ranking is no heavy-hitter: the generic per-partition
+    /// `Limit{5}{Sort}`, with the query's columns unchanged.
     #[test]
     fn rownumber_avg_topk_becomes_a_partitioned_sort_limit() {
         let original = rownumber_topk(grouped(AggIntent::Avg { col: None }));
         let out = canonicalize(Rc::clone(&original)).unwrap();
         assert_eq!(out.schema, original.schema);
-        assert!(
-            matches!(out.non_asap(),Some(NonASAPOp::Filter { child,.. }) if matches!(child.non_asap(),Some(NonASAPOp::SQLWindowFunc { .. })))
-        );
+        assert_partitioned_sort_limit(&out, 5, 1);
+        assert!(!reaches_window(&out));
         assert_idempotent(&out);
+    }
+
+    /// A tie-breaking second ORDER BY key is kept: the generic
+    /// per-partition `Limit{Sort}` sorts by both keys.
+    #[test]
+    fn rownumber_with_a_tie_breaking_key_keeps_both_sort_keys() {
+        let order = vec![
+            SortKey {
+                expr: ScalarExpr::Column(2),
+                ascending: false,
+                nulls_first: true,
+            },
+            SortKey {
+                expr: ScalarExpr::Column(0),
+                ascending: true,
+                nulls_first: false,
+            },
+        ];
+        let original = select(
+            &[0, 1, 2],
+            filter_le_5(
+                3,
+                select(
+                    &[0, 1, 2, 3],
+                    rownumber_window_by(order.clone(), grouped(count())),
+                ),
+            ),
+        );
+        let out = canonicalize(Rc::clone(&original)).unwrap();
+        assert_eq!(out.schema, original.schema);
+        assert_partitioned_sort_limit(&out, 5, 1);
+        let Some(NonASAPOp::Limit { child: sort, .. }) = out.non_asap() else {
+            unreachable!()
+        };
+        let Some(NonASAPOp::Sort { keys, .. }) = sort.non_asap() else {
+            unreachable!()
+        };
+        assert_eq!(*keys, order);
+    }
+
+    /// A SELECT list without the partition column (`SELECT service, c`)
+    /// still keeps 5 rows per region: the projection stays above the
+    /// per-partition `Limit{Sort}` over the aggregate.
+    #[test]
+    fn rownumber_topk_selecting_fewer_columns_keeps_them_above_the_limit() {
+        let original = select(
+            &[0, 2],
+            filter_le_5(3, select(&[0, 1, 2, 3], rownumber_window(grouped(count())))),
+        );
+        let out = canonicalize(Rc::clone(&original)).unwrap();
+        assert_eq!(out.schema, original.schema);
+        let Some(NonASAPOp::Project { child, .. }) = out.non_asap() else {
+            panic!("expected the SELECT list on top, got {out:?}");
+        };
+        assert_partitioned_sort_limit(child, 5, 1);
+        assert!(!reaches_window(&out));
+        assert_idempotent(&out);
+    }
+
+    /// Without an enclosing SELECT dropping it, `rn` is an output column:
+    /// the window stays.
+    #[test]
+    fn a_visible_row_number_is_left_alone() {
+        let q = filter_le_5(3, select(&[0, 1, 2, 3], rownumber_window(grouped(count()))));
+        let out = canonicalize(Rc::clone(&q)).unwrap();
+        assert!(Rc::ptr_eq(&out, &q), "left as the same Filter");
     }
 
     #[test]
     fn filter_on_a_non_rownumber_column_is_left_alone() {
         // `WHERE service_len <= 5` (col 0, not the rn window column) must not
         // be mistaken for a top-k.
-        let q = filter_le_5(0, rownumber_window(grouped(count())));
+        let q = select(
+            &[0, 1, 2],
+            filter_le_5(0, select(&[0, 1, 2, 3], rownumber_window(grouped(count())))),
+        );
         let out = canonicalize(Rc::clone(&q)).unwrap();
-        assert!(Rc::ptr_eq(&out, &q), "left as the same Filter");
+        assert!(Rc::ptr_eq(&out, &q), "left as the same Project");
     }
 
     // ── Subquery lowering ───────────────────────────────────────────────────
@@ -1095,13 +1467,15 @@ mod tests {
 
     #[test]
     fn lifted_subquery_is_canonicalized() {
-        // The subquery is itself a promotable heavy-hitter; once lifted into
-        // the join it is canonical, so a second pass finds nothing to do.
+        // The subquery is a count-ranked `Limit{Sort}`. The join reads its
+        // columns, so it is not promoted (that would change them); once
+        // lifted into the join it is canonical, so a second pass finds
+        // nothing to do.
         let sub = limit(5, 0, sort(desc(1), count_by_service()));
-        let q = filter_of(exists(sub, false), scan());
+        let q = filter_of(exists(Rc::clone(&sub), false), scan());
         let out = canonicalize(q).unwrap();
         let (_, _, _, r) = join_parts(&out);
-        assert!(is_topk_over_count(r));
+        assert!(Rc::ptr_eq(r, &sub));
         assert_idempotent(&out);
     }
 }

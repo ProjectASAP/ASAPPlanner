@@ -184,19 +184,27 @@ async fn a_sql_fold_over_estimates_leaves_its_row_count_unbound() {
 /// candidate of `sql` over `flows(key: key_type, bytes)` that picks a heap
 /// sketch for its top-k.
 async fn heap_updates(key: &str, key_type: DataType, sql: &str) -> Vec<(String, String)> {
-    let catalog = SqlCatalog::new().with_table(
-        "flows",
-        Schema::new(vec![
+    heap_updates_over(
+        vec![
             Field::plain(key, key_type, false),
             Field::plain("bytes", DataType::Float64, false),
-        ]),
-    );
+        ],
+        sql,
+    )
+    .await
+}
+
+/// [`heap_updates`] over `flows(fields)`.
+async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String)> {
+    let catalog = SqlCatalog::new().with_table("flows", Schema::new(fields));
     let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(sql, &catalog, accuracy).await.unwrap();
     let inventory =
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
     let name = |expr: &SummaryInputExpr| match expr {
         SummaryInputExpr::Column(ColumnRef::Named(name)) => name.clone(),
+        // The ranked value when it is the child's one sample value.
+        SummaryInputExpr::Column(ColumnRef::SampleValue) => "<sample value>".into(),
         SummaryInputExpr::Tuple(items) => match items.as_slice() {
             [SummaryInputExpr::Column(ColumnRef::Named(name))] => name.clone(),
             other => panic!("one item column: {other:?}"),
@@ -273,6 +281,32 @@ async fn topk_heap_over_a_key_named_value_is_weighted_by_the_count() {
         updates
             .iter()
             .all(|(item, weight)| item == "value" && weight.starts_with("count(")),
+        "{updates:?}"
+    );
+}
+
+/// SQL's per-group top-k idiom (`ROW_NUMBER() OVER (PARTITION BY city
+/// ORDER BY COUNT(*) DESC) … WHERE rn <= 5`) is a heavy-hitter top-k, as
+/// PromQL `topk by (city)` is: both heap sketches compose, keyed by the
+/// host and weighted by the count (the aggregate's one value column, so
+/// read as its sample value).
+#[tokio::test]
+async fn rownumber_per_group_topk_offers_heap_sketches() {
+    let updates = heap_updates_over(
+        vec![
+            Field::plain("city", DataType::Utf8, false),
+            Field::plain("host", DataType::Utf8, false),
+        ],
+        "SELECT city, host, c FROM (SELECT city, host, COUNT(*) AS c, ROW_NUMBER() OVER \
+         (PARTITION BY city ORDER BY COUNT(*) DESC) AS rn FROM flows GROUP BY city, host) \
+         WHERE rn <= 5",
+    )
+    .await;
+    assert_eq!(updates.len(), 2, "{updates:?}");
+    assert!(
+        updates
+            .iter()
+            .all(|(item, weight)| item == "host" && weight == "<sample value>"),
         "{updates:?}"
     );
 }

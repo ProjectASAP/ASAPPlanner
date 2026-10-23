@@ -162,24 +162,78 @@ async fn ascending_count_ranked_topk_stays_generic_in_both_languages() {
     );
 }
 
-/// Row-number filters retain their computed column and outer projection scope.
+/// The partitioned heavy-hitter of `qe`: its `k` and the names of the
+/// columns it partitions by, if `qe` is an outer `Aggregate([TopK{k}])`.
+fn partitioned_top_k(qe: &OperatorNode) -> Option<(usize, Vec<String>)> {
+    let Some(NonASAPOp::Aggregate {
+        reduction,
+        measures,
+        child,
+        ..
+    }) = qe.non_asap()
+    else {
+        return None;
+    };
+    let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
+        return None;
+    };
+    let partition = reduction
+        .expect_reduce()
+        .iter()
+        .map(|&column| child.schema.fields[column].name.clone())
+        .collect();
+    Some((*k, partition))
+}
 
+/// SQL's per-partition top-k idiom (`ROW_NUMBER() OVER (PARTITION BY
+/// region ORDER BY COUNT(*) DESC) … WHERE rn <= 5`) is the heavy-hitter
+/// PromQL `topk by (region)` lowers to: the top 5 per region by count, an
+/// outer `TopK{5}` grouped by `region` over the explicit inner Count.
 #[tokio::test]
-async fn sql_rownumber_count_preserves_window_schema() {
-    let query=sql("SELECT service, region, v FROM (SELECT service, region, COUNT(*) AS v, ROW_NUMBER() OVER (PARTITION BY region ORDER BY COUNT(*) DESC) AS rn FROM metrics GROUP BY service, region) t WHERE rn <= 5").await;
-    query.validate_structure().unwrap();
-    assert_eq!(query.schema.fields.len(), 3);
-    assert!(OperatorNode::reachable(&query)
+async fn sql_rownumber_count_topk_is_promqls_topk_by() {
+    let s = sql(
+        "SELECT service, region, v FROM (SELECT service, region, COUNT(*) AS v, \
+         ROW_NUMBER() OVER (PARTITION BY region ORDER BY COUNT(*) DESC) AS rn \
+         FROM metrics GROUP BY service, region) t WHERE rn <= 5",
+    )
+    .await;
+    let p = promql(
+        "topk by (region) (5, sum by (service, region) (count_over_time(http_requests_total[5m])))",
+    );
+    s.validate_structure().unwrap();
+    let region = vec!["region".to_string()];
+    assert_eq!(partitioned_top_k(&s), Some((5, region.clone())), "{s:?}");
+    assert_eq!(partitioned_top_k(&p), Some((5, region)), "{p:?}");
+    assert!(heavy_hitter(&s).is_some(), "over the explicit inner Count");
+    assert!(!OperatorNode::reachable(&s)
         .iter()
         .any(|node| matches!(node.non_asap(), Some(NonASAPOp::SQLWindowFunc { .. }))));
 }
 
+/// An avg ranking is no heavy-hitter: the generic per-partition
+/// `Limit{5}{Sort}` that PromQL `topk by (region)` over an average lowers
+/// to, with the query's three columns.
 #[tokio::test]
-async fn sql_rownumber_avg_preserves_window_schema() {
-    let query=sql("SELECT service, region, v FROM (SELECT service, region, AVG(latency) AS v, ROW_NUMBER() OVER (PARTITION BY region ORDER BY AVG(latency) DESC) AS rn FROM metrics GROUP BY service, region) t WHERE rn <= 5").await;
+async fn sql_rownumber_avg_topk_is_a_partitioned_sort_limit() {
+    let query = sql(
+        "SELECT service, region, v FROM (SELECT service, region, AVG(latency) AS v, \
+         ROW_NUMBER() OVER (PARTITION BY region ORDER BY AVG(latency) DESC) AS rn \
+         FROM metrics GROUP BY service, region) t WHERE rn <= 5",
+    )
+    .await;
     query.validate_structure().unwrap();
     assert_eq!(query.schema.fields.len(), 3);
-    assert!(OperatorNode::reachable(&query)
+    let Some(NonASAPOp::Limit {
+        n: Some(5),
+        partition_by,
+        child,
+        ..
+    }) = query.non_asap()
+    else {
+        panic!("a per-partition Limit: {query:?}");
+    };
+    assert_eq!(child.schema.fields[partition_by[0]].name, "region");
+    assert!(!OperatorNode::reachable(&query)
         .iter()
         .any(|node| matches!(node.non_asap(), Some(NonASAPOp::SQLWindowFunc { .. }))));
 }
