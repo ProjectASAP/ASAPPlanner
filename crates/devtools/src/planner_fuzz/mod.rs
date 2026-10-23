@@ -44,7 +44,7 @@ use serde_json::{json, Value};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::pass::Stage1ToStage3Search;
-use asap_plan_selection::{select_plan, PlanSelectionSettings, PlanningModels};
+use asap_plan_selection::{select_plan, PlanSelectionSettings, PlanningModels, SearchAlgorithm};
 use asap_planner::PlannerExecutorCompileCheck;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
@@ -444,7 +444,11 @@ impl Planner {
                 &data,
                 models,
                 Stage1ToStage3Search {
-                    memo_groups: search == SearchKind::MemoBruteForce,
+                    search: if search == SearchKind::MemoBruteForce {
+                        SearchAlgorithm::MemoBruteForce
+                    } else {
+                        SearchAlgorithm::Legacy
+                    },
                     ..Stage1ToStage3Search::default()
                 },
             ),
