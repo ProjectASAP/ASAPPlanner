@@ -4,7 +4,15 @@
 
 **Scope:** Multi-query optimization across exact operators, ASAP primitives, window implementations, sharing, and materialization.
 
-## 1. Traditional Memo Groups and Rule Expansion
+## 1. Motivation and Challenges
+
+ASAP primitives create opportunities to replace expensive exact computations and share summaries, panes, rollups, scans, or retained raw data. They also enlarge the optimization search space. Enumerating complete workload candidates multiplies implementation, sharing, window, and materialization choices. Optimizing queries independently avoids that enumeration but can miss joint savings.
+
+The challenge is cross-query dependence: a candidate's incremental cost changes when another candidate enables a shared producer, requires a larger summary, or extends retention. Selecting the cheapest candidate for each group independently can therefore lose the workload optimum.
+
+The design uses a memo to represent candidates compactly and a mixed-integer linear program (MILP) to select a consistent physical plan. The goals are to avoid repeated candidate generation, expose ASAP-aware sharing, and minimize the configured objective subject to accuracy, latency, and resource constraints. Optimality applies to the generated finite candidate set and configured models, not every imaginable plan. New sketch/window algorithms and runtime scheduling are outside this proposal.
+
+## 2. Traditional Memo Groups and Rule Expansion
 
 A traditional memo, as used by Cascades-style optimizers, compactly represents equivalent query expressions. A **memo group** contains expressions that produce the same logical result under the query semantics. Each expression references child groups instead of copying complete input plans. Different parent expressions can therefore reuse the same search work.
 
@@ -61,14 +69,6 @@ Best(group, required_physical_properties)
 For each physical candidate, it derives child requirements, optimizes the child groups under those requirements, and combines their costs with the candidate's own cost. The cheapest implementation for unordered output may differ from the cheapest one for ordered output; sorting or other property-enforcing operators may be needed. Rules generate candidates; costing and valid bounds guide exploration and selection.
 
 Sharing a memo group shares optimization representation, not necessarily runtime computation. Explicit materialization/reuse decisions are still needed to execute a common producer once. This distinction becomes central to ASAPPlanner's cross-query optimization below.
-
-## 2. Motivation and Challenges
-
-ASAP primitives create opportunities to replace expensive exact computations and share summaries, panes, rollups, scans, or retained raw data. They also enlarge the optimization search space. Enumerating complete workload candidates multiplies implementation, sharing, window, and materialization choices. Optimizing queries independently avoids that enumeration but can miss joint savings.
-
-The challenge is cross-query dependence: a candidate's incremental cost changes when another candidate enables a shared producer, requires a larger summary, or extends retention. Selecting the cheapest candidate for each group independently can therefore lose the workload optimum.
-
-The design uses a memo to represent candidates compactly and a mixed-integer linear program (MILP) to select a consistent physical plan. The goals are to avoid repeated candidate generation, expose ASAP-aware sharing, and minimize the configured objective subject to accuracy, latency, and resource constraints. Optimality applies to the generated finite candidate set and configured models, not every imaginable plan. New sketch/window algorithms and runtime scheduling are outside this proposal.
 
 ## 3. Memo-Based Candidate Representation
 
