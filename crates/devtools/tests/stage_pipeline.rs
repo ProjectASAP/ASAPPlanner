@@ -1319,7 +1319,7 @@ fn committed_workload_examples_are_current_with_data_workload_and_stored_outputs
         .iter()
         .filter(|e| e.get("workload").is_some())
         .collect();
-    assert_eq!(workload_examples.len(), 9);
+    assert_eq!(workload_examples.len(), 10);
     std::thread::scope(|scope| {
         for example in workload_examples {
             let root = &root;

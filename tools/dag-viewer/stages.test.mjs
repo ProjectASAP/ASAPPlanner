@@ -173,6 +173,33 @@ test('a memo-MILP document shows a sketch rollup, a union schedule and a widened
   assert.equal(widened.sharedUnits[0].kind, 'widened scan');
 });
 
+// T2+T4: no memo group is shared, but the two queries' candidates come
+// out as identical nodes (one scan, one per-series pane chain and its
+// finalized sums), one node of the composed plan: the panel lists it with
+// its readers rather than reading as no sharing.
+test('a node the composed plan shares is a shared unit with its readers', () => {
+  const doc = memoDoc('rangeheavy-t2-t4-1h');
+  assert.deepEqual([...call('validateStagePipeline', doc)], []);
+  assert.equal(doc.stage3_plan_selection.search.memo.shared_groups, 0);
+  const view = call('memoSearchView', doc);
+  assert.equal(view.summary.certified, true);
+  const composed = view.sharedUnits.filter((u) => u.kind === 'one node of the composed plan');
+  assert.equal(composed.length, 1);
+  assert.match(composed[0].unit, /^node \d+ · FinalizeExactAccumulator \(over nodes .*PaneChain, \d+ Scan\)$/);
+  assert.equal(composed[0].readers.length, 2);
+  assert.ok(composed[0].readers.some((r) => / · SummaryAgg$/.test(r)));
+  assert.deepEqual([...composed[0].queries], ['q1', 'q2']);
+  // A node only one query reaches, or one whose readers all share it too,
+  // is no unit of its own.
+  const nodes = call('composedSharedNodes', doc);
+  assert.deepEqual([...nodes.map((n) => n.kind)], ['FinalizeExactAccumulator']);
+  // Each query alone shares nothing.
+  const alone = structuredClone(doc);
+  const selected = alone.stage2_physical_asap_optimization.candidates.find((c) => c.id === alone.stage3_plan_selection.selected);
+  selected.dag.roots = selected.dag.roots.slice(0, 1);
+  assert.deepEqual([...call('composedSharedNodes', alone)], []);
+});
+
 test('a memo plan naming a missing group is refused', () => {
   const broken = memoDoc('rangeheavy-t5-q05-q09-1h');
   broken.stage3_plan_selection.search.memo_plan.coupling_sites[0].readers.push(99);

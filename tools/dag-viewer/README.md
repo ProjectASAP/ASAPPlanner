@@ -25,7 +25,7 @@ To run it, see [RUNNING.md](RUNNING.md).
 
 - **Examples**: one tab per entry of `examples.json`: #509 Examples 1, 3a
   and 3b, workload-01 of each ASAPQuery random workload set (below), and
-  six memo-MILP examples, each one kind of sharing on the smallest subset
+  seven memo-MILP examples, each one kind of sharing on the smallest subset
   of a paper workload template (below). `#example3b` in the URL opens that
   example.
 - **Workload sets** (button): one table per set listed in
@@ -97,7 +97,10 @@ To run it, see [RUNNING.md](RUNNING.md).
   the cost of the queries planned alone with the saving; then the selected
   plan's shared units: each memo group (`G1`, `G2`, …: one distinct
   logical sub-expression) one node serves to several readers, each
-  coupling site (`S1`, …) read by several groups, and a widened scan, with
+  coupling site (`S1`, …) read by several groups, a widened scan, and each
+  node of the composed plan several queries share (candidates whose nodes
+  come out identical are one Stage 2 node even when no memo group is
+  shared; the topmost such node is listed with the nodes below it), with
   their readers, the queries behind them, their repeat intervals (a shared
   unit runs on their union) and the threshold (a shared build's size, a
   pane chain's grid, set by the strictest reader).
@@ -369,7 +372,7 @@ shown. If a check fails, it shows the problems instead.
   `deployment_capabilities` and `cost_model`) is committed under
   `examples/`. The committed documents are
   `examples/planner-layering-example1.json` and workload-01 of each
-  ASAPQuery set (0.9, 0.9 and 1.4 MB), and the six memo-MILP examples
+  ASAPQuery set (0.9, 0.9 and 1.4 MB), and the seven memo-MILP examples
   (0.1 MB each); `crates/devtools/tests/stage_pipeline.rs`
   checks that they are current (a memo-MILP one up to its timings, and
   certified). `server.py --regenerate` rewrites them.

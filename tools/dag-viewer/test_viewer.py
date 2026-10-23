@@ -809,7 +809,7 @@ class PageTests(unittest.TestCase):
         """Each memo-search example is planned with `--search memo-milp`
         from a file under memo-examples/, and server.py passes the search."""
         examples = [e for e in json.loads((HERE / "examples.json").read_text()) if "search" in e]
-        self.assertEqual(len(examples), 6)
+        self.assertEqual(len(examples), 7)
         for example in examples:
             with self.subTest(example["id"]):
                 self.assertTrue(example["workload"].startswith("memo-examples/"))

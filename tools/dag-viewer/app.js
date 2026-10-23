@@ -354,7 +354,7 @@
       ? table(['shared unit', 'kind', 'readers', 'queries', 'threshold', 'runs', 'strictest reader'],
         view.sharedUnits.map((u) => `<tr><td class="wrap">${esc(u.unit)}</td><td>${esc(u.kind)}</td><td class="wrap">${esc(u.readers.join(', '))}</td><td>${esc(u.queries.join(', '))}</td>` +
           `<td class="wrap">${esc(u.threshold)}</td><td class="wrap">${esc(u.schedule)}</td><td>${esc(u.strictest)}</td></tr>`).join(''))
-      : '<span class="status">The selected plan shares nothing: every group has one reader.</span>';
+      : '<span class="status">The selected plan shares nothing: every group and every Stage 2 node has one reader.</span>';
   }
 
   // Show the selected plan in the Stage 2 lane and select its node `id`.

@@ -145,5 +145,19 @@
     "search": "memo-milp",
     "file": "examples/memo-rollupheavy-t11-service-endpoint-5m.json",
     "story": "Sketch rollup: W-RollupHeavy template 11, distinct users over 5 min by (service, endpoint) and by (service); the coarser grouping merges the finer one's KMV states, sized for both."
+  },
+  {
+    "id": "memo-rangeheavy-t2-t4-1h",
+    "name": "RangeHeavy T2+T4 (pane chain shared at composition)",
+    "workload": "memo-examples/promql/rangeheavy-t2-t4-1h.json",
+    "deployment_capabilities": {
+      "raw_data_retained": true,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
+    "search": "memo-milp",
+    "file": "examples/memo-rangeheavy-t2-t4-1h.json",
+    "story": "Composed sharing: W-RangeHeavy templates 2 and 4 over 1 h, every 60 s; one scan and one per-series pane chain; T2 regroups T4's per-series sums by label_0, then takes the top 32."
   }
 ]

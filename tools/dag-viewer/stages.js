@@ -1035,8 +1035,9 @@ function gcd(a, b) { return b ? gcd(b, a % b) : a; }
 // no memo: the MILP summary (incumbent cost, lower bound, gap, rounds,
 // whether it certified, and the cost of each query planned alone), each
 // memo group with its chosen implementation candidate, and the selected
-// plan's shared units: each group one node serves to several readers, and
-// each coupling site read by several groups, with its readers, the queries
+// plan's shared units: each group one node serves to several readers,
+// each coupling site read by several groups, a widened scan and each node
+// of the composed plan several queries share, with its readers, the queries
 // behind them, their repeat intervals (a shared unit runs on their union)
 // and the threshold (a size is set by its strictest reader).
 function memoSearchView(doc) {
@@ -1164,7 +1165,74 @@ function memoSearchView(doc) {
       });
     });
   }
+  // Sharing made when the plan is composed: candidates whose nodes come
+  // out identical (e.g. per-series pane chains over a widened scan) are
+  // one node of the selected Stage 2 plan, even with no memo group shared.
+  composedSharedNodes(doc).forEach((node) => {
+    const qs = node.queries;
+    sharedUnits.push({
+      unit: `node ${node.id} · ${node.kind}${node.below.length ? ` (over nodes ${node.below.map((b) => `${b.id} ${b.kind}`).join(', ')})` : ''}`,
+      kind: 'one node of the composed plan',
+      readers: node.readers.map((r) => (typeof r === 'number' ? `node ${r} · ${node.readerKinds[r]}` : `${qid(r.root)} (root)`)),
+      queries: qs.map(qid),
+      threshold: `one Stage 2 node${node.timing ? `, ${node.timing.replace(/_/g, ' ')}` : ''}`,
+      schedule: schedule(qs),
+      strictest: strictest(qs),
+    });
+  });
   return { summary, groups, sharedUnits, scansWidened: !!plan.scans_widened };
+}
+
+// The selected Stage 2 plan's topmost shared nodes: each node several
+// queries reach that is a query's root or is read by a node fewer queries
+// reach, with the nodes and query roots that read it (`readers`: a node id,
+// or `{ root: <query index> }`), the queries reaching it, its timing and the
+// nodes below it (all shared with it). Empty without a selected candidate.
+function composedSharedNodes(doc) {
+  const selection = doc.stage3_plan_selection || {};
+  const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === selection.selected);
+  if (!candidate) return [];
+  const lane = stageDag(candidate.dag, true);
+  const reach = stageQueryReach(lane);
+  const byId = new Map(lane.nodes.map((n) => [n.id, n]));
+  const consumers = new Map();
+  const producers = new Map();
+  lane.edges.forEach((e) => {
+    if (!consumers.has(e.producer)) consumers.set(e.producer, []);
+    consumers.get(e.producer).push(e.consumer);
+    if (!producers.has(e.consumer)) producers.set(e.consumer, []);
+    producers.get(e.consumer).push(e.producer);
+  });
+  const count = (id) => (reach.get(id) || []).length;
+  const below = (id) => {
+    const seen = new Set();
+    const stack = [...(producers.get(id) || [])];
+    while (stack.length) {
+      const p = stack.pop();
+      if (seen.has(p)) continue;
+      seen.add(p);
+      stack.push(...(producers.get(p) || []));
+    }
+    return [...seen].sort((a, b) => b - a).map((p) => ({ id: p, kind: (byId.get(p) || {}).kind }));
+  };
+  const shared = [];
+  lane.nodes.forEach((node) => {
+    const n = count(node.id);
+    if (n < 2) return;
+    const readerNodes = [...new Set(consumers.get(node.id) || [])];
+    const roots = lane.queries.map((q, i) => (q.node === node.id ? i : -1)).filter((i) => i >= 0);
+    if (!roots.length && !readerNodes.some((c) => count(c) < n)) return;
+    shared.push({
+      id: node.id,
+      kind: node.kind,
+      timing: typeof node.timing === 'string' ? node.timing : null,
+      readers: readerNodes.concat(roots.map((root) => ({ root }))),
+      readerKinds: Object.fromEntries(readerNodes.map((c) => [c, (byId.get(c) || {}).kind])),
+      queries: [...reach.get(node.id)].sort((a, b) => a - b),
+      below: below(node.id),
+    });
+  });
+  return shared;
 }
 
 // The MILP summary as one line, e.g. "incumbent 1.2 · lower bound 1.2 ·
