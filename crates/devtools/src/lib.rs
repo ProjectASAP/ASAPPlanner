@@ -20,6 +20,7 @@
 //! measured table.
 
 pub mod candidate_labels;
+pub mod planner_fuzz;
 pub mod planner_layering_examples;
 pub mod planning_stages;
 pub mod rqe_atomic_costs;
