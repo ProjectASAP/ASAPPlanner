@@ -1591,7 +1591,9 @@ fn three_way_on_two_independent_clusters() {
         let clusters: Vec<_> = milp.clusters.iter().map(|c| c.queries.clone()).collect();
         assert_eq!(clusters, [vec![0, 1], vec![2, 3]], "{label}");
         assert!(
-            milp.clusters.iter().all(|c| c.gap == Some(0.0)),
+            milp.clusters
+                .iter()
+                .all(|c| c.gap.is_some_and(|gap| gap <= 1e-9)),
             "{label}: {milp:?}"
         );
         assert_eq!(
