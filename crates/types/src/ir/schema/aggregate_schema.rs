@@ -134,6 +134,15 @@ pub fn aggregate_output_schema(
             out_cols.push(cnt);
             continue;
         }
+        // `absent(v)` emits its synthesized labels as `Utf8` columns before
+        // its value.
+        if let AggIntent::Absent { labels } = intent {
+            out_cols.extend(
+                labels
+                    .keys()
+                    .map(|name| Field::plain(name.clone(), DataType::Utf8, false)),
+            );
+        }
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
         // both have a fixed output type that ignores it.

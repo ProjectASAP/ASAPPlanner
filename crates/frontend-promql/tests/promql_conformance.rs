@@ -31,6 +31,7 @@
 // `__GAP`-suffixed test names intentionally SHOUT the documented divergences.
 #![allow(non_snake_case)]
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -1520,7 +1521,12 @@ fn pi_lowers_to_a_scalar_constant() {
 #[test]
 fn presence_functions_lower_to_presence_intents() {
     for (q, want) in [
-        (r#"absent(up{job="x"})"#, AggIntent::Absent),
+        (
+            r#"absent(up{job="x"})"#,
+            AggIntent::Absent {
+                labels: BTreeMap::from([("job".to_string(), "x".to_string())]),
+            },
+        ),
         ("absent_over_time(m[1h])", AggIntent::AbsentOverTime),
         ("present_over_time(m[5m])", AggIntent::PresentOverTime),
     ] {
@@ -1540,6 +1546,57 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
         "matcher label `job` kept, got {:?}",
         cols.fields.iter().map(|c| &c.name).collect::<Vec<_>>()
     );
+}
+
+/// `absent(v)`'s output labels, as Prometheus' `createLabelsForAbsentFunction`
+/// derives them: only from a selector argument, from each label's first
+/// equality matcher, removed again by any other matcher on that label; never
+/// `__name__`; a label set to the empty string is no label.
+#[test]
+fn absent_takes_its_labels_from_the_selector_equality_matchers() {
+    let labels = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    };
+    for (query, want) in [
+        ("absent(up)", labels(&[])),
+        (
+            r#"absent(up{job="a",instance=~"i.*",env!="prod"})"#,
+            labels(&[("job", "a")]),
+        ),
+        (
+            r#"absent({__name__="up",job="a"})"#,
+            labels(&[("job", "a")]),
+        ),
+        // A second matcher on a label removes it, equality or not.
+        (r#"absent(up{job="a",job="b"})"#, labels(&[])),
+        (r#"absent(up{job="a",job=~"a"})"#, labels(&[])),
+        // A removal does not mark the label seen: a later equality sets it.
+        (r#"absent(up{job=~"a.*",job="b"})"#, labels(&[("job", "b")])),
+        (r#"absent(up{job=""})"#, labels(&[])),
+        // Any other argument synthesizes a label-less sample.
+        (r#"absent(sum(up{job="a"}))"#, labels(&[])),
+        (r#"absent(up{job="a"} > 1)"#, labels(&[])),
+    ] {
+        let qe = ok(query);
+        let Some(NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            ..
+        }) = qe.non_asap()
+        else {
+            panic!("{query}: {:?}", qe.operator)
+        };
+        // One sample for the whole argument: a reduction across series.
+        assert_eq!(reduction, &Reduction::by(vec![]), "{query}");
+        assert_eq!(
+            measures.as_slice(),
+            [AggIntent::Absent { labels: want }],
+            "{query}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

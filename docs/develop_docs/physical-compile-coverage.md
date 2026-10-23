@@ -210,7 +210,12 @@ In order of backend usage:
    - Other scalar functions as operands.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
-   - Other functions, such as `stddev_over_time`, `absent`, and math functions.
+   - Other functions, such as `stddev_over_time` and math functions.
+     `absent(v)` is covered: it lowers to an `Aggregate` by no key with an
+     `Absent` measure carrying the labels of `v`'s equality matchers, and
+     compiles to the executor's `Absent` operator, which emits one sample of
+     value 1 with those labels when its input has no row and nothing
+     otherwise.
    After these shapes are covered, the backend can delete rows 28 and 30.
 2. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
    `SummaryAgg`.

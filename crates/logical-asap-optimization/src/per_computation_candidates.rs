@@ -5499,7 +5499,9 @@ mod tests {
             },
             A::Math(MathFunc::Abs),
             A::TimeFn(TimeFunc::Hour),
-            A::Absent,
+            A::Absent {
+                labels: Default::default(),
+            },
             A::AbsentOverTime,
             A::PresentOverTime,
             A::Group,
