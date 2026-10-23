@@ -368,6 +368,35 @@ pub(crate) fn scan_labels_read(
         .collect()
 }
 
+/// The labels of each metric's scans among `candidate`'s own node and its
+/// private nodes (not its child groups' nodes), by the raw-horizon key of
+/// the metric's source.
+pub(crate) fn private_scan_labels(
+    memo: &Memo,
+    candidate: &ImplementationCandidate,
+) -> Vec<(u64, BTreeSet<String>)> {
+    let mut boundary = Boundary::of(memo, candidate);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![Rc::clone(&candidate.node)];
+    while let Some(node) = stack.pop() {
+        if !seen.insert(Rc::as_ptr(&node)) {
+            continue;
+        }
+        if let Some(reader) = scan_reader(&node) {
+            if let Some(NonASAPOp::Scan { source, .. }) = reader.scan.non_asap() {
+                out.push((raw_horizon_key(source), reader.labels));
+            }
+        }
+        for child in node.children() {
+            if boundary.group(child).is_none() {
+                stack.push(Rc::clone(child));
+            }
+        }
+    }
+    out
+}
+
 /// The raw-horizon key ([`raw_horizon_key`]) of a scan-labels site's
 /// metric.
 pub(crate) fn site_source_key(memo: &Memo, site: &CouplingSite) -> Option<u64> {

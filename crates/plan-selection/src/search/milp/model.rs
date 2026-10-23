@@ -1786,34 +1786,44 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
     // Term cuts: when all of a cut's choices are chosen, its term's
     // charge is at least its bound.
     for cut in &input.cuts.cuts {
+        // A cut whose term or condition has no variable in this model is
+        // left out (with a charge of 0 it would exclude its plans).
         let mut charge = Expression::from(0.0);
-        match cut.term {
+        let charged = match cut.term {
             Term::SourceScans(source) => {
+                let mut any = false;
                 for &m in source_scan_charges.get(&source).into_iter().flatten() {
                     charge += m;
+                    any = true;
                 }
                 for key in &cut.nodes {
                     if let Some(&m) = cross_charged.get(key) {
                         charge += m;
+                        any = true;
                     }
                 }
+                any
             }
             Term::HeldPerReader(q, c) => {
-                if let Some(&h) = held_per_reader.get(&(q, c)) {
-                    charge += h;
-                }
+                held_per_reader.get(&(q, c)).map(|&h| charge += h).is_some()
             }
-            Term::HeldLongest(c) => {
-                if let Some(&h) = held_longest.get(&c) {
-                    charge += h;
-                }
-            }
+            Term::HeldLongest(c) => held_longest.get(&c).map(|&h| charge += h).is_some(),
             Term::SharedBuildHeld(key) => {
                 charge += shared_build_held[&key];
+                true
             }
             Term::IngestionCopy(g) => {
                 charge += ingestion_copy[&g].0;
+                true
             }
+        };
+        let conditioned = cut.reached.iter().all(|qc| work_reached.contains_key(qc))
+            && cut
+                .built_once
+                .iter()
+                .all(|g| once.contains_key(&GroupId(*g as u32)));
+        if !charged || !conditioned {
+            continue;
         }
         let mut chosen = Expression::from(0.0);
         for &c in &cut.choices {
@@ -2921,6 +2931,7 @@ pub(crate) fn model_input_of(
         }
     }
     let mut scan_labels = Vec::new();
+    let mut query_time_scan_labels = Vec::new();
     let mut widened_scans = Vec::new();
     for part in kept {
         let g = part.choice.group.0 as usize;
@@ -2928,6 +2939,16 @@ pub(crate) fn model_input_of(
         scan_labels.push(crate::search::memo::rules::scans::scan_labels_read(
             memo, candidate,
         ));
+        let at_ingestion = part
+            .choice
+            .coefficients
+            .slots
+            .iter()
+            .any(|slot| matches!(slot.materialization, Materialization::MatAtIngestion(_)));
+        query_time_scan_labels.push(match at_ingestion {
+            true => Vec::new(),
+            false => crate::search::memo::rules::scans::private_scan_labels(memo, candidate),
+        });
         widened_scans.push(
             widened_of
                 .get(&(g, std::rc::Rc::as_ptr(&candidate.node)))
@@ -3042,6 +3063,7 @@ pub(crate) fn model_input_of(
         })
         .collect();
     input.cuts.scan_labels = scan_labels;
+    input.cuts.query_time_scan_labels = query_time_scan_labels;
     input.cuts.widened_scans = widened_scans;
     let mut cuts = std::mem::take(&mut input.cuts);
     crate::search::milp::cuts::fill_from_input(&input, &mut cuts);

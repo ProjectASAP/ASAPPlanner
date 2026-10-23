@@ -39,6 +39,12 @@ pub(crate) struct TermCuts {
     /// node, its private nodes and its child groups' nodes), by the
     /// source's raw-horizon key.
     pub scan_labels: Vec<Vec<(u64, BTreeSet<String>)>>,
+    /// Per choice, the labels of each source's scans it runs at query
+    /// time whenever it runs at query time: its own node's and its private
+    /// nodes' (child groups' scans are their own choices'), none for a
+    /// choice with an ingestion-time slot (whose scans below may run at
+    /// ingestion time only).
+    pub query_time_scan_labels: Vec<Vec<(u64, BTreeSet<String>)>>,
     /// Per choice, its scans widened: (source key, label set, the price per
     /// unit of rate of its query-time scans of that source widened to the
     /// label set), from its candidate's widened-scans twins.
@@ -129,6 +135,19 @@ pub(crate) enum Term {
     IngestionCopy(usize),
 }
 
+impl Term {
+    /// The term's kind, for reports and tests.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Term::SourceScans(_) => "source scans",
+            Term::HeldPerReader(..) => "held per reader",
+            Term::HeldLongest(_) => "held longest",
+            Term::SharedBuildHeld(_) => "shared build held",
+            Term::IngestionCopy(_) => "ingestion copy",
+        }
+    }
+}
+
 /// The per-choice facts [`TermCuts`] reads that the model's input already
 /// has: rate floors and whether a choice always runs at query time.
 pub(crate) fn fill_from_input(input: &ModelInput, cuts: &mut TermCuts) {
@@ -204,7 +223,11 @@ pub(crate) fn term_cuts_of(input: &ModelInput, chosen: &[usize]) -> Vec<TermCut>
             return Some((Vec::new(), Vec::new()));
         }
         let q = reach.iter().position(|r| r.contains(&c))?;
-        Some(match has_reach_variable(c) {
+        // The model has the query's reach of the choice only for a query
+        // of the choice's group (a fused choice of another group may be
+        // reached through a group it implements).
+        let reads = input.group_queries[input.choices[c].group.0 as usize].contains(&q);
+        Some(match has_reach_variable(c) && reads {
             true => (Vec::new(), vec![(q, c)]),
             false => (reach[q].clone(), Vec::new()),
         })
@@ -235,13 +258,20 @@ pub(crate) fn term_cuts_of(input: &ModelInput, chosen: &[usize]) -> Vec<TermCut>
         }
     }
     let rate = |c: usize| facts.rate_floor[c];
+    let has_ingestion_slot = |c: usize| {
+        input.choices[c]
+            .coefficients
+            .slots
+            .iter()
+            .any(|slot| matches!(slot.materialization, Materialization::MatAtIngestion(_)))
+    };
     let mut out = Vec::new();
     for (source, members) in scans {
         // The labels the plan's query-time scans of the source cover, at
         // least: a widened plan's scans cover them.
         let mut labels: BTreeSet<String> = BTreeSet::new();
         for &c in &at_query_time {
-            for (s, read) in &facts.scan_labels[c] {
+            for (s, read) in &facts.query_time_scan_labels[c] {
                 if *s == source {
                     labels.extend(read.iter().cloned());
                 }
@@ -260,6 +290,10 @@ pub(crate) fn term_cuts_of(input: &ModelInput, chosen: &[usize]) -> Vec<TermCut>
             }
         }
         for &c in &at_query_time {
+            if has_ingestion_slot(c) {
+                // Its widened scans may run at ingestion time only.
+                continue;
+            }
             for scan in &facts.widened_scans[c] {
                 let charge = rate(c) * scan.cost_per_unit_rate;
                 if scan.source == source && scan.labels.is_subset(&labels) && charge > widened.0 {
@@ -427,7 +461,10 @@ pub(crate) fn held_cuts_of(input: &ModelInput, chosen: &[usize]) -> Vec<TermCut>
         if latency > modeled * (1.0 + 1e-9) {
             for &c in &reached {
                 let held = input.held.get(c).copied().unwrap_or_default();
-                if held.per_reader_per_ms > 0.0 {
+                // The model's held charge of a query's copy exists only for
+                // a query of the choice's group.
+                let reads = input.group_queries[group_of(c)].contains(&q);
+                if reads && held.per_reader_per_ms > 0.0 {
                     let share = reader_share(input, &all_queries);
                     out.push(cut(
                         Term::HeldPerReader(q, c),
@@ -446,11 +483,13 @@ pub(crate) fn held_cuts_of(input: &ModelInput, chosen: &[usize]) -> Vec<TermCut>
         }
         latency_of.push((reached, latency));
     }
-    // A build several groups' choices share: one node held while its
-    // readers run, at their union rate, for their rate-weighted mean
-    // latency (each reader its own copy) or the longest. Readers a plan
-    // with more choices may add lower the mean at most to the share of
-    // every query that may read it.
+    // A build several groups' choices share: held while its readers run,
+    // at their union rate, for their rate-weighted mean latency (each
+    // reader its own copy) or the longest. Readers a plan with more choices
+    // may add lower the mean at most to the share of every query that may
+    // read it. Its copies may also stay apart, each read by some of the
+    // readers: then the copy a reader `q` reads holds at least at `q`'s
+    // rate for `q`'s share of the mean (or `q`'s latency).
     let mut builds: BTreeMap<(u64, usize), (f64, bool, BTreeSet<usize>)> = BTreeMap::new();
     for (q, (reached, _)) in latency_of.iter().enumerate() {
         for &c in reached {
@@ -493,11 +532,26 @@ pub(crate) fn held_cuts_of(input: &ModelInput, chosen: &[usize]) -> Vec<TermCut>
             }
             false => 0.0,
         };
-        let evaluation_ms = match per_reader {
-            true => weighted.min(longest),
-            false => longest,
-        };
-        let bound = per_ms * union * evaluation_ms;
+        let one_node = per_ms
+            * union
+            * match per_reader {
+                true => weighted.min(longest),
+                false => longest,
+            };
+        let apart = readers
+            .iter()
+            .map(|&q| {
+                let (rate, latency) = (input.queries[q].rate, latency_of[q].1);
+                per_ms
+                    * rate
+                    * match (per_reader, rate_all > 0.0) {
+                        (true, true) => (rate * latency / rate_all).min(latency),
+                        (true, false) => 0.0,
+                        (false, _) => latency,
+                    }
+            })
+            .fold(0.0, f64::max);
+        let bound = one_node.min(apart);
         if bound > 0.0 {
             let mut choices: Vec<usize> = readers
                 .iter()

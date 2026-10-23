@@ -1948,7 +1948,7 @@ mod tests {
         raw_data_retained: bool,
         data: &DataWorkload,
         term_cuts_from_rounds: usize,
-    ) {
+    ) -> BTreeSet<&'static str> {
         let roots: Vec<(usize, QueryRoot)> = queries
             .iter()
             .zip(targets)
@@ -1994,6 +1994,21 @@ mod tests {
                 "{queries:?} {group_choice:?}: model {value} over exact {exact}"
             );
         }
+        // Each cut reads model variables that exist: a query's reach or
+        // held charge of a choice only of a group the query reads.
+        let reads = |q: usize, c: usize| {
+            input.group_queries[input.choices[c].group.0 as usize].contains(&q)
+        };
+        for cut in &input.cuts.cuts {
+            assert!(
+                cut.reached.iter().all(|&(q, c)| reads(q, c)),
+                "{queries:?}: {cut:?}"
+            );
+            if let crate::search::milp::cuts::Term::HeldPerReader(q, c) = cut.term {
+                assert!(reads(q, c), "{queries:?}: {cut:?}");
+            }
+        }
+        input.cuts.cuts.iter().map(|cut| cut.term.kind()).collect()
     }
 
     /// An exact top-k of 5-minute sums every 5 minutes over 1,000 series
@@ -2141,8 +2156,9 @@ mod tests {
     #[test]
     fn the_model_with_term_cuts_is_a_lower_bound() {
         let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
+        let mut kinds = BTreeSet::new();
         for raw_data_retained in [true, false] {
-            assert_model_is_a_lower_bound_in(
+            kinds.extend(assert_model_is_a_lower_bound_in(
                 &[
                     "sum by (job) (sum_over_time(m[10m]))",
                     "sum(sum_over_time(m[10m]))",
@@ -2159,7 +2175,55 @@ mod tests {
                 raw_data_retained,
                 &data(),
                 30,
-            );
+            ));
+        }
+        // A fused choice: the top-k's heap implements the sum, the other
+        // query's root, so that query reaches a choice of a group it does
+        // not read.
+        let exact = AccuracyTarget::exact();
+        for raw_data_retained in [true, false] {
+            kinds.extend(assert_model_is_a_lower_bound_in(
+                &[
+                    "topk(5, sum by (job) (sum_over_time(m[5m])))",
+                    "sum by (job) (sum_over_time(m[5m]))",
+                ],
+                &[60_000, 60_000],
+                &[exact.clone(), exact.clone()],
+                raw_data_retained,
+                &data(),
+                30,
+            ));
+        }
+        // Ingestion copies (a pane build at ingestion beside a sum reading
+        // the scan built once) and held memory over the longest reader.
+        let within = AccuracyTarget::max_error(0.01);
+        kinds.extend(assert_model_is_a_lower_bound_in(
+            &["quantile_over_time(0.9, m[5m])", "sum_over_time(m[5m])"],
+            &[60_000, 300_000],
+            &[within, exact.clone()],
+            true,
+            &data(),
+            30,
+        ));
+        kinds.extend(assert_model_is_a_lower_bound_in(
+            &[
+                "max_over_time(m[5m]) - min_over_time(m[5m])",
+                "max_over_time(m[5m])",
+            ],
+            &[60_000, 60_000],
+            &[exact.clone(), exact],
+            true,
+            &data(),
+            30,
+        ));
+        for kind in [
+            "source scans",
+            "held per reader",
+            "held longest",
+            "shared build held",
+            "ingestion copy",
+        ] {
+            assert!(kinds.contains(kind), "no {kind} cut in {kinds:?}");
         }
     }
 
