@@ -1496,23 +1496,49 @@ fn three_way(
 /// enough to search exhaustively, over one or two gauges, with raw data
 /// kept or not, under each of `settings` in turn (every one with `every`).
 fn assert_three_way_on_random_workloads(settings: &[PlanSelectionSettings], every: bool) {
+    assert_three_way_on_seeds(settings, every, 60, 20);
+}
+
+/// The random workload of `seed`, over one gauge or (every third seed)
+/// two.
+fn seeded_workload(seed: u64) -> PlanningWorkload {
+    let gauges: &[&str] = match seed % 3 {
+        0 => &["m", "n"],
+        _ => &["m"],
+    };
+    random_workload_over(seed, gauges)
+}
+
+/// The number of whole-workload combinations of `workload`'s candidates.
+fn combinations_of(workload: &PlanningWorkload) -> usize {
+    let roots = lower_promql_roots(workload).unwrap();
+    asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+        roots.iter().cloned().enumerate().collect(),
+    )
+    .unwrap()
+    .combinations()
+}
+
+/// [`assert_three_way_on_random_workloads`] on the `count` seeds of 1 to
+/// 60 with the fewest combinations (all of them small enough to search
+/// exhaustively), at least `at_least` of them.
+fn assert_three_way_on_seeds(
+    settings: &[PlanSelectionSettings],
+    every: bool,
+    count: usize,
+    at_least: usize,
+) {
+    let mut seeds: Vec<(usize, u64)> = (1..=60u64)
+        .map(|seed| (combinations_of(&seeded_workload(seed)), seed))
+        .filter(|&(combinations, _)| combinations <= MAX_EXHAUSTIVE_COMBINATIONS)
+        .collect();
+    seeds.sort_unstable();
+    seeds.truncate(count);
     let mut searched = 0;
     let mut mismatches = Vec::new();
-    for seed in 1..=60u64 {
-        let gauges: &[&str] = match seed % 3 {
-            0 => &["m", "n"],
-            _ => &["m"],
-        };
-        let workload = random_workload_over(seed, gauges);
+    for (_, seed) in seeds {
+        let workload = seeded_workload(seed);
         let roots = lower_promql_roots(&workload).unwrap();
-        let inventory =
-            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
-                roots.iter().cloned().enumerate().collect(),
-            )
-            .unwrap();
-        if inventory.combinations() > MAX_EXHAUSTIVE_COMBINATIONS {
-            continue;
-        }
         searched += 1;
         let entries: Vec<_> = workload.query_workload.entries().collect();
         let data = workload.data_workload.clone().unwrap();
@@ -1541,7 +1567,7 @@ fn assert_three_way_on_random_workloads(settings: &[PlanSelectionSettings], ever
         }
     }
     assert!(
-        searched >= 20,
+        searched >= at_least,
         "only {searched} workloads were small enough"
     );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
@@ -1552,6 +1578,15 @@ fn assert_three_way_on_random_workloads(settings: &[PlanSelectionSettings], ever
 #[ignore = "the exhaustive search and the brute force over every seed take minutes in a debug build; run with --release --ignored"]
 fn three_way_random_workloads_under_cost_model_1() {
     assert_three_way_on_random_workloads(&cost_models(1)[..1], true);
+}
+
+/// The three searches agree under cost model 1 on the 20 random workloads
+/// with the fewest combinations: the quick subset of
+/// [`three_way_random_workloads_under_cost_model_1`].
+#[test]
+#[ignore = "the exhaustive search over 20 seeds takes a minute or more in a debug build; run with --release --ignored"]
+fn three_way_twenty_smallest_random_workloads_under_cost_model_1() {
+    assert_three_way_on_seeds(&cost_models(1)[..1], true, 20, 20);
 }
 
 /// The three searches agree on the random workloads under cost model 2.

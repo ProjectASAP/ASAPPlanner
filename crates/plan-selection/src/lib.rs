@@ -1120,7 +1120,6 @@ impl SearchAlgorithm {
     }
 }
 
-
 /// Why the legacy search ran instead of the requested memo search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2124,11 +2123,6 @@ impl<'a> PlanSelector<'a> {
             },
         };
         Ok((selection, built))
-    }
-
-    /// The rejections recorded so far.
-    pub(crate) fn rejections(&self) -> &[Rejection] {
-        &self.rejected
     }
 
     /// Under a price ranking, the cheapest price of the valid candidates

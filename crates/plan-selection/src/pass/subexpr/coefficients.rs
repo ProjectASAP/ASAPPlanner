@@ -1857,14 +1857,7 @@ mod tests {
             };
         let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         let memo = memo(&per_computation, &entries);
-        let input = super::super::milp::model_input_of(
-            &memo,
-            &entries,
-            &data,
-            models,
-            std::time::Instant::now(),
-        )
-        .unwrap();
+        let input = super::super::milp::model_input_of(&memo, &entries, &data, models).unwrap();
         let checked = super::super::milp::lower_bound_check(
             &memo,
             &per_computation,
