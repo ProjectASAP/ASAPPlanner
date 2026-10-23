@@ -211,7 +211,7 @@ The rules above prune a search that still builds and prices whole-workload candi
 | Materialization | `NotMaterialized`, `MatAtQuery`, at ingestion, or kept across evaluations: chosen once per implementation candidate of a group, however many parents read it. |
 | Shared group | A group read by two or more parents. Its choice (implementation, size, materialization, pane grid) couples its parents. |
 | Coupling site | A choice several groups' costs depend on: a shared group's size (sized for its strictest reader), a shared pane chain's grid, longest window and size, a metric's scan label set, a source's raw-data horizon. |
-| Local price | One implementation candidate's usage, priced by Stage 3's per-node pricing given its context (its readers' requirements, its coupling sites' thresholds): CPU operations, scanned bytes, memory byte-seconds, peak memory, disk, each reader's latency. Cached per (group, candidate, context). |
+| Local cost | One implementation candidate's usage, evaluated by Stage 3's per-node cost function given its context (its readers' requirements, its coupling sites' thresholds): CPU operations, scanned bytes, memory byte-seconds, peak memory, disk, each reader's latency. Cached per (group, candidate, context). |
 | MILP | One mixed-integer linear program over the memo whose variables are the groups' candidate choices, their materializations and the coupling sites' thresholds, with Stage 3's prices as coefficients. It replaces enumerating whole-workload candidates. |
 
 ### How the stages and the memo work together
@@ -329,7 +329,7 @@ Nothing here builds a whole-workload candidate; each strategy only adds alternat
 
 **4. Stage 2: materialization per implementation.** For example, the shared pane chain may be kept at ingestion time or rebuilt per evaluation; `G2` may be computed by each reader or built once per evaluation. A group with several parents chooses once.
 
-**5. Stage 3: local prices as coefficients.** Each implementation is priced once per consumer rate, materialization and threshold, and cached; these are the MILP's coefficients. Here all nine groups are coupled through `G1`, `G2` and the shared quantile build. A second metric's groups would share no variable with them, and the solver separates such blocks on its own.
+**5. Stage 3: coefficient derivation.** Each implementation's cost is derived once per consumer rate, materialization and threshold, and cached; these are the MILP's coefficients. Here all nine groups are coupled through `G1`, `G2` and the shared quantile build. A second metric's groups would share no variable with them, and the solver separates such blocks on its own.
 
 **6. One MILP chooses everything.** Threshold enumeration gives each coupling site its discrete values, which become MILP variables:
 
@@ -363,9 +363,9 @@ The result is the plan the exhaustive search would select. It is checked by `joi
 
 1. **Hash-cons** the workload's logical DAG into groups.
 2. **Generate** each group's implementation candidates (Pass 1, then the Pass 2 transformations), each with its child groups and its coupling sites.
-3. **Coefficients.** Price each candidate's private nodes with Stage 3's per-node pricing, per consumer rate and per materialization, and each coupling site's node at each of its thresholds. Stage 3 stays the only source of prices.
+3. **Coefficient derivation.** Derive each choice's objective coefficients from Stage 3's per-node cost function (`price_node`): a candidate's private nodes per consumer rate and per materialization, and each coupling site's node at each of its thresholds. Stage 3 stays the only source of costs.
 4. **Solve one MILP over the memo** (below): one choice per needed group, its materializations and the coupling sites' thresholds.
-5. **Lazy cuts.** Compose the solver's plan, recompose its guarantees and price it with Stage 3. If Stage 3's price exceeds the solver's objective (the held-memory term), or a composed guarantee fails, add a cut that corrects or excludes that plan, and solve again. Stop when Stage 3's price equals the objective and every check passes. The gap must be 0 to report the plan as optimal.
+5. **Solution decoding, incumbent evaluation, lazy cuts.** Decode the solver's solution into its one physical plan, recompose its guarantees, and evaluate the plan's exact cost with Stage 3 (the incumbent cost). If the incumbent cost exceeds the model bound (the held-memory term), or a composed guarantee fails, add a cut that corrects or excludes that plan, and solve again. Stop when the best incumbent cost equals the model bound and every check passes. The gap must be 0 to report the plan as optimal.
 6. **Build late.** Run the executor's compile check on the selected plan only, and report it.
 
 ### The solver: MILP over the memo
@@ -396,7 +396,7 @@ Sets:
 - `S`: coupling sites; `T(s)`: thresholds of site `s`.
 - `K = Q ∪ {(g,c,o) : o ≠ nm}`: consumers, the queries and the materialized slots.
 
-Parameters, all priced by Stage 3, in cost per second unless noted:
+Parameters, all derived from Stage 3's per-node cost function, in cost per second unless noted:
 - `rate(k)`: evaluations per second of consumer `k`.
 - `w(g,c)`: cost of one computation of `(g,c)`'s own nodes.
 - `a(g,c,o)`: standing cost of slot `(g,c,o)` (ingestion upkeep, kept state).
@@ -516,7 +516,7 @@ An exact linearization of the held-memory product needs a variable for each quer
 
 **The lazy-cut loop.** The model without the lazy terms never overestimates a plan's cost, so its optimum is a lower bound on the true optimum. The loop:
 1. Solve the model and take its plan `P`, with objective `c_milp`.
-2. Compose `P` and price it with Stage 3, which includes held memory and the composed guarantees, giving `c_true`.
+2. Decode `P` into its physical plan and evaluate it with Stage 3, which includes held memory and the composed guarantees, giving the incumbent cost `c_true`.
 3. If `c_true = c_milp` and every check passes, `P` is optimal: its true cost equals a lower bound on every plan's true cost.
 4. Otherwise add a cut and go to step 1:
    - a combination whose guarantee fails is excluded;
@@ -534,9 +534,27 @@ Each cut removes or corrects at least one of finitely many combinations, so the 
 
 ### Coefficients
 
-**Principle: Stage 3 is the only source of prices, and the model only needs a lower bound.**
+**Terms.** Three distinct steps use Stage 3's cost function, and this document keeps their names apart:
+
+| Term | What it is | When | How often |
+| --- | --- | --- | --- |
+| **Coefficient derivation** | Computing the objective coefficient of each local choice (a group's implementation, materialization, threshold) from Stage 3's per-node cost function. The result is a lower bound on that choice's true cost. | before solving | once per choice, cached |
+| **Solution decoding** | Turning a MILP solution (the values of `x`, `m`, `u`, …) into the one physical plan it describes. | after each solve | once per round |
+| **Incumbent evaluation** | Running Stage 3 on that decoded plan as a whole: guarantees, latency checks and its exact cost (the **incumbent cost**). | after decoding | once per round |
+
+The **model bound** is the solver's objective, a lower bound on every plan's cost. The **gap** is (incumbent cost − model bound) / incumbent cost.
+
+**One solution, one plan.** Every choice that changes a plan's cost is a model variable, so a solution decodes to exactly one plan, and incumbent evaluation runs Stage 3 once per round:
+- sharing an identical expression or computing it per reader is the materialization `m` (`mq` vs `nm`);
+- a shared node's size is the threshold `u`;
+- a metric's scan label set is a threshold variable of the scan's coupling site (the union of the labels of the readers attached to it);
+- pane grids and raw horizons are threshold variables of their sites.
+
+A solution must never stand for several plans whose costs are then enumerated: that enumeration (thresholds × identical-expression variants × materializations) is what exhausts memory on whole workloads. If a variant cannot be a variable yet, its alternatives are evaluated as a small set local to that one site, never as a product with other sites, and the design records it as a gap to close.
+
+**Principle: Stage 3 is the only source of costs, and the coefficients only need to be lower bounds.**
 - Every coefficient comes from Stage 3's per-node pricing (`price_node`), evaluated in a hypothetical context. The MILP has no cost formula of its own.
-- The selected plan is always re-priced by Stage 3 as a whole, and its cost is that price. So a coefficient may be any value **no greater than** the true cost of the choice it prices.
+- The selected plan is always evaluated by Stage 3 as a whole (incumbent evaluation), and its cost is the incumbent cost. So a coefficient may be any value **no greater than** the true cost of the choice it stands for.
 - Exact coefficients make the first bound tight. Lower-bound coefficients keep the result exact at the cost of more lazy-cut rounds.
 
 **Decomposition.** A plan's cost is the sum over its nodes of `price_node(node, context)`. A node's context is who computes it, how often, how it is materialized, at which threshold it is sized, and how large its input is. When a cost depends only on discrete context, each value of the context gets its own coefficient, selected by a 0/1 variable:
@@ -545,8 +563,8 @@ Each cut removes or corrects at least one of finitely many combinations, so the 
 | --- | --- | --- |
 | the chosen implementation | `x[g,c]` | `price_node` of the candidate's own nodes |
 | the materialization | `m[g,c,o]` | standing cost `a(g,c,o)` and per-computation cost `w(g,c)` for that `o` |
-| which consumers compute it, how often | `y[k,g,c]` | `rate(k) · w(g,c)`, with `w` priced at one computation |
-| a shared node's size | `u[s,t]` | `σ(s,t)`: the node priced at threshold `t` |
+| which consumers compute it, how often | `y[k,g,c]` | `rate(k) · w(g,c)`, with `w` the cost of one computation |
+| a shared node's size | `u[s,t]` | `σ(s,t)`: the node's cost at threshold `t` |
 
 Example: `quantile_over_time(0.9, data[5m])` as a KLL built once per evaluation at threshold 0.01 is the choice (group, KLL, `mq`, `t = 0.01`). Its `w` is Stage 3's price of one KLL sized for 0.01 over five minutes of rows, and its objective term is `rate(Q1) · w · y[Q1, G4, KLL]`. Coefficients are generated per candidate, per combination of its coupling-site thresholds, and per materialization of its private builds.
 
@@ -555,11 +573,11 @@ Example: `quantile_over_time(0.9, data[5m])` as a KLL built once per evaluation 
 | Term | Why it does not decompose | Coefficient used | Corrected by |
 | --- | --- | --- | --- |
 | Held memory, bytes × latency | the latency is a sum over the whole path | 0, or a McCormick bound from the memo's byte and latency ranges | a cut on the term |
-| A shared scan's window (the longest reader's) | its input depends on other groups' choices | priced at the reader's own window | a cut when a longer reader is chosen |
+| A shared scan's window (the longest reader's) | its input depends on other groups' choices | derived at the reader's own window | a cut when a longer reader is chosen |
 | A child consumed by an ingestion-time build | the child runs at ingestion time instead | the cheaper of the two pricings | a cut on the pair |
 | A chain kept across evaluations, charged per request | depends on the request count | the per-evaluation price | a cut |
 | Compaction with several ingest workers | depends on the global worker count | 0 | a cut |
-| Composed accuracy | depends on the chosen children | not priced | a no-good cut on a failing combination |
+| Composed accuracy | depends on the chosen children | no coefficient | a no-good cut on a failing combination |
 
 Validation: for every plan of the brute force over the memo, the sum of its coefficients is at most Stage 3's price, and equal wherever the term decomposes exactly.
 
@@ -573,7 +591,7 @@ The report gives the number of rounds and the first round's bound against the fi
 
 - **Raw data on disk**: a per-source horizon threshold, linear in the MILP.
 - **Cost models 2 and 3**: peaks and limits as linear constraints.
-- **A measured cost table**: the calibration factor is fitted once, before the search, over every candidate node the generation produced (before pruning), and frozen; every coefficient is priced with it.
+- **A measured cost table**: the calibration factor is fitted once, before the search, over every candidate node the generation produced (before pruning), and frozen; every coefficient is derived with it.
 
 ### Code layout
 
