@@ -460,7 +460,7 @@ pub(crate) fn held_cuts_of(input: &ModelInput, chosen: &[usize]) -> Vec<TermCut>
         // key: a cut helps only when the reached choices give more.
         if latency > modeled * (1.0 + 1e-9) {
             for &c in &reached {
-                let held = input.held.get(c).copied().unwrap_or_default();
+                let held = input.held.get(c).cloned().unwrap_or_default();
                 // The model's held charge of a query's copy exists only for
                 // a query of the choice's group.
                 let reads = input.group_queries[group_of(c)].contains(&q);

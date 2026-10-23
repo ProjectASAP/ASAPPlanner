@@ -272,13 +272,18 @@ pub(crate) struct ModelInput {
 /// The memory a choice's parts hold while an evaluation runs, charged per
 /// ms of latency: Stage 3 charges `bytes · rate · E / 1000` at the memory
 /// price, `E` the latency of the queries reaching the part.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct HeldAtQueryTime {
     /// Per unit of a reading query's rate: each reader holds its own copy
     /// over its own latency.
     pub per_reader_per_ms: f64,
     /// Per unit of rate: one copy held over the longest reader's latency.
     pub longest_per_ms: f64,
+    /// Per query-time slot several groups' choices may share, by its
+    /// shared site (`SlotCoefficients::shared_site`), per unit of rate:
+    /// one node once shared, so one copy held over the longest reader's
+    /// latency, charged once per site over every choice that has it.
+    pub shared_slot_longest_per_ms: Vec<((u64, usize), f64)>,
 }
 
 /// A raw scan of one part of a choice, when that part runs at query time.
@@ -295,30 +300,38 @@ pub(crate) struct RawScan {
 /// The memory `choice`'s parts hold while an evaluation runs
 /// ([`LazyTerms::held`]), but its ingestion-time slots'. Its own node,
 /// when built once, holds the smaller of its working memory and its built
-/// state.
+/// state. A slot of a site several groups' choices may share
+/// (`shared_sites`) is one node once shared: its copy held over the
+/// longest reader is charged once per site, not per choice; a copy per
+/// reader of it is left out (its readers' share of the node's rate is
+/// unknown).
 fn held_at_query_time(
     choice: &Choice,
     lazy: &LazyTerms,
     prices: &ResourceUnitCost,
-    shared_keys: &BTreeSet<(u64, usize)>,
+    shared_sites: &BTreeSet<(u64, usize)>,
 ) -> HeldAtQueryTime {
     let mut held = HeldAtQueryTime::default();
     for term in &lazy.held {
+        let mut shared_site = None;
         if let Via::Slot(i) = term.via {
             let slot = &choice.coefficients.slots[i];
-            if matches!(slot.materialization, Materialization::MatAtIngestion(_))
-                || slot
-                    .shared_site
-                    .is_some_and(|key| shared_keys.contains(&key))
-            {
+            if matches!(slot.materialization, Materialization::MatAtIngestion(_)) {
                 continue;
             }
+            shared_site = slot.shared_site.filter(|site| shared_sites.contains(site));
         }
         let bytes = match term.own_node {
             true => term.bytes.min(lazy.built_once_state_bytes),
             false => term.bytes,
         };
         let per_ms = prices.cost_per_memory_byte_second * bytes as f64 / 1000.0;
+        if let Some(site) = shared_site {
+            if !term.per_reader {
+                held.shared_slot_longest_per_ms.push((site, per_ms));
+            }
+            continue;
+        }
         match term.per_reader {
             true => held.per_reader_per_ms += per_ms,
             false => held.longest_per_ms += per_ms,
@@ -516,6 +529,9 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
     for held in &mut scaled.held {
         held.per_reader_per_ms *= scale;
         held.longest_per_ms *= scale;
+        for (_, per_ms) in &mut held.shared_slot_longest_per_ms {
+            *per_ms *= scale;
+        }
     }
     for cost in scaled.direct_at_ingestion_cost.iter_mut().flatten() {
         *cost *= scale;
@@ -1084,12 +1100,17 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             entry.1 = entry.1.max(work);
         }
     }
-    let held_of = |c: usize| input.held.get(c).copied().unwrap_or_default();
+    let no_held = HeldAtQueryTime::default();
+    let held_of = |c: usize| input.held.get(c).unwrap_or(&no_held);
     let mut work_reached: HashMap<(usize, usize), Variable> = HashMap::new();
     for (c, choice) in input.choices.iter().enumerate() {
         let held = held_of(c);
         let works = work_of(c).iter().any(|&(_, work)| work > 0.0);
-        if !works && held.per_reader_per_ms <= 0.0 && held.longest_per_ms <= 0.0 {
+        if !works
+            && held.per_reader_per_ms <= 0.0
+            && held.longest_per_ms <= 0.0
+            && held.shared_slot_longest_per_ms.is_empty()
+        {
             continue;
         }
         for &q in &input.group_queries[choice.group.0 as usize] {
@@ -1125,14 +1146,24 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             held_longest.insert(c, h);
         }
     }
-    // The held memory of builds several groups share, charged only
-    // through their term cuts.
-    let mut shared_build_held: BTreeMap<(u64, usize), Variable> = BTreeMap::new();
+    // Held memory of each query-time slot several groups' choices may
+    // share: one copy over its longest reader, once per site; its term
+    // cuts bound the same variable.
+    let mut held_by_shared_slot: BTreeMap<(u64, usize), Variable> = BTreeMap::new();
+    for held in &input.held {
+        for &(key, _) in &held.shared_slot_longest_per_ms {
+            held_by_shared_slot.entry(key).or_insert_with(|| {
+                let h = vars.add(variable().min(0));
+                objective += h;
+                h
+            });
+        }
+    }
     let mut ingestion_copy: BTreeMap<usize, (Variable, Variable)> = BTreeMap::new();
     for cut in &input.cuts.cuts {
         match cut.term {
             Term::SharedBuildHeld(key) => {
-                shared_build_held.entry(key).or_insert_with(|| {
+                held_by_shared_slot.entry(key).or_insert_with(|| {
                     let h = vars.add(variable().min(0));
                     objective += h;
                     h
@@ -1674,16 +1705,26 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
                 h >= coefficient * (latency_of(q) - longest * (1 - w))
             ));
         }
+        let g = input.choices[c].group.0 as usize;
+        let slowest_query_rate = input.group_queries[g]
+            .iter()
+            .map(|&r| input.queries[r].rate)
+            .reduce(f64::min)
+            .unwrap_or(0.0);
         if let Some(&h) = held_longest.get(&c) {
-            let g = input.choices[c].group.0 as usize;
-            let rate = input.group_queries[g]
-                .iter()
-                .map(|&r| input.queries[r].rate)
-                .reduce(f64::min)
-                .unwrap_or(0.0);
-            let coefficient = held.longest_per_ms * rate;
+            let coefficient = held.longest_per_ms * slowest_query_rate;
             constraints.push(constraint!(
                 h >= coefficient * (latency_of(q) - longest * (1 - w))
+            ));
+        }
+        // A shared slot's node holds at least the bytes of each chosen
+        // choice's copy (equal builds), at least at its group's slowest
+        // rate, over each reader's latency; apart, the copies cost at
+        // least their dearest.
+        for (key, per_ms) in &held.shared_slot_longest_per_ms {
+            let coefficient = per_ms * slowest_query_rate;
+            constraints.push(constraint!(
+                held_by_shared_slot[key] >= coefficient * (latency_of(q) - longest * (1 - w))
             ));
         }
     }
@@ -1809,7 +1850,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
             }
             Term::HeldLongest(c) => held_longest.get(&c).map(|&h| charge += h).is_some(),
             Term::SharedBuildHeld(key) => {
-                charge += shared_build_held[&key];
+                charge += held_by_shared_slot[&key];
                 true
             }
             Term::IngestionCopy(g) => {
@@ -3023,8 +3064,8 @@ pub(crate) fn model_input_of(
         k.direct.cost_per_unit_rate = k.direct.cost_per_unit_rate.max(0.0);
     }
     // A slot whose build several groups' choices may share is one node
-    // charged once (`SlotCoefficients::shared_site`): its held memory is
-    // left out rather than charged per choice.
+    // charged once (`SlotCoefficients::shared_site`), and so is its held
+    // memory ([`held_at_query_time`]).
     let mut groups_of_key: HashMap<(u64, usize), BTreeSet<GroupId>> = HashMap::new();
     for choice in &input.choices {
         for slot in &choice.coefficients.slots {
@@ -3825,6 +3866,7 @@ pub(crate) mod tests {
                 HeldAtQueryTime {
                     per_reader_per_ms: 1.0,
                     longest_per_ms: 0.0,
+                    shared_slot_longest_per_ms: Vec::new(),
                 };
                 2
             ],

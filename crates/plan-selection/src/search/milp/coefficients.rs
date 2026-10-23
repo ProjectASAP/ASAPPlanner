@@ -2011,6 +2011,68 @@ mod tests {
         input.cuts.cuts.iter().map(|cut| cut.term.kind()).collect()
     }
 
+    /// The model's bound over the exact price of the cheapest group
+    /// choice (the plan the search must certify), with raw data retained.
+    fn best_plan_bound_ratio(
+        queries: &[&str],
+        intervals_ms: &[u32],
+        targets: &[AccuracyTarget],
+    ) -> f64 {
+        let roots: Vec<(usize, QueryRoot)> = queries
+            .iter()
+            .zip(targets)
+            .map(|(q, target)| {
+                let root = lower_promql(q, target.clone());
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
+            })
+            .enumerate()
+            .collect();
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let entries = entries(intervals_ms, targets);
+        let models = PlanningModels::builtin();
+        let memo = memo(&per_computation, &entries);
+        let data = data();
+        let input = crate::search::milp::model::model_input_of(&memo, &entries, &data, models)
+            .unwrap()
+            .0;
+        let checked = crate::search::milp::model::lower_bound_check(
+            &memo,
+            &per_computation,
+            &input,
+            &entries,
+            &data,
+            models,
+        )
+        .unwrap();
+        let (_, exact, value) = checked
+            .into_iter()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        value.unwrap() / exact
+    }
+
+    /// Two quantiles within 1% every 10 s over one 5-minute KLL build
+    /// shared at query time (one slot site of both groups): the build's
+    /// held memory is charged once over its longest reader, not left out.
+    /// The model's bound on the cheapest plan was 0.99399 of its price
+    /// with the shared build's held memory left out.
+    #[test]
+    fn the_model_charges_held_memory_of_a_shared_query_time_build_once() {
+        let within = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        let ratio = best_plan_bound_ratio(
+            &[
+                "quantile_over_time(0.9, m[5m])",
+                "quantile_over_time(0.5, m[5m])",
+            ],
+            &[10_000, 10_000],
+            &[within.clone(), within],
+        );
+        assert!(
+            ratio > 0.995 && ratio <= 1.0 + 1e-9,
+            "bound {ratio} of the price"
+        );
+    }
+
     /// An exact top-k of 5-minute sums every 5 minutes over 1,000 series
     /// sampled every 15 s, without raw data: only a summary maintained at
     /// ingestion time is valid. Its scan and window are read only through
