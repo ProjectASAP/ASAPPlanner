@@ -1973,7 +1973,7 @@ fn term_cuts_certify_the_brute_force_price_on_839() {
         "memo brute force {b}, memo MILP {m}"
     );
     let gap = milp.search.milp.and_then(|milp| milp.gap);
-    assert!(gap.is_some_and(|gap| gap <= 1e-9), "gap {gap:?}");
+    assert!(gap.is_some_and(|gap| gap <= CERTIFIED_GAP), "gap {gap:?}");
 }
 
 /// Debugging aid: the random workload of seed `JP_SEED` (over the gauge
