@@ -2952,6 +2952,28 @@ pub fn resize_for_failure_probability(
     with_resized_summaries(roots, &resize)
 }
 
+/// `roots` with each summary at the most any target can make
+/// [`resize_for_failure_probability`] enlarge it: classic HLL at precision
+/// 18 (its failure probability only falls with precision), every other
+/// summary sized for a vanishing per-value failure probability. A failure
+/// probability this plan misses, it misses at every size Stage 3 can give.
+pub(crate) fn resized_to_the_largest(
+    roots: &[QueryRoot],
+) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
+    with_resized_summaries(roots, &|_, params| {
+        Some(match params {
+            SketchParams::Hll {
+                precision,
+                relative_error,
+            } => SketchParams::Hll {
+                precision: (*precision).max(18),
+                relative_error: Some(hll::classic_relative_error(*precision, *relative_error)),
+            },
+            params => with_failure_probability(params, 1e-300),
+        })
+    })
+}
+
 /// What Stage 3 accepted for each query ([`AcceptedAccuracy`]), or the
 /// first query whose output is not shown to meet its target, as a reason. An output meets its target when its theoretical root guarantee
 /// (composed in Stage 1 with the built-in model) satisfies it, or when the

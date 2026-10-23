@@ -2252,7 +2252,8 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
 /// result is at least its per-value one) unless a node is exact whatever
 /// its input (a count of rows), so a group's node composed over its
 /// candidate and one child candidate, every other child exact, bounds it
-/// from below. With its data-workload statistics
+/// from below. With its summaries at the largest size Stage 3 can give
+/// them ([`crate::resized_to_the_largest`]), its data-workload statistics
 /// bound and every other unknown term at zero (the optimistic floor), its
 /// failure probability above the largest target of the queries a plan may
 /// lead to the group rules the pair out, under every size threshold of the
@@ -2300,11 +2301,13 @@ fn guarantee_requirements(
             .is_ok_and(|g| g.is_some_and(|g| g.is_exact()))
     };
     // The optimistic floor of the failure probability of `node`'s
-    // guarantee; `Some(1.0)` for no guarantee, which no node above
+    // guarantee with its summaries at the largest size Stage 3's resizing
+    // can give them; `Some(1.0)` for no guarantee, which no node above
     // repairs (an approximate input no rule composes); `None` when unknown.
     let floor = |node: &Rc<OperatorNode>| -> Option<f64> {
-        let roots = [QueryRoot::Operator(Rc::clone(node))];
-        let Some(guarantee) = guarantee_of(&roots).ok()? else {
+        let largest =
+            crate::resized_to_the_largest(&[QueryRoot::Operator(Rc::clone(node))]).ok()?;
+        let Some(guarantee) = guarantee_of(&largest).ok()? else {
             return Some(1.0);
         };
         crate::bind_statistics(&guarantee, &|statistic| {
@@ -3153,6 +3156,40 @@ mod tests {
             _ => None,
         })
         .collect()
+    }
+
+    /// Distinct items per minute within 5% with probability 0.99, over at
+    /// most 2,000 distinct items: classic HLL at its Pass 1 precision does
+    /// not certify that, and Stage 3 enlarges its precision until it does.
+    /// So no HLL choice is ruled out.
+    #[test]
+    fn a_summary_stage_3_enlarges_to_certify_is_kept() {
+        use asap_logical_asap_optimization::accuracy::estimators::hll;
+        let (memo, input) = memo_and_input_over(
+            &["distinct_over_time(m[1m])"],
+            &[AccuracyTarget::max_error(0.05).failure_probability(0.01)],
+            Some(2_000),
+        );
+        let hll_choices: Vec<usize> = (0..input.choices.len())
+            .filter(|&c| !hll_precisions(&memo, &input, c).is_empty())
+            .collect();
+        assert!(!hll_choices.is_empty());
+        // Its Pass 1 precision misses the target; Stage 3's meets it.
+        assert!(hll_choices.iter().any(|&c| {
+            hll_precisions(&memo, &input, c)
+                .iter()
+                .any(|&(precision, relative_error)| {
+                    let relative_error = hll::classic_relative_error(precision, relative_error);
+                    hll::classic_failure_probability(precision, relative_error, 2_000) > 0.01
+                        && hll::classic_failure_probability(18, relative_error, 2_000) <= 0.01
+                })
+        }));
+        for (c, allowed) in &input.requires {
+            assert!(
+                !(hll_choices.contains(c) && allowed.is_empty()),
+                "HLL choice {c} ruled out"
+            );
+        }
     }
 
     /// The number of series over 1,000,000 distinct items each: a count
