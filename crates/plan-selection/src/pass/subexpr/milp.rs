@@ -1612,7 +1612,8 @@ pub(crate) fn search<Id: Clone>(
         // kept) is still a lower bound for the gap.
         input.relaxed = true;
         input.time_limit_s = None;
-        if let Some(relaxation) = solve(&input).map_err(SelectionError::Solver)? {
+        // A failed relaxation leaves the gap unknown, never the incumbent lost.
+        if let Ok(Some(relaxation)) = solve(&input) {
             bound = Some(relaxation.objective);
         }
     }
