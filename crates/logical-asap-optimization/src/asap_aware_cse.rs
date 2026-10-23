@@ -1976,6 +1976,37 @@ pub fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
 /// read only by estimates, with the finest build of its algorithm over the
 /// same rows whose keys include its own ([`sketch_rollup_candidates`]).
 pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
+    rollup_candidates_of(roots, None)
+}
+
+/// The rollup candidate of coarse build `coarse` among
+/// [`rollup_candidates`]`(roots)`, the first when several, computed for that
+/// build alone (each coarse build's candidate depends only on `roots`, not
+/// on the other coarse builds).
+pub fn rollup_candidate_for(
+    roots: &[QueryRoot],
+    coarse: *const OperatorNode,
+) -> Option<RollupCandidate> {
+    rollup_candidates_of(roots, Some(coarse)).into_iter().next()
+}
+
+/// Whether adding `root` to a candidate's roots may change the rollup
+/// candidate of its coarse build `coarse`: `root` reaches `coarse` itself
+/// or a build that could answer it ([`finer_keys`]). Otherwise `root` adds
+/// no reader of `coarse` or of any build that could answer it (a reader
+/// reaches what it reads), no such build, and leaves the walk order of the
+/// other nodes as it was, so [`rollup_candidate_for`] is unchanged.
+pub fn may_change_rollup_candidate(coarse: &Rc<OperatorNode>, root: &Rc<OperatorNode>) -> bool {
+    OperatorNode::reachable(root)
+        .iter()
+        .any(|node| Rc::ptr_eq(node, coarse) || finer_keys(coarse, node).is_some())
+}
+
+/// [`rollup_candidates`], over the coarse builds that are `only` when set.
+fn rollup_candidates_of(
+    roots: &[QueryRoot],
+    only: Option<*const OperatorNode>,
+) -> Vec<RollupCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for node in roots.iter().flat_map(root_operators) {
@@ -1999,8 +2030,9 @@ pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
             })
     };
     let builds: Vec<&Rc<OperatorNode>> = nodes.iter().filter(|n| grouped_exact(n)).collect();
+    let wanted = |coarse: &Rc<OperatorNode>| only.is_none_or(|only| Rc::as_ptr(coarse) == only);
     let mut candidates = Vec::new();
-    for &coarse in &builds {
+    for &coarse in builds.iter().filter(|coarse| wanted(coarse)) {
         let finals = finalized(coarse);
         // Every reader of the coarse state reads its finalized value.
         if finals.is_empty() || finals.len() != readers[&Rc::as_ptr(coarse)].len() {
@@ -2030,7 +2062,7 @@ pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
         }
         candidates.extend(best.map(|(_, candidate)| candidate));
     }
-    candidates.extend(sketch_rollup_candidates(&nodes, &readers));
+    candidates.extend(sketch_rollup_candidates(&nodes, &readers, only));
     candidates
 }
 
@@ -2046,6 +2078,7 @@ pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
 fn sketch_rollup_candidates(
     nodes: &[Rc<OperatorNode>],
     readers: &HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>>,
+    only: Option<*const OperatorNode>,
 ) -> Vec<RollupCandidate> {
     let builds: Vec<&Rc<OperatorNode>> = nodes.iter().filter(|n| regroupable(n)).collect();
     // The finer build with the most keys; among several (groupings that
@@ -2074,7 +2107,10 @@ fn sketch_rollup_candidates(
             .map(|(_, fine)| fine)
     };
     let mut candidates = Vec::new();
-    for &coarse in &builds {
+    for &coarse in builds
+        .iter()
+        .filter(|coarse| only.is_none_or(|only| Rc::as_ptr(coarse) == only))
+    {
         let Some(ASAPOp::SummaryAgg { family, .. }) = coarse.asap() else {
             continue;
         };
@@ -3923,6 +3959,32 @@ mod tests {
             .into_iter()
             .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
             .collect()
+    }
+
+    /// One coarse build's rollup candidate, computed alone, is the one
+    /// [`rollup_candidates`] lists for it; a query reaching no build that
+    /// could answer it may not change it, one reaching a finer build may.
+    #[test]
+    fn one_coarse_builds_rollup_candidate_is_the_listed_one() {
+        let roots = exact(&[
+            "sum by (job) (m)",
+            "sum by (job, instance) (m)",
+            "sum by (job, instance, zone) (m)",
+        ]);
+        let listed = rollup_candidates(&roots);
+        assert!(!listed.is_empty());
+        for candidate in &listed {
+            let alone = rollup_candidate_for(&roots, Rc::as_ptr(&candidate.coarse)).unwrap();
+            assert!(Rc::ptr_eq(&alone.finer, &candidate.finer));
+        }
+        let coarse = &builds(&roots[0])[0];
+        assert!(rollup_candidate_for(&roots[..1], Rc::as_ptr(coarse)).is_none());
+        assert!(may_change_rollup_candidate(coarse, operator(&roots[1])));
+        let other_metric = exact(&["sum by (job, instance) (other)"]);
+        assert!(!may_change_rollup_candidate(
+            coarse,
+            operator(&other_metric[0])
+        ));
     }
 
     /// `sum by (job)` is answered from `sum by (job, instance)`, which the
