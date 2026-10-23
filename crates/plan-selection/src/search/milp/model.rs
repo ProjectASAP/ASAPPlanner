@@ -1234,10 +1234,14 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
                 let w = flow_all[&(q, c)];
                 constraints.push(constraint!(w <= x[c]));
                 into += w;
-                for h in &input.choices[c].children {
-                    *below
-                        .entry(h.0 as usize)
-                        .or_insert_with(|| Expression::from(0.0)) += w;
+                // A child listed twice (identical subtrees) is one flow.
+                let children: BTreeSet<usize> = input.choices[c]
+                    .children
+                    .iter()
+                    .map(|h| h.0 as usize)
+                    .collect();
+                for h in children {
+                    *below.entry(h).or_insert_with(|| Expression::from(0.0)) += w;
                 }
             }
             for &c in &fused_into[g] {
@@ -1448,6 +1452,8 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
                     constraints.push(constraint!(reached >= w));
                 }
                 let choice = &input.choices[c];
+                // A child listed twice (identical subtrees) is one flow.
+                let mut at_query_children = BTreeSet::new();
                 for (h, via) in choice.children.iter().zip(&choice.coefficients.child_via) {
                     let at_query = match via {
                         Via::Direct => true,
@@ -1457,10 +1463,11 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, SolveError>
                         ),
                     };
                     if at_query {
-                        *below
-                            .entry(h.0 as usize)
-                            .or_insert_with(|| Expression::from(0.0)) += w;
+                        at_query_children.insert(h.0 as usize);
                     }
+                }
+                for h in at_query_children {
+                    *below.entry(h).or_insert_with(|| Expression::from(0.0)) += w;
                 }
             }
             for &c in &fused_into[g] {
@@ -3530,6 +3537,24 @@ pub(crate) mod tests {
     /// but copies and widened scans.
     fn memo_and_input(queries: &[&str], targets: &[AccuracyTarget]) -> (Memo, ModelInput) {
         memo_and_input_over(queries, targets, None)
+    }
+
+    /// A query over two identical subtrees reads one child group twice:
+    /// the child is one reach flow, so its plans stay feasible.
+    #[test]
+    fn a_child_read_twice_by_one_choice_is_one_flow() {
+        let (_, input) = memo_and_input(
+            &["sum_over_time(m[1m]) / sum_over_time(m[1m])"],
+            &[AccuracyTarget::exact()],
+        );
+        assert!(
+            input.choices.iter().any(|choice| {
+                let children: BTreeSet<_> = choice.children.iter().collect();
+                children.len() < choice.children.len()
+            }),
+            "a choice lists one child twice"
+        );
+        assert!(solve(&input).unwrap().is_some(), "a plan");
     }
 
     /// [`memo_and_input`] with `m`'s distinct items per evaluation bound
