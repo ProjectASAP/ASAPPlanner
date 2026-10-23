@@ -2,6 +2,7 @@
 //! one pipeline behind `stage_pipeline` and the planner-layering acceptance
 //! tests, so both see the same candidates, ids and selection.
 
+use asap_frontend_sql::SqlCatalog;
 use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
 use asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_optimization;
@@ -14,8 +15,11 @@ pub use asap_plan_selection::pass::{LogicalCandidate, PrunedCandidate};
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{Selection, SelectionError};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
+use serde_json::Value;
+use std::collections::HashSet;
 
 #[derive(Debug)]
 pub struct PlanningStagesRun {
@@ -268,4 +272,61 @@ fn validate(roots: &[QueryRoot]) -> Result<(), PlanningStagesError> {
         .iter()
         .try_for_each(|root| root.validate_structure())
         .map_err(|e| PlanningStagesError::Validation(e.to_string()))
+}
+
+/// The SQL catalog of the tables `tables` declare, each a `stage_pipeline
+/// --table` JSON object: `{"name": ..., "columns": [{"name": ..., "type":
+/// "timestamp|utf8|string|float64|double|int64|bigint", "nullable": true}],
+/// "time_index": 0}`.
+pub fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
+    let mut catalog = SqlCatalog::new();
+    let mut names = HashSet::new();
+    for raw in tables {
+        let table: Value = serde_json::from_str(raw).map_err(|e| format!("--table: {e}"))?;
+        let name = table["name"]
+            .as_str()
+            .ok_or("--table: name must be a string")?;
+        if !names.insert(name.to_owned()) {
+            return Err(format!("--table: table {name} is declared twice"));
+        }
+        let columns = table["columns"]
+            .as_array()
+            .ok_or("--table: columns must be an array")?
+            .iter()
+            .map(|column| {
+                let column_name = column["name"]
+                    .as_str()
+                    .ok_or("--table: column name must be a string")?;
+                let dtype = match column["type"]
+                    .as_str()
+                    .map(str::to_ascii_lowercase)
+                    .as_deref()
+                {
+                    Some("timestamp") => DataType::Timestamp,
+                    Some("utf8" | "string") => DataType::Utf8,
+                    Some("float64" | "double") => DataType::Float64,
+                    Some("int64" | "bigint") => DataType::Int64,
+                    other => return Err(format!("--table: unsupported column type {other:?}")),
+                };
+                let nullable = column["nullable"].as_bool().unwrap_or(true);
+                Ok(Field::plain(column_name, dtype, nullable))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let schema = match table.get("time_index") {
+            None | Some(Value::Null) => Schema::new(columns),
+            Some(index) => match index.as_u64().map(|index| index as usize) {
+                Some(index) if index < columns.len() => {
+                    Schema::with_time_index(columns, index, vec![])
+                }
+                _ => {
+                    return Err(format!(
+                        "--table {name}: time_index must be the index of one of its {} columns",
+                        columns.len()
+                    ))
+                }
+            },
+        };
+        catalog = catalog.with_table(name, schema);
+    }
+    Ok(catalog)
 }
