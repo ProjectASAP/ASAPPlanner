@@ -2270,6 +2270,7 @@ fn guarantee_requirements(
     models: PlanningModels<'_>,
 ) -> Vec<(usize, Vec<usize>)> {
     use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
+    use asap_types::ir::properties::AccuracyMetric;
     use asap_types::ir::OperatorNode;
     use std::rc::Rc;
     if models.plan_selection.ignore_accuracy_guarantees || models.evidence.may_provide_evidence() {
@@ -2340,10 +2341,11 @@ fn guarantee_requirements(
     let versions: HashMap<(usize, usize), Vec<Rc<OperatorNode>>> = choices_of
         .keys()
         .map(|&(g, c)| {
-            let nodes = crate::search::milp::coefficients::at_site_thresholds(memo, &memo.candidates[g][c])
-                .into_iter()
-                .map(|(version, _)| version.node)
-                .collect();
+            let nodes =
+                crate::search::milp::coefficients::at_site_thresholds(memo, &memo.candidates[g][c])
+                    .into_iter()
+                    .map(|(version, _)| version.node)
+                    .collect();
             ((g, c), nodes)
         })
         .collect();
@@ -2372,8 +2374,11 @@ fn guarantee_requirements(
                     nodes.iter().any(|node| {
                         versions[d].iter().any(|child_version| {
                             let replaced = HashMap::from([(child_node, Rc::clone(child_version))]);
-                            let composed =
-                                crate::search::memo::brute_force::substituted(node, &replaced, &mut HashMap::new());
+                            let composed = crate::search::memo::brute_force::substituted(
+                                node,
+                                &replaced,
+                                &mut HashMap::new(),
+                            );
                             !misses(floor(&composed), target)
                         })
                     })
@@ -2389,6 +2394,103 @@ fn guarantee_requirements(
             requires.extend(own.iter().map(|&choice| (choice, allowed.clone())));
         }
     }
+    // The accuracy metric: a query's root guarantee must be in its target's
+    // metric (or one comparable directly), whatever its size. A root
+    // group's candidate decides that metric when everything below it that
+    // may approximate is in it or in one child candidate whose children
+    // only compute exactly (a group whose candidates and their children's
+    // are all exact): that pair's guarantee is the root's.
+    let mut exact_only = vec![false; memo.groups.len()];
+    if let Some(order) = memo.topological_order() {
+        for GroupId(h) in order {
+            let h = h as usize;
+            exact_only[h] = memo.candidates[h].iter().all(|candidate| {
+                crate::search::memo::rules::windows::is_exact(candidate)
+                    && candidate.children.iter().all(|c| exact_only[c.0 as usize])
+            });
+        }
+    }
+    let metric_of = |node: &Rc<OperatorNode>| {
+        let roots = recompose_guarantees(&[QueryRoot::Operator(Rc::clone(node))]).ok()?;
+        let QueryRoot::Operator(root) = &roots[0] else {
+            return None;
+        };
+        let guarantee = root.guarantee.as_ref()?;
+        (!guarantee.is_exact()).then_some(guarantee.spec.accuracy_metric)
+    };
+    let metric_meets = |metric: AccuracyMetric, target: AccuracyMetric| {
+        metric == target
+            || (metric == AccuracyMetric::ABSOLUTE_STREAM_L2
+                && target == AccuracyMetric::ABSOLUTE_STREAM_L1)
+    };
+    for (&(g, c), own) in &choices_of {
+        let targets: Vec<AccuracyMetric> = memo.groups[g]
+            .roots_of
+            .iter()
+            .filter_map(|&q| {
+                let target = &entries[q].requirements.accuracy;
+                (!target.is_exact())
+                    .then_some(target.accuracy_metric)
+                    .flatten()
+            })
+            .collect();
+        if targets.is_empty() {
+            continue;
+        }
+        let misses = |node: &Rc<OperatorNode>| {
+            metric_of(node).is_some_and(|m| !targets.iter().all(|&t| metric_meets(m, t)))
+        };
+        let candidate = &memo.candidates[g][c];
+        let open: Vec<usize> = candidate
+            .children
+            .iter()
+            .map(|h| h.0 as usize)
+            .filter(|&h| !exact_only[h])
+            .collect();
+        match open[..] {
+            [] => {
+                if misses(&candidate.node) {
+                    requires.extend(own.iter().map(|&choice| (choice, Vec::new())));
+                }
+            }
+            [h] => {
+                let child_node = Rc::as_ptr(&memo.groups[h].node);
+                let of_child: Vec<(usize, usize)> = choices_of
+                    .keys()
+                    .copied()
+                    .filter(|&(k, _)| k == h)
+                    .collect();
+                let allowed: Vec<(usize, usize)> = of_child
+                    .iter()
+                    .copied()
+                    .filter(|&(_, d)| {
+                        let child = &memo.candidates[h][d];
+                        // A child reading approximate groups decides nothing.
+                        if !child.children.iter().all(|k| exact_only[k.0 as usize]) {
+                            return true;
+                        }
+                        let replaced = HashMap::from([(child_node, Rc::clone(&child.node))]);
+                        let composed = crate::search::memo::brute_force::substituted(
+                            &candidate.node,
+                            &replaced,
+                            &mut HashMap::new(),
+                        );
+                        !misses(&composed)
+                    })
+                    .collect();
+                if allowed.len() < of_child.len() {
+                    let allowed: Vec<usize> = allowed
+                        .iter()
+                        .flat_map(|d| choices_of[d].iter().copied())
+                        .collect();
+                    requires.extend(own.iter().map(|&choice| (choice, allowed.clone())));
+                }
+            }
+            // Several approximate children: no pair decides the metric.
+            _ => {}
+        }
+    }
+
     requires
 }
 
@@ -2925,5 +3027,55 @@ mod tests {
         // Within the contract, a precision large enough certifies it.
         assert_eq!(classic_failure_probability(4, 0.05, 1_000), 1.0);
         assert!(classic_failure_probability(18, 0.05, 1_000) < 1.0);
+    }
+
+    /// A 0.9 quantile over 5 minutes within a rank error of 1%: a DDSketch
+    /// estimate guarantees a relative error, which no rule compares with a
+    /// rank target, whatever its size. The model never chooses a plan
+    /// whose root reads a DDSketch, and still has one reading a KLL.
+    #[test]
+    fn a_choice_whose_guarantee_is_in_another_metric_is_ruled_out() {
+        use asap_types::ir::properties::AccuracyMetric;
+        let (memo, mut input) = memo_and_input(
+            &["quantile_over_time(0.9, m[5m])"],
+            &[AccuracyTarget::max_error(0.01)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::Rank)],
+        );
+        let builds = |c: usize, algorithm: &str| {
+            let choice = &input.choices[c];
+            asap_types::ir::OperatorNode::reachable(
+                &memo.candidates[choice.group.0 as usize][choice.candidate].node,
+            )
+            .iter()
+            .any(|n| {
+                matches!(n.asap(), Some(asap_types::ir::ASAPOp::SummaryAgg { family, .. })
+                    if format!("{family:?}").contains(algorithm))
+            })
+        };
+        assert!((0..input.choices.len()).any(|c| builds(c, "DDSketch")));
+        for query in &mut input.queries {
+            query.max_latency_ms = None;
+        }
+        // Every plan the model may return reads no DDSketch.
+        let mut plans = 0;
+        while let Some(solution) = solve(&input).unwrap() {
+            plans += 1;
+            assert!(
+                solution.chosen.iter().all(|&c| !builds(c, "DDSketch")),
+                "{:?}",
+                solution.chosen
+            );
+            let groups = solution
+                .chosen
+                .iter()
+                .map(|&c| input.choices[c].group)
+                .collect::<BTreeSet<_>>()
+                .len();
+            input
+                .excluded
+                .push((solution.chosen.clone(), Vec::new(), groups as f64 - 1.0));
+        }
+        assert!(plans > 0);
     }
 }
