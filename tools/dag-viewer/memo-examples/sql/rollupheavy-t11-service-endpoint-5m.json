@@ -1,0 +1,63 @@
+{
+  "query_workload": {
+    "language": {
+      "sql": "datafusion_sql"
+    },
+    "query_batch": null,
+    "repeating_queries": [
+      {
+        "query": "SELECT service, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service",
+        "demand": {
+          "fixed_interval": 60000
+        },
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "relative",
+            "max_error": 0.05,
+            "failure_probability": 0.05,
+            "accuracy_scope": "per_value"
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      },
+      {
+        "query": "SELECT service, endpoint, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service, endpoint",
+        "demand": {
+          "fixed_interval": 60000
+        },
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "relative",
+            "max_error": 0.05,
+            "failure_probability": 0.05,
+            "accuracy_scope": "per_value"
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      }
+    ]
+  },
+  "data_workload": {
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 2000000.0
+      }
+    },
+    "sources": {
+      "http": {
+        "series_count": 10000,
+        "sample_interval": 5,
+        "values_non_negative": true,
+        "max_distinct_per_evaluation": 1000000
+      }
+    }
+  }
+}

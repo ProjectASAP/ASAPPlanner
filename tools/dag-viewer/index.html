@@ -119,6 +119,7 @@ footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
 .drop-active { outline: 2px dashed var(--accent); outline-offset: -8px; }
 .editor { padding: 12px; display: grid; gap: 10px; }
 .editor h3 { margin: 0; font-family: var(--font-display); font-size: 14px; font-weight: 600; }
+#memoPanel h3 { margin: 10px 0 4px; font-family: var(--font-display); font-size: 14px; font-weight: 600; }
 .editor .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .editor input, .editor select, .editor textarea { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; min-width: 0; }
 .editor textarea { font-family: var(--font-mono); font-size: 12.5px; resize: vertical; }
@@ -231,6 +232,14 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
           <div class="panel-head"><div><div class="eyebrow">Selected plan · what a runtime installs</div><h2 id="stored-title">Stored outputs</h2></div><span class="eyebrow">click a row to select its Stage 2 node</span></div>
           <div class="lane-meta" id="stored-meta"></div>
           <div class="table-wrap" id="storedOutputs"></div>
+        </section>
+        <section class="panel" id="memoPanel" aria-labelledby="memo-title" hidden>
+          <div class="panel-head"><div><div class="eyebrow">Memo-MILP search · the selected plan over the memo</div><h2 id="memo-title">Memo groups and shared units</h2></div></div>
+          <div class="lane-meta" id="memo-meta"></div>
+          <h3>Shared units</h3>
+          <div class="table-wrap" id="memoShared"></div>
+          <h3>Memo groups</h3>
+          <div class="table-wrap" id="memoGroups"></div>
         </section>
       </div>
       <div class="legend" aria-label="Legend">

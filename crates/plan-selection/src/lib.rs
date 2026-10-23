@@ -1042,6 +1042,90 @@ pub struct SearchReport {
     /// for every other search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub milp: Option<MilpReport>,
+    /// The memo-MILP search's selected plan over the memo: each group with
+    /// the implementation candidate chosen for it, and the coupling sites
+    /// at their chosen thresholds; `None` for every other search, or when
+    /// the selected plan is the warm start (each query planned alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo_plan: Option<MemoPlanReport>,
+}
+
+/// The selected plan over the memo (joint-planning-search design, "How the
+/// stages and the memo work together"), for the selection report.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemoPlanReport {
+    /// Every group of the memo; a cluster's groups follow the earlier
+    /// clusters', so `group` is its index here.
+    pub groups: Vec<MemoGroupReport>,
+    /// The coupling sites the chosen candidates read, each at the threshold
+    /// the plan chose.
+    pub coupling_sites: Vec<CouplingSiteReport>,
+    /// Whether the selected plan is the solution's variant with every
+    /// metric's scans widened to one label set, identical scans one node
+    /// (scan widening is no model variable yet, so solution decoding
+    /// evaluates it beside the plan the choices describe).
+    #[serde(default)]
+    pub scans_widened: bool,
+}
+
+/// One memo group: a distinct logical sub-expression of the workload.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemoGroupReport {
+    /// Its index in [`MemoPlanReport::groups`].
+    pub group: usize,
+    /// Its logical node's operator, its children named by group index.
+    pub operator: asap_types::ir::Operator<Option<usize>>,
+    /// The groups that read it, and the queries whose roots reach it and
+    /// whose root it is, by index in the workload.
+    pub parents: Vec<usize>,
+    pub queries: Vec<usize>,
+    pub roots_of: Vec<usize>,
+    /// Its implementation candidates.
+    pub candidates: usize,
+    /// The implementation candidate the plan chose for it; `None` when the
+    /// plan reads no implementation of it, or another group's chosen
+    /// candidate implements it (`implemented_by`).
+    pub chosen: Option<ChosenCandidateReport>,
+    /// The group whose chosen candidate implements this one too (a fused
+    /// computation); `None` otherwise.
+    pub implemented_by: Option<usize>,
+}
+
+/// A group's chosen implementation candidate.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChosenCandidateReport {
+    /// How it was made: `Pass1`, or the Pass 2 transformation
+    /// (`SharedBuild`, `Panes`, `Rollup`, `TopKReuse`, `WidenedScans`).
+    pub origin: String,
+    /// Its root node's operator kind.
+    pub operator: String,
+    /// The groups it implements (several for a fused computation) and the
+    /// groups it reads.
+    pub implements: Vec<usize>,
+    pub reads: Vec<usize>,
+    /// Whether the group's one node is built once per evaluation for every
+    /// reader, rather than recomputed per reader.
+    pub built_once: bool,
+    /// The coupling sites it reads, by index in
+    /// [`MemoPlanReport::coupling_sites`].
+    pub coupling_sites: Vec<usize>,
+}
+
+/// A coupling site of the selected plan: a choice several groups' costs
+/// depend on, at the threshold the plan chose.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CouplingSiteReport {
+    /// `SharedBuildSize`, `PaneChain`, `ScanLabels` or `RawHorizon`.
+    pub kind: String,
+    /// The chosen threshold: a shared build's size parameters (`params`,
+    /// null for an exact accumulator), a pane chain's `pane_width_ms`,
+    /// `longest_window_ms` and `family`, a scan's `labels`, or a raw
+    /// `horizon_ms`.
+    pub threshold: serde_json::Value,
+    /// The thresholds the site was enumerated with.
+    pub thresholds: usize,
+    /// The groups whose chosen candidates read it (its readers).
+    pub readers: Vec<usize>,
 }
 
 /// The MILP search's report: its bound, gap and effort.
@@ -1084,6 +1168,11 @@ pub struct MilpReport {
     /// the gap from the summed bound and incumbent cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<MilpClusterReport>,
+    /// The cost per second of the warm-start plan: each query planned
+    /// alone, with no sharing between queries; `None` when some query has
+    /// no plan alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queries_alone_cost: Option<f64>,
 }
 
 /// One independent cluster of the MILP search: queries whose plans share

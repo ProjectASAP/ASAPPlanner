@@ -279,6 +279,7 @@
       renderRanking();
     }
     renderStoredOutputs();
+    renderMemoSearch();
   }
 
   const table = (head, body) => `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;
@@ -335,6 +336,27 @@
       tr.addEventListener('click', pick);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
     });
+  }
+
+  // The memo-MILP search's summary, the selected plan's shared units with
+  // their readers and threshold, and every memo group with its chosen
+  // implementation candidate; hidden for other searches.
+  function renderMemoSearch() {
+    const view = memoSearchView(doc);
+    $('memoPanel').hidden = !view;
+    if (!view) return;
+    $('memo-meta').textContent = [memoSummaryText(view.summary),
+      view.scansWidened ? 'selected plan: the scan-widening variant of the solution' : ''].filter(Boolean).join(' · ');
+    $('memoShared').innerHTML = view.sharedUnits.length
+      ? table(['shared unit', 'kind', 'readers', 'queries', 'threshold', 'runs', 'strictest reader'],
+        view.sharedUnits.map((u) => `<tr><td class="wrap">${esc(u.unit)}</td><td>${esc(u.kind)}</td><td class="wrap">${esc(u.readers.join(', '))}</td><td>${esc(u.queries.join(', '))}</td>` +
+          `<td class="wrap">${esc(u.threshold)}</td><td class="wrap">${esc(u.schedule)}</td><td>${esc(u.strictest)}</td></tr>`).join(''))
+      : '<span class="status">The selected plan shares nothing: every group has one reader.</span>';
+    $('memoGroups').innerHTML = view.groups.length
+      ? table(['group', 'logical node', 'reads', 'read by', 'queries', 'implementation candidates', 'chosen candidate'],
+        view.groups.map((g) => `<tr><td>${esc(g.id)}${g.shared ? ' · shared' : ''}</td><td class="wrap">${esc(g.label)}</td><td>${esc(g.reads.join(', ') || '—')}</td>` +
+          `<td class="wrap">${esc(g.readBy.join(', ') || '—')}</td><td>${esc(g.queries.join(', '))}</td><td>${esc(g.candidates)}</td><td class="wrap">${esc(g.chosen)}</td></tr>`).join(''))
+      : '<span class="status">The selected plan is the warm start (each query planned alone): no memo choice to show.</span>';
   }
 
   // Show the selected plan in the Stage 2 lane and select its node `id`.

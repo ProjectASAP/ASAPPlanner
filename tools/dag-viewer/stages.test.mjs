@@ -142,3 +142,42 @@ test('the search header says why the search ran as one and which queries were in
   searched.stage3_plan_selection.search.interchangeable_queries = undefined;
   assert.equal(call('searchText', searched), 'default search · 12 physical candidates checked');
 });
+
+// The memo-MILP examples: the MILP summary, the memo groups with their
+// chosen candidates and the shared units with readers and threshold.
+const memoDoc = (id) => JSON.parse(readFileSync(new URL(`examples/memo-${id}.json`, here), 'utf8'));
+
+test('a memo-MILP document shows its shared sketch, readers and certified summary', () => {
+  const doc = memoDoc('rangeheavy-t5-q05-q09-1h');
+  assert.deepEqual([...call('validateStagePipeline', doc)], []);
+  assert.match(call('searchText', doc), /^memo-MILP search · /);
+  const view = call('memoSearchView', doc);
+  assert.equal(view.summary.certified, true);
+  assert.ok(view.summary.saving > 0.4);
+  assert.match(call('memoSummaryText', view.summary), /certified \(gap ≤ 1e-4\).*queries planned alone .* \(sharing saves 50%\)/);
+  const chain = view.sharedUnits.find((u) => u.kind === 'coupling site · PaneChain');
+  assert.deepEqual([...chain.readers], ['G3', 'G4']);
+  assert.deepEqual([...chain.queries], ['q1', 'q2']);
+  assert.match(chain.threshold, /^1 min panes over 1 h · DDSketch · alpha 0.05/);
+  assert.equal(view.groups.find((g) => g.id === 'G3').chosen, 'Panes · Project · at S1');
+});
+
+test('a memo-MILP document shows a sketch rollup, a union schedule and a widened scan', () => {
+  const rollup = call('memoSearchView', memoDoc('rollupheavy-t11-service-endpoint-5m'));
+  assert.match(rollup.groups.find((g) => g.id === 'G3').chosen, /^Rollup · Project · reads G2, G6 · at S1$/);
+  assert.match(rollup.sharedUnits[0].threshold, /^finer state Kmv · k 3001/);
+  const union = call('memoSearchView', memoDoc('rangeheavy-t5-q05-1h-60s-300s'));
+  assert.equal(union.sharedUnits[0].schedule, 'every 1 min ∪ every 5 min → on a 1 min grid');
+  const widened = call('memoSearchView', memoDoc('rangeheavy-t7-t4-1h'));
+  assert.equal(widened.scansWidened, true);
+  assert.equal(widened.sharedUnits[0].kind, 'widened scan');
+});
+
+test('a memo plan naming a missing group is refused', () => {
+  const broken = memoDoc('rangeheavy-t5-q05-q09-1h');
+  broken.stage3_plan_selection.search.memo_plan.coupling_sites[0].readers.push(99);
+  assert.match(call('validateStagePipeline', broken)[0], /coupling_sites\[0\]: readers must name groups/);
+  assert.equal(call('memoSearchView', memoDoc('rangeheavy-t5-q05-q09-1h')).groups.length, 4);
+  // Other searches have no memo view.
+  assert.equal(call('memoSearchView', doc), null);
+});

@@ -221,6 +221,7 @@ pub(crate) fn combine(
         .sum();
     selection.search.incumbent_cost = Some(price);
     selection.search.milp = Some(milp_report(&found));
+    selection.search.memo_plan = memo_plan_report(&found);
     let roots = combined;
     Some((selection, selected, roots))
 }
@@ -255,7 +256,47 @@ fn milp_report(
         time_limit_reached: reports.iter().any(|r| r.time_limit_reached),
         decode_failures: reports.iter().map(|r| r.decode_failures).sum(),
         clusters: found.iter().map(|(_, _, _, c)| c.clone()).collect(),
+        queries_alone_cost: reports.iter().map(|r| r.queries_alone_cost).sum(),
     }
+}
+
+/// The workload's memo plan from its clusters': each cluster's groups and
+/// coupling sites after the earlier clusters', renumbered; `None` when a
+/// cluster has none.
+fn memo_plan_report(
+    found: &[(
+        Selection,
+        PhysicalCandidate,
+        Vec<QueryRoot>,
+        crate::MilpClusterReport,
+    )],
+) -> Option<crate::MemoPlanReport> {
+    let mut combined = crate::MemoPlanReport::default();
+    for (selection, _, _, _) in found {
+        let plan = selection.search.memo_plan.as_ref()?;
+        combined.scans_widened |= plan.scans_widened;
+        let (groups, sites) = (combined.groups.len(), combined.coupling_sites.len());
+        let shift = |ids: &[usize], by: usize| ids.iter().map(|i| i + by).collect::<Vec<_>>();
+        for group in &plan.groups {
+            let mut group = group.clone();
+            group.group += groups;
+            group.operator = group.operator.map_children(|c| c.map(|g| g + groups));
+            group.parents = shift(&group.parents, groups);
+            group.implemented_by = group.implemented_by.map(|g| g + groups);
+            if let Some(chosen) = &mut group.chosen {
+                chosen.implements = shift(&chosen.implements, groups);
+                chosen.reads = shift(&chosen.reads, groups);
+                chosen.coupling_sites = shift(&chosen.coupling_sites, sites);
+            }
+            combined.groups.push(group);
+        }
+        for site in &plan.coupling_sites {
+            let mut site = site.clone();
+            site.readers = shift(&site.readers, groups);
+            combined.coupling_sites.push(site);
+        }
+    }
+    Some(combined)
 }
 
 #[cfg(test)]
