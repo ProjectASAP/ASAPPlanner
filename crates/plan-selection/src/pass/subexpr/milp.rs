@@ -46,7 +46,7 @@ pub(crate) struct PartCoefficients {
 }
 
 /// One materialized private slot of a choice.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SlotCoefficients {
     pub materialization: Materialization,
     /// Price per second that does not depend on a rate (ingestion-time
@@ -62,6 +62,10 @@ pub(crate) struct SlotCoefficients {
     /// and materialization are one node when shared (a site's build at one
     /// threshold, identical expressions), so the model charges them once.
     pub shared_site: Option<(u64, usize)>,
+    /// A query-time slot's raw scans, out of `cost_per_unit_rate`: like
+    /// [`ChoiceCoefficients::absorbed_scans`], charged as scans of their
+    /// source (another slot's or part's identical scan is one node).
+    pub scans: Vec<(u64, f64, f64)>,
 }
 
 /// A cross-group node's variables: its once charge, its charge, the
@@ -154,8 +158,9 @@ pub(crate) struct Choice {
     /// For a scan group's choice: what a pass over its output costs per
     /// unit of rate, at most its own price. A widened scan shared by a
     /// source's scan groups costs at least the dearest scan, and each other
-    /// reader at least such a pass: the model charges each scan choice's
-    /// pass, plus the largest excess over it.
+    /// reader at least such a pass: the model charges each distinct scan's
+    /// pass once (readers of one scan share its node), plus the largest
+    /// excess over it.
     pub scan_project_cost_per_unit_rate: f64,
 }
 
@@ -364,6 +369,10 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
         for slot in &mut k.slots {
             slot.fixed_cost *= scale;
             slot.cost_per_unit_rate *= scale;
+            for (_, cost, pass) in &mut slot.scans {
+                *cost *= scale;
+                *pass *= scale;
+            }
         }
         for node in &mut k.shared_nodes {
             node.cost_per_unit_rate *= scale;
@@ -544,7 +553,14 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         z
     };
     // Each scan choice's direct charge, per source (`Choice::scan_source`).
-    let mut scan_charges: BTreeMap<u64, BTreeMap<usize, Expression>> = BTreeMap::new();
+    let mut scan_charges: BTreeMap<u64, BTreeMap<(usize, usize), Expression>> = BTreeMap::new();
+    // Each scan choice's pass, per identical scan (its source and price):
+    // readers of one scan share its node and pay its pass once.
+    let mut pass_charges: BTreeMap<(u64, u64), BTreeMap<(usize, usize), Expression>> =
+        BTreeMap::new();
+    // Each choice's direct charge per schedule class of its query
+    // consumers: one node serves the class's queries.
+    let mut class_charges: BTreeMap<(usize, usize), Vec<Expression>> = BTreeMap::new();
     // Each cross-group node's charges per consumer, and their largest sum.
     let mut cross_per_consumer: BTreeMap<u64, (Expression, f64)> = BTreeMap::new();
     for (&(k, c), &v) in &y {
@@ -566,11 +582,15 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         }
         for &(source, cost, pass) in &input.choices[c].coefficients.absorbed_scans {
             let pass = pass.min(cost);
-            objective += rate_or_slowest * pass * v;
+            *pass_charges
+                .entry((source, cost.to_bits()))
+                .or_default()
+                .entry((c, 0))
+                .or_insert_with(|| Expression::from(0.0)) += rate_or_slowest * pass * v;
             *scan_charges
                 .entry(source)
                 .or_default()
-                .entry(c)
+                .entry((c, 0))
                 .or_insert_with(|| Expression::from(0.0)) += rate_or_slowest * (cost - pass) * v;
         }
         if total == 0.0 {
@@ -579,11 +599,15 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         if let Some(source) = input.choices[c].scan_source {
             let rate = rate_or_slowest;
             let pass = input.choices[c].scan_project_cost_per_unit_rate.min(total);
-            objective += rate * pass * v;
+            *pass_charges
+                .entry((source, total.to_bits()))
+                .or_default()
+                .entry((c, 0))
+                .or_insert_with(|| Expression::from(0.0)) += rate * pass * v;
             *scan_charges
                 .entry(source)
                 .or_default()
-                .entry(c)
+                .entry((c, 0))
                 .or_insert_with(|| Expression::from(0.0)) += rate * (total - pass) * v;
             continue;
         }
@@ -591,7 +615,14 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         let cost = total - shared;
         match rate(k) {
             Some(r) => {
-                objective += r * cost * v;
+                match k {
+                    // Queries of one class read one node of the choice.
+                    Consumer::Query(q) => class_charges
+                        .entry((c, input.schedule[q]))
+                        .or_default()
+                        .push(r * cost * v),
+                    _ => objective += r * cost * v,
+                }
                 if shared != 0.0 {
                     per_consumer_shared[c].push((v, r * shared));
                 }
@@ -620,8 +651,36 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             }
         }
     }
+    // Query-time slots' scans, at the slot's group's slowest rate, each
+    // slot's apart from its choice's other parts.
+    for (c, choice) in input.choices.iter().enumerate() {
+        let slowest = slowest_rate(choice.group.0 as usize);
+        for (i, slot) in choice.coefficients.slots.iter().enumerate() {
+            if matches!(slot.materialization, Materialization::MatAtIngestion(_)) {
+                continue;
+            }
+            for &(source, cost, pass) in &slot.scans {
+                let pass = pass.min(cost);
+                *pass_charges
+                    .entry((source, cost.to_bits()))
+                    .or_default()
+                    .entry((c, i + 1))
+                    .or_insert_with(|| Expression::from(0.0)) += slowest * pass * x[c];
+                *scan_charges
+                    .entry(source)
+                    .or_default()
+                    .entry((c, i + 1))
+                    .or_insert_with(|| Expression::from(0.0)) += slowest * (cost - pass) * x[c];
+            }
+        }
+    }
     let mut scan_maxima: Vec<(Variable, Vec<Expression>)> = Vec::new();
-    for charges in scan_charges.into_values() {
+    for charges in class_charges.into_values() {
+        let m = vars.add(variable().min(0));
+        objective += m;
+        scan_maxima.push((m, charges));
+    }
+    for charges in scan_charges.into_values().chain(pass_charges.into_values()) {
         let m = vars.add(variable().min(0));
         objective += m;
         scan_maxima.push((m, charges.into_values().collect()));

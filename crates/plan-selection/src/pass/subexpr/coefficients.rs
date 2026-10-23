@@ -912,7 +912,24 @@ fn coefficients_of(
         let via = Via::Slot(slots.len());
         lazy_of(&part, via);
         let at_ingestion = matches!(node.materialization, Materialization::MatAtIngestion(_));
-        let rate_cost: f64 = part.iter().map(|&id| per_rate(id)).sum();
+        // A query-time slot's raw scans are charged as scans.
+        let scans: Vec<(u64, f64, f64)> = match at_ingestion {
+            true => Vec::new(),
+            false => part
+                .iter()
+                .filter(|&&id| query_time(id))
+                .filter_map(|&id| match &dag.nodes[position[&id]].payload {
+                    Operator::NonASAP(NonASAPOp::Scan { source, .. }) => Some((
+                        super::scans::raw_horizon_key(source),
+                        per_rate(id),
+                        prices.cost_per_cpu_op * priced[&id].output.rows as f64,
+                    )),
+                    _ => None,
+                })
+                .collect(),
+        };
+        let rate_cost: f64 = part.iter().map(|&id| per_rate(id)).sum::<f64>()
+            - scans.iter().map(|&(_, cost, _)| cost).sum::<f64>();
         let state: f64 = part.iter().map(|&id| kept_state(id)).sum();
         slots.push(SlotCoefficients {
             materialization: node.materialization,
@@ -929,6 +946,7 @@ fn coefficients_of(
             // threshold, identical expressions, scans widened to one label
             // set): equal over equal inputs, scans' projections aside.
             shared_site: Some((u64::from(widened[position[&node.id]]), 0)),
+            scans,
         });
         slot_keys.push(shallow[position[&node.id]]);
         part_keys.push(part.iter().map(|id| keys[position[id]]).collect());
@@ -1708,7 +1726,9 @@ mod tests {
             // memory too.
             for (i, slot) in coefficients.slots.iter().enumerate() {
                 if charged_slots.insert(p.slots[i]) {
-                    actual += slot.fixed_cost + slot.cost_per_unit_rate * rates[&p.slots[i]].1;
+                    let scans: f64 = slot.scans.iter().map(|&(_, cost, _)| cost).sum();
+                    actual +=
+                        slot.fixed_cost + (slot.cost_per_unit_rate + scans) * rates[&p.slots[i]].1;
                 } else {
                     lazy.held.retain(|term| term.via != Via::Slot(i));
                     lazy.raw_scans.retain(|(_, _, via)| *via != Via::Slot(i));
