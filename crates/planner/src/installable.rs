@@ -435,6 +435,13 @@ impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
         };
         match installable() {
             Ok(plan) => plan.check_compiles(),
+            // Deriving the plan's stored outputs already compiled each
+            // build, and the executor refused one: the plan does not
+            // compile, whichever run builds that output, as `check_compiles`
+            // reports a build it refuses.
+            Err(InstallablePlanError::StoredOutputNotExecutable { node_id, reason }) => {
+                Err(format!("stored output {node_id}: {reason}"))
+            }
             // Not installable for another reason, which `plan_installable`
             // reports as such (e.g. a scalar root); not the compiler's to say.
             Err(_) => Ok(()),
