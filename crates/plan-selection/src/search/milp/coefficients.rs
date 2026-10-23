@@ -133,6 +133,9 @@ pub(crate) struct ChoiceParts {
     pub build_keys: Vec<u32>,
     /// Per part (direct, then each slot), its nodes' keys.
     pub part_keys: Vec<HashSet<u32>>,
+    /// The candidate at the choice's site thresholds, which solution
+    /// decoding composes.
+    pub version: ImplementationCandidate,
 }
 
 pub(crate) fn choice_parts(
@@ -199,6 +202,32 @@ pub(crate) fn choice_parts(
                 models.deployment_capabilities,
             ) else {
                 continue;
+            };
+            // Built for one query twice, a build may be built once only
+            // because of the second copy: the keys of the builds Stage 2
+            // also builds once for the one query alone.
+            let built_once_alone: Option<HashSet<u32>> = match built_for.as_slice() {
+                [a, b] if a == b => {
+                    let alone = optimize_physical_asap(
+                        "S",
+                        &roots[..1],
+                        &part_entries[..1],
+                        data,
+                        models.deployment_capabilities,
+                    )
+                    .unwrap_or_default();
+                    let mut keys = HashSet::new();
+                    for physical in &alone {
+                        let all = keys_of(&physical.dag, cache.keys_mut());
+                        for (i, node) in physical.dag.nodes.iter().enumerate() {
+                            if matches!(node.materialization, Materialization::MatAtQuery(_)) {
+                                keys.insert(all[i]);
+                            }
+                        }
+                    }
+                    Some(keys)
+                }
+                _ => None,
             };
             let child_groups = children_of(memo, group, candidate);
             let child_key_sets: Vec<Rc<crate::cost::per_node::ChildKeys>> = child_groups
@@ -323,6 +352,29 @@ pub(crate) fn choice_parts(
                             .iter()
                             .map(|&i| physical.dag.nodes[i].materialization)
                             .collect();
+                        let built_once_keys: Vec<u32> = builds
+                            .iter()
+                            .filter(|&&i| {
+                                matches!(
+                                    physical.dag.nodes[i].materialization,
+                                    Materialization::MatAtQuery(_)
+                                )
+                            })
+                            .map(|&i| widened[i])
+                            .collect();
+                        let built_once_with_other_group: Vec<u32> = match &built_once_alone {
+                            Some(alone) => builds
+                                .iter()
+                                .filter(|&&i| {
+                                    matches!(
+                                        physical.dag.nodes[i].materialization,
+                                        Materialization::MatAtQuery(_)
+                                    ) && !alone.contains(&keys[i])
+                                })
+                                .map(|&i| widened[i])
+                                .collect(),
+                            None => Vec::new(),
+                        };
                         if seen.contains(&assignment) {
                             continue;
                         }
@@ -375,6 +427,8 @@ pub(crate) fn choice_parts(
                                     _ => None,
                                 },
                                 scan_project_cost_per_unit_rate: parts.scan_project_cost,
+                                built_once_with_other_group,
+                                built_once_keys,
                             },
                             lazy: LazyTerms {
                                 thresholds: thresholds.clone(),
@@ -386,6 +440,7 @@ pub(crate) fn choice_parts(
                             slot_keys: parts.slot_keys,
                             build_keys: builds.iter().map(|&i| shallow[i]).collect(),
                             part_keys: parts.part_keys,
+                            version: candidate.clone(),
                         });
                     }
                 }
@@ -400,7 +455,7 @@ pub(crate) fn choice_parts(
 /// candidates, with the index of each threshold. A raw-horizon site has
 /// no threshold here: scan sharing is part of each choice
 /// ([`Choice::scan_children`]). A candidate without sites is itself.
-fn at_site_thresholds(
+pub(super) fn at_site_thresholds(
     memo: &Memo,
     candidate: &ImplementationCandidate,
 ) -> Vec<(ImplementationCandidate, Vec<(CouplingSite, usize)>)> {
@@ -903,6 +958,22 @@ fn coefficients_of(
         );
     }
     let mut part_keys = vec![direct.iter().map(|id| keys[position[id]]).collect()];
+    // Each query-time node a reader computes, keyed as one node in the
+    // plan: a scan by its source (scans of one source may be one widened
+    // scan), any other node by its key up to scan widening.
+    let node_work_key = |id: PhysicalASAPNodeId| -> u64 {
+        match &dag.nodes[position[&id]].payload {
+            Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                (1 << 63) | crate::search::memo::rules::scans::raw_horizon_key(source)
+            }
+            _ => u64::from(widened[position[&id]]),
+        }
+    };
+    let mut query_work: Vec<(u64, f64)> = direct
+        .iter()
+        .filter(|&&id| query_time(id))
+        .map(|&id| (node_work_key(id), priced[&id].work_ms))
+        .collect();
     let mut slots = Vec::new();
     let mut slot_keys = Vec::new();
     let mut slot_reads = Vec::new();
@@ -914,6 +985,13 @@ fn coefficients_of(
         let via = Via::Slot(slots.len());
         lazy_of(&part, via);
         let at_ingestion = matches!(node.materialization, Materialization::MatAtIngestion(_));
+        if !at_ingestion {
+            query_work.extend(
+                part.iter()
+                    .filter(|&&id| query_time(id))
+                    .map(|&id| (node_work_key(id), priced[&id].work_ms)),
+            );
+        }
         // A query-time slot's raw scans are charged as scans.
         let scans: Vec<(u64, f64, f64)> = match at_ingestion {
             true => Vec::new(),
@@ -975,28 +1053,36 @@ fn coefficients_of(
     for node in &mut at_ingestion.nodes {
         node.output_state.timing = ExecutionTiming::IngestionTime;
     }
-    let direct_at_ingestion = per_computation(
+    // `None` only when Stage 3 cannot place it at ingestion time (a
+    // grouping with no window below it); any other pricing error leaves
+    // its price unknown, charged 0 (a lower bound).
+    let direct_at_ingestion = match per_computation(
         &at_ingestion,
         entries,
         scan_lookback,
         horizons,
         data,
         models,
-    )
-    .ok()
-    .map(|ingestion_priced| PartCoefficients {
-        cost_per_unit_rate: direct
-            .iter()
-            .map(|id| {
-                let p = &ingestion_priced[id];
-                p.cpu_ops_per_second * prices.cost_per_cpu_op
-                    + p.scanned_bytes_per_second * prices.cost_per_scanned_byte
-                    + p.average_memory_bytes * prices.cost_per_memory_byte_second
-                    + p.disk_bytes as f64 * prices.cost_per_disk_byte_second
-            })
-            .sum(),
-        work_ms: 0.0,
-    });
+    ) {
+        Ok(ingestion_priced) => Some(PartCoefficients {
+            cost_per_unit_rate: direct
+                .iter()
+                .map(|id| {
+                    let p = &ingestion_priced[id];
+                    p.cpu_ops_per_second * prices.cost_per_cpu_op
+                        + p.scanned_bytes_per_second * prices.cost_per_scanned_byte
+                        + p.average_memory_bytes * prices.cost_per_memory_byte_second
+                        + p.disk_bytes as f64 * prices.cost_per_disk_byte_second
+                })
+                .sum(),
+            work_ms: 0.0,
+        }),
+        Err(SelectionError::Cost {
+            error: crate::cost::analytical::AnalyticalCostError::IngestionGroupingWithoutWindow,
+            ..
+        }) => None,
+        Err(_) => Some(PartCoefficients::default()),
+    };
     // The group's own node built once at query time, in memory: the state
     // it holds instead of its working memory.
     let mut built_once = dag.nodes[position[&root]].clone();
@@ -1032,6 +1118,7 @@ fn coefficients_of(
                     )
                 })
                 .collect(),
+            query_work,
         },
         lazy: LazyTerms {
             held,
@@ -1848,8 +1935,8 @@ mod tests {
         intervals_ms: &[u32],
         targets: &[AccuracyTarget],
     ) {
-        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true);
-        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, false);
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true, &data(), 0);
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, false, &data(), 0);
     }
 
     /// [`assert_model_is_a_lower_bound`] in a deployment that keeps raw
@@ -1859,7 +1946,9 @@ mod tests {
         intervals_ms: &[u32],
         targets: &[AccuracyTarget],
         raw_data_retained: bool,
-    ) {
+        data: &DataWorkload,
+        term_cuts_from_rounds: usize,
+    ) -> BTreeSet<&'static str> {
         let roots: Vec<(usize, QueryRoot)> = queries
             .iter()
             .zip(targets)
@@ -1871,7 +1960,6 @@ mod tests {
             .collect();
         let per_computation = generate_per_computation_candidates(roots).unwrap();
         let entries = entries(intervals_ms, targets);
-        let data = data();
         let deployment =
             asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities {
                 raw_data_retained,
@@ -1880,14 +1968,20 @@ mod tests {
             };
         let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         let memo = memo(&per_computation, &entries);
-        let input =
-            crate::search::milp::model::model_input_of(&memo, &entries, &data, models).unwrap();
+        let input = crate::search::milp::model::model_input_of(&memo, &entries, data, models)
+            .unwrap()
+            .0;
+        // With the term cuts the lazy loop may add from its first rounds.
+        let input = match term_cuts_from_rounds {
+            0 => input,
+            rounds => crate::search::milp::model::with_every_term_cut(&input, rounds),
+        };
         let checked = crate::search::milp::model::lower_bound_check(
             &memo,
             &per_computation,
             &input,
             &entries,
-            &data,
+            data,
             models,
         )
         .unwrap();
@@ -1898,6 +1992,115 @@ mod tests {
             assert!(
                 value <= exact * (1.0 + 1e-9),
                 "{queries:?} {group_choice:?}: model {value} over exact {exact}"
+            );
+        }
+        // Each cut reads model variables that exist: a query's reach or
+        // held charge of a choice only of a group the query reads.
+        let reads = |q: usize, c: usize| {
+            input.group_queries[input.choices[c].group.0 as usize].contains(&q)
+        };
+        for cut in &input.cuts.cuts {
+            assert!(
+                cut.reached.iter().all(|&(q, c)| reads(q, c)),
+                "{queries:?}: {cut:?}"
+            );
+            if let crate::search::milp::cuts::Term::HeldPerReader(q, c) = cut.term {
+                assert!(reads(q, c), "{queries:?}: {cut:?}");
+            }
+        }
+        input.cuts.cuts.iter().map(|cut| cut.term.kind()).collect()
+    }
+
+    /// An exact top-k of 5-minute sums every 5 minutes over 1,000 series
+    /// sampled every 15 s, without raw data: only a summary maintained at
+    /// ingestion time is valid. Its scan and window are read only through
+    /// that ingestion-time slot, so no query-time work or held memory of
+    /// theirs may be charged (a random three-way workload's cluster).
+    #[test]
+    fn the_model_is_a_lower_bound_below_an_ingestion_time_slot() {
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000.0 / 15.0,
+            },
+            sources: [(
+                "m".to_string(),
+                SourceFacts {
+                    series_count: Some(1_000),
+                    sample_interval: Some(asap_types::workload::DurationMs(15_000)),
+                    metric_type: Some(asap_types::workload::MetricType::Gauge),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert_model_is_a_lower_bound_in(
+            &["topk by (job) (3, sum_over_time(m[5m]))"],
+            &[300_000],
+            &[AccuracyTarget::exact()],
+            false,
+            &data,
+            0,
+        );
+    }
+
+    /// Two queries whose children are read by two ingestion-time slots,
+    /// without raw data: Stage 3 runs each shared child as one ingestion
+    /// copy, so the model charges its ingestion-time part once, not once
+    /// per slot reading it. Every 10 s, the two quantiles' query-time
+    /// node over their shared build is one node read by both queries of
+    /// one class: its held memory is charged at their union rate. Every
+    /// 10 s and every 20 s, its readers are in two classes no group's
+    /// class set joins: their union rate is at least the faster's.
+    #[test]
+    fn the_model_is_a_lower_bound_for_a_child_of_two_ingestion_time_slots() {
+        let within = AccuracyTarget::max_error(0.01);
+        for intervals in [
+            [300_000, 300_000],
+            [60_000, 300_000],
+            [10_000, 10_000],
+            [10_000, 20_000],
+        ] {
+            for window in ["5m", "1m"] {
+                assert_model_is_a_lower_bound_in(
+                    &[
+                        &format!("quantile_over_time(0.9, m[{window}])"),
+                        &format!("quantile_over_time(0.5, m[{window}])"),
+                    ],
+                    &intervals,
+                    &[within.clone(), within.clone()],
+                    false,
+                    &data(),
+                    0,
+                );
+            }
+            assert_model_is_a_lower_bound_in(
+                &["quantile_over_time(0.9, m[5m])", "sum_over_time(m[5m])"],
+                &intervals,
+                &[within.clone(), AccuracyTarget::exact()],
+                false,
+                &data(),
+                0,
+            );
+            assert_model_is_a_lower_bound_in(
+                &["quantile_over_time(0.9, m[5m])", "max_over_time(m[1m])"],
+                &intervals,
+                &[within.clone(), AccuracyTarget::exact()],
+                false,
+                &data(),
+                0,
+            );
+            let exact = AccuracyTarget::exact();
+            assert_model_is_a_lower_bound_in(
+                &[
+                    "max by (job) (sum_over_time(m[5m]))",
+                    "sum_over_time(m[5m])",
+                ],
+                &intervals,
+                &[exact.clone(), exact.clone()],
+                false,
+                &data(),
+                0,
             );
         }
     }
@@ -1945,6 +2148,83 @@ mod tests {
             &[20_000, 20_000, 1_000, 1_000],
             &[target.clone(), target.clone(), target.clone(), target],
         );
+    }
+
+    /// #839's shape with the term cuts of the lazy loop's first 30 rounds
+    /// (a source's scans apart or widened, held memory, ingestion copies):
+    /// each cut stays a lower bound of every plan it applies to.
+    #[test]
+    fn the_model_with_term_cuts_is_a_lower_bound() {
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
+        let mut kinds = BTreeSet::new();
+        for raw_data_retained in [true, false] {
+            kinds.extend(assert_model_is_a_lower_bound_in(
+                &[
+                    "sum by (job) (sum_over_time(m[10m]))",
+                    "sum(sum_over_time(m[10m]))",
+                    "avg by (job) (quantile_over_time(0.99, m[100s]))",
+                    "avg(quantile_over_time(0.95, m[100s]))",
+                ],
+                &[20_000, 20_000, 1_000, 1_000],
+                &[
+                    target.clone(),
+                    target.clone(),
+                    target.clone(),
+                    target.clone(),
+                ],
+                raw_data_retained,
+                &data(),
+                30,
+            ));
+        }
+        // A fused choice: the top-k's heap implements the sum, the other
+        // query's root, so that query reaches a choice of a group it does
+        // not read.
+        let exact = AccuracyTarget::exact();
+        for raw_data_retained in [true, false] {
+            kinds.extend(assert_model_is_a_lower_bound_in(
+                &[
+                    "topk(5, sum by (job) (sum_over_time(m[5m])))",
+                    "sum by (job) (sum_over_time(m[5m]))",
+                ],
+                &[60_000, 60_000],
+                &[exact.clone(), exact.clone()],
+                raw_data_retained,
+                &data(),
+                30,
+            ));
+        }
+        // Ingestion copies (a pane build at ingestion beside a sum reading
+        // the scan built once) and held memory over the longest reader.
+        let within = AccuracyTarget::max_error(0.01);
+        kinds.extend(assert_model_is_a_lower_bound_in(
+            &["quantile_over_time(0.9, m[5m])", "sum_over_time(m[5m])"],
+            &[60_000, 300_000],
+            &[within, exact.clone()],
+            true,
+            &data(),
+            30,
+        ));
+        kinds.extend(assert_model_is_a_lower_bound_in(
+            &[
+                "max_over_time(m[5m]) - min_over_time(m[5m])",
+                "max_over_time(m[5m])",
+            ],
+            &[60_000, 60_000],
+            &[exact.clone(), exact],
+            true,
+            &data(),
+            30,
+        ));
+        for kind in [
+            "source scans",
+            "held per reader",
+            "held longest",
+            "shared build held",
+            "ingestion copy",
+        ] {
+            assert!(kinds.contains(kind), "no {kind} cut in {kinds:?}");
+        }
     }
 
     /// One query reading two groups over one metric, whose scans may be one

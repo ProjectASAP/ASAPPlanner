@@ -23,6 +23,10 @@ use asap_types::workload::{
 };
 use planner_layering_common::*;
 
+/// The largest gap a certified search reports (the planner's
+/// `GAP_TOLERANCE`): the solver's own tolerances.
+const CERTIFIED_GAP: f64 = 1e-4;
+
 /// Every cost model, each objective of cost model 3 included, with
 /// `memory_gb` of cluster memory: small enough that some candidates do not
 /// fit, so the limits are exercised too.
@@ -1486,7 +1490,9 @@ fn three_way(
         .as_ref()
         .and_then(|milp| milp.gap)
         .expect("the MILP reports its gap");
-    if gap.abs() > 1e-9 {
+    // Certified: within the solver's tolerances (the planner's
+    // GAP_TOLERANCE), never reported as exactly 0 unless proven.
+    if gap.abs() > CERTIFIED_GAP {
         return Err(format!("{label}: MILP gap {gap}"));
     }
     Ok(true)
@@ -1571,6 +1577,63 @@ fn assert_three_way_on_seeds(
         "only {searched} workloads were small enough"
     );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// Queries over two gauges, two per gauge, are two independent clusters of
+/// the memo, each searched with its own MILP and lazy loop: with raw data
+/// kept and without, the MILP reports both clusters, each certified, and
+/// the three searches select plans of one price.
+#[test]
+fn three_way_on_two_independent_clusters() {
+    let mut workload = random_workload_over(3, &["m", "n"]);
+    let queries = [
+        "quantile_over_time(0.9, m[5m])",
+        "sum_over_time(m[1m])",
+        "max_over_time(n[5m])",
+        "quantile_over_time(0.99, n[10m])",
+    ];
+    workload.query_workload.repeating_queries = workload_of(
+        &queries.map(|q| (q, 60_000)),
+        AccuracyTarget::max_error(0.05),
+    )
+    .query_workload
+    .repeating_queries;
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    for deployment in [
+        asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        no_raw_data(),
+    ] {
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        let label = format!("raw data retained {}", deployment.raw_data_retained);
+        assert!(
+            assert_three_way(&label, &roots, &entries, &data, models),
+            "{label}"
+        );
+        let run = run_stage1_to_stage3_with(
+            roots.iter().cloned().enumerate().collect(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search::with_algorithm(SearchAlgorithm::MemoMilp),
+        )
+        .unwrap();
+        let milp = run.stage3_plan_selection.unwrap().search.milp.unwrap();
+        let clusters: Vec<_> = milp.clusters.iter().map(|c| c.queries.clone()).collect();
+        assert_eq!(clusters, [vec![0, 1], vec![2, 3]], "{label}");
+        assert!(
+            milp.clusters
+                .iter()
+                .all(|c| c.gap.is_some_and(|gap| gap <= CERTIFIED_GAP)),
+            "{label}: {milp:?}"
+        );
+        assert_eq!(
+            milp.rounds,
+            milp.clusters.iter().map(|c| c.rounds).sum::<u32>(),
+            "{label}"
+        );
+    }
 }
 
 /// The three searches agree on the random workloads under cost model 1.
@@ -1843,6 +1906,76 @@ fn a_sketch_rollup_beside_other_quantiles_selects_the_exhaustive_price() {
     assert_memo_selects_the_exhaustive_price("Q2, Q3, Q4", &workload(&[q2, q3, q4]));
 }
 
+/// #839's workload (two 10-minute sums every 20 s, two 100-second
+/// quantiles of one metric at different label sets every second): the
+/// cheapest plan widens the quantiles' scans to one label set and shares
+/// one scan. With its term cuts (a source's scans apart or widened, held
+/// memory, ingestion copies) the memo MILP certifies the memo brute
+/// force's price.
+#[test]
+fn term_cuts_certify_the_brute_force_price_on_839() {
+    let entries: Vec<serde_json::Value> = [
+        (
+            "sum by (region, service, job) (sum_over_time(m[10m]))",
+            20000,
+        ),
+        ("sum by (region, service) (sum_over_time(m[10m]))", 20000),
+        (
+            "avg by (region, service, job) (quantile_over_time(0.99, m[100s]))",
+            1000,
+        ),
+        ("avg by (region) (quantile_over_time(0.95, m[100s]))", 1000),
+    ]
+    .iter()
+    .map(|(q, interval)| {
+        serde_json::json!({
+            "query": q,
+            "demand": {"fixed_interval": interval},
+            "requirements": {"accuracy": {"max_error": 0.05, "failure_probability": 0.3}},
+            "predictability": {"predictable": {"known_at": null}}
+        })
+    })
+    .collect();
+    let workload: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": entries},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 100000.0}},
+            "sources": {"m": {"series_count": 10000, "metric_type": "gauge", "values_non_negative": true, "sample_interval": 100}}
+        }
+    }))
+    .unwrap();
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let models = PlanningModels::builtin();
+    let run = |search| {
+        run_stage1_to_stage3_with(
+            roots.iter().cloned().enumerate().collect(),
+            &entries,
+            &data,
+            models,
+            search,
+        )
+        .unwrap()
+        .stage3_plan_selection
+        .unwrap()
+    };
+    let brute_force = run(Stage1ToStage3Search::with_algorithm(
+        SearchAlgorithm::MemoBruteForce,
+    ));
+    let milp = run(Stage1ToStage3Search::with_algorithm(
+        SearchAlgorithm::MemoMilp,
+    ));
+    let price = |s: &asap_plan_selection::Selection| s.costs[&s.selected].cost_per_second.unwrap();
+    let (b, m) = (price(&brute_force), price(&milp));
+    assert!(
+        (b - m).abs() <= 1e-9 * b,
+        "memo brute force {b}, memo MILP {m}"
+    );
+    let gap = milp.search.milp.and_then(|milp| milp.gap);
+    assert!(gap.is_some_and(|gap| gap <= CERTIFIED_GAP), "gap {gap:?}");
+}
+
 /// Debugging aid: the random workload of seed `JP_SEED` (over the gauge
 /// `m`) as stage_pipeline's `--workload` JSON, at `JP_SEED_OUT`.
 #[test]
@@ -1852,4 +1985,63 @@ fn dump_random_workload() {
     let out = std::env::var("JP_SEED_OUT").unwrap_or_else(|_| format!("seed{seed}.json"));
     let workload = random_workload(seed);
     std::fs::write(&out, serde_json::to_string_pretty(&workload).unwrap()).unwrap();
+}
+
+/// With no time left for a single MILP round, memo-milp still returns a
+/// plan: the warm-start incumbent, each query planned alone by the legacy
+/// search with no sharing, offered before round 1. Under cost model 1 its
+/// cost is the sum of the queries' own plans' costs, and the run reports
+/// the time limit and a gap to the MILP lower bound.
+#[test]
+fn a_time_limited_memo_milp_run_returns_the_warm_start_plan() {
+    let queries = [
+        "quantile_over_time(0.9, m[5m])",
+        "sum_over_time(m[1m])",
+        "quantile_over_time(0.99, m[10m])",
+    ];
+    let workload = workload_of(
+        &queries.map(|q| (q, 60_000)),
+        AccuracyTarget::max_error(0.05),
+    );
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let models = PlanningModels::builtin();
+    let alone: f64 = roots
+        .iter()
+        .zip(&entries)
+        .map(|(root, entry)| {
+            let run = run_stage1_to_stage3_with(
+                vec![(0, root.clone())],
+                std::slice::from_ref(entry),
+                &data,
+                models,
+                Stage1ToStage3Search::default(),
+            )
+            .unwrap();
+            let selection = run.stage3_plan_selection.unwrap();
+            selection.costs[&selection.selected]
+                .cost_per_second
+                .unwrap()
+        })
+        .sum();
+    let run = run_stage1_to_stage3_with(
+        roots.iter().cloned().enumerate().collect(),
+        &entries,
+        &data,
+        models,
+        Stage1ToStage3Search {
+            milp_time_limit_ms: Some(0),
+            ..Stage1ToStage3Search::with_algorithm(SearchAlgorithm::MemoMilp)
+        },
+    )
+    .unwrap();
+    let selection = run.stage3_plan_selection.unwrap();
+    assert_eq!(selection.selected, "P0");
+    let cost = selection.search.incumbent_cost.unwrap();
+    assert!((cost - alone).abs() <= 1e-9 * alone, "{cost} vs {alone}");
+    let milp = selection.search.milp.unwrap();
+    assert!(milp.time_limit_reached, "{milp:?}");
+    assert!(milp.gap.is_some(), "{milp:?}");
+    assert!(run.stage3_selected_logical.is_some());
 }

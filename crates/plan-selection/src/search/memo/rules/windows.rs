@@ -23,6 +23,7 @@
 //! inputs where a rule reads exact values, and each rollup reading the
 //! build the joint rule would choose.
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -30,8 +31,10 @@ use std::rc::Rc;
 
 use asap_logical_asap_optimization::accuracy::estimators::size_for_all_readers;
 use asap_logical_asap_optimization::asap_aware_cse::{
-    pane_candidates, rollup_candidates, rollup_pass2_candidates, topk_reuse_candidates,
-    window_composition_pass2_candidates, with_pane_chain, with_resized_build, RollupCandidate,
+    may_change_rollup_candidate, pane_candidates, rollup_candidate_for, rollup_candidates,
+    rollup_pass2_candidates, topk_reuse_candidates, window_composition_pass2_candidates,
+    window_composition_shared_chain_candidates, with_pane_chain, with_resized_build,
+    RollupCandidate,
 };
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::flat::flatten;
@@ -464,10 +467,9 @@ pub(crate) fn add_rollup_windows(memo: &mut Memo, entries: &[QueryWorkloadEntry]
                     if panes.len() != 2 {
                         continue;
                     }
-                    let Ok(pass2_candidates) = window_composition_pass2_candidates(&roots, &panes)
-                    else {
-                        continue;
-                    };
+                    // Only the pair in panes, reading a shared chain.
+                    let pass2_candidates =
+                        window_composition_shared_chain_candidates(&roots, &panes);
                     for pass2_candidate in pass2_candidates {
                         if pass2_candidate.pane_candidates.len() != 2
                             || pass2_candidate.shared_chains.is_empty()
@@ -995,26 +997,55 @@ pub(crate) fn rollup_rules(memo: &Memo, present: &BTreeSet<(usize, usize)>) -> V
         Some(read) => Rc::clone(&read.coarse_candidate),
         None => Rc::clone(&candidate(key).node),
     };
-    // The joint rule's source of each coarse build over `nodes`, in group
-    // order.
-    let sources =
-        |nodes: &[(usize, Rc<OperatorNode>)]| -> Vec<(*const OperatorNode, Rc<OperatorNode>)> {
-            let mut nodes = nodes.to_vec();
-            nodes.sort_by_key(|(g, _)| *g);
-            let roots: Vec<QueryRoot> = nodes
-                .into_iter()
-                .map(|(_, node)| QueryRoot::Operator(node))
-                .collect();
-            rollup_candidates(&roots)
-                .into_iter()
-                .map(|r| (Rc::as_ptr(&r.coarse), r.finer))
-                .collect()
-        };
-    let source_of = |coarse: *const OperatorNode, nodes: &[(usize, Rc<OperatorNode>)]| {
-        sources(nodes)
+    // The joint rule's plan of `nodes`, in group order (one node per group),
+    // and its key: the same plan is asked about many times.
+    type PlanKey = Vec<(usize, *const OperatorNode)>;
+    let plan = |nodes: &[(usize, Rc<OperatorNode>)]| -> (PlanKey, Vec<QueryRoot>) {
+        let mut nodes = nodes.to_vec();
+        nodes.sort_by_key(|(g, _)| *g);
+        let key = nodes.iter().map(|(g, n)| (*g, Rc::as_ptr(n))).collect();
+        let roots = nodes
             .into_iter()
-            .find(|(c, _)| *c == coarse)
-            .map(|(_, finer)| finer)
+            .map(|(_, node)| QueryRoot::Operator(node))
+            .collect();
+        (key, roots)
+    };
+    // The joint rule's source of each coarse build over `nodes`.
+    type Sources = Rc<Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>>;
+    let all_sources: RefCell<HashMap<PlanKey, Sources>> = RefCell::default();
+    let sources = |nodes: &[(usize, Rc<OperatorNode>)]| -> Sources {
+        let (key, roots) = plan(nodes);
+        Rc::clone(all_sources.borrow_mut().entry(key).or_insert_with(|| {
+            Rc::new(
+                rollup_candidates(&roots)
+                    .into_iter()
+                    .map(|r| (r.coarse, r.finer))
+                    .collect(),
+            )
+        }))
+    };
+    // The source of one coarse build over `nodes`, computed for that build
+    // alone.
+    type OneSourceKey = (*const OperatorNode, PlanKey);
+    let one_source: RefCell<HashMap<OneSourceKey, Option<Rc<OperatorNode>>>> = RefCell::default();
+    let source_of = |coarse: *const OperatorNode, nodes: &[(usize, Rc<OperatorNode>)]| {
+        let (key, roots) = plan(nodes);
+        one_source
+            .borrow_mut()
+            .entry((coarse, key))
+            .or_insert_with(|| rollup_candidate_for(&roots, coarse).map(|r| r.finer))
+            .clone()
+    };
+    // Whether adding candidate `key`'s plan node may change the source of
+    // coarse build `coarse` ([`may_change_rollup_candidate`]); when not, the
+    // source over a plan with it is the source over the plan without it.
+    type MayChangeKey = (*const OperatorNode, (usize, usize));
+    let may_change: RefCell<HashMap<MayChangeKey, bool>> = RefCell::default();
+    let may_change_source = |coarse: &Rc<OperatorNode>, key: (usize, usize)| {
+        *may_change
+            .borrow_mut()
+            .entry((Rc::as_ptr(coarse), key))
+            .or_insert_with(|| may_change_rollup_candidate(coarse, &plan_node(key)))
     };
     let mut rules = Vec::new();
     for &rollup in present {
@@ -1055,7 +1086,7 @@ pub(crate) fn rollup_rules(memo: &Memo, present: &BTreeSet<(usize, usize)>) -> V
                     .filter(move |(g, _)| *g != coarse_group && *g != finer_group)
             };
             // A third group's build that beats the finer build for `C`.
-            for other in others() {
+            for other in others().filter(|&o| may_change_source(&read.coarse_build, o)) {
                 let nodes = [r_node.clone(), f_node.clone(), (other.0, plan_node(other))];
                 if source_of(coarse, &nodes).is_none_or(|b| !Rc::ptr_eq(&b, &build)) {
                     rules.push(RollupRule {
@@ -1085,9 +1116,10 @@ pub(crate) fn rollup_rules(memo: &Memo, present: &BTreeSet<(usize, usize)>) -> V
                     Some(h) => plan_node(h),
                 };
                 let in_holder = reached(&holder_node);
-                for (other_coarse, finer_build) in sources(&nodes) {
+                for (other_coarse_build, finer_build) in sources(&nodes).iter() {
+                    let other_coarse = Rc::as_ptr(other_coarse_build);
                     if other_coarse == coarse
-                        || !Rc::ptr_eq(&finer_build, &build)
+                        || !Rc::ptr_eq(finer_build, &build)
                         || !in_holder.contains(&other_coarse)
                     {
                         continue;
@@ -1102,6 +1134,10 @@ pub(crate) fn rollup_rules(memo: &Memo, present: &BTreeSet<(usize, usize)>) -> V
                         .copied()
                         .filter(|(g, _)| !groups.contains(g))
                         .filter(|&z| {
+                            // `nodes`' source is `build`.
+                            if !may_change_source(other_coarse_build, z) {
+                                return false;
+                            }
                             let mut with = nodes.clone();
                             with.push((z.0, plan_node(z)));
                             source_of(other_coarse, &with).is_none_or(|b| !Rc::ptr_eq(&b, &build))

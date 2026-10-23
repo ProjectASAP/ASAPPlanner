@@ -1074,6 +1074,42 @@ pub struct MilpReport {
     /// solver limit (iterations, memory, interrupt): the plan is then
     /// proven optimal only if `gap` is 0.
     pub time_limit_reached: bool,
+    /// Solutions solution decoding could not compose into a plan: each
+    /// keeps its objective as a lower bound, so the gap stays honest.
+    #[serde(default)]
+    pub decode_failures: u32,
+    /// Each independent cluster's search, ordered by its first query: one
+    /// cluster when the memo was searched as one. The fields above are
+    /// their totals: bounds, rounds, model sizes and solver time summed,
+    /// the gap from the summed bound and incumbent cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<MilpClusterReport>,
+}
+
+/// One independent cluster of the MILP search: queries whose plans share
+/// no cost with other clusters' under cost model 1, searched with their
+/// own model and lazy loop.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MilpClusterReport {
+    /// Its queries, by index in the workload.
+    pub queries: Vec<usize>,
+    /// The memo groups of its own workload.
+    pub groups: usize,
+    /// Its lazy loop's rounds.
+    pub rounds: u32,
+    /// (incumbent cost − lower bound) / incumbent cost, at least 0.
+    pub gap: Option<f64>,
+    /// Its MILP lower bound at the end.
+    pub lower_bound: Option<f64>,
+    /// Its selected plan's cost per second.
+    pub incumbent_cost: Option<f64>,
+    /// The wall time in milliseconds its solves took, together.
+    pub solver_time_ms: u64,
+    /// Whether it stopped at the search's time limit.
+    pub time_limit_reached: bool,
+    /// Solutions solution decoding could not compose into a plan.
+    #[serde(default)]
+    pub decode_failures: u32,
 }
 
 /// The size of a sub-expression memo (planner-layering design, "The
@@ -2921,6 +2957,28 @@ pub fn resize_for_failure_probability(
         })
     };
     with_resized_summaries(roots, &resize)
+}
+
+/// `roots` with each summary at the most any target can make
+/// [`resize_for_failure_probability`] enlarge it: classic HLL at precision
+/// 18 (its failure probability only falls with precision), every other
+/// summary sized for a vanishing per-value failure probability. A failure
+/// probability this plan misses, it misses at every size Stage 3 can give.
+pub(crate) fn resized_to_the_largest(
+    roots: &[QueryRoot],
+) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
+    with_resized_summaries(roots, &|_, params| {
+        Some(match params {
+            SketchParams::Hll {
+                precision,
+                relative_error,
+            } => SketchParams::Hll {
+                precision: (*precision).max(18),
+                relative_error: Some(hll::classic_relative_error(*precision, *relative_error)),
+            },
+            params => with_failure_probability(params, 1e-300),
+        })
+    })
 }
 
 /// What Stage 3 accepted for each query ([`AcceptedAccuracy`]), or the

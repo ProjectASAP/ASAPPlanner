@@ -15,6 +15,7 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::selected_dag;
 use asap_logical_asap_optimization::asap_aware_cse::{
     pane_candidates, window_composition_pass2_candidates,
+    window_composition_shared_chain_candidates,
 };
 use asap_types::ir::operator::operator_properties::TimeShift;
 use asap_types::ir::operator::pane_chain::expand_pane_chains;
@@ -854,6 +855,11 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
         .into_iter()
         .find(|c| c.pane_candidates.len() == 2 && !c.shared_chains.is_empty())
         .expect("one shared chain");
+    // The whole set's shared chains, built alone, are the same candidates.
+    let alone = window_composition_shared_chain_candidates(&roots, &rule_candidates);
+    let first = alone.first().expect("one shared chain alone");
+    assert_eq!(first.shared_chains, shared.shared_chains);
+    assert_eq!(first.roots.as_ref().ok(), shared.roots.as_ref().ok());
     assert_eq!(
         (
             shared.shared_chains[0].pane_width_ms,

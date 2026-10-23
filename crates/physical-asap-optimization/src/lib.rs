@@ -481,6 +481,57 @@ pub fn optimize_physical_asap_assigned(
     assigned_candidate(from_logical, &implemented, &mat_candidates, assignment).map(Some)
 }
 
+/// [`optimize_physical_asap_chosen`]'s choice per materialization
+/// candidate: from the logical node it implements, its readers and its
+/// options.
+pub type ChooseMaterialization<'a> =
+    dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Materialization + 'a;
+
+/// Stage 2 for one CandidateLogicalASAPDAG and one materialization
+/// assignment chosen node by node: `choose(logical, readers, options)`
+/// gives the option for each materialization candidate, `logical` being
+/// the address of the logical node of `roots` it implements (null when it
+/// implements none, e.g. a node the implementation adds) and `readers` the
+/// queries that read it. `None` when a chosen option is not one of the
+/// candidate's, or the assignment materializes a build at ingestion time
+/// above one at query time. The search that decodes one plan from a model
+/// solution uses it to build that plan alone, not every assignment.
+pub fn optimize_physical_asap_chosen(
+    from_logical: &str,
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+    choose: &mut ChooseMaterialization<'_>,
+) -> Result<Option<PhysicalCandidate>, PhysicalASAPOptimizationError> {
+    let mut memo = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    let logical_of: HashMap<*const OperatorNode, *const OperatorNode> = memo
+        .iter()
+        .map(|(logical, implemented)| (Rc::as_ptr(implemented), *logical))
+        .collect();
+    let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
+    check_panes_on_range_steps(&mat_candidates, entries)?;
+    let mut assignment = Vec::with_capacity(mat_candidates.len());
+    for mat_candidate in &mat_candidates {
+        let logical = logical_of
+            .get(&Rc::as_ptr(&mat_candidate.node))
+            .copied()
+            .unwrap_or(std::ptr::null());
+        let options = mat_candidate.options();
+        let m = choose(logical, &mat_candidate.readers, &options);
+        if !options.contains(&m) {
+            return Ok(None);
+        }
+        assignment.push(m);
+    }
+    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
+    if !down_closed(&mat_candidates, &candidates_below(&nodes), &assignment) {
+        return Ok(None);
+    }
+    assigned_candidate(from_logical, &implemented, &mat_candidates, assignment).map(Some)
+}
+
 /// The physical candidate of the implemented roots `implemented` with
 /// `assignment[c]` chosen for `mat_candidates[c]`.
 fn assigned_candidate(

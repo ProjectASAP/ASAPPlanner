@@ -436,7 +436,7 @@ fn build(
 }
 
 /// Mark `g` and every group below it through the groups' children.
-fn mark_below(memo: &Memo, g: usize, below: &mut [bool]) {
+pub(crate) fn mark_below(memo: &Memo, g: usize, below: &mut [bool]) {
     if below[g] {
         return;
     }
@@ -448,7 +448,7 @@ fn mark_below(memo: &Memo, g: usize, below: &mut [bool]) {
 
 /// `node` with every node `built` maps (by address) replaced by its built
 /// node, rebuilt above them; `rebuilt` memoizes by address.
-fn substituted(
+pub(crate) fn substituted(
     node: &Rc<OperatorNode>,
     built: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
     rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
