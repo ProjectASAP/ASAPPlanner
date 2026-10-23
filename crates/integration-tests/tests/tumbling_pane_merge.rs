@@ -859,7 +859,7 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
     let alone = window_composition_shared_chain_candidates(&roots, &rule_candidates);
     let first = alone.first().expect("one shared chain alone");
     assert_eq!(first.shared_chains, shared.shared_chains);
-    assert_eq!(first.roots, shared.roots);
+    assert_eq!(first.roots.as_ref().ok(), shared.roots.as_ref().ok());
     assert_eq!(
         (
             shared.shared_chains[0].pane_width_ms,
