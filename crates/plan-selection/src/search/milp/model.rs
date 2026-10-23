@@ -3220,4 +3220,46 @@ mod tests {
             );
         }
     }
+    /// Samples per distinct value per series, within 5% with probability
+    /// 0.99: the distinct count is the divisor. A UnivMon divisor sized for
+    /// a vanishing failure probability hits its heap cap, and its relative
+    /// error grows past what a division composes, so the quotient has no
+    /// guarantee at the largest size only. That is unknown, not a sure
+    /// failure: no choice building a UnivMon is ruled out.
+    #[test]
+    fn a_guarantee_lost_only_at_the_largest_size_rules_nothing_out() {
+        let (memo, input) = memo_and_input(
+            &["count_over_time(m[1m]) / distinct_over_time(m[1m])"],
+            &[AccuracyTarget::max_error(0.05).failure_probability(0.01)],
+        );
+        let univmon = |c: usize| {
+            let choice = &input.choices[c];
+            asap_types::ir::OperatorNode::reachable(
+                &memo.candidates[choice.group.0 as usize][choice.candidate].node,
+            )
+            .iter()
+            .any(|n| {
+                matches!(n.asap(), Some(asap_types::ir::ASAPOp::SummaryAgg { family, .. })
+                    if format!("{family:?}").contains("UnivMon"))
+            })
+        };
+        let univmons: Vec<usize> = (0..input.choices.len()).filter(|&c| univmon(c)).collect();
+        assert!(!univmons.is_empty());
+        for (c, allowed) in &input.requires {
+            assert!(
+                !(univmons.contains(c) && allowed.is_empty()),
+                "UnivMon choice {c} ruled out"
+            );
+            // A requirement on a group with UnivMon choices allows them all.
+            for &d in &univmons {
+                let same_group = allowed
+                    .iter()
+                    .any(|&a| input.choices[a].group == input.choices[d].group);
+                assert!(
+                    !same_group || allowed.contains(&d),
+                    "choice {c} rules out UnivMon choice {d}"
+                );
+            }
+        }
+    }
 }
