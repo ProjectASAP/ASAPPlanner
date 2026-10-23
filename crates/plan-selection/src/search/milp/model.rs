@@ -724,6 +724,47 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             }
         }
     }
+    // Per group, its choices' scans of each source together: one choice
+    // of the group is chosen, so the source's scan costs at least the
+    // chosen one's charge at the group's slowest rate. Summed over the
+    // group's choices, this keeps fractional choices' charges in the
+    // relaxation (each reader's charge alone is a fraction of it).
+    let mut per_group: BTreeMap<(u64, usize), Expression> = BTreeMap::new();
+    for (c, choice) in input.choices.iter().enumerate() {
+        let g = choice.group.0 as usize;
+        let slowest = slowest_rate(g);
+        let k = &choice.coefficients;
+        let mut add = |source: u64, excess: f64| {
+            if excess > 0.0 {
+                *per_group
+                    .entry((source, g))
+                    .or_insert_with(|| Expression::from(0.0)) += slowest * excess * x[c];
+            }
+        };
+        for &(source, cost, pass) in &k.absorbed_scans {
+            add(source, cost - pass.min(cost));
+        }
+        if let Some(source) = choice.scan_source {
+            let total = k.direct.cost_per_unit_rate;
+            add(
+                source,
+                total - choice.scan_project_cost_per_unit_rate.min(total),
+            );
+        }
+        for slot in &k.slots {
+            if matches!(slot.materialization, Materialization::MatAtIngestion(_)) {
+                continue;
+            }
+            for &(source, cost, pass) in &slot.scans {
+                add(source, cost - pass.min(cost));
+            }
+        }
+    }
+    for ((source, g), charge) in per_group {
+        if let Some(charges) = scan_charges.get_mut(&source) {
+            charges.insert((input.choices.len() + g, usize::MAX), charge);
+        }
+    }
     let mut scan_maxima: Vec<(Variable, Vec<Expression>)> = Vec::new();
     for charges in class_charges.into_values() {
         let m = vars.add(variable().min(0));
