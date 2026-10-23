@@ -10,6 +10,11 @@
 // `"range_evaluation": {"step_ms": 60000, "span_ms": 3600000}`; PromQL, or
 // SQL over `--table` declarations)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
+//     --workload promql.json --workload sql.json --table '<json>' --out run.json
+// (`--workload` repeats: each file keeps its one language and is lowered by
+// its own frontend, and their queries are planned as one workload; see
+// below)
+// cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --max-error 0.01 --failure-probability 0.001 --out run.json
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --table '{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"},
@@ -110,9 +115,16 @@
 //     pane chain the selected plan keeps beyond one evaluation (by node id)
 //     to how far back from the newest evaluation the runtime must keep its
 //     panes: the window plus the longest range-evaluation span reading it.
-//     `warnings` are one-line warnings about the selected plan: its peak
-//     memory when over 10^12 bytes and the cost model declares no memory
-//     capacity (`large_peak_memory_warning`); absent when there are none.
+//     `warnings` are one-line warnings about the workload and the selected
+//     plan: a PromQL query applying `rate`, `increase` or `irate` to a
+//     metric the data workload declares a gauge, prefixed with its id (the
+//     query still plans; `counter_function_over_gauge_warnings`), and the
+//     plan's peak memory when over 10^12 bytes and the cost model declares
+//     no memory capacity (`large_peak_memory_warning`); absent when there
+//     are none. Each node's `per_node` entry also has its `operator`,
+//     `timing` and predicted CPU (`cpu_core_seconds_per_second`), and each
+//     shown candidate's `cpu_core_seconds_per_second` is their sum: report
+//     only, as `plan_installable`'s predicted usage names them.
 // `workload.data_workload` is the `DataWorkload` the run planned with, as
 // declared (`--workload`, `--example`) or built from `--sample-interval-ms`
 // (`--promql`); each query also carries its `recurrence` and
@@ -129,6 +141,18 @@
 // Planning never caps or truncates the candidates it ranks; only the display
 // does (`--max-displayed`).
 //
+// `--workload` may repeat, so one run plans queries in several languages
+// (e.g. a PromQL file and a SQL file) together. Each file is lowered by
+// its own language's frontend (SQL over the `--table` declarations), the
+// queries are numbered `q1..qN` across the files in the order given, and
+// the data workload is the union of the files' sources. A source several
+// files declare must have the same facts in each, and the files must
+// declare the same kind of arrival: ingesting (or mixed) arrivals add
+// their `rows_per_second`. Plan selection shares a workload's
+// `rows_per_second` out over all its sources, so when the data arrives,
+// every source of several files must declare its own rate
+// (`series_count` and `sample_interval`). A disagreement or a source
+// without its own rate is refused.
 // With `--workload`, each query's accuracy (ε, δ, metric) comes from the
 // file: `--max-error`, `--failure-probability` and `--accuracy-metric` apply
 // to `--promql`/`--sql` queries only.
@@ -210,6 +234,7 @@
 // to true; without `time_index` the table has no time column; a
 // `time_index` that is not a column index is an error).
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeSet, HashSet};
 
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
@@ -221,7 +246,7 @@ use asap_devtools::planning_stages::{
     PlanningStagesError, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
-use asap_frontend_promql::promql_metric_names;
+use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
 use asap_logical_asap_optimization::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates, PruneReason,
 };
@@ -244,7 +269,7 @@ use asap_types::workload::{
 use serde_json::{json, Value};
 
 const USAGE: &str =
-    "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
+    "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | (--workload <file>)... [--table <json>...] | ((--promql | --sql) <query> \
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
@@ -333,7 +358,8 @@ fn document_of(
 
 fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut example = None;
-    let mut workload_path: Option<String> = None;
+    // `--workload` files, planned together in this order.
+    let mut workload_paths: Vec<String> = Vec::new();
     // (language, text, name) in workload order.
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
@@ -364,7 +390,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         let number = |v: String| v.parse::<f64>().map_err(|e| format!("{v}: {e}"));
         match flag.as_str() {
             "--example" => example = Some(value()?),
-            "--workload" => workload_path = Some(value()?),
+            "--workload" => workload_paths.push(value()?),
             "--promql" => queries.push((QueryLanguage::PromQL, value()?, None)),
             "--sql" => queries.push((
                 QueryLanguage::SQL(SqlDialect::DataFusionSQL),
@@ -444,12 +470,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let has_sql = queries
         .iter()
         .any(|(language, _, _)| *language != QueryLanguage::PromQL);
-    if !tables.is_empty() && !has_sql && workload_path.is_none() {
+    if !tables.is_empty() && !has_sql && workload_paths.is_empty() {
         return Err("--table needs --sql".into());
     }
     let out = out.ok_or("--out is required")?;
     if (series_count.is_some() || rows_per_second.is_some() || rows_held.is_some())
-        && (workload_path.is_some() || example.is_some())
+        && (!workload_paths.is_empty() || example.is_some())
     {
         return Err(
             "--series-count, --rows-per-second and --rows-held declare facts for --promql/--sql \
@@ -549,8 +575,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         },
     };
     plan_selection.ignore_accuracy_guarantees = !enforce_accuracy_guarantees;
-    let from_file = match &workload_path {
-        Some(path) if example.is_none() && queries.is_empty() => {
+    let from_files = if workload_paths.is_empty() {
+        None
+    } else if example.is_none() && queries.is_empty() {
+        let mut workloads = Vec::new();
+        for path in &workload_paths {
             let text =
                 std::fs::read_to_string(path).map_err(|e| format!("--workload {path}: {e}"))?;
             let workload: PlanningWorkload =
@@ -558,21 +587,18 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             workload
                 .validate()
                 .map_err(|e| format!("--workload {path}: {e}"))?;
-            Some((workload, sql_catalog(&tables)?))
+            workloads.push((path.as_str(), workload));
         }
-        Some(_) => {
-            return Err(
-                "give exactly one of --example, --workload or --promql/--sql queries".into(),
-            )
-        }
-        None => None,
+        Some((workloads, sql_catalog(&tables)?))
+    } else {
+        return Err("give exactly one of --example, --workload or --promql/--sql queries".into());
     };
     // The workload's queries as the document describes them, the
     // frontends' roots, the workload entries and the data workload.
     let (described, roots, entries, data) = match (example.as_deref(), queries.is_empty()) {
-        (None, true) if from_file.is_some() => {
-            let (workload, catalog) = from_file.expect("checked");
-            lowered(&workload, &catalog)?
+        (None, true) if from_files.is_some() => {
+            let (workloads, catalog) = from_files.expect("checked");
+            lowered_together(&workloads, &catalog, &catalog_table_names(&tables)?)?
         }
         (Some(example), true) => {
             let (workload, catalog) = match example {
@@ -701,20 +727,22 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             },
         ),
     };
+    // A rate, increase or irate over a declared gauge (the query still plans).
+    let mut warnings = counter_function_over_gauge_warnings_of(&described, &data)?;
     // A selected plan's very large peak memory, when the deployment
     // declares no memory capacity to check it against.
-    let warnings: Vec<String> = result
-        .as_ref()
-        .ok()
-        .and_then(|run| run.stage3_plan_selection.as_ref().ok())
-        .and_then(|selection| {
-            large_peak_memory_warning(
-                selection.costs[&selection.selected].usage.peak_memory_bytes,
-                &plan_selection.cost_model,
-            )
-        })
-        .into_iter()
-        .collect();
+    warnings.extend(
+        result
+            .as_ref()
+            .ok()
+            .and_then(|run| run.stage3_plan_selection.as_ref().ok())
+            .and_then(|selection| {
+                large_peak_memory_warning(
+                    selection.costs[&selection.selected].usage.peak_memory_bytes,
+                    &plan_selection.cost_model,
+                )
+            }),
+    );
     let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
     if !warnings.is_empty() {
         document["stage3_plan_selection"]["warnings"] = json!(warnings);
@@ -739,6 +767,27 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}").into())
 }
 
+/// One warning per PromQL query of `described` (the document's queries)
+/// that applies `rate`, `increase` or `irate` to a metric `data` declares a
+/// gauge, prefixed with the query's id; the query still plans.
+fn counter_function_over_gauge_warnings_of(
+    described: &[Value],
+    data: &DataWorkload,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    for query in described.iter().filter(|q| q["language"] == "promql") {
+        let (id, text) = (&query["id"], query["text"].as_str().unwrap_or_default());
+        let id = id.as_str().unwrap_or_default();
+        warnings.extend(
+            counter_function_over_gauge_warnings(text, data)
+                .map_err(|e| format!("{id}: {e}"))?
+                .into_iter()
+                .map(|warning| format!("{id}: {warning}")),
+        );
+    }
+    Ok(warnings)
+}
+
 /// A workload's queries as the document describes them, the frontends'
 /// roots, the workload entries and the data workload.
 type Lowered = (
@@ -758,6 +807,119 @@ fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered,
     let entries = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     Ok((workload_queries(workload), roots, entries, data))
+}
+
+/// `workloads` (each `--workload` file's path and workload, in order),
+/// each lowered by its own language's frontend, as one workload: their
+/// queries in order, numbered `q1..qN` across the files, and one data
+/// workload with every file's sources. A source several files declare must
+/// have the same facts in each, and their arrivals must agree
+/// ([`arrival_together`]). When several files' data arrives, every source
+/// must declare its own rate (`series_count` and `sample_interval`): each
+/// declared source, each metric a PromQL query reads and, when a file is
+/// SQL, each of `sql_tables` (the `--table` names). Plan selection shares a
+/// workload's `rows_per_second` out over all its sources, so one file's
+/// rate would otherwise be priced on another file's sources.
+fn lowered_together(
+    workloads: &[(&str, PlanningWorkload)],
+    catalog: &SqlCatalog,
+    sql_tables: &[String],
+) -> Result<Lowered, String> {
+    let (mut described, mut roots, mut entries) = (Vec::new(), Vec::new(), Vec::new());
+    let mut data: Option<DataWorkload> = None;
+    // The sources the queries read, beside the declared ones.
+    let mut read_sources: BTreeSet<String> = BTreeSet::new();
+    for (path, workload) in workloads {
+        match workload.query_workload.language {
+            QueryLanguage::PromQL => {
+                for entry in workload.query_workload.entries() {
+                    read_sources.extend(
+                        promql_metric_names(&entry.query.0)
+                            .map_err(|e| format!("--workload {path}: {e}"))?,
+                    );
+                }
+            }
+            _ => read_sources.extend(sql_tables.iter().cloned()),
+        }
+        let (queries, more_roots, more_entries, more_data) =
+            lowered(workload, catalog).map_err(|e| format!("--workload {path}: {e}"))?;
+        described.extend(queries);
+        roots.extend(more_roots);
+        entries.extend(more_entries);
+        let Some(data) = data.as_mut() else {
+            data = Some(more_data);
+            continue;
+        };
+        data.arrival = arrival_together(data.arrival, more_data.arrival).ok_or_else(|| {
+            format!(
+                "--workload {path}: its data arrival {:?} disagrees with the earlier files' {:?} \
+                 (a file without a data_workload declares an unknown arrival); files planned \
+                 together must declare the same kind of arrival",
+                more_data.arrival, data.arrival
+            )
+        })?;
+        for (source, facts) in more_data.sources {
+            match data.sources.entry(source) {
+                Entry::Vacant(slot) => {
+                    slot.insert(facts);
+                }
+                Entry::Occupied(earlier) if *earlier.get() != facts => {
+                    return Err(format!(
+                    "--workload {path}: source {} is declared with other facts in an earlier file",
+                    earlier.key()
+                ))
+                }
+                Entry::Occupied(_) => {}
+            }
+        }
+    }
+    let data = data.unwrap_or_default();
+    if workloads.len() > 1 && data.arrival.rows_per_second().is_some() {
+        let has_own_rate = |source: &String| {
+            data.sources.get(source).is_some_and(|facts| {
+                facts.series_count.is_some() && facts.sample_interval.is_some()
+            })
+        };
+        if let Some(source) = data
+            .sources
+            .keys()
+            .chain(&read_sources)
+            .find(|source| !has_own_rate(source))
+        {
+            return Err(format!(
+                "--workload: source {source} declares no rate of its own (series_count and \
+                 sample_interval); with several files, each source needs one, since a file's \
+                 rows_per_second is shared out over every file's sources"
+            ));
+        }
+    }
+    data.validate().map_err(|e| e.to_string())?;
+    for (index, query) in described.iter_mut().enumerate() {
+        query["id"] = json!(format!("q{}", index + 1));
+    }
+    Ok((described, roots, entries, data))
+}
+
+/// The arrival of two files' data planned together: ingesting (or mixed)
+/// at the sum of their rates; the same arrival when both are at rest or
+/// unknown; `None` when they differ.
+fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArrival> {
+    match (earlier, later) {
+        (
+            DataArrival::Ingesting { rows_per_second: a },
+            DataArrival::Ingesting { rows_per_second: b },
+        ) => Some(DataArrival::Ingesting {
+            rows_per_second: a + b,
+        }),
+        (DataArrival::Mixed { rows_per_second: a }, DataArrival::Mixed { rows_per_second: b }) => {
+            Some(DataArrival::Mixed {
+                rows_per_second: a + b,
+            })
+        }
+        (DataArrival::AtRest, DataArrival::AtRest) => Some(DataArrival::AtRest),
+        (DataArrival::Unknown, DataArrival::Unknown) => Some(DataArrival::Unknown),
+        _ => None,
+    }
 }
 
 /// The document for `run`, whose workload queries are `queries`.
@@ -1043,6 +1205,9 @@ fn plan_selection_json(
                     (
                         node.to_string(),
                         json!({
+                            "operator": c.operator,
+                            "timing": c.timing,
+                            "cpu_core_seconds_per_second": c.cpu_core_seconds_per_second,
                             "cost_per_second": c.cost_per_second,
                             "multiplier": c.multiplier,
                             "detail": c.detail,
@@ -1055,6 +1220,13 @@ fn plan_selection_json(
                 id.clone(),
                 json!({
                     "cost_per_second": cost.cost_per_second,
+                    // Report-only: the nodes' predicted CPU, summed as
+                    // `plan_installable`'s predicted usage sums it.
+                    "cpu_core_seconds_per_second": cost
+                        .per_node
+                        .values()
+                        .map(|node| node.cpu_core_seconds_per_second)
+                        .sum::<f64>(),
                     "cost_unit": cost.cost_unit,
                     "source": cost.source,
                     "usage": usage_json(&cost.usage),

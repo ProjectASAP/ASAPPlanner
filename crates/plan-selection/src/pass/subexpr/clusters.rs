@@ -98,10 +98,8 @@ pub(crate) fn split(
             reached[q] = true;
         }
     }
-    for q in 1..count {
-        if !reached[q] {
-            union(&mut parent, 0, q);
-        }
+    for (q, _) in reached.iter().enumerate().skip(1).filter(|(_, r)| !**r) {
+        union(&mut parent, 0, q);
     }
     if count > 0 && !reached[0] {
         for q in 1..count {

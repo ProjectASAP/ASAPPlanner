@@ -1,7 +1,8 @@
 // Workload sets: the PlanningWorkload files listed in workloads/index.json,
 // one table per set. Clicking a workload plans it through the local server
 // (`stage_pipeline --workload`, default search, the set's deployment
-// capabilities) and shows the stage lanes. Without the server, a workload
+// capabilities, a SQL workload's tables from the tables.json next to its
+// file) and shows the stage lanes. Without the server, a workload
 // with a precomputed stage document (`document`) opens that document; the
 // others are marked as needing the server.
 (function () {
@@ -58,6 +59,16 @@
     });
   }
 
+  // The SQL tables a workload reads: a PlanningWorkload declares none, so a
+  // SQL workload's are in the tables.json next to its file (an array of
+  // stage_pipeline `--table` declarations). Null for a PromQL workload.
+  function sqlTables(file, workload) {
+    const language = ((workload || {}).query_workload || {}).language;
+    if (!language || typeof language !== 'object' || !('sql' in language)) return Promise.resolve(null);
+    const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/') + 1) : '';
+    return json(`workloads/${dir}tables.json`);
+  }
+
   function openWorkload(set, entry) {
     const workload = workloads.get(entry.file);
     const source = `${set.id} / ${entry.id}`;
@@ -68,7 +79,8 @@
       return;
     }
     $('setsServer').textContent = `planning ${entry.id}…`;
-    window.StageViewer.planWorkload(workload, set.deployment_capabilities || null, source, story, set.cost_model || null, set.accuracy_guarantees || null)
+    sqlTables(entry.file, workload)
+      .then((tables) => window.StageViewer.planWorkload(workload, set.deployment_capabilities || null, source, story, set.cost_model || null, set.accuracy_guarantees || null, tables))
       .then(() => { $('setsServer').textContent = 'planned by the local server'; })
       .catch((err) => {
         // Fall back to the precomputed document when the server cannot plan.

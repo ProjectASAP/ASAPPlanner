@@ -1105,11 +1105,39 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 if measures.len() != output_names.len() {
                     return Err(invalid("aggregate output names differ from measures"));
                 }
+                // PromQL `absent(v)`: one reduction of every series to at
+                // most one synthesized sample.
+                if let [AggIntent::Absent { labels }] = measures.as_slice() {
+                    if !matches!(reduction, PlannerReduction::Reduce(keys) if *keys == GroupKeys::none())
+                        || filters.iter().any(Option::is_some)
+                    {
+                        return Err(invalid("absent reduces by no key, unfiltered"));
+                    }
+                    return Operator::absent(
+                        input.clone(),
+                        labels.clone(),
+                        Arc::new(node.output_schema.clone()),
+                    );
+                }
                 let PlannerReduction::Reduce(keys) = reduction else {
                     return Err(invalid(
                         "per-entity aggregate requires an explicit entity binding",
                     ));
                 };
+                // PromQL `histogram_quantile` over classic buckets: one
+                // histogram per label set but `le`, interpolated as
+                // Prometheus does. The frontend groups `without (le)`.
+                if let [AggIntent::HistogramQuantile { q, le }] = measures.as_slice() {
+                    if !(keys.is_without()
+                        && keys.keys() == [*le]
+                        && filters.iter().all(Option::is_none))
+                    {
+                        return Err(invalid(
+                            "histogram_quantile requires grouping without([le]) and no measure filter",
+                        ));
+                    }
+                    return Operator::series_histogram_quantile(input.clone(), *q, *le);
+                }
                 let measures = measures
                     .iter()
                     .zip(output_names)

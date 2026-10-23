@@ -11,7 +11,7 @@
 //! query runs, composed accuracy) are added back by the caller's lazy cuts:
 //! the model's optimum is a lower bound on the plan's Stage 3 price.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use good_lp::solvers::highs::highs;
 use good_lp::{
@@ -221,10 +221,6 @@ pub(crate) struct ModelInput {
     /// Per choice, the memory its parts hold while a query's evaluation
     /// runs ([`HeldAtQueryTime`]).
     pub held: Vec<HeldAtQueryTime>,
-    /// Only plans the model prices below this: the incumbent's price. The
-    /// model is then infeasible exactly when no group choice left can beat
-    /// the incumbent.
-    pub cutoff: Option<f64>,
     /// The solver's time limit in seconds, if any.
     pub time_limit_s: Option<f64>,
     /// Solve the linear relaxation (every binary in [0, 1]): a lower bound
@@ -391,14 +387,13 @@ fn scaled(input: &ModelInput, scale: f64) -> ModelInput {
     for (_, bound) in &mut scaled.extra_bounds {
         *bound *= scale;
     }
-    scaled.cutoff = input.cutoff.map(|c| c * scale);
     scaled
 }
 
 fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     let mut vars = ProblemVariables::new();
     let n = input.group_count;
-    let relaxed = input.relaxed || std::env::var_os("JP_MILP_LP").is_some();
+    let relaxed = input.relaxed;
     let binary = || {
         if relaxed {
             variable().min(0).max(1)
@@ -653,9 +648,6 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         let u = vars.add(binary());
         objective += a + b;
         objective += shared_cost[c] * slowest_rate(input.choices[c].group.0 as usize) * x[c];
-        if std::env::var_os("JP_MILP_NOMIN").is_some() {
-            continue;
-        }
         cheaper_of.push((a, b, u, c, big_m));
     }
     // Slots that may be one shared node (equal builds over equal inputs):
@@ -758,13 +750,21 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             at_query_time.insert((q, g), vars.add(variable().min(0).max(1)));
         }
     }
+    // A choice's query-time work, without its nodes another group's
+    // choice may share (shareable nodes and shared slots): Stage 3 counts a
+    // shared node once per query, so they are left out to keep latency a
+    // lower bound.
     let query_time_work = |c: usize| -> f64 {
         let coefficients = &input.choices[c].coefficients;
-        coefficients.direct.work_ms
+        let shared: f64 = coefficients.shared_nodes.iter().map(|n| n.work_ms).sum();
+        (coefficients.direct.work_ms - shared).max(0.0)
             + coefficients
                 .slots
                 .iter()
-                .filter(|s| !matches!(s.materialization, Materialization::MatAtIngestion(_)))
+                .filter(|s| {
+                    !matches!(s.materialization, Materialization::MatAtIngestion(_))
+                        && s.shared_site.is_none()
+                })
                 .map(|s| s.work_ms)
                 .sum::<f64>()
     };
@@ -809,22 +809,6 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         .collect();
     for &v in &kept_on_disk {
         objective += v;
-    }
-    if std::env::var_os("JP_MILP_TRACE").is_some() {
-        use good_lp::IntoAffineExpression;
-        let negative: Vec<(Variable, f64)> = (&objective)
-            .linear_coefficients()
-            .filter(|(_, c)| *c < 0.0 || c.is_nan())
-            .collect();
-        if !negative.is_empty() {
-            let x_set: HashSet<Variable> = x.iter().copied().collect();
-            eprintln!(
-                "milp: {} negative objective coefficients, {} on choices: {:?}",
-                negative.len(),
-                negative.iter().filter(|(v, _)| x_set.contains(v)).count(),
-                &negative[..negative.len().min(5)]
-            );
-        }
     }
     let variable_count = vars.len() as u64;
     let model = vars.minimise(objective.clone()).using(highs);
@@ -1294,100 +1278,27 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
             }
         }
     }
-    if let Some(cutoff) = input
-        .cutoff
-        .filter(|_| std::env::var_os("JP_MILP_CUTOFF").is_some())
-    {
-        constraints.push(constraint!(objective.clone() <= cutoff));
-    }
     let constraint_count = constraints.len() as u64;
     let mut model = model
         .with_all(constraints)
         .with_mip_gap(0.0)
         .map_err(|e| format!("MIP gap: {e:?}"))?;
-    if std::env::var_os("JP_MILP_VERBOSE").is_some() {
-        model.set_verbose(true);
-    }
     // No absolute gap either: prices are scaled to about 1.
     model = model.set_option("mip_abs_gap", 0.0);
     if let Some(limit) = input.time_limit_s {
         model = model.set_time_limit(limit.max(0.001));
-    }
-    if let Ok(options) = std::env::var("JP_HIGHS_OPTIONS") {
-        for option in options.split(',').filter(|o| !o.is_empty()) {
-            let (key, value) = option.split_once('=').unwrap_or((option, ""));
-            if let Ok(v) = value.parse::<i32>() {
-                model = model.set_option(key, v);
-            } else if let Ok(v) = value.parse::<f64>() {
-                model = model.set_option(key, v);
-            } else if let Ok(v) = value.parse::<bool>() {
-                model = model.set_option(key, v);
-            } else {
-                model = model.set_option(key, value);
-            }
-        }
     }
     let solution = match model.solve() {
         Ok(solution) => solution,
         Err(good_lp::ResolutionError::Infeasible) => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    if std::env::var_os("JP_MILP_TRACE").is_some() {
-        use good_lp::IntoAffineExpression;
-        let low: Vec<(f64, f64)> = (&objective)
-            .linear_coefficients()
-            .map(|(v, c)| (c, solution.value(v)))
-            .filter(|(_, value)| *value < -1e-9)
-            .collect();
-        if !low.is_empty() {
-            eprintln!(
-                "milp: {} objective variables below 0: {:?}",
-                low.len(),
-                &low[..low.len().min(8)]
-            );
-        }
-    }
     let chosen: Vec<usize> = x
         .iter()
         .enumerate()
         .filter(|(_, v)| solution.value(**v) > 0.5)
         .map(|(c, _)| c)
         .collect();
-    if std::env::var_os("JP_MILP_TRACE").is_some() {
-        if relaxed {
-            for (g, v) in once.iter() {
-                eprintln!("  once g{} = {:.3}", g.0, solution.value(*v));
-            }
-            for (g, v) in need.iter().enumerate() {
-                eprintln!("  need g{} = {:.3}", g, solution.value(*v));
-            }
-        }
-        let shown: Vec<usize> = if relaxed {
-            (0..x.len())
-                .filter(|&c| solution.value(x[c]) > 1e-6)
-                .collect()
-        } else {
-            chosen.clone()
-        };
-        for &c in &shown {
-            if relaxed {
-                eprintln!("  x = {:.3}", solution.value(x[c]));
-            }
-            let choice: &Choice = &input.choices[c];
-            let reach: Vec<String> = y
-                .iter()
-                .filter(|((_, d), v)| *d == c && solution.value(**v) > 1e-9)
-                .map(|((k, _), v)| format!("{k:?}={:.2}", solution.value(*v)))
-                .collect();
-            eprintln!(
-                "  g{} cand{} direct {:.4e}/rate work {:.2}ms shared {:?} slots {:?} scans {:?} horizon {:?} assignment {:?} y {:?}",
-                choice.group.0, choice.candidate, choice.coefficients.direct.cost_per_unit_rate,
-                choice.coefficients.direct.work_ms, choice.coefficients.shared_nodes.len(),
-                choice.coefficients.slots.iter().map(|s| (s.fixed_cost, s.cost_per_unit_rate)).collect::<Vec<_>>(),
-                choice.scan_children, choice.scan_horizon_ms, choice.assignment, reach
-            );
-        }
-    }
     let built_once = once
         .iter()
         .filter(|(_, v)| solution.value(**v) > 0.5)
@@ -1648,7 +1559,7 @@ fn run_rounds<Id: Clone>(loops: &mut [ClusterLoop<'_, Id>]) -> Result<(), Select
             solving -= 1;
             loops[k].input = Some(input);
             loops[k].solver_ms += solve_time.as_secs_f64() * 1e3;
-            loops[k].take_solution(solved.map_err(SelectionError::Solver)?)?;
+            loops[k].take_solution(solved)?;
             if loops[k].next_round() {
                 ready.push_back(k);
             }
@@ -1692,7 +1603,6 @@ struct ClusterLoop<'a, Id> {
     time_limit_reached: bool,
     /// The loop has stopped: certified, out of plans, or out of time.
     done: bool,
-    trace: bool,
 }
 
 impl<'a, Id: Clone> ClusterLoop<'a, Id> {
@@ -1707,7 +1617,7 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         started: std::time::Instant,
         time_limit_ms: Option<u64>,
     ) -> Result<Self, SelectionError> {
-        let input = model_input_of(&memo, entries, data, models, started)?;
+        let input = model_input_of(&memo, entries, data, models)?;
         Ok(Self {
             memo,
             per_computation,
@@ -1728,11 +1638,10 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             size: (0, 0),
             time_limit_reached: false,
             done: false,
-            trace: std::env::var_os("JP_MILP_TRACE").is_some(),
         })
     }
 
-    /// Prepare the next round's solve (its time limit and cutoff); `false`
+    /// Prepare the next round's solve (its time limit); `false`
     /// when the loop has stopped.
     fn next_round(&mut self) -> bool {
         if self.done || self.time_limit_reached {
@@ -1750,20 +1659,28 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         let input = self.input.as_mut().expect("the loop's input");
         input.time_limit_s = remaining_s;
         self.iterations += 1;
-        input.cutoff = self
-            .selector
-            .cheapest_price()
-            .map(|incumbent| incumbent - 1e-9 * incumbent.abs());
         true
     }
 
     /// The rest of a round, given its solve's result: the solution's
     /// incumbent evaluation and its cut, or the end of the loop.
-    fn take_solution(&mut self, solved: Option<ModelSolution>) -> Result<(), SelectionError> {
-        let iterations = self.iterations;
-        let trace = self.trace;
+    fn take_solution(
+        &mut self,
+        solved: Result<Option<ModelSolution>, String>,
+    ) -> Result<(), SelectionError> {
         let memo = &self.memo;
         let input = self.input.as_mut().expect("the loop's input");
+        let solved = match solved {
+            Ok(solved) => solved,
+            // The solver stopped at the time limit before finding any
+            // solution: the incumbent so far stands.
+            Err(error) if input.time_limit_s.is_some() && error.contains("NoSolutionFound") => {
+                self.time_limit_reached = true;
+                self.done = true;
+                return Ok(());
+            }
+            Err(error) => return Err(SelectionError::Solver(error)),
+        };
         // The solver stopped at the time limit: its plan is no bound, but
         // it is still evaluated, as a last round, and may become the
         // incumbent.
@@ -1781,16 +1698,6 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             self.bound = Some(solution.objective);
             self.first_bound.get_or_insert(solution.objective);
         }
-        if trace {
-            eprintln!(
-                "milp: round {iterations} bound {:.6e} incumbent {:?} vars {} cons {} at {:.1}s",
-                solution.objective,
-                self.selector.cheapest_price(),
-                solution.variables,
-                solution.constraints,
-                self.started.elapsed().as_secs_f64()
-            );
-        }
         self.size = (solution.variables, solution.constraints);
         if let Some(incumbent) = self.selector.cheapest_price() {
             if !last_round && solution.objective >= incumbent - 1e-9 * incumbent.abs() {
@@ -1804,59 +1711,9 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         for &c in &solution.chosen {
             group_choice[input.choices[c].group.0 as usize] = Some(input.choices[c].candidate);
         }
-        if trace {
-            eprintln!("milp: round {iterations} group choice {group_choice:?}");
-        }
-        let chosen_candidates: Vec<(GroupId, &super::ImplementationCandidate)> = group_choice
-            .iter()
-            .enumerate()
-            .filter_map(|(g, c)| Some((GroupId(g as u32), &memo.candidates[g][(*c)?])))
-            .collect();
-        if !super::windows::requirements_met(&chosen_candidates) {
-            // The model encodes every requirement (`rollup_rules`), so this
-            // is a safety net: cut the smallest failing pairs of (group,
-            // candidate), else the whole group choice below.
-            let mut cut = false;
-            for (i, a) in chosen_candidates.iter().enumerate() {
-                if a.1.rollup_of.is_none() {
-                    continue;
-                }
-                for (j, b) in chosen_candidates.iter().enumerate() {
-                    if i != j && !super::windows::requirements_met(&[*a, *b]) {
-                        let members: Vec<usize> = (0..input.choices.len())
-                            .filter(|&c| {
-                                let choice = &input.choices[c];
-                                (choice.group == a.0
-                                    && choice.candidate == group_choice[a.0 .0 as usize].unwrap())
-                                    || (choice.group == b.0
-                                        && choice.candidate
-                                            == group_choice[b.0 .0 as usize].unwrap())
-                            })
-                            .collect();
-                        input.excluded.push((members, Vec::new(), 1.0));
-                        cut = true;
-                    }
-                }
-                if !super::windows::requirements_met(&[*a]) {
-                    let members: Vec<usize> = (0..input.choices.len())
-                        .filter(|&c| {
-                            input.choices[c].group == a.0
-                                && Some(input.choices[c].candidate) == group_choice[a.0 .0 as usize]
-                        })
-                        .collect();
-                    input.excluded.push((members, Vec::new(), 0.0));
-                    cut = true;
-                }
-            }
-            if trace {
-                eprintln!("milp: round {iterations} requirements not met (pair cut {cut})");
-            }
-            if cut {
-                return Ok(());
-            }
-        }
-        let offer_started = std::time::Instant::now();
-        let offered_before = self.number;
+        // A group choice that fails a requirement the model does not
+        // encode is evaluated as any other: the incumbent evaluation finds
+        // no valid plan in it, and the cut below removes exactly it.
         super::search::offer_group_choice(
             memo,
             self.per_computation,
@@ -1868,17 +1725,6 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             &mut self.logical,
             &mut self.number,
         )?;
-        if trace {
-            eprintln!(
-                "milp: round {iterations} evaluated {} plans in {:.1}s; last rejection {:?}",
-                self.number - offered_before,
-                offer_started.elapsed().as_secs_f64(),
-                self.selector
-                    .rejections()
-                    .last()
-                    .map(|r| (r.cause, r.reason.chars().take(200).collect::<String>()))
-            );
-        }
         // Exclude it: every choice of each chosen (group, candidate).
         let groups = group_choice.iter().flatten().count();
         let excluded: Vec<usize> = input
@@ -1918,10 +1764,10 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
     > {
         let Self {
             memo,
-            per_computation,
+            per_computation: _,
             queries,
             entries,
-            data,
+            data: _,
             models,
             input,
             selector,
@@ -1935,26 +1781,6 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             ..
         } = self;
         let mut input = input.expect("the loop's input");
-        if std::env::var_os("JP_MILP_CHECK").is_some() {
-            // Debugging aid: every group choice's exact cost against the
-            // model's value restricted to it.
-            let incumbent = selector.cheapest_price().unwrap_or(f64::INFINITY);
-            for (group_choice, exact, value) in
-                lower_bound_check(&memo, per_computation, &input, entries, data, models)?
-            {
-                let bad = value.is_none_or(|v| v > exact * (1.0 + 1e-9));
-                if bad || exact < incumbent * (1.0 - 1e-9) {
-                    eprintln!(
-                        "check: {group_choice:?} exact {exact:.7e} model {value:?}{}",
-                        if bad {
-                            " NOT A LOWER BOUND"
-                        } else {
-                            " BELOW INCUMBENT"
-                        }
-                    );
-                }
-            }
-        }
         if time_limit_reached && bound.is_none() {
             // No round solved to optimality: the relaxation's optimum (all
             // cuts kept) is still a lower bound for the gap.
@@ -1981,11 +1807,11 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             }
             if !without_plan.is_empty() {
                 return Err(SelectionError::Solver(format!(
-                    "no valid plan for {}{}",
+                    "no valid plan for {} (raw data {})",
                     without_plan.join(", "),
                     match models.deployment_capabilities.raw_data_retained {
-                        true => "",
-                        false => " in a deployment that keeps no raw data",
+                        true => "retained",
+                        false => "not retained",
                     }
                 )));
             }
@@ -2051,7 +1877,6 @@ pub(super) fn model_input_of(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
-    started: std::time::Instant,
 ) -> Result<ModelInput, SelectionError> {
     let scale = super::pricing::frozen_calibration(memo, entries, data, models)?;
     let mut cache = super::pricing::PriceCache::new(scale);
@@ -2093,32 +1918,6 @@ pub(super) fn model_input_of(
             );
             choices.push(choice);
         }
-    }
-    let trace = std::env::var_os("JP_MILP_TRACE").is_some();
-    if trace {
-        for (c, choice) in choices.iter().enumerate() {
-            let k = &choice.coefficients;
-            let negative = k.direct.cost_per_unit_rate < 0.0
-                || k.direct.work_ms < 0.0
-                || k.slots
-                    .iter()
-                    .any(|s| s.fixed_cost < 0.0 || s.cost_per_unit_rate < 0.0 || s.work_ms < 0.0)
-                || k.shared_nodes.iter().any(|n| n.cost_per_unit_rate < 0.0);
-            if negative {
-                eprintln!(
-                    "milp: NEGATIVE choice {c}: g{} cand{} {:?} assignment {:?}",
-                    choice.group.0, choice.candidate, k, choice.assignment
-                );
-            }
-        }
-    }
-    if trace {
-        eprintln!(
-            "milp: memo {} groups, {} choices in {:.1}s",
-            memo.groups.len(),
-            choices.len(),
-            started.elapsed().as_secs_f64()
-        );
     }
     let mut input = model_input(memo, choices, entries, models)?;
     let mut sources: Vec<String> = Vec::new();
@@ -2259,7 +2058,6 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         raw_scans: input.raw_scans.clone(),
         raw_data_retained: input.raw_data_retained,
         held: input.held.clone(),
-        cutoff: input.cutoff,
         time_limit_s: input.time_limit_s,
         relaxed: input.relaxed,
         rollup_rules: input.rollup_rules.clone(),
@@ -2433,7 +2231,6 @@ fn model_input(
         raw_scans: Vec::new(),
         raw_data_retained: true,
         held: Vec::new(),
-        cutoff: None,
         time_limit_s: None,
         relaxed: false,
     })
@@ -2510,7 +2307,6 @@ mod tests {
             raw_scans: Vec::new(),
             raw_data_retained: true,
             held: Vec::new(),
-            cutoff: None,
             time_limit_s: None,
             relaxed: false,
         };

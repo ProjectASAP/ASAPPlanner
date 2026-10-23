@@ -19747,396 +19747,592 @@
       "P315-m319": {
         "cost_per_second": 7.882484714275631e-6,
         "cost_unit": "cost_per_second",
+        "cpu_core_seconds_per_second": 0.03891416666666671,
         "per_node": {
           "0": {
             "cost_per_second": 5.0598e-8,
+            "cpu_core_seconds_per_second": 0.0045,
             "detail": "scan 500000 samples; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Scan",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "1": {
             "cost_per_second": 1.1107991735363008e-7,
+            "cpu_core_seconds_per_second": 0.001,
             "detail": "build exact Sum accumulator in 30 panes of 20000 ms for 50000 groups: 500000 rows x (1 + depth 1); x 1.0000/s; keeps 86800000 bytes",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "PaneChain",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "10": {
             "cost_per_second": 5.622005014799535e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 80 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "11": {
             "cost_per_second": 5.797517983734607e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "build exact Sum accumulator into 50000 states: 50000 rows x depth 1; x 1.0000/s; holds 2800000 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryAgg",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "12": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "finalize 50000 accumulators; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "13": {
             "cost_per_second": 5.797517983734607e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "build exact Count accumulator into 50000 states: 50000 rows x depth 1; x 1.0000/s; holds 2800000 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryAgg",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "14": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "finalize 50000 accumulators; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "15": {
             "cost_per_second": 5.622003510359674e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 56 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "16": {
             "cost_per_second": 5.622003510359674e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 56 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "BinaryOp",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "17": {
             "cost_per_second": 5.622003510359674e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 56 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "18": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "estimate 50000 groups x 1; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryEstimate",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "19": {
             "cost_per_second": 5.62200506080687e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 80 bytes for 5.5 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "2": {
             "cost_per_second": 8.435576410770415e-10,
+            "cpu_core_seconds_per_second": 0.00007500000000000001,
             "detail": "merge 1500000 states into 50000; x 0.0500/s; holds 2800000 bytes for 1.6 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryMerge",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "20": {
             "cost_per_second": 5.62200506080687e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 80 bytes for 5.5 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "21": {
             "cost_per_second": 5.799128240466118e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "build exact Sum accumulator into 50000 states: 50000 rows x depth 1; x 1.0000/s; holds 2800000 bytes for 5.5 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryAgg",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "22": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "finalize 50000 accumulators; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "23": {
             "cost_per_second": 5.799128240466118e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "build exact Count accumulator into 50000 states: 50000 rows x depth 1; x 1.0000/s; holds 2800000 bytes for 5.5 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryAgg",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "24": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "finalize 50000 accumulators; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "25": {
             "cost_per_second": 5.622001518242061e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 24 bytes for 5.5 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "26": {
             "cost_per_second": 5.622001518242061e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 24 bytes for 5.5 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "BinaryOp",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "27": {
             "cost_per_second": 5.622001518242061e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 24 bytes for 5.5 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "28": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "estimate 50000 groups x 1; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryEstimate",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "29": {
             "cost_per_second": 5.622005014799535e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 80 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "3": {
             "cost_per_second": 2.8375692360699177e-11,
+            "cpu_core_seconds_per_second": 2.5e-6,
             "detail": "finalize 50000 accumulators; x 0.0500/s; holds 2800000 bytes for 1.6 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "30": {
             "cost_per_second": 5.797517983734607e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "build exact Sum accumulator into 50000 states: 50000 rows x depth 1; x 1.0000/s; holds 2800000 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryAgg",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "31": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "finalize 50000 accumulators; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "32": {
             "cost_per_second": 5.797517983734607e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "build exact Count accumulator into 50000 states: 50000 rows x depth 1; x 1.0000/s; holds 2800000 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryAgg",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "33": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "finalize 50000 accumulators; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "34": {
             "cost_per_second": 5.622003510359674e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 56 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "35": {
             "cost_per_second": 5.622003510359674e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 56 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "BinaryOp",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "36": {
             "cost_per_second": 5.622003510359674e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 56 bytes for 5.4 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "37": {
             "cost_per_second": 4.16028e-8,
+            "cpu_core_seconds_per_second": 0.0036999999999999997,
             "detail": "scan 500000 samples; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Scan",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "38": {
             "cost_per_second": 2.0769532124423981e-7,
+            "cpu_core_seconds_per_second": 0.001,
             "detail": "build exact Sum accumulator in 60 panes of 1000 ms for 50000 groups: 500000 rows x (1 + depth 1); x 1.0000/s; keeps 170800000 bytes",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "PaneChain",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "39": {
             "cost_per_second": 3.374230564308166e-8,
+            "cpu_core_seconds_per_second": 0.003,
             "detail": "merge 3000000 states into 50000; x 1.0000/s; holds 2800000 bytes for 3.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryMerge",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "4": {
             "cost_per_second": 2.8375692360699177e-11,
+            "cpu_core_seconds_per_second": 2.5e-6,
             "detail": "build exact Sum accumulator into 50000 states: 50000 rows x depth 1; x 0.0500/s; holds 2800000 bytes for 1.6 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryAgg",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "40": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "finalize 50000 accumulators; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "41": {
             "cost_per_second": 5.622002355575561e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "sort 50000 rows in 50000 partitions; x 1.0000/s; holds 64 bytes for 3.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Sort",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "42": {
             "cost_per_second": 5.622002355575561e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "limit to 50000 rows; x 1.0000/s; holds 64 bytes for 3.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Limit",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "43": {
             "cost_per_second": 5.622002355575561e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "operator: pass 50000 rows; x 1.0000/s; holds 64 bytes for 3.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "44": {
             "cost_per_second": 4.16028e-8,
+            "cpu_core_seconds_per_second": 0.0036999999999999997,
             "detail": "scan 500000 samples; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Scan",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "45": {
             "cost_per_second": 1.432850519838333e-7,
+            "cpu_core_seconds_per_second": 0.001,
             "detail": "build exact Sum accumulator in 40 panes of 30000 ms for 50000 groups: 500000 rows x (1 + depth 1); x 1.0000/s; keeps 114800000 bytes",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "PaneChain",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "46": {
             "cost_per_second": 7.498361709872881e-10,
+            "cpu_core_seconds_per_second": 0.00006666666666666667,
             "detail": "merge 2000000 states into 50000; x 0.0333/s; holds 2800000 bytes for 2.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryMerge",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "47": {
             "cost_per_second": 1.8739999999999998e-11,
+            "cpu_core_seconds_per_second": 1.6666666666666667e-6,
             "detail": "finalize 50000 accumulators; x 0.0333/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "48": {
             "cost_per_second": 1.8740005398193995e-11,
+            "cpu_core_seconds_per_second": 1.6666666666666667e-6,
             "detail": "sort 50000 rows in 50000 partitions; x 0.0333/s; holds 64 bytes for 2.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Sort",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "49": {
             "cost_per_second": 1.8740005398193995e-11,
+            "cpu_core_seconds_per_second": 1.6666666666666667e-6,
             "detail": "limit to 50000 rows; x 0.0333/s; holds 64 bytes for 2.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Limit",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "5": {
             "cost_per_second": 2.811e-11,
+            "cpu_core_seconds_per_second": 2.5e-6,
             "detail": "finalize 50000 accumulators; x 0.0500/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "50": {
             "cost_per_second": 1.8740005398193995e-11,
+            "cpu_core_seconds_per_second": 1.6666666666666667e-6,
             "detail": "operator: pass 50000 rows; x 0.0333/s; holds 64 bytes for 2.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "51": {
             "cost_per_second": 4.16028e-8,
+            "cpu_core_seconds_per_second": 0.0036999999999999997,
             "detail": "scan 500000 samples; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Scan",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "52": {
             "cost_per_second": 1.1107991735363008e-7,
+            "cpu_core_seconds_per_second": 0.001,
             "detail": "build exact Increase accumulator in 30 panes of 20000 ms for 50000 groups: 500000 rows x (1 + depth 1); x 1.0000/s; keeps 86800000 bytes",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "PaneChain",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "53": {
             "cost_per_second": 8.435737436443566e-10,
+            "cpu_core_seconds_per_second": 0.00007500000000000001,
             "detail": "merge 1500000 states into 50000; x 0.0500/s; holds 2800000 bytes for 1.7 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryMerge",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "54": {
             "cost_per_second": 2.811e-11,
+            "cpu_core_seconds_per_second": 2.5e-6,
             "detail": "finalize 50000 accumulators; x 0.0500/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "55": {
             "cost_per_second": 2.8110006256997585e-11,
+            "cpu_core_seconds_per_second": 2.5e-6,
             "detail": "sort 50000 rows in 50000 partitions; x 0.0500/s; holds 64 bytes for 1.7 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Sort",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "56": {
             "cost_per_second": 2.8110006256997585e-11,
+            "cpu_core_seconds_per_second": 2.5e-6,
             "detail": "limit to 50000 rows; x 0.0500/s; holds 64 bytes for 1.7 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Limit",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "57": {
             "cost_per_second": 2.8110006256997585e-11,
+            "cpu_core_seconds_per_second": 2.5e-6,
             "detail": "operator: pass 50000 rows; x 0.0500/s; holds 64 bytes for 1.7 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "58": {
             "cost_per_second": 3.2607599999999995e-8,
+            "cpu_core_seconds_per_second": 0.0029,
             "detail": "scan 500000 samples; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Scan",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "59": {
             "cost_per_second": 1.432850519838333e-7,
+            "cpu_core_seconds_per_second": 0.001,
             "detail": "build exact Rate accumulator in 40 panes of 30000 ms for 50000 groups: 500000 rows x (1 + depth 1); x 1.0000/s; keeps 114800000 bytes",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "PaneChain",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "6": {
             "cost_per_second": 5.0598e-8,
+            "cpu_core_seconds_per_second": 0.0045,
             "detail": "scan 500000 samples; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Scan",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "60": {
             "cost_per_second": 7.498361709872881e-10,
+            "cpu_core_seconds_per_second": 0.00006666666666666667,
             "detail": "merge 2000000 states into 50000; x 0.0333/s; holds 2800000 bytes for 2.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryMerge",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "61": {
             "cost_per_second": 1.8739999999999998e-11,
+            "cpu_core_seconds_per_second": 1.6666666666666667e-6,
             "detail": "finalize 50000 accumulators; x 0.0333/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "FinalizeExactAccumulator",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "62": {
             "cost_per_second": 1.8740004048645494e-11,
+            "cpu_core_seconds_per_second": 1.6666666666666667e-6,
             "detail": "sort 50000 rows in 50000 partitions; x 0.0333/s; holds 48 bytes for 2.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Sort",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "63": {
             "cost_per_second": 1.8740004048645494e-11,
+            "cpu_core_seconds_per_second": 1.6666666666666667e-6,
             "detail": "limit to 50000 rows; x 0.0333/s; holds 48 bytes for 2.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Limit",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "64": {
             "cost_per_second": 1.8740004048645494e-11,
+            "cpu_core_seconds_per_second": 1.6666666666666667e-6,
             "detail": "operator: pass 50000 rows; x 0.0333/s; holds 48 bytes for 2.2 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "Project",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "7": {
             "cost_per_second": 6.795485646528245e-6,
+            "cpu_core_seconds_per_second": 0.001,
             "detail": "build DDSketch in 100 panes of 1000 ms for 50000 groups: 500000 rows x (1 + depth 1); x 1.0000/s; keeps 5898400000 bytes",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "PaneChain",
+            "price_source": "analytical",
+            "timing": "ingestion_time"
           },
           "8": {
             "cost_per_second": 5.658943890154361e-8,
+            "cpu_core_seconds_per_second": 0.005,
             "detail": "merge 5000000 states into 50000; x 1.0000/s; holds 58400000 bytes for 5.5 ms",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryMerge",
+            "price_source": "analytical",
+            "timing": "query_time"
           },
           "9": {
             "cost_per_second": 5.622e-10,
+            "cpu_core_seconds_per_second": 0.000049999999999999996,
             "detail": "estimate 50000 groups x 1; x 1.0000/s",
             "multiplier": 1,
-            "price_source": "analytical"
+            "operator": "SummaryEstimate",
+            "price_source": "analytical",
+            "timing": "query_time"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",

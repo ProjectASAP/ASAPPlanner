@@ -1827,6 +1827,7 @@ mod tests {
         targets: &[AccuracyTarget],
     ) {
         assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, true);
+        assert_model_is_a_lower_bound_in(queries, intervals_ms, targets, false);
     }
 
     /// [`assert_model_is_a_lower_bound`] in a deployment that keeps raw
@@ -1857,14 +1858,7 @@ mod tests {
             };
         let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
         let memo = memo(&per_computation, &entries);
-        let input = super::super::milp::model_input_of(
-            &memo,
-            &entries,
-            &data,
-            models,
-            std::time::Instant::now(),
-        )
-        .unwrap();
+        let input = super::super::milp::model_input_of(&memo, &entries, &data, models).unwrap();
         let checked = super::super::milp::lower_bound_check(
             &memo,
             &per_computation,
@@ -1874,7 +1868,8 @@ mod tests {
             models,
         )
         .unwrap();
-        assert!(!checked.is_empty());
+        // Without raw data a workload may have no valid plan at all.
+        assert!(!raw_data_retained || !checked.is_empty());
         for (group_choice, exact, value) in checked {
             let value = value.unwrap_or_else(|| panic!("{queries:?} {group_choice:?}: infeasible"));
             assert!(
@@ -1926,6 +1921,21 @@ mod tests {
             ],
             &[20_000, 20_000, 1_000, 1_000],
             &[target.clone(), target.clone(), target.clone(), target],
+        );
+    }
+
+    /// One query reading two groups over one metric, whose scans may be one
+    /// node: its latency and held memory stay lower bounds.
+    #[test]
+    fn the_model_is_a_lower_bound_for_a_query_over_two_groups_of_one_metric() {
+        let exact = AccuracyTarget::exact();
+        assert_model_is_a_lower_bound(
+            &[
+                "max_over_time(m[5m]) - min_over_time(m[5m])",
+                "max_over_time(m[5m])",
+            ],
+            &[60_000, 60_000],
+            &[exact.clone(), exact],
         );
     }
 

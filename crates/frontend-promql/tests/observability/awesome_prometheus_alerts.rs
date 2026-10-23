@@ -259,7 +259,9 @@ fn absent_function_lowers_to_absent_intent() {
     // `Absent` intent (issue #47); the empty→synthesized-sample logic is a
     // post-ASAP concern.
     let qe = ok(r#"absent(up{job="prometheus"})"#);
-    assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Absent)));
+    assert!(intents(&qe)
+        .iter()
+        .any(|i| matches!(i, AggIntent::Absent { .. })));
 }
 
 #[test]

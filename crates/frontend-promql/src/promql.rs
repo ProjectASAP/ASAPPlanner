@@ -36,7 +36,8 @@
 //! | `rate(m[w])` / `irate(m[w])` | `Aggregate{[Rate/IRate], TimeRange{w}}` — distinct function identities; shared physical machinery is a later realization choice |
 //! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
-//! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
+//! | `absent(v)` | `Aggregate{by(), [Absent{labels}]}` — one sample of value 1 when `v` is empty, labelled with `v`'s equality matchers (issue #47) |
+//! | `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[AbsentOverTime/PresentOverTime]}` — per-series presence intents (issue #47) |
 //! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | typed scalar `Project` (issue #45); `pi()` → a `ScalarExpr::Literal` root |
 //! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `ScalarExpr::EvalTimestamp` root / `Aggregate{[TimeFn(f)]}` (issue #46) |
 //! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar(s)` / `ScalarExpr::PromqlScalarFromVector(v)` — the scalar⇄vector bridges (issue #48) |
@@ -230,6 +231,47 @@ pub(crate) fn metric_names(query: &str) -> Result<std::collections::BTreeSet<Str
     let mut metrics = Vec::new();
     collect_metric_names(&ast, &mut metrics);
     Ok(metrics.into_iter().collect())
+}
+
+/// Each `rate`, `increase` or `irate` call in `query` with every metric its
+/// argument reads ([`crate::counter_function_over_gauge_warnings`]).
+pub(crate) fn counter_function_metrics(
+    query: &str,
+) -> Result<std::collections::BTreeSet<(&'static str, String)>> {
+    fn collect(expr: &Expr, out: &mut std::collections::BTreeSet<(&'static str, String)>) {
+        match expr {
+            Expr::Paren(p) => collect(&p.expr, out),
+            Expr::Unary(u) => collect(&u.expr, out),
+            Expr::Subquery(s) => collect(&s.expr, out),
+            Expr::Aggregate(a) => collect(&a.expr, out),
+            Expr::Binary(b) => {
+                collect(&b.lhs, out);
+                collect(&b.rhs, out);
+            }
+            Expr::Call(c) => {
+                let function = match c.func.name {
+                    "rate" => Some("rate"),
+                    "increase" => Some("increase"),
+                    "irate" => Some("irate"),
+                    _ => None,
+                };
+                for arg in &c.args.args {
+                    if let Some(function) = function {
+                        let mut metrics = Vec::new();
+                        collect_metric_names(arg, &mut metrics);
+                        out.extend(metrics.into_iter().map(|m| (function, m)));
+                    }
+                    collect(arg, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let ast = parser::parse(query).map_err(LoweringError::Parse)?;
+    check_depth(&ast, MAX_DEPTH)?;
+    let mut calls = std::collections::BTreeSet::new();
+    collect(&ast, &mut calls);
+    Ok(calls)
 }
 
 std::thread_local! {
@@ -1094,12 +1136,15 @@ fn is_presence_fn(name: &str) -> bool {
 }
 
 /// `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` — lowered
-/// to an `Aggregate{[Absent/…]}` over the (instant or range) argument. The
-/// empty-result → synthesized-1-sample logic is a post-ASAP/runtime concern;
-/// the canonical DAG only marks the operation (issue #47).
+/// to an `Aggregate{[Absent/…]}` over the (instant or range) argument (issue
+/// #47). `absent` reduces across every series of `v` to at most one sample
+/// (no grouping keys), carrying the labels it synthesizes
+/// ([`absent_labels`]).
 fn walk_presence(call: &Call) -> Result<Unresolved> {
     let func = match call.func.name {
-        "absent" => AggIntent::Absent,
+        "absent" => AggIntent::Absent {
+            labels: absent_labels(arg(call, 0)?),
+        },
         "absent_over_time" => AggIntent::AbsentOverTime,
         "present_over_time" => AggIntent::PresentOverTime,
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
@@ -1107,6 +1152,31 @@ fn walk_presence(call: &Call) -> Result<Unresolved> {
     // arg 0 is the instant vector (`absent`) or range vector (`*_over_time`);
     // `walk` produces a `Window` for the matrix-selector forms.
     Ok(outer_aggregate(vec![], func, walk(arg(call, 0)?)?))
+}
+
+/// The labels `absent(v)` gives its synthesized sample, as Prometheus'
+/// `createLabelsForAbsentFunction` derives them: none unless `v` is a
+/// selector; else each label's first equality matcher sets it, any other
+/// matcher on it (a later equality included) removes it, `__name__` is
+/// skipped, and an empty value is no label.
+fn absent_labels(v: &Expr) -> BTreeMap<String, String> {
+    let Expr::VectorSelector(vs) = v else {
+        return BTreeMap::new();
+    };
+    let mut labels = BTreeMap::new();
+    let mut set = std::collections::HashSet::new();
+    for m in &vs.matchers.matchers {
+        if m.name == "__name__" {
+            continue;
+        }
+        if matches!(m.op, MatchOp::Equal) && set.insert(m.name.as_str()) {
+            labels.insert(m.name.clone(), m.value.clone());
+        } else {
+            labels.remove(&m.name);
+        }
+    }
+    labels.retain(|_, value| !value.is_empty());
+    labels
 }
 
 /// The scalar→vector conversion (issue #48); `scalar(v)` is scalar-typed and

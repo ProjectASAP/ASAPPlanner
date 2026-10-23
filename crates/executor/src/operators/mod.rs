@@ -63,6 +63,10 @@ enum Kind {
     VectorToScalar {
         column: usize,
     },
+    /// PromQL `absent(v)`: these labels, value 1, when the input is empty.
+    Absent {
+        labels: BTreeMap<String, String>,
+    },
     VectorBinary {
         operator: crate::expressions::binary::BinaryOperator,
         return_bool: bool,
@@ -333,6 +337,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
                 | Kind::AllGroupsSummaryBuild { .. }
                 | Kind::SummaryMerge { .. }
                 | Kind::VectorToScalar { .. }
+                | Kind::Absent { .. }
         )
     }
     fn properties(&self, inputs: &[PlanProperties]) -> PlanProperties {
@@ -364,6 +369,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::Union => "Union",
             Kind::CurrentSeries { .. } => "CurrentSeries",
             Kind::VectorToScalar { .. } => "VectorToScalar",
+            Kind::Absent { .. } => "Absent",
             Kind::VectorBinary { .. } => "VectorBinary",
             Kind::AlignedBinary { .. } => "AlignedBinary",
             Kind::RangeWindow { .. } => "RangeWindow",
@@ -421,7 +427,8 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             | Kind::Constant { .. }
             | Kind::EvaluationTime
             | Kind::Union
-            | Kind::VectorToScalar { .. } => source::execute(self, inputs, context),
+            | Kind::VectorToScalar { .. }
+            | Kind::Absent { .. } => source::execute(self, inputs, context),
             Kind::VectorBinary { .. } => vector_binary::execute(self, inputs, context),
             Kind::AlignedBinary { .. } => aligned_binary::execute(self, inputs, context),
             Kind::RangeWindow { .. } | Kind::HistogramQuantile => {

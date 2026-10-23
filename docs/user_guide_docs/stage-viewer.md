@@ -147,8 +147,10 @@ The header names the search. Under the default search, the list has the
 selected plan and the rejections the search recorded (the first of each
 cause, marked `not kept`, not clickable), and the header says how many
 physical candidates it checked, how many independent components it searched
-separately, and, per query, how many of its own candidates it discarded and
-why. Under `--exhaustive`, the list has every plan:
+separately or why it searched the workload as one (for example `searched as
+one: not in joint space`), which queries were interchangeable and took one
+shared choice (for example `interchangeable queries: (p50, p90, p99)`), and,
+per query, how many of its own candidates it discarded and why. Under `--exhaustive`, the list has every plan:
 the selected plan first, then the other valid plans cheapest first, each
 with its cost per second; then the invalid plans with their reasons, the
 plans Stage 2 pruned, and the Stage 1 candidates that did not compose.
@@ -262,7 +264,10 @@ the queries themselves (open **queries** for each one's text, how often it
 runs and its accuracy target) and the sources they read. Click a row to
 plan the workload: the server runs `stage_pipeline --workload` with the
 default search and the set's deployment capabilities and cost model, and
-the page shows its stages. Planning a 9-query workload takes about 15
+the page shows its stages. A SQL workload also needs the tables it reads,
+which a workload file does not declare: put them in a `tables.json` next to
+the set's workload files, a JSON array of `stage_pipeline --table`
+declarations, and the server passes each one as `--table`. Planning a 9-query workload takes about 15
 seconds.
 
 | Set | Workloads | What it is |
@@ -324,7 +329,7 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | --- | --- |
 | `--promql <query>`, `--sql <query>` | A query; repeat and mix for several, in workload order |
 | `--name <name>` | Names the query before it (default `q1`, `q2`, …) |
-| `--workload <file>` | A `PlanningWorkload` JSON file instead of queries: its queries, their requirements and recurrence, and its data workload. Each query's accuracy comes from the file, so `--max-error`, `--failure-probability` and `--accuracy-metric` do not apply. |
+| `--workload <file>` | A `PlanningWorkload` JSON file instead of queries: its queries, their requirements and recurrence, and its data workload. Each query's accuracy comes from the file, so `--max-error`, `--failure-probability` and `--accuracy-metric` do not apply. Repeat it to plan several files, each in its own language (for example PromQL and SQL), as one workload: queries are numbered `q1..qN` across the files, sources are combined (a source two files declare must have the same facts), and the files' arrivals must be the same kind; ingesting or mixed rates add up, and then every source must declare its own rate (`series_count` and `sample_interval`), since a workload's `rows_per_second` is shared out over all its sources. |
 | `--table '<json>'` | A table the SQL queries read, for example `{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}, {"name": "service", "type": "utf8"}], "time_index": 0}`; repeat for several |
 | `--max-error`, `--failure-probability` | Accuracy (ε, δ) for every query; without them the queries are exact |
 | `--accuracy-metric <metric>` | The error metric of that accuracy: `absolute`, `absolute_stream_l1`, `absolute_stream_l2`, `relative` or `rank`. Without it, a plan is accepted in whatever metric meets ε (and δ). |
@@ -338,7 +343,8 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | `--measured-operation-costs <file>` | A JSON table of measured CPU time per sketch operation (`[{"sketch": …, "operation": "update", "cpu_ns_per_operation": …}]`, as `convert_rqe_atomic_costs` writes it). A sketch node whose parameters match an entry exactly is priced from it; each node's `price_source` in the document says `measured` or `analytical`. |
 | `--enforce-accuracy-guarantees` | Reject a plan whose accuracy guarantee does not meet its query's target, as `plan_installable` does with the default settings. Without it (the default), every query output is accepted regardless of its guarantee, the plans are compared on cost alone, and each output's line says `regardless of guarantee`, plus `ignoring a failed guarantee check (<cause>)` when its guarantee would not have met the target; the document's `accuracy_guarantees` is `ignored` or `enforced`. With `--plan-selection-settings`, this flag decides, whatever the file's `ignore_accuracy_guarantees` says. |
 | `--exhaustive` | Compose and price every candidate instead of running the default search, and list them all. Use it for small workloads or to compare with the default search. |
-| `--search <algorithm>` | The default search's algorithm: `legacy` (the default), `memo-brute-force` (every plan of the memo over logical sub-expressions, each priced by Stage 3: the reference) or `memo-milp` (the memo solved as a mixed-integer linear program). The document's `search` names it (`default` for `legacy`), and the search report says which algorithm ran (`algorithm`, omitted for `legacy`) and, when the legacy search ran instead, why (`routed_to_legacy`: the MILP prices cost model 1 only, or is not built yet). Not with `--exhaustive`. |
+| `--search <algorithm>` | The default search's algorithm: `legacy` (the default), `memo-brute-force` (every plan of the memo over logical sub-expressions, each evaluated by Stage 3: the reference) or `memo-milp` (experimental: the memo solved as a mixed-integer linear program, cost model 1 only). The document's `search` names it (`default` for `legacy`). The search report gives `incumbent_cost` (the selected plan's cost), `algorithm` (omitted for `legacy`), `routed_to_legacy` when the legacy search ran instead (cost models 2 and 3), and for `memo-milp` a `milp` object: `lower_bound`, `first_lower_bound`, `gap` (0 when the plan is proven optimal), `rounds`, `variable_count`, `constraint_count`, `solver_time_ms` and `time_limit_reached`. Not with `--exhaustive`. |
+| `--milp-time-limit-s <f64>` | With `--search memo-milp`: stop after this many seconds and select the best plan found, reporting `time_limit_reached` and its `gap`; never called optimal unless the gap is 0. |
 | `--max-displayed <n>` | With `--exhaustive`, how many plans the document shows (default 64), in enumeration order, plus the selected plan. The planner still optimizes and prices every plan, so the selection does not depend on it. |
 | `--max-combinations <n>` | With `--exhaustive` only: the most candidates a run plans (default 10000), counted at Stage 1 and again at Stage 2; a larger workload is refused with exit status 3 and no document. The default search has no limit. |
 | `--out <file>` | Where to write the document |

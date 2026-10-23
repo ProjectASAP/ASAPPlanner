@@ -148,6 +148,23 @@ class PlanArgsTests(unittest.TestCase):
             )
 
 
+# A SQL workload (one query of the 2026-10-22 evaluation's W-RollupHeavy)
+# and the table it reads, which only a --table declares.
+FLOWS_TABLE = {"name": "flows", "time_index": 0, "columns": [
+    {"name": "ts", "type": "timestamp", "nullable": False},
+    {"name": "dst_port", "type": "utf8", "nullable": False},
+    {"name": "src_addr", "type": "float64", "nullable": False}]}
+SQL_WORKLOAD = {
+    "query_workload": {"language": {"sql": "datafusion_sql"}, "query_batch": None, "repeating_queries": [{
+        "query": "SELECT dst_port, COUNT(*) AS value FROM flows WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY dst_port",
+        "demand": {"fixed_interval": 60000},
+        "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}, "max_latency_ms": None},
+        "predictability": {"predictable": {"known_at": None}}}]},
+    "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}},
+                      "sources": {"flows": {"series_count": 100, "sample_interval": 1000, "distinct_values_per_label": {"dst_port": 100}}}},
+}
+
+
 class WorkloadArgsTests(unittest.TestCase):
     """A PlanningWorkload request becomes `stage_pipeline --workload` with the
     set's deployment capabilities, cost model and accuracy guarantee mode."""
@@ -172,6 +189,39 @@ class WorkloadArgsTests(unittest.TestCase):
             for mode in (None, "ignored"):
                 args = server.workload_args({"workload": workload, "accuracy_guarantees": mode}, path, "out.json")
                 self.assertNotIn("--enforce-accuracy-guarantees", args)
+
+    def test_sql_tables_become_table_flags(self):
+        """A SQL workload's tables, which a PlanningWorkload does not
+        declare, are passed to stage_pipeline as one --table each."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "w.json")
+            args = server.workload_args({"workload": SQL_WORKLOAD, "tables": [FLOWS_TABLE]}, path, "out.json")
+            self.assertEqual(args[1:], ["--workload", path, "--table", json.dumps(FLOWS_TABLE, separators=(",", ":")),
+                                        "--out", "out.json"])
+            for absent in ({"workload": SQL_WORKLOAD}, {"workload": SQL_WORKLOAD, "tables": None}):
+                self.assertNotIn("--table", server.workload_args(absent, path, "out.json"))
+
+    def test_malformed_tables_are_rejected(self):
+        for tables, message in [
+            ({"name": "flows"}, "tables must be an array"),
+            ([{"name": "flows"}], "table #1: columns"),
+            ([FLOWS_TABLE, FLOWS_TABLE], "table #2: table flows is declared twice"),
+        ]:
+            with self.subTest(message), self.assertRaisesRegex(ValueError, message):
+                server.workload_args({"workload": SQL_WORKLOAD, "tables": tables}, "w.json", "out.json")
+
+    def test_example_args_read_the_tables_next_to_the_workload(self):
+        """An examples.json entry planned from a workload file passes the
+        tables in the tables.json next to it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "workloads" / "s").mkdir(parents=True)
+            (root / "workloads" / "s" / "tables.json").write_text(json.dumps([FLOWS_TABLE]))
+            with mock.patch.object(server, "HERE", root):
+                args = server.example_args({"workload": "workloads/s/w.json"}, "o.json")
+                self.assertEqual(args[3:], ["--table", json.dumps(FLOWS_TABLE, separators=(",", ":")), "--out", "o.json"])
+                (root / "workloads" / "s" / "tables.json").unlink()
+                self.assertEqual(server.example_args({"workload": "workloads/s/w.json"}, "o.json")[3:], ["--out", "o.json"])
 
     def test_malformed_requests_are_rejected(self):
         for payload, message in [
@@ -334,6 +384,11 @@ class PlanEndpointTests(unittest.TestCase):
         self.assertFalse(document["deployment_capabilities"]["raw_data_retained"])
         self.assertIsNotNone(document["stage3_plan_selection"]["selected"])
         self.assertTrue(document["stage3_plan_selection"]["stored_outputs"])
+
+    def test_plan_workload_endpoint_plans_a_sql_workload_with_its_tables(self):
+        document = post_plan({"workload": SQL_WORKLOAD, "tables": [FLOWS_TABLE]}, "/api/plan-workload")
+        self.assertEqual(document["workload"]["queries"][0]["language"], "sql")
+        self.assertIsNotNone(document["stage3_plan_selection"]["selected"])
 
     def test_plan_endpoint_returns_the_stage_pipeline_document(self):
         document = post_plan({"queries": [{"name": "job_rate", "language": "promql", "text": "sum by (job) (rate(m[1m]))"}],

@@ -3132,3 +3132,266 @@ async fn a_forced_heap_grouped_topk_sum_plan_compiles_and_answers_within_its_bou
         }
     }
 }
+
+// ── Classic-histogram `histogram_quantile` (issue #890) ─────────────────────
+
+/// The classic bucket metric of the histogram tests.
+const BUCKET_METRIC: &str = "http_request_duration_seconds_bucket";
+
+/// Exact PromQL `queries`, every minute, over ingesting classic-bucket
+/// series of [`BUCKET_METRIC`] sampled every 10 s.
+fn exact_bucket_workload(queries: &[&str]) -> PlanningWorkload {
+    let entries: Vec<String> = queries
+        .iter()
+        .map(|query| {
+            format!(
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval": 60000}},
+                  "requirements": {{"accuracy": {{"max_error": 0.0, "failure_probability": 0.0}}}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
+    serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 2.4}}}},
+              "sources": {{"{BUCKET_METRIC}": {{"series_count": 24, "sample_interval": 10000}}}}}}}}"#,
+        entries.join(",")
+    ))
+    .unwrap()
+}
+
+/// Cumulative bucket counters of [`BUCKET_METRIC`], one sample every 10 s
+/// over the 5 minutes before `EVALUATION_MS` (first 295 s before it, last
+/// 5 s before it), each rising at a constant per-second rate from 1000, so
+/// `rate(…[5m])` of each is its slope. Per `(service, job)`, the slopes of
+/// buckets `le` 0.1, 0.5, 1 and `+Inf`, each on instances `1` and `2`:
+/// - `orders`/`api`: 0.5, 1.5, 2, 2 (summed over instances: 1, 3, 4, 4);
+/// - `batch`/`worker`: 0.5, 0.5, 0.5, 2.5 (most observations above 1, in
+///   `+Inf` alone; summed: 1, 1, 1, 5);
+/// - `idle`/`idle`: 0 everywhere (no observations).
+fn bucket_samples() -> Vec<RawDataSample> {
+    let mut samples = Vec::new();
+    for (service, job, slopes) in [
+        ("orders", "api", [0.5, 1.5, 2.0, 2.0]),
+        ("batch", "worker", [0.5, 0.5, 0.5, 2.5]),
+        ("idle", "idle", [0.0; 4]),
+    ] {
+        for (le, slope) in ["0.1", "0.5", "1", "+Inf"].into_iter().zip(slopes) {
+            for instance in ["1", "2"] {
+                for step in 0..30 {
+                    samples.push(RawDataSample {
+                        labels: BTreeMap::from([
+                            ("__name__".to_string(), BUCKET_METRIC.to_string()),
+                            ("service".to_string(), service.to_string()),
+                            ("job".to_string(), job.to_string()),
+                            ("instance".to_string(), instance.to_string()),
+                            ("le".to_string(), le.to_string()),
+                        ]),
+                        timestamp_ms: EVALUATION_MS - 295_000 + step * 10_000,
+                        value: 1000.0 + slope * 10.0 * step as f64,
+                    });
+                }
+            }
+        }
+    }
+    samples
+}
+
+/// The plan file of exact `queries` over [`bucket_samples`]' metric, on a
+/// deployment that keeps raw data samples.
+async fn bucket_plan_json(queries: &[&str]) -> String {
+    plan_json_for(
+        exact_bucket_workload(queries),
+        &DeploymentCapabilities::default(),
+    )
+    .await
+}
+
+/// `histogram_quantile` over classic buckets as the issue's dashboard
+/// writes it: p50, p95 and p99 of the summed bucket rates of one service,
+/// in one workload. Stage 3 selects an exact plan the executor compiles,
+/// and it answers with Prometheus' cumulative-bucket interpolation: over
+/// summed rates 1, 3, 4, 4 at `le` 0.1, 0.5, 1, `+Inf`, rank 0.5 · 4 = 2
+/// lies in the 0.5 bucket, 0.1 + 0.4 · (2 − 1) / (3 − 1) = 0.3; rank 3.8
+/// and 3.96 in the 1 bucket, 0.5 + 0.5 · 0.8 = 0.9 and 0.5 + 0.5 · 0.96 =
+/// 0.98. The result has no labels: `sum by (le)` keeps only `le`, which
+/// the quantile drops.
+#[tokio::test]
+async fn classic_histogram_quantiles_run_with_prometheus_interpolation() {
+    let selector = format!(r#"rate({BUCKET_METRIC}{{service="orders"}}[5m])"#);
+    let queries: Vec<String> = [0.5, 0.95, 0.99]
+        .iter()
+        .map(|q| format!("histogram_quantile({q}, sum by (le) ({selector}))"))
+        .collect();
+    let queries: Vec<&str> = queries.iter().map(String::as_str).collect();
+    let plan_json = bucket_plan_json(&queries).await;
+    let run = run_data_plane(
+        &plan_json,
+        &bucket_samples(),
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query.len(), 3);
+    for (answers, expected) in run.answers_per_query.iter().zip([0.3, 0.9, 0.98]) {
+        assert_eq!(answers.len(), 1, "{answers:?}");
+        let (labels, value) = &answers[0];
+        assert!(labels.is_empty(), "le is dropped: {labels:?}");
+        assert!((value - expected).abs() < 1e-9, "{value} vs {expected}");
+    }
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// One p99 per `job` (`sum by (job, le)`): the result keeps `job` and
+/// drops `le`. `worker`'s rank 0.99 · 5 = 4.95 lies past every finite
+/// bucket (most observations are in `+Inf` alone), so Prometheus answers
+/// the largest finite bound, 1; `idle` has no observations, so NaN. The
+/// p99 alert (`> 0.5`) keeps `api` (0.98) and `worker` (1) and drops
+/// `idle` (NaN compares false). A selector that matches no series gives an
+/// empty result. Over one series' buckets, without `sum`, the result keeps
+/// that series' labels but `le` (and the name `rate` dropped).
+#[tokio::test]
+async fn a_classic_histogram_quantile_keeps_labels_and_handles_inf_and_empty_input() {
+    let by_job = format!("histogram_quantile(0.99, sum by (job, le) (rate({BUCKET_METRIC}[5m])))");
+    let alert = format!("{by_job} > 0.5");
+    let empty = format!(
+        r#"histogram_quantile(0.5, sum by (le) (rate({BUCKET_METRIC}{{service="missing"}}[5m])))"#
+    );
+    // Without `sum`, each series is its own histogram: `instance` 1's
+    // buckets alone (rates 0.5, 1.5, 2, 2), keeping its labels but `le`.
+    let per_series = format!(
+        r#"histogram_quantile(0.99, rate({BUCKET_METRIC}{{service="orders",instance="1"}}[5m]))"#
+    );
+    let plan_json = bucket_plan_json(&[&by_job, &alert, &empty, &per_series]).await;
+    let run = run_data_plane(
+        &plan_json,
+        &bucket_samples(),
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    let job = |answers: &[Answer]| -> Vec<(String, f64)> {
+        answers
+            .iter()
+            .map(|(labels, value)| {
+                assert_eq!(labels.keys().collect::<Vec<_>>(), ["job"], "{labels:?}");
+                (labels["job"].clone(), *value)
+            })
+            .collect()
+    };
+    for answers in [&run.answers_per_query, &run.reference_answers_per_query] {
+        let per_job = job(&answers[0]);
+        assert_eq!(per_job.len(), 3, "{per_job:?}");
+        assert_eq!(per_job[0].0, "api");
+        assert!((per_job[0].1 - 0.98).abs() < 1e-9, "{per_job:?}");
+        assert_eq!(per_job[1].0, "idle");
+        assert!(per_job[1].1.is_nan(), "{per_job:?}");
+        assert_eq!(per_job[2], ("worker".to_string(), 1.0));
+        let alerting = job(&answers[1]);
+        assert_eq!(alerting.len(), 2, "{alerting:?}");
+        assert_eq!(alerting[0].0, "api");
+        assert_eq!(alerting[1], ("worker".to_string(), 1.0));
+        assert!(answers[2].is_empty(), "{:?}", answers[2]);
+        let [(labels, value)] = answers[3].as_slice() else {
+            panic!("{:?}", answers[3]);
+        };
+        assert_eq!(
+            labels.keys().collect::<Vec<_>>(),
+            ["instance", "job", "service"],
+            "{labels:?}"
+        );
+        assert!((value - 0.98).abs() < 1e-9, "{value}");
+    }
+
+// ── PromQL absent() (issue #895) ─────────────────────────────────────────────
+
+/// The Prometheus stale marker, which Remote Write carries when a series ends.
+const STALE_MARKER: f64 = f64::from_bits(0x7ff0_0000_0000_0002);
+
+/// The answers of the exact plan of PromQL `query` over `samples` of `m`
+/// (6 series, every 10 s), with the query-time reference's.
+async fn exact_answers(query: &str, samples: &[RawDataSample]) -> Vec<Answer> {
+    let plan_json = plan_json_for(
+        exact_workload(&[query], ""),
+        &DeploymentCapabilities::default(),
+    )
+    .await;
+    let run = run_data_plane(&plan_json, samples, EVALUATION_MS, &mut SummaryStore::new());
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+    run.answers_per_query[0].clone()
+}
+
+/// A sample of `m` at `ago_ms` before `EVALUATION_MS` with `labels`.
+fn m_sample(labels: &[(&str, &str)], ago_ms: i64, value: f64) -> RawDataSample {
+    let mut sample = sample("m", "1", EVALUATION_MS - ago_ms, value);
+    for (name, label) in labels {
+        sample.labels.insert(name.to_string(), label.to_string());
+    }
+    sample
+}
+
+/// `absent(v)` answers as Prometheus' `funcAbsent`: one sample of value 1
+/// when `v` selects no series at the evaluation time, labelled with the
+/// selector's equality matchers (`job`, not the negated `instance` and
+/// `env`); no sample when some series matches, whatever its value
+/// (0 included). A series whose newest sample is the stale marker has
+/// ended, so `absent` answers 1 again.
+#[tokio::test]
+async fn absent_answers_as_prometheus_through_the_installed_plan() {
+    let query = r#"absent(m{job="a",instance!="3",env!="prod"})"#;
+    let one = vec![(BTreeMap::from([("job".to_string(), "a".to_string())]), 1.0)];
+    // No sample at all.
+    assert_eq!(exact_answers(query, &[]).await, one);
+    // Only series the matchers reject: job b, env prod, instance 3.
+    let rejected = [
+        m_sample(&[("job", "b")], 1_000, 1.0),
+        m_sample(&[("job", "a"), ("env", "prod")], 1_000, 1.0),
+        {
+            let mut other = m_sample(&[("job", "a")], 1_000, 1.0);
+            other.labels.insert("instance".into(), "3".into());
+            other
+        },
+    ];
+    assert_eq!(exact_answers(query, &rejected).await, one);
+    // A matching series, valued 0 or not: no sample.
+    for value in [0.0, 5.0] {
+        let samples = [m_sample(&[("job", "a")], 1_000, value)];
+        assert_eq!(exact_answers(query, &samples).await, vec![], "{value}");
+    }
+    // The last matching series ended (its newest sample is stale).
+    let ended = [
+        m_sample(&[("job", "a")], 5_000, 5.0),
+        m_sample(&[("job", "a")], 1_000, STALE_MARKER),
+    ];
+    assert_eq!(exact_answers(query, &ended).await, one);
+}
+
+/// `absent(m)` (no matcher) synthesizes a label-less sample; the missing-job
+/// alert shape (several equality matchers) keeps every matcher's label.
+#[tokio::test]
+async fn absent_labels_come_from_the_equality_matchers_only() {
+    assert_eq!(
+        exact_answers("absent(m)", &[]).await,
+        vec![(BTreeMap::new(), 1.0)]
+    );
+    let alert = r#"absent(m{kubernetes_namespace="mw-content-history-reconcile-enrich",release="production",job_name="mw_content_history_reconcile_enrich"})"#;
+    let labels: BTreeMap<String, String> = [
+        (
+            "kubernetes_namespace",
+            "mw-content-history-reconcile-enrich",
+        ),
+        ("release", "production"),
+        ("job_name", "mw_content_history_reconcile_enrich"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect();
+    assert_eq!(exact_answers(alert, &[]).await, vec![(labels.clone(), 1.0)]);
+    let running = [m_sample(
+        &labels
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>(),
+        1_000,
+        3600.0,
+    )];
+    assert_eq!(exact_answers(alert, &running).await, vec![]);
+}
