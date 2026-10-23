@@ -1,7 +1,8 @@
 //! SQL heavy-hitter queries through Stage 1 (every Pass 1 choice composed)
 //! and physical ASAP-aware optimization: exact top-k sorts by the ranked
-//! measure, descending, whatever the group keys are called or typed, and no
-//! valid candidate is pruned.
+//! measure, descending, whatever the group keys are called or typed, no
+//! valid candidate is pruned, and every candidate answers the ranked value
+//! then the group keys naming each ranked item.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_logical_asap_optimization::per_computation_candidates::{
@@ -155,7 +156,7 @@ async fn group_key_named_value_ranks_by_count() {
     check(
         "SELECT value, COUNT(*) AS c FROM metrics GROUP BY value ORDER BY c DESC LIMIT 5",
         "count(Int64(1))",
-        &["topk_5"],
+        &["topk_5", "value"],
     )
     .await;
 }
@@ -166,7 +167,7 @@ async fn integer_group_key_ranks_by_count() {
     check(
         "SELECT port, COUNT(*) AS c FROM metrics GROUP BY port ORDER BY c DESC LIMIT 5",
         "count(Int64(1))",
-        &["topk_5"],
+        &["topk_5", "port"],
     )
     .await;
 }
@@ -178,7 +179,7 @@ async fn multi_key_ranks_by_count() {
         "SELECT host, port, COUNT(*) AS c FROM metrics GROUP BY host, port \
          ORDER BY c DESC LIMIT 5",
         "count(Int64(1))",
-        &["topk_5"],
+        &["topk_5", "host", "port"],
     )
     .await;
 }
@@ -189,7 +190,7 @@ async fn sum_ranking_ranks_by_sum() {
     check(
         "SELECT port, SUM(value) AS s FROM metrics GROUP BY port ORDER BY s DESC LIMIT 5",
         "sum(metrics.value)",
-        &["topk_5"],
+        &["topk_5", "port"],
     )
     .await;
 }

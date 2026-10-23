@@ -2982,11 +2982,10 @@ fn whole_expression(
 
 /// A heap's top-k `estimate` (`[partitions.., items.., topk]`, one row per
 /// ranked item) in `target`'s columns: its `[keys.., topk_k]`, with
-/// `topk_k` the estimated Float64 weight, then, over PromQL rows, the item
-/// columns. This is the exact top-k's physical shape (its ranked rows'
-/// value, then their other labels; a SQL result keeps only its logical
-/// columns), so readers of `[keys.., topk_k]` find those columns where they
-/// were.
+/// `topk_k` the estimated Float64 weight, then the item columns. This is
+/// the exact top-k's physical shape (its ranked rows' value, then the
+/// columns naming each ranked item: PromQL labels, SQL group keys), so
+/// readers of `[keys.., topk_k]` find those columns where they were.
 fn ranked_as_topk(
     target: &OperatorNode,
     estimate: Rc<OperatorNode>,
@@ -3014,10 +3013,6 @@ fn ranked_as_topk(
                 ))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let promql = match target.non_asap() {
-        Some(NonASAPOp::Aggregate { child, .. }) => reads_only_time_series(child),
-        _ => false,
-    };
     let cols = key_columns
         .iter()
         .zip(keys)
@@ -3025,7 +3020,7 @@ fn ranked_as_topk(
         .chain(std::iter::once(column(estimated, &ranked.name)))
         .chain(
             (0..estimated)
-                .filter(|index| promql && !key_columns.contains(index))
+                .filter(|index| !key_columns.contains(index))
                 .map(|index| column(index, &fields[index].name)),
         )
         .collect();

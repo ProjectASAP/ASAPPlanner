@@ -87,7 +87,9 @@
 //! candidate's and as the frontend declares. Over PromQL rows it also keeps
 //! the series identity, after them: `topk` answers whole input series, so
 //! each answer carries the chosen series' full label set. PromQL rows without
-//! one (e.g. of `sum by (job)`) keep their other string label columns instead.
+//! one (e.g. of `sum by (job)`) keep their other string label columns instead,
+//! and SQL rows their other group keys (the ranked item, e.g. `host` of
+//! `GROUP BY host ORDER BY COUNT(*) DESC LIMIT k`).
 //! `topk_k` carries the ranked value's type and nullability (the frontend
 //! declares a non-null `Utf8` placeholder); casting the value to `Utf8` would
 //! not make it the same answer.
@@ -1064,14 +1066,17 @@ fn implement_topk(
             alias: Some(asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into()),
             expr: ScalarExpr::Column(identity),
         });
-    } else if reads_only_time_series(&child) {
-        // PromQL rows without it (e.g. those of `sum by (job)`) carry their
-        // labels as plain string columns: each answer keeps the ones the
-        // logical columns do not, so `topk(k, sum by (job) (...))` answers
-        // each job. A SQL result keeps only its logical columns.
+    } else {
+        // Otherwise each answer keeps the columns naming its ranked item
+        // that the logical columns do not: over PromQL rows without the
+        // identity (e.g. those of `sum by (job)`) their string labels, so
+        // `topk(k, sum by (job) (...))` answers each job; over a SQL
+        // aggregate its other group keys, so `ORDER BY COUNT(*) DESC LIMIT
+        // k` over `GROUP BY host` answers each host.
+        let promql = reads_only_time_series(&child);
         for (index, field) in child.schema.fields.iter().enumerate() {
-            let is_label = field.dtype == FieldDataType::Plain(DataType::Utf8);
-            if is_label && index != value && !key_fields.iter().any(|k| k.name == field.name) {
+            let names_item = !promql || field.dtype == FieldDataType::Plain(DataType::Utf8);
+            if names_item && index != value && !key_fields.iter().any(|k| k.name == field.name) {
                 cols.push(ProjectItem {
                     alias: Some(field.name.clone()),
                     expr: ScalarExpr::Column(index),
