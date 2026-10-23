@@ -1748,7 +1748,9 @@ fn search_flag_picks_the_search_algorithm() {
     assert!(report.get("routed_to_legacy").is_none(), "{report}");
     let milp_report = &report["milp"];
     assert!(milp_report["rounds"].as_u64().unwrap() >= 1, "{report}");
-    assert!(milp_report["gap"].as_f64().unwrap() <= 1e-9, "{report}");
+    // Certified: the gap is within the search's tolerance (1e-4), which
+    // also absorbs the solver's and the incumbent cutoff's tolerances.
+    assert!(milp_report["gap"].as_f64().unwrap() <= 1e-4, "{report}");
     assert!(
         milp_report["lower_bound"].as_f64().unwrap() <= price(&milp) * (1.0 + 1e-9),
         "{report}"
@@ -1789,8 +1791,9 @@ fn search_flag_is_checked() {
     assert!(stderr.contains("drop it with --exhaustive"), "{stderr}");
 }
 
-/// The MILP search stopped by its time limit before any valid plan says
-/// so (never a plan called optimal), and the limit needs the MILP search.
+/// The MILP search stopped by its time limit before its first round
+/// returns the warm-start plan (each query planned alone) with its gap,
+/// never called optimal, and the limit needs the MILP search.
 #[test]
 fn milp_time_limit_is_reported_and_needs_the_milp_search() {
     let document = document_of(&[
@@ -1802,11 +1805,15 @@ fn milp_time_limit_is_reported_and_needs_the_milp_search() {
         "0",
     ]);
     let selection = &document["stage3_plan_selection"];
-    assert!(selection["selected"].is_null(), "{selection}");
+    assert!(selection["selected"].is_string(), "{selection}");
+    let milp = &selection["search"]["milp"];
+    assert_eq!(milp["time_limit_reached"], true, "{selection}");
+    assert_eq!(milp["rounds"], 0, "{selection}");
+    let gap = milp["gap"].as_f64().unwrap();
+    assert!(gap > 1e-4 && gap <= 1.0, "{selection}");
     assert!(
-        selection["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("reached its time limit")),
+        milp["lower_bound"].as_f64().unwrap()
+            <= selection["search"]["incumbent_cost"].as_f64().unwrap(),
         "{selection}"
     );
     let (_, stderr) = failure(&[
