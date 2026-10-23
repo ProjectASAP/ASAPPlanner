@@ -1053,28 +1053,36 @@ fn coefficients_of(
     for node in &mut at_ingestion.nodes {
         node.output_state.timing = ExecutionTiming::IngestionTime;
     }
-    let direct_at_ingestion = per_computation(
+    // `None` only when Stage 3 cannot place it at ingestion time (a
+    // grouping with no window below it); any other pricing error leaves
+    // its price unknown, charged 0 (a lower bound).
+    let direct_at_ingestion = match per_computation(
         &at_ingestion,
         entries,
         scan_lookback,
         horizons,
         data,
         models,
-    )
-    .ok()
-    .map(|ingestion_priced| PartCoefficients {
-        cost_per_unit_rate: direct
-            .iter()
-            .map(|id| {
-                let p = &ingestion_priced[id];
-                p.cpu_ops_per_second * prices.cost_per_cpu_op
-                    + p.scanned_bytes_per_second * prices.cost_per_scanned_byte
-                    + p.average_memory_bytes * prices.cost_per_memory_byte_second
-                    + p.disk_bytes as f64 * prices.cost_per_disk_byte_second
-            })
-            .sum(),
-        work_ms: 0.0,
-    });
+    ) {
+        Ok(ingestion_priced) => Some(PartCoefficients {
+            cost_per_unit_rate: direct
+                .iter()
+                .map(|id| {
+                    let p = &ingestion_priced[id];
+                    p.cpu_ops_per_second * prices.cost_per_cpu_op
+                        + p.scanned_bytes_per_second * prices.cost_per_scanned_byte
+                        + p.average_memory_bytes * prices.cost_per_memory_byte_second
+                        + p.disk_bytes as f64 * prices.cost_per_disk_byte_second
+                })
+                .sum(),
+            work_ms: 0.0,
+        }),
+        Err(SelectionError::Cost {
+            error: crate::cost::analytical::AnalyticalCostError::IngestionGroupingWithoutWindow,
+            ..
+        }) => None,
+        Err(_) => Some(PartCoefficients::default()),
+    };
     // The group's own node built once at query time, in memory: the state
     // it holds instead of its working memory.
     let mut built_once = dag.nodes[position[&root]].clone();
@@ -2017,11 +2025,13 @@ mod tests {
     /// Two queries whose children are read by two ingestion-time slots,
     /// without raw data: Stage 3 runs each shared child as one ingestion
     /// copy, so the model charges its ingestion-time part once, not once
-    /// per slot reading it.
+    /// per slot reading it. Every 10 s, the two quantiles' query-time
+    /// node over their shared build is one node read by both queries of
+    /// one class: its held memory is charged at their union rate.
     #[test]
     fn the_model_is_a_lower_bound_for_a_child_of_two_ingestion_time_slots() {
         let within = AccuracyTarget::max_error(0.01);
-        for intervals in [[300_000, 300_000], [60_000, 300_000]] {
+        for intervals in [[300_000, 300_000], [60_000, 300_000], [10_000, 10_000]] {
             for window in ["5m", "1m"] {
                 assert_model_is_a_lower_bound_in(
                     &[

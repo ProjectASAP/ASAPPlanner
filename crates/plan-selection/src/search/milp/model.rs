@@ -1410,12 +1410,31 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     // A part read by several queries runs at their classes' union rate,
     // not their rates' sum: per reader, its held memory is charged at
     // `union / sum` of that reader's rate (Stage 3's rate-weighted mean
-    // latency at the part's rate). The least ratio over the group's class
-    // sets bounds it from below.
-    let per_reader_share: Vec<f64> = input
-        .group_queries
-        .iter()
-        .map(|queries_of| {
+    // latency at the part's rate). Its readers may be any query of a group
+    // with a choice computing one of its nodes (a node several groups
+    // share is one node); the least ratio over those queries' class sets
+    // bounds it from below.
+    let mut groups_of_key: HashMap<u64, BTreeSet<usize>> = HashMap::new();
+    for (c, choice) in input.choices.iter().enumerate() {
+        for (key, _) in work_of(c) {
+            groups_of_key
+                .entry(key)
+                .or_default()
+                .insert(choice.group.0 as usize);
+        }
+    }
+    let per_reader_share: Vec<f64> = (0..input.choices.len())
+        .map(|c| {
+            let mut queries_of: BTreeSet<usize> = input.group_queries
+                [input.choices[c].group.0 as usize]
+                .iter()
+                .copied()
+                .collect();
+            for (key, _) in work_of(c) {
+                for &g in &groups_of_key[&key] {
+                    queries_of.extend(input.group_queries[g].iter().copied());
+                }
+            }
             input
                 .union_rate
                 .iter()
@@ -1437,7 +1456,7 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         let held = held_of(c);
         let longest = longest_latency[q];
         if let Some(&h) = held_per_reader.get(&(q, c)) {
-            let share = per_reader_share[input.choices[c].group.0 as usize];
+            let share = per_reader_share[c];
             let coefficient = held.per_reader_per_ms * input.queries[q].rate * share;
             constraints.push(constraint!(
                 h >= coefficient * (latency_of(q) - longest * (1 - w))
