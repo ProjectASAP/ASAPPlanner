@@ -23,6 +23,10 @@ use asap_types::workload::{
 };
 use planner_layering_common::*;
 
+/// The largest gap a certified search reports (the planner's
+/// `GAP_TOLERANCE`): the solver's own tolerances.
+const CERTIFIED_GAP: f64 = 1e-4;
+
 /// Every cost model, each objective of cost model 3 included, with
 /// `memory_gb` of cluster memory: small enough that some candidates do not
 /// fit, so the limits are exercised too.
@@ -1486,7 +1490,9 @@ fn three_way(
         .as_ref()
         .and_then(|milp| milp.gap)
         .expect("the MILP reports its gap");
-    if gap.abs() > 1e-9 {
+    // Certified: within the solver's tolerances (the planner's
+    // GAP_TOLERANCE), never reported as exactly 0 unless proven.
+    if gap.abs() > CERTIFIED_GAP {
         return Err(format!("{label}: MILP gap {gap}"));
     }
     Ok(true)
@@ -1619,7 +1625,7 @@ fn three_way_on_two_independent_clusters() {
         assert!(
             milp.clusters
                 .iter()
-                .all(|c| c.gap.is_some_and(|gap| gap <= 1e-9)),
+                .all(|c| c.gap.is_some_and(|gap| gap <= CERTIFIED_GAP)),
             "{label}: {milp:?}"
         );
         assert_eq!(

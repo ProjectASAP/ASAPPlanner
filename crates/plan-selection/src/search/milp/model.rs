@@ -419,6 +419,10 @@ pub(crate) fn solve(input: &ModelInput) -> Result<Option<ModelSolution>, SolveEr
 /// them of the incumbent tie with it.
 const CUTOFF_TOLERANCE: f64 = 1e-6;
 
+/// How far above the cutoff, in the scaled objective, the solver may
+/// prune a node (HiGHS's default MIP feasibility tolerance).
+const SOLVER_PRUNING_TOLERANCE: f64 = 1e-6;
+
 /// How far below its objective a solve stopped at the solver's gap
 /// tolerance (a relative gap of about 1e-6 at most) may have its optimum.
 const GAP_TOLERANCE: f64 = 1e-4;
@@ -2405,9 +2409,16 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             self.proven_bound = solved.as_ref().and_then(|s| s.proven_bound);
         }
         let Some(solution) = solved else {
-            // No plan left below the incumbent: it is optimal.
+            // No plan left below the incumbent: it is optimal, but under a
+            // cutoff only to the cutoff's and the solver's tolerances, which
+            // the bound keeps, so the gap shows them.
             if let Some(incumbent) = self.selector.cheapest_price() {
-                self.bound = Some(incumbent);
+                self.bound = Some(match input.objective_cutoff {
+                    Some(_) => (incumbent * (1.0 - CUTOFF_TOLERANCE)
+                        - SOLVER_PRUNING_TOLERANCE / price_scale(input))
+                    .max(0.0),
+                    None => incumbent,
+                });
             }
             self.done = true;
             return Ok(());
@@ -4206,7 +4217,10 @@ pub(crate) mod tests {
             cluster.finish().unwrap().0.search.milp.unwrap()
         };
         let every = run(crate::search::milp::decode::MAX_FREE_COMBINATIONS);
-        assert_eq!(every.gap, Some(0.0));
+        assert!(
+            every.gap.is_some_and(|gap| gap <= GAP_TOLERANCE),
+            "{every:?}"
+        );
         let none = run(0);
         assert!(none.rounds > 1);
         assert_eq!(none.lower_bound, none.first_lower_bound);
