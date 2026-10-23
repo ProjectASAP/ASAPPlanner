@@ -291,6 +291,7 @@ pub(super) fn choice_parts(
                         }
                         let keys = keys_of(&physical.dag, cache.keys_mut());
                         let shallow = shallow_keys(&physical.dag, cache.keys_mut());
+                        let widened = widened_keys_of(&physical.dag, cache.keys_mut());
                         let private: Vec<bool> =
                             keys.iter().map(|k| !children.contains(k)).collect();
                         let builds: Vec<usize> = (0..physical.dag.nodes.len())
@@ -319,6 +320,7 @@ pub(super) fn choice_parts(
                             physical,
                             &keys,
                             &shallow,
+                            &widened,
                             &private,
                             &child_roots,
                             &horizons,
@@ -517,41 +519,33 @@ fn raw_windows(memo: &Memo) -> HashMap<u64, BTreeSet<u64>> {
     windows
 }
 
-/// A key equal for builds that may be one node once shared: `node`'s
-/// operator kind, state family and panes, and the raw sources below it.
-fn build_key(
-    dag: &PhysicalASAPDAG,
-    node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
-    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut sources: BTreeSet<u64> = BTreeSet::new();
-    let mut stack = vec![node.id];
-    let mut seen = HashSet::new();
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        if let Some(n) = dag.nodes.iter().find(|n| n.id == id) {
-            if let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &n.payload {
-                sources.insert(super::scans::raw_horizon_key(source));
-            }
-        }
-        stack.extend(producers_of.get(&id).into_iter().flatten().copied());
-    }
-    let shape = match &node.payload {
-        Operator::ASAP(ASAPOp::PaneChain {
-            family,
-            pane_width_ms,
-            pane_count,
-            ..
-        }) => format!("chain {family:?} {pane_width_ms} {pane_count}"),
-        Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => format!("build {family:?}"),
-        other => other.kind_name().to_string(),
-    };
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (shape, sources).hash(&mut hasher);
-    hasher.finish()
+/// Each node's key up to scan widening, by position: its payload over its
+/// producers' keys, each scan by its source alone (the identical-expression
+/// rule may widen a source's scans to one label set), schemas left out.
+/// Equal keys of two groups' nodes mean the nodes are one node once shared.
+fn widened_keys_of(dag: &PhysicalASAPDAG, interned: &mut HashMap<String, u32>) -> Vec<u32> {
+    let mut key_of: HashMap<PhysicalASAPNodeId, u32> = HashMap::new();
+    dag.nodes
+        .iter()
+        .map(|node| {
+            let text = match &node.payload {
+                Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                    format!("widened scan {source:?}")
+                }
+                payload => {
+                    let payload = payload.map_children(|id| key_of.get(id).copied());
+                    format!(
+                        "widened {}",
+                        serde_json::to_string(&payload).expect("a physical node serializes")
+                    )
+                }
+            };
+            let next = interned.len() as u32;
+            let key = *interned.entry(text).or_insert(next);
+            key_of.insert(node.id, key);
+            key
+        })
+        .collect()
 }
 
 /// The child groups of `candidate`: its own, and every other group whose
@@ -703,6 +697,7 @@ fn coefficients_of(
     physical: &PhysicalCandidate,
     keys: &[u32],
     shallow: &[u32],
+    widened: &[u32],
     private: &[bool],
     child_roots: &[Option<u32>],
     horizons: &HashMap<u64, u64>,
@@ -852,7 +847,7 @@ fn coefficients_of(
             cost_per_unit_rate: below.iter().map(|&n| per_rate(n)).sum(),
             work_ms: work(&below),
             state_bytes,
-            key: build_key(dag, &dag.nodes[position[&id]], &producers_of),
+            key: u64::from(widened[position[&id]]),
         });
         shared_node_keys.push(
             below
@@ -886,11 +881,10 @@ fn coefficients_of(
                 false => rate_cost,
             },
             work_ms: work(&part),
-            // Builds that may be one node when shared (a site's build at
-            // one threshold, identical expressions, scans widened to one
-            // label set): the same kind, family and panes over the same
-            // sources. Keyed loosely (a wider key only lowers the bound).
-            shared_site: Some((build_key(dag, node, &producers_of), 0)),
+            // Builds that are one node when shared (a site's build at one
+            // threshold, identical expressions, scans widened to one label
+            // set): equal over equal inputs, scans' projections aside.
+            shared_site: Some((u64::from(widened[position[&node.id]]), 0)),
         });
         slot_keys.push(shallow[position[&node.id]]);
         part_keys.push(part.iter().map(|id| keys[position[id]]).collect());
