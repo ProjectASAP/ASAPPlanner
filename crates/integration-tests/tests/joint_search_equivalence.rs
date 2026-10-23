@@ -2045,3 +2045,25 @@ fn a_time_limited_memo_milp_run_returns_the_warm_start_plan() {
     assert!(milp.gap.is_some(), "{milp:?}");
     assert!(run.stage3_selected_logical.is_some());
 }
+
+/// A scalar root over a difference of two operators, scaled by a literal,
+/// with an absolute target: an accuracy rule judging the difference by the
+/// query's target would rule out plans the scaled scalar accepts. The
+/// three searches agree.
+#[test]
+fn three_way_scalar_scaled_difference_with_an_absolute_target() {
+    for (query, error) in [
+        (
+            "scalar(sum(rate(c_total[5m])) - sum(rate(c_total[1m]))) / 1000",
+            1.0,
+        ),
+        ("scalar(quantile(0.9, m) - quantile(0.5, m)) / 1000", 0.01),
+    ] {
+        let target = AccuracyTarget::max_error(error).accuracy_metric(AccuracyMetric::ABSOLUTE);
+        let workload = workload_of(&[(query, 60_000)], target);
+        let roots = lower_promql_roots(&workload).unwrap();
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap();
+        assert_three_way(query, &roots, &entries, &data, PlanningModels::builtin());
+    }
+}

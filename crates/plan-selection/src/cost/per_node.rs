@@ -1189,6 +1189,7 @@ mod tests {
                 roots_of: vec![0],
             }],
             candidates: vec![candidates],
+            scalar_root_queries: Vec::new(),
         };
         add_window_composition(&mut memo, &entries);
         let panes = memo.candidates[0]

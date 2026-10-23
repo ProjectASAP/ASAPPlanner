@@ -49,7 +49,18 @@ use crate::search::memo::{CandidateOrigin, GroupId, ImplementationCandidate, Mem
 pub(crate) fn memo_of<Id: Clone>(per_computation: &PerComputationCandidates<Id>) -> Memo {
     let (groups, group_of) = hash_consed(&per_computation.roots);
     let candidates = pass1_candidates(per_computation, &groups, &group_of);
-    Memo { groups, candidates }
+    let scalar_root_queries = per_computation
+        .roots
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, root))| matches!(root, QueryRoot::Scalar(_)))
+        .map(|(q, _)| q)
+        .collect();
+    Memo {
+        groups,
+        candidates,
+        scalar_root_queries,
+    }
 }
 
 /// Each original node (of `roots`), by address, to its group.

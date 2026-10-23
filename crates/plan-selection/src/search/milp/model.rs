@@ -3327,7 +3327,14 @@ fn guarantee_requirements(
     // at least one of them through it. None when one has no target, or
     // the group is free.
     let target = |g: usize| -> Option<f64> {
-        if free[g] {
+        // A scalar root composes its operators' guarantees further (an
+        // error scaled by a literal, a ratio): its target says nothing of
+        // a group's own.
+        if free[g]
+            || reaching[g]
+                .iter()
+                .any(|q| memo.scalar_root_queries.contains(q))
+        {
             return None;
         }
         let targets: Option<Vec<f64>> = reaching[g]
@@ -3427,6 +3434,14 @@ fn guarantee_requirements(
                 && target == AccuracyMetric::ABSOLUTE_STREAM_L1)
     };
     for (&(g, c), own) in &choices_of {
+        // A scalar root's metric is its expression's, not the group's.
+        if memo.groups[g]
+            .roots_of
+            .iter()
+            .any(|q| memo.scalar_root_queries.contains(q))
+        {
+            continue;
+        }
         let targets: Vec<AccuracyMetric> = memo.groups[g]
             .roots_of
             .iter()
@@ -3499,7 +3514,8 @@ fn guarantee_requirements(
 
 /// Which pairs of approximate inputs a query's root may not combine
 /// ([`guarantee_requirements`] tries one approximate child at a time): for
-/// a root group's choice with exactly two children that may approximate
+/// a query root group's choice (the query's output itself, not an operand
+/// of a scalar root) with exactly two children that may approximate
 /// (each child candidate reading only exact groups), each pair of child
 /// candidates whose composed root fails one of the group's queries'
 /// targets (Stage 3's guarantee check) at every size threshold of the
@@ -3567,7 +3583,14 @@ fn pair_guarantee_rules(
     };
     let mut rules = Vec::new();
     for (&(g, c), own) in &choices_of {
-        let queries = &memo.groups[g].roots_of;
+        // The queries whose output this group's node is: a scalar root
+        // composes it further.
+        let queries: Vec<usize> = memo.groups[g]
+            .roots_of
+            .iter()
+            .copied()
+            .filter(|q| !memo.scalar_root_queries.contains(q))
+            .collect();
         if queries.is_empty() {
             continue;
         }
@@ -3613,7 +3636,7 @@ fn pair_guarantee_rules(
                                 &replaced,
                                 &mut HashMap::new(),
                             );
-                            fails(&composed, queries)
+                            fails(&composed, &queries)
                         })
                     })
                 });
@@ -4091,6 +4114,31 @@ pub(crate) mod tests {
             "{group_choice:?}: {:?}",
             selector.rejected.last()
         );
+    }
+
+    /// The ratio of two quantiles within 5% as the operand of a scalar root
+    /// (as `scalar(a / b) * 1000`, whose own guarantee the scalar composes
+    /// further): the ratio's group is listed among that query's roots, but
+    /// its output is not the query's, so no pair is ruled out by the
+    /// query's target. As the output itself, the pair is ruled out.
+    #[test]
+    fn no_pair_rule_judges_a_scalar_roots_operand_by_the_querys_target() {
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.01);
+        let queries = [
+            "quantile_over_time(0.9, m[1h])",
+            "quantile_over_time(0.5, m[1h])",
+            "quantile_over_time(0.9, m[1h]) / quantile_over_time(0.5, m[1h])",
+        ];
+        let targets = vec![target; queries.len()];
+        let (per_computation, entries, data) = workload(&queries, &targets, None);
+        let models = PlanningModels::builtin();
+        let mut memo = crate::search::memo::brute_force::memo(&per_computation, &entries);
+        let (input, _) = model_input_of(&memo, &entries, &data, models).unwrap();
+        let rules = pair_guarantee_rules(&memo, &input.choices, &entries, &data, models);
+        assert!(!rules.is_empty());
+        memo.scalar_root_queries = vec![2];
+        let rules = pair_guarantee_rules(&memo, &input.choices, &entries, &data, models);
+        assert!(rules.is_empty(), "{rules:?}");
     }
 
     /// `queries`' workload: each query every minute, at `targets`, over a

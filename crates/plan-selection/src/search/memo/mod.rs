@@ -80,6 +80,10 @@ pub(crate) struct Memo {
     pub groups: Vec<MemoGroup>,
     /// Each group's implementation candidates, by group index.
     pub candidates: Vec<Vec<ImplementationCandidate>>,
+    /// The queries whose root is a scalar expression: listed in
+    /// [`MemoGroup::roots_of`] of each group the expression reads, whose
+    /// output is then not the query's.
+    pub scalar_root_queries: Vec<usize>,
 }
 
 /// One way to implement a group: its node as Stage 2 implements it, over
