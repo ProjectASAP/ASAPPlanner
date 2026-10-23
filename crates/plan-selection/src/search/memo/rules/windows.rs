@@ -33,7 +33,8 @@ use asap_logical_asap_optimization::accuracy::estimators::size_for_all_readers;
 use asap_logical_asap_optimization::asap_aware_cse::{
     may_change_rollup_candidate, pane_candidates, rollup_candidate_for, rollup_candidates,
     rollup_pass2_candidates, topk_reuse_candidates, window_composition_pass2_candidates,
-    with_pane_chain, with_resized_build, RollupCandidate,
+    window_composition_shared_chain_candidates, with_pane_chain, with_resized_build,
+    RollupCandidate,
 };
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::flat::flatten;
@@ -466,10 +467,9 @@ pub(crate) fn add_rollup_windows(memo: &mut Memo, entries: &[QueryWorkloadEntry]
                     if panes.len() != 2 {
                         continue;
                     }
-                    let Ok(pass2_candidates) = window_composition_pass2_candidates(&roots, &panes)
-                    else {
-                        continue;
-                    };
+                    // Only the pair in panes, reading a shared chain.
+                    let pass2_candidates =
+                        window_composition_shared_chain_candidates(&roots, &panes);
                     for pass2_candidate in pass2_candidates {
                         if pass2_candidate.pane_candidates.len() != 2
                             || pass2_candidate.shared_chains.is_empty()

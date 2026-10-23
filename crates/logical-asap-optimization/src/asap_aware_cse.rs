@@ -1273,27 +1273,52 @@ pub fn window_composition_pass2_candidates(
             pane_candidates: chosen.clone(),
             shared_chains: Vec::new(),
         });
-        // Shared chains on the members' own finest panes, then, when it
-        // groups them differently, on the gcd of their widths.
-        let on_member_panes = nested_window_groups(&chosen);
-        let on_gcd_panes = gcd_window_groups(&chosen);
-        push_shared_chains(roots, &chosen, &on_member_panes, &mut pass2_candidates);
-        if on_gcd_panes != on_member_panes {
-            push_shared_chains(roots, &chosen, &on_gcd_panes, &mut pass2_candidates);
-        }
-        // Coarser groupings read a finer grouping's chain, rolled up.
         let chosen_rollable: Vec<bool> = (0..candidates.len())
             .filter(|&i| mask >> i & 1 == 1)
             .map(|i| rollable[i])
             .collect();
-        push_shared_chains(
-            roots,
-            &chosen,
-            &rollup_window_groups(&chosen, &chosen_rollable),
-            &mut pass2_candidates,
-        );
+        push_every_shared_chain(roots, &chosen, &chosen_rollable, &mut pass2_candidates);
     }
     Ok(pass2_candidates)
+}
+
+/// The Pass 2 candidates of [`window_composition_pass2_candidates`] in
+/// which every one of `candidates` is in panes and reads a shared chain:
+/// that function's candidates of the whole set with shared chains, in its
+/// order, without building the other subsets'.
+pub fn window_composition_shared_chain_candidates(
+    roots: &[QueryRoot],
+    candidates: &[PaneCandidate],
+) -> Vec<WindowCompositionPass2Candidate> {
+    let rollable = rollable_pane_candidates(roots, candidates);
+    let mut pass2_candidates = Vec::new();
+    push_every_shared_chain(roots, candidates, &rollable, &mut pass2_candidates);
+    pass2_candidates
+}
+
+/// Push the shared-chain Pass 2 candidates of the subset `chosen` (each
+/// rollable or not, `chosen_rollable`) of [`window_composition_pass2_candidates`].
+fn push_every_shared_chain(
+    roots: &[QueryRoot],
+    chosen: &[PaneCandidate],
+    chosen_rollable: &[bool],
+    pass2_candidates: &mut Vec<WindowCompositionPass2Candidate>,
+) {
+    // Shared chains on the members' own finest panes, then, when it
+    // groups them differently, on the gcd of their widths.
+    let on_member_panes = nested_window_groups(chosen);
+    let on_gcd_panes = gcd_window_groups(chosen);
+    push_shared_chains(roots, chosen, &on_member_panes, pass2_candidates);
+    if on_gcd_panes != on_member_panes {
+        push_shared_chains(roots, chosen, &on_gcd_panes, pass2_candidates);
+    }
+    // Coarser groupings read a finer grouping's chain, rolled up.
+    push_shared_chains(
+        roots,
+        chosen,
+        &rollup_window_groups(chosen, chosen_rollable),
+        pass2_candidates,
+    );
 }
 
 /// Push the Pass 2 candidate in which each of `groups` reads its one shared
