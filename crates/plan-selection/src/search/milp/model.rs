@@ -1574,6 +1574,15 @@ pub(crate) fn search<Id: Clone + std::fmt::Debug>(
             return Ok(found);
         }
     }
+    // One cluster, or clusters whose plans do not add up: the whole memo,
+    // unless the clusters spent the time limit.
+    if clusters.len() > 1
+        && time_limit_ms.is_some_and(|limit| started.elapsed().as_millis() >= u128::from(limit))
+    {
+        return Err(SelectionError::Solver(
+            "the MILP search reached its time limit: the clusters' plans did not combine into one plan whose cost is their sum, and no time is left to search the memo as one".to_string(),
+        ));
+    }
     // One cluster, or clusters whose plans do not add up: the whole memo.
     let all: Vec<usize> = (0..entries.len()).collect();
     let mut cluster = ClusterLoop::new(
@@ -1685,6 +1694,10 @@ fn run_rounds<Id: Clone>(loops: &mut [ClusterLoop<'_, Id>]) -> Result<(), Select
                 let Some(k) = ready.pop_front() else {
                     break;
                 };
+                // A queued solve's time limit counts from when it starts.
+                if !loops[k].start_solve() {
+                    continue;
+                }
                 let input = loops[k]
                     .input
                     .take()
@@ -1795,13 +1808,18 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         })
     }
 
-    /// Prepare the next round's solve (its time limit); `false`
-    /// when the loop has stopped.
+    /// Whether the loop has another round; `false` when it has stopped.
     fn next_round(&mut self) -> bool {
         if self.done || self.time_limit_reached {
             self.done = true;
             return false;
         }
+        true
+    }
+
+    /// Start the round's solve: set its time limit to the time left now;
+    /// `false` (the loop stops at its time limit) when none is left.
+    fn start_solve(&mut self) -> bool {
         let remaining_s = self
             .time_limit_ms
             .map(|limit| limit as f64 / 1e3 - self.started.elapsed().as_secs_f64());
