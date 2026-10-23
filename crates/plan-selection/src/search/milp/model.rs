@@ -2172,6 +2172,15 @@ fn run_rounds<Id: Clone>(loops: &mut [ClusterLoop<'_, Id>]) -> Result<(), Select
                     .map_err(|e| SelectionError::Solver(format!("no solver thread: {e}")))?;
                 solving += 1;
             }
+            // The warm starts run here, while the first rounds solve: each
+            // loop's incumbent is offered before its first solution is
+            // taken.
+            for cluster in loops.iter_mut() {
+                if !cluster.warm_started {
+                    cluster.warm_started = true;
+                    cluster.offer_independent_plan();
+                }
+            }
             if solving == 0 {
                 return Ok(());
             }
@@ -2235,6 +2244,9 @@ struct ClusterLoop<'a, Id> {
     proven_bound: Option<f64>,
     /// The loop has stopped: certified, out of plans, or out of time.
     done: bool,
+    /// Its warm-start incumbent ([`Self::offer_independent_plan`]) has
+    /// been offered.
+    warm_started: bool,
     /// The most combinations of free nodes' options decoding evaluates
     /// ([`crate::search::milp::decode::MAX_FREE_COMBINATIONS`]).
     max_free_combinations: usize,
@@ -2284,15 +2296,13 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             max_free_combinations: crate::search::milp::decode::MAX_FREE_COMBINATIONS,
             unevaluated_bound: None,
             decode_failures: 0,
-        })
-        .map(|mut cluster| {
-            cluster.offer_independent_plan();
-            cluster
+            warm_started: false,
         })
     }
 
-    /// Offer the selector the warm-start incumbent before round 1: each
-    /// query planned alone by the legacy search, with no sharing between
+    /// Offer the selector the warm-start incumbent before the loop takes
+    /// its first solution ([`run_rounds`] runs it while the first rounds
+    /// solve): each query planned alone by the legacy search, with no sharing between
     /// queries, the plans side by side. It only sets the starting
     /// incumbent: certification still compares the MILP lower bound with
     /// the incumbent, and a time-limited loop has a plan to report. A
@@ -2537,6 +2547,8 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             unevaluated_bound,
             decode_failures,
             proven_bound,
+            started,
+            time_limit_ms,
             ..
         } = self;
         let mut input = input.expect("the loop's input");
@@ -2547,15 +2559,21 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         if let Some(proven) = proven_bound {
             bound = Some(bound.map_or(proven, |bound| bound.max(proven)));
         }
-        if time_limit_reached && bound.is_none() {
-            // No round solved to optimality: the relaxation's optimum (all
-            // cuts kept) is still a lower bound for the gap.
+        // The time the search's limit leaves, in s; `None` for no limit.
+        let remaining_s =
+            time_limit_ms.map(|limit| limit as f64 / 1e3 - started.elapsed().as_secs_f64());
+        if time_limit_reached && bound.is_none() && remaining_s.is_none_or(|s| s > 0.0) {
+            // No round solved to optimality and no solver bound: the
+            // relaxation's optimum (all cuts kept), within the time left, is
+            // still a lower bound for the gap. With no time left, or a
+            // relaxation stopped or failed, the gap stays unknown, never
+            // the incumbent lost.
             input.relaxed = true;
-            input.time_limit_s = None;
-            // A failed relaxation leaves the gap unknown, never the
-            // incumbent lost.
+            input.time_limit_s = remaining_s;
             if let Ok(Some(relaxation)) = solve(&input) {
-                bound = Some(relaxation.objective);
+                if relaxation.optimal {
+                    bound = Some(relaxation.objective);
+                }
             }
         }
         if !time_limit_reached && iterations == 1 && selector.cheapest_price().is_none() {

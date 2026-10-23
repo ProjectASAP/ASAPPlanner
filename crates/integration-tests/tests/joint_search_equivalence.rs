@@ -1919,9 +1919,11 @@ fn dump_random_workload() {
 
 /// With no time left for a single MILP round, memo-milp still returns a
 /// plan: the warm-start incumbent, each query planned alone by the legacy
-/// search with no sharing, offered before round 1. Under cost model 1 its
-/// cost is the sum of the queries' own plans' costs, and the run reports
-/// the time limit and a gap to the MILP lower bound.
+/// search with no sharing, offered before the first solution is taken.
+/// Under cost model 1 its cost is the sum of the queries' own plans'
+/// costs. The run reports the time limit and stops without solving
+/// anything more: with no time left for a relaxation, the gap is unknown
+/// (never a lower bound above the incumbent).
 #[test]
 fn a_time_limited_memo_milp_run_returns_the_warm_start_plan() {
     let queries = [
@@ -1955,6 +1957,7 @@ fn a_time_limited_memo_milp_run_returns_the_warm_start_plan() {
                 .unwrap()
         })
         .sum();
+    let started = std::time::Instant::now();
     let run = run_stage1_to_stage3_with(
         roots.iter().cloned().enumerate().collect(),
         &entries,
@@ -1972,6 +1975,10 @@ fn a_time_limited_memo_milp_run_returns_the_warm_start_plan() {
     assert!((cost - alone).abs() <= 1e-9 * alone, "{cost} vs {alone}");
     let milp = selection.search.milp.unwrap();
     assert!(milp.time_limit_reached, "{milp:?}");
-    assert!(milp.gap.is_some(), "{milp:?}");
+    assert!(
+        milp.gap.is_none() || milp.lower_bound.is_some_and(|bound| bound <= cost),
+        "{milp:?}"
+    );
+    assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
     assert!(run.stage3_selected_logical.is_some());
 }
