@@ -194,10 +194,11 @@ An argument whose output provably lacks `le`, such as
 `sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
 returns an empty vector for it. Candidate search keeps the classic form as one
 retained exact ordinary sub-DAG for every accuracy target; it has no sketch
-candidate. `histogram_quantiles` lowers each branch the same way; the
-Fallback compiler accepts its `Concat` of relabeled branches and rejects
-duplicate output label sets. Nested aggregation, such as
-`sum(histogram_quantile(…))`, resolves the renamed sample-value column.
+candidate. `histogram_quantiles` lowers each branch the same way, but
+`compile` does not yet bind its `Concat` of relabeled branches. Nested
+aggregation, such as `sum(histogram_quantile(…))`, does not compile either:
+the outer aggregate looks for a value column named `value`, while the
+quantile's is named `histogram_quantile`. Both are tracked in issue #911.
 
 Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 

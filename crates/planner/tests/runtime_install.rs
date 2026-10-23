@@ -3231,6 +3231,7 @@ async fn classic_histogram_quantiles_run_with_prometheus_interpolation() {
         EVALUATION_MS,
         &mut SummaryStore::new(),
     );
+    assert_eq!(run.answers_per_query.len(), 3);
     for (answers, expected) in run.answers_per_query.iter().zip([0.3, 0.9, 0.98]) {
         assert_eq!(answers.len(), 1, "{answers:?}");
         let (labels, value) = &answers[0];

@@ -1114,9 +1114,12 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 // histogram per label set but `le`, interpolated as
                 // Prometheus does. The frontend groups `without (le)`.
                 if let [AggIntent::HistogramQuantile { q, le }] = measures.as_slice() {
-                    if !(keys.is_without() && keys.keys() == [*le]) {
+                    if !(keys.is_without()
+                        && keys.keys() == [*le]
+                        && filters.iter().all(Option::is_none))
+                    {
                         return Err(invalid(
-                            "a histogram quantile groups by every label but its bucket bound",
+                            "histogram_quantile requires grouping without([le]) and no measure filter",
                         ));
                     }
                     return Operator::series_histogram_quantile(input.clone(), *q, *le);
