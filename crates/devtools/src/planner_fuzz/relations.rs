@@ -750,11 +750,13 @@ fn root_estimate(root: &Rc<OperatorNode>) -> Result<(Rc<OperatorNode>, SketchSta
 }
 
 /// `root` with its root estimate ([`root_estimate`]) replaced by
-/// `estimate`; a root `Project` keeps the columns `estimate` still has, by
-/// name.
+/// `estimate`; a root `Project` keeps its columns by name, except the
+/// `dropped` group labels (a rollup's), which it loses. Any other column
+/// `estimate` lacks is an error.
 fn with_root_estimate(
     root: &Rc<OperatorNode>,
     estimate: Rc<OperatorNode>,
+    dropped: &[String],
 ) -> Result<Rc<OperatorNode>, String> {
     let Some(NonASAPOp::Project {
         cols,
@@ -764,24 +766,22 @@ fn with_root_estimate(
     else {
         return Ok(estimate);
     };
-    let cols = cols
-        .iter()
-        .filter_map(|item| {
-            let ScalarExpr::Column(index) = item.expr else {
-                return None;
-            };
-            let name = &child.schema.fields[index].name;
-            let new = estimate
-                .schema
-                .fields
-                .iter()
-                .position(|f| f.name == *name)?;
-            Some(ProjectItem {
+    let mut kept = Vec::new();
+    for item in cols {
+        let ScalarExpr::Column(index) = item.expr else {
+            return Err("q's root projection is not of plain columns".into());
+        };
+        let name = &child.schema.fields[index].name;
+        match estimate.schema.fields.iter().position(|f| f.name == *name) {
+            Some(new) => kept.push(ProjectItem {
                 alias: item.alias.clone(),
                 expr: ScalarExpr::Column(new),
-            })
-        })
-        .collect();
+            }),
+            None if dropped.contains(name) => {}
+            None => return Err(format!("the new estimate has no column {name}")),
+        }
+    }
+    let cols = kept;
     OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
         cols,
         qualifier: qualifier.clone(),
@@ -957,6 +957,14 @@ pub fn witness_root(
                         .ok_or_else(|| format!("q's state has no column {label}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            // The finer group labels the rollup drops.
+            let dropped: Vec<String> = state
+                .schema
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .filter(|name| !labels.contains(name))
+                .collect();
             let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![state],
                 newest_panes: None,
@@ -968,7 +976,7 @@ pub fn witness_root(
                 query,
             }))
             .map_err(|e| format!("rollup estimate: {e}"))?;
-            with_root_estimate(q_root, estimate)
+            with_root_estimate(q_root, estimate, &dropped)
         }
         Witness::NewestPanes { window_ms } => {
             rewrite_root(q_root, "summary merge over a pane chain", |node| {
@@ -1052,7 +1060,7 @@ pub fn witness_root(
                 query: statistic.clone(),
             }))
             .map_err(|e| format!("estimate: {e}"))?;
-            with_root_estimate(q_root, estimate)
+            with_root_estimate(q_root, estimate, &[])
         }
         Witness::UnionWithLast => {
             let other_root = base_roots
@@ -1082,7 +1090,7 @@ pub fn witness_root(
                 query,
             }))
             .map_err(|e| format!("union estimate: {e}"))?;
-            with_root_estimate(q_root, estimate)
+            with_root_estimate(q_root, estimate, &[])
         }
     }
 }

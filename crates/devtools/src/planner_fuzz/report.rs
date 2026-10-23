@@ -612,7 +612,8 @@ pub fn run_campaign(campaign: &Campaign, settings: FuzzSettings) -> std::io::Res
             tally.distinct_violations.insert(signature(&check));
             // One draft per class: a class already drafted is counted, not
             // shrunk again.
-            if drafted.contains(&draft_key(&check, &measurement)) {
+            let original_key = draft_key(&check, &measurement);
+            if !drafted.insert(original_key) {
                 continue;
             }
             let request = WorkerRequest::Shrink {
@@ -637,10 +638,10 @@ pub fn run_campaign(campaign: &Campaign, settings: FuzzSettings) -> std::io::Res
                 None => ((*check).clone(), measurement, None),
             };
             let key = draft_key(&shrunk, &shrunk_measurement);
-            if !drafted.insert(key.clone()) {
+            // The shrunk check may land in another class; draft it once.
+            if key != draft_key(&check, &shrunk_measurement) && !drafted.insert(key.clone()) {
                 continue;
             }
-            drafted.insert(draft_key(&check, &shrunk_measurement));
             let mut finding = Finding {
                 id: format!("s{}-{:03}", campaign.seed, summary.findings.len() + 1),
                 relation,
