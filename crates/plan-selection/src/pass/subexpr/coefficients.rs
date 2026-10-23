@@ -812,7 +812,10 @@ fn coefficients_of(
             let node = &dag.nodes[position[&id]];
             let shareable = matches!(node.payload, Operator::ASAP(_))
                 || !node.output_schema.unique_keys.is_empty();
-            id != root && shareable && !is_build(&node.payload) && query_time(id)
+            // A scan apart is its reader's own; a shared one is its scan
+            // group's choice (`Choice::scan_children`).
+            let scan = matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. }));
+            id != root && shareable && !scan && !is_build(&node.payload) && query_time(id)
         })
         .map(|id| {
             let below = walk(id)
