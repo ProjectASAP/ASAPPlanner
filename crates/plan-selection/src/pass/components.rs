@@ -658,7 +658,7 @@ fn combined_pass2<Id>(runs: &[Stage1ToStage3Run<Id>]) -> Option<Option<Pass2Cand
 /// `rejection` of a component's search with its query numbers (`q<n>` at
 /// the start of its id or reason, counted within the component) renamed to
 /// the workload's.
-fn renumber(rejection: Rejection, component: &[usize]) -> Rejection {
+pub(crate) fn renumber(rejection: Rejection, component: &[usize]) -> Rejection {
     let rename = |text: &str| -> String {
         let Some(rest) = text.strip_prefix('q') else {
             return text.to_string();

@@ -1470,15 +1470,15 @@ pub(crate) type MemoSearchResult =
 /// The cheapest valid plan of `per_computation`'s memo under cost model 1
 /// (the caller routes cost models 2 and 3 to the legacy search).
 ///
-/// Lazy loop: solve the model (a lower bound: it omits memory held while a
-/// query runs, and checks composed guarantees only on its incumbents);
-/// price the solution's group choice exactly, as the reference search
-/// prices one ([`offer_group_choice`]: every threshold, identical-expression
-/// variant and Stage 2 materialization), which updates the incumbent; add
-/// a no-good cut excluding that group choice; stop when the model's bound
-/// reaches the incumbent. Each group choice is priced at most once, so the
-/// loop ends, and the incumbent is the reference search's optimum.
-pub(crate) fn search<Id: Clone>(
+/// The memo is split into independent clusters ([`super::clusters::split`]):
+/// queries linked through no shared group, coupling site or charged raw
+/// horizon. Each cluster is its own workload with its own model and lazy
+/// loop ([`ClusterLoop`]), the clusters' solves running in parallel; each
+/// loop stops once its incumbent is certified. Under cost model 1 the
+/// workload's cost is the sum of the clusters' costs, so the clusters'
+/// plans together are the workload's cheapest plan
+/// ([`super::clusters::combine`], which checks the sum).
+pub(crate) fn search<Id: Clone + std::fmt::Debug>(
     per_computation: &PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -1488,58 +1488,314 @@ pub(crate) fn search<Id: Clone>(
     let started = std::time::Instant::now();
     let memo = super::search::memo(per_computation, entries);
     let memo_stats = super::search::stats(&memo, started.elapsed().as_secs_f64() * 1e3);
-    let mut input = model_input_of(&memo, entries, data, models, started)?;
-    let trace = std::env::var_os("JP_MILP_TRACE").is_some();
-    let mut selector = PlanSelector::new(entries, data, models, false)?;
-    let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
-    let mut number = 0usize;
-    let mut iterations = 0u32;
-    let mut bound = None;
-    let mut first_bound = None;
-    let mut solver_ms = 0.0;
-    let mut size = (0, 0);
-    let mut time_limit_reached = false;
-    loop {
-        if time_limit_reached {
-            break;
+    let roots: Vec<QueryRoot> = per_computation
+        .roots
+        .iter()
+        .map(|(_, root)| root.clone())
+        .collect();
+    let clusters = super::clusters::split(&memo, &roots, &models);
+    if clusters.len() > 1 {
+        if let Some(found) = search_clusters(
+            per_computation,
+            &clusters,
+            entries,
+            data,
+            models,
+            started,
+            time_limit_ms,
+        ) {
+            let mut found = found?;
+            found.0.search.memo = Some(memo_stats);
+            return Ok(found);
         }
-        let remaining_s =
-            time_limit_ms.map(|limit| limit as f64 / 1e3 - started.elapsed().as_secs_f64());
+    }
+    // One cluster, or clusters whose plans do not add up: the whole memo.
+    let all: Vec<usize> = (0..entries.len()).collect();
+    let mut cluster = ClusterLoop::new(
+        memo,
+        per_computation,
+        &all,
+        entries,
+        data,
+        models,
+        started,
+        time_limit_ms,
+    )?;
+    run_rounds(std::slice::from_mut(&mut cluster))?;
+    let (mut selection, selected, roots, report) = cluster.finish()?;
+    selection.search.memo = Some(memo_stats);
+    if let Some(milp) = &mut selection.search.milp {
+        milp.clusters = vec![report];
+    }
+    Ok((selection, selected, roots))
+}
+
+/// [`search`] over `clusters` (each a list of the workload's queries), each
+/// searched as its own workload, their plans combined into the workload's.
+/// `None` when a cluster's Pass 1 fails or the combined plan's cost is not
+/// the sum of the clusters' (the caller then searches the memo as one).
+fn search_clusters<Id: Clone + std::fmt::Debug>(
+    per_computation: &PerComputationCandidates<Id>,
+    clusters: &[Vec<usize>],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    started: std::time::Instant,
+    time_limit_ms: Option<u64>,
+) -> Option<MemoSearchResult> {
+    // Each cluster's workload: its queries' roots through Pass 1, pruned
+    // for the deployment as the caller pruned the workload's.
+    let mut workloads = Vec::with_capacity(clusters.len());
+    for queries in clusters {
+        let roots: Vec<(Id, QueryRoot)> = queries
+            .iter()
+            .map(|&q| per_computation.roots[q].clone())
+            .collect();
+        let inventory =
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots)
+                .ok()?
+                .without_unsupported_summaries(models.deployment_capabilities);
+        let cluster_entries: Vec<QueryWorkloadEntry> =
+            queries.iter().map(|&q| entries[q].clone()).collect();
+        workloads.push((inventory, cluster_entries));
+    }
+    let mut loops = Vec::with_capacity(clusters.len());
+    for (queries, (inventory, cluster_entries)) in clusters.iter().zip(&workloads) {
+        let memo = super::search::memo(inventory, cluster_entries);
+        match ClusterLoop::new(
+            memo,
+            inventory,
+            queries,
+            cluster_entries,
+            data,
+            models,
+            started,
+            time_limit_ms,
+        ) {
+            Ok(cluster) => loops.push(cluster),
+            Err(error) => return Some(Err(error)),
+        }
+    }
+    if let Err(error) = run_rounds(&mut loops) {
+        return Some(Err(error));
+    }
+    let mut found = Vec::with_capacity(loops.len());
+    for (queries, cluster) in clusters.iter().zip(loops) {
+        match cluster.finish() {
+            Ok(result) => found.push(result),
+            Err(SelectionError::NoValidCandidate(rejected)) => {
+                return Some(Err(SelectionError::NoValidCandidate(
+                    rejected
+                        .into_iter()
+                        .map(|r| super::super::components::renumber(r, queries))
+                        .collect(),
+                )))
+            }
+            Err(error) => return Some(Err(error)),
+        }
+    }
+    super::clusters::combine(found, clusters, entries, data, models).map(Ok)
+}
+
+/// Solve every cluster's model until each loop stops: up to one solver
+/// thread per core, each solving one cluster's model (HiGHS keeps one
+/// state per model), while this thread runs the incumbent evaluation of
+/// the solutions that come back. A loop's next solve starts as soon as
+/// its last solution is evaluated.
+fn run_rounds<Id: Clone>(loops: &mut [ClusterLoop<'_, Id>]) -> Result<(), SelectionError> {
+    /// A solver thread's stack: HiGHS recurses in presolve.
+    const SOLVER_STACK_BYTES: usize = 256 << 20;
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(loops.len())
+        .max(1);
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut ready: std::collections::VecDeque<usize> = (0..loops.len())
+            .filter(|&k| loops[k].next_round())
+            .collect();
+        let mut solving = 0usize;
+        loop {
+            while solving < threads {
+                let Some(k) = ready.pop_front() else {
+                    break;
+                };
+                let input = loops[k]
+                    .input
+                    .take()
+                    .expect("a loop's input between solves");
+                let sender = sender.clone();
+                std::thread::Builder::new()
+                    .stack_size(SOLVER_STACK_BYTES)
+                    .spawn_scoped(scope, move || {
+                        let solve_started = std::time::Instant::now();
+                        let solved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            solve(&input)
+                        }))
+                        .unwrap_or_else(|_| Err("the solver panicked".to_string()));
+                        // The receiver is gone only once the search failed.
+                        let _ = sender.send((k, input, solved, solve_started.elapsed()));
+                    })
+                    .map_err(|e| SelectionError::Solver(format!("no solver thread: {e}")))?;
+                solving += 1;
+            }
+            if solving == 0 {
+                return Ok(());
+            }
+            let (k, input, solved, solve_time) = receiver
+                .recv()
+                .expect("every solver thread sends its result");
+            solving -= 1;
+            loops[k].input = Some(input);
+            loops[k].solver_ms += solve_time.as_secs_f64() * 1e3;
+            loops[k].take_solution(solved.map_err(SelectionError::Solver)?)?;
+            if loops[k].next_round() {
+                ready.push_back(k);
+            }
+        }
+    })
+}
+
+/// One cluster's lazy loop: solve the model (a lower bound: it omits memory held while a
+/// query runs, and checks composed guarantees only on its incumbents);
+/// evaluate the solution's group choice exactly, as the reference search
+/// does ([`super::search::offer_group_choice`]: every threshold,
+/// identical-expression variant and Stage 2 materialization), which
+/// updates the incumbent; add a no-good cut excluding that group choice;
+/// stop when the MILP lower bound reaches the incumbent cost. Each group
+/// choice is evaluated at most once, so the loop ends, and the incumbent is
+/// the reference search's optimum.
+///
+/// A round is [`Self::next_round`], [`solve`] of [`Self::input`] (on a
+/// solver thread, [`run_rounds`]), then [`Self::take_solution`].
+struct ClusterLoop<'a, Id> {
+    memo: Memo,
+    per_computation: &'a PerComputationCandidates<Id>,
+    /// Its queries, by index in the whole workload; query `i` of
+    /// `entries` is `queries[i]`.
+    queries: &'a [usize],
+    entries: &'a [QueryWorkloadEntry],
+    data: &'a DataWorkload,
+    models: PlanningModels<'a>,
+    started: std::time::Instant,
+    time_limit_ms: Option<u64>,
+    /// The model; `None` while a solver thread has it.
+    input: Option<ModelInput>,
+    selector: PlanSelector<'a>,
+    logical: HashMap<String, Vec<QueryRoot>>,
+    number: usize,
+    iterations: u32,
+    bound: Option<f64>,
+    first_bound: Option<f64>,
+    solver_ms: f64,
+    size: (u64, u64),
+    time_limit_reached: bool,
+    /// The loop has stopped: certified, out of plans, or out of time.
+    done: bool,
+    trace: bool,
+}
+
+impl<'a, Id: Clone> ClusterLoop<'a, Id> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        memo: Memo,
+        per_computation: &'a PerComputationCandidates<Id>,
+        queries: &'a [usize],
+        entries: &'a [QueryWorkloadEntry],
+        data: &'a DataWorkload,
+        models: PlanningModels<'a>,
+        started: std::time::Instant,
+        time_limit_ms: Option<u64>,
+    ) -> Result<Self, SelectionError> {
+        let input = model_input_of(&memo, entries, data, models, started)?;
+        Ok(Self {
+            memo,
+            per_computation,
+            queries,
+            entries,
+            data,
+            models,
+            started,
+            time_limit_ms,
+            input: Some(input),
+            selector: PlanSelector::new(entries, data, models, false)?,
+            logical: HashMap::new(),
+            number: 0,
+            iterations: 0,
+            bound: None,
+            first_bound: None,
+            solver_ms: 0.0,
+            size: (0, 0),
+            time_limit_reached: false,
+            done: false,
+            trace: std::env::var_os("JP_MILP_TRACE").is_some(),
+        })
+    }
+
+    /// Prepare the next round's solve (its time limit and cutoff); `false`
+    /// when the loop has stopped.
+    fn next_round(&mut self) -> bool {
+        if self.done || self.time_limit_reached {
+            self.done = true;
+            return false;
+        }
+        let remaining_s = self
+            .time_limit_ms
+            .map(|limit| limit as f64 / 1e3 - self.started.elapsed().as_secs_f64());
         if remaining_s.is_some_and(|s| s <= 0.0) {
-            time_limit_reached = true;
-            break;
+            self.time_limit_reached = true;
+            self.done = true;
+            return false;
         }
+        let input = self.input.as_mut().expect("the loop's input");
         input.time_limit_s = remaining_s;
-        iterations += 1;
-        let solve_started = std::time::Instant::now();
-        input.cutoff = selector
+        self.iterations += 1;
+        input.cutoff = self
+            .selector
             .cheapest_price()
             .map(|incumbent| incumbent - 1e-9 * incumbent.abs());
-        let solved = solve(&input).map_err(SelectionError::Solver)?;
-        solver_ms += solve_started.elapsed().as_secs_f64() * 1e3;
+        true
+    }
+
+    /// The rest of a round, given its solve's result: the solution's
+    /// incumbent evaluation and its cut, or the end of the loop.
+    fn take_solution(&mut self, solved: Option<ModelSolution>) -> Result<(), SelectionError> {
+        let iterations = self.iterations;
+        let trace = self.trace;
+        let memo = &self.memo;
+        let input = self.input.as_mut().expect("the loop's input");
         // The solver stopped at the time limit: its plan is no bound, but
-        // it is still priced, as a last round, and may become the
+        // it is still evaluated, as a last round, and may become the
         // incumbent.
         let last_round = solved.as_ref().is_some_and(|s| !s.optimal);
-        time_limit_reached |= last_round;
+        self.time_limit_reached |= last_round;
         let Some(solution) = solved else {
             // No plan left below the incumbent: it is optimal.
-            if let Some(incumbent) = selector.cheapest_price() {
-                bound = Some(incumbent);
+            if let Some(incumbent) = self.selector.cheapest_price() {
+                self.bound = Some(incumbent);
             }
-            break;
+            self.done = true;
+            return Ok(());
         };
         if !last_round {
-            bound = Some(solution.objective);
-            first_bound.get_or_insert(solution.objective);
+            self.bound = Some(solution.objective);
+            self.first_bound.get_or_insert(solution.objective);
         }
         if trace {
-            eprintln!("milp: round {iterations} bound {:.6e} incumbent {:?} solve {:.0}ms vars {} cons {} at {:.1}s", solution.objective, selector.cheapest_price(), solve_started.elapsed().as_secs_f64()*1e3, solution.variables, solution.constraints, started.elapsed().as_secs_f64());
+            eprintln!(
+                "milp: round {iterations} bound {:.6e} incumbent {:?} vars {} cons {} at {:.1}s",
+                solution.objective,
+                self.selector.cheapest_price(),
+                solution.variables,
+                solution.constraints,
+                self.started.elapsed().as_secs_f64()
+            );
         }
-        size = (solution.variables, solution.constraints);
-        if let Some(incumbent) = selector.cheapest_price() {
+        self.size = (solution.variables, solution.constraints);
+        if let Some(incumbent) = self.selector.cheapest_price() {
             if !last_round && solution.objective >= incumbent - 1e-9 * incumbent.abs() {
-                break;
+                self.done = true;
+                return Ok(());
             }
         }
         // The solution's group choice: the candidate each chosen choice
@@ -1596,28 +1852,28 @@ pub(crate) fn search<Id: Clone>(
                 eprintln!("milp: round {iterations} requirements not met (pair cut {cut})");
             }
             if cut {
-                continue;
+                return Ok(());
             }
         }
         let offer_started = std::time::Instant::now();
-        let offered_before = number;
+        let offered_before = self.number;
         super::search::offer_group_choice(
-            &memo,
-            per_computation,
+            memo,
+            self.per_computation,
             &group_choice,
-            entries,
-            data,
-            models,
-            &mut selector,
-            &mut logical,
-            &mut number,
+            self.entries,
+            self.data,
+            self.models,
+            &mut self.selector,
+            &mut self.logical,
+            &mut self.number,
         )?;
         if trace {
             eprintln!(
-                "milp: round {iterations} priced {} plans in {:.1}s; last rejection {:?}",
-                number - offered_before,
+                "milp: round {iterations} evaluated {} plans in {:.1}s; last rejection {:?}",
+                self.number - offered_before,
                 offer_started.elapsed().as_secs_f64(),
-                selector
+                self.selector
                     .rejections()
                     .last()
                     .map(|r| (r.cause, r.reason.chars().take(200).collect::<String>()))
@@ -1644,94 +1900,147 @@ pub(crate) fn search<Id: Clone>(
         input
             .excluded
             .push((excluded, outside, groups as f64 - 1.0));
+        Ok(())
     }
-    if std::env::var_os("JP_MILP_CHECK").is_some() {
-        // Debugging aid: every group choice's exact price against the
-        // model's value restricted to it.
-        let incumbent = selector.cheapest_price().unwrap_or(f64::INFINITY);
-        for (group_choice, exact, value) in
-            lower_bound_check(&memo, per_computation, &input, entries, data, models)?
-        {
-            let bad = value.is_none_or(|v| v > exact * (1.0 + 1e-9));
-            if bad || exact < incumbent * (1.0 - 1e-9) {
-                eprintln!(
-                    "check: {group_choice:?} exact {exact:.7e} model {value:?}{}",
-                    if bad {
-                        " NOT A LOWER BOUND"
-                    } else {
-                        " BELOW INCUMBENT"
+
+    /// The stopped loop's selection, physical candidate and logical roots,
+    /// with its MILP report, and its cluster's report.
+    fn finish(
+        self,
+    ) -> Result<
+        (
+            Selection,
+            PhysicalCandidate,
+            Vec<QueryRoot>,
+            crate::MilpClusterReport,
+        ),
+        SelectionError,
+    > {
+        let Self {
+            memo,
+            per_computation,
+            queries,
+            entries,
+            data,
+            models,
+            input,
+            selector,
+            mut logical,
+            iterations,
+            mut bound,
+            first_bound,
+            solver_ms,
+            size,
+            time_limit_reached,
+            ..
+        } = self;
+        let mut input = input.expect("the loop's input");
+        if std::env::var_os("JP_MILP_CHECK").is_some() {
+            // Debugging aid: every group choice's exact cost against the
+            // model's value restricted to it.
+            let incumbent = selector.cheapest_price().unwrap_or(f64::INFINITY);
+            for (group_choice, exact, value) in
+                lower_bound_check(&memo, per_computation, &input, entries, data, models)?
+            {
+                let bad = value.is_none_or(|v| v > exact * (1.0 + 1e-9));
+                if bad || exact < incumbent * (1.0 - 1e-9) {
+                    eprintln!(
+                        "check: {group_choice:?} exact {exact:.7e} model {value:?}{}",
+                        if bad {
+                            " NOT A LOWER BOUND"
+                        } else {
+                            " BELOW INCUMBENT"
+                        }
+                    );
+                }
+            }
+        }
+        if time_limit_reached && bound.is_none() {
+            // No round solved to optimality: the relaxation's optimum (all
+            // cuts kept) is still a lower bound for the gap.
+            input.relaxed = true;
+            input.time_limit_s = None;
+            if let Some(relaxation) = solve(&input).map_err(SelectionError::Solver)? {
+                bound = Some(relaxation.objective);
+            }
+        }
+        if !time_limit_reached && iterations == 1 && selector.cheapest_price().is_none() {
+            // Infeasible from the first round: name the queries with no plan
+            // of their own.
+            let mut without_plan = Vec::new();
+            for (q, entry) in entries.iter().enumerate().take(input.queries.len()) {
+                let mut alone = model_input_clone(&input);
+                for (r, query) in alone.queries.iter_mut().enumerate() {
+                    if r != q {
+                        query.roots.clear();
                     }
-                );
-            }
-        }
-    }
-    if time_limit_reached && bound.is_none() {
-        // No round solved to optimality: the relaxation's optimum (all cuts
-        // kept) is still a lower bound for the gap.
-        input.relaxed = true;
-        input.time_limit_s = None;
-        if let Some(relaxation) = solve(&input).map_err(SelectionError::Solver)? {
-            bound = Some(relaxation.objective);
-        }
-    }
-    if !time_limit_reached && iterations == 1 && selector.cheapest_price().is_none() {
-        // Infeasible from the first round: name the queries with no plan
-        // of their own.
-        let mut without_plan = Vec::new();
-        for (q, entry) in entries.iter().enumerate().take(input.queries.len()) {
-            let mut alone = model_input_clone(&input);
-            for (r, query) in alone.queries.iter_mut().enumerate() {
-                if r != q {
-                    query.roots.clear();
+                }
+                if solve(&alone).map_err(SelectionError::Solver)?.is_none() {
+                    without_plan.push(format!("query {} ({})", queries[q], entry.query.0));
                 }
             }
-            if solve(&alone).map_err(SelectionError::Solver)?.is_none() {
-                without_plan.push(format!("query {q} ({})", entry.query.0));
+            if !without_plan.is_empty() {
+                return Err(SelectionError::Solver(format!(
+                    "no valid plan for {}{}",
+                    without_plan.join(", "),
+                    match models.deployment_capabilities.raw_data_retained {
+                        true => "",
+                        false => " in a deployment that keeps no raw data",
+                    }
+                )));
             }
         }
-        if !without_plan.is_empty() {
+        if time_limit_reached && selector.cheapest_price().is_none() {
             return Err(SelectionError::Solver(format!(
-                "no valid plan for {}{}",
-                without_plan.join(", "),
-                match models.deployment_capabilities.raw_data_retained {
-                    true => "",
-                    false => " in a deployment that keeps no raw data",
-                }
+                "the MILP search reached its time limit after {iterations} rounds before finding a valid plan"
             )));
         }
+        let (mut selection, selected) = selector.finish()?;
+        let price = selection.costs[&selection.selected].cost_per_second;
+        // Once no plan below the incumbent is left, the bound is the
+        // incumbent.
+        let lower_bound = bound.map(|bound| match price {
+            Some(price) => bound.min(price),
+            None => bound,
+        });
+        selection.search.incumbent_cost = price;
+        let report = crate::MilpReport {
+            lower_bound,
+            first_lower_bound: first_bound,
+            gap: gap(price, lower_bound),
+            rounds: iterations,
+            variable_count: size.0,
+            constraint_count: size.1,
+            solver_time_ms: solver_ms as u64,
+            time_limit_reached,
+            clusters: Vec::new(),
+        };
+        let cluster = crate::MilpClusterReport {
+            queries: queries.to_vec(),
+            groups: memo.groups.len(),
+            rounds: report.rounds,
+            gap: report.gap,
+            lower_bound: report.lower_bound,
+            incumbent_cost: price,
+            solver_time_ms: report.solver_time_ms,
+            time_limit_reached,
+        };
+        selection.search.milp = Some(report);
+        let roots = logical
+            .remove(&selected.from_logical)
+            .expect("the selection's logical roots are kept");
+        Ok((selection, selected, roots, cluster))
     }
-    if time_limit_reached && selector.cheapest_price().is_none() {
-        return Err(SelectionError::Solver(format!(
-            "the MILP search reached its time limit after {iterations} rounds before finding a valid plan"
-        )));
+}
+
+/// (incumbent cost − lower bound) / incumbent cost, at least 0; `None`
+/// without both.
+pub(super) fn gap(incumbent_cost: Option<f64>, lower_bound: Option<f64>) -> Option<f64> {
+    match (incumbent_cost, lower_bound) {
+        (Some(price), Some(bound)) if price > 0.0 => Some(((price - bound) / price).max(0.0)),
+        (Some(_), Some(_)) => Some(0.0),
+        _ => None,
     }
-    let (mut selection, selected) = selector.finish()?;
-    let price = selection.costs[&selection.selected].cost_per_second;
-    selection.search.memo = Some(memo_stats);
-    // Once no plan below the incumbent is left, the bound is the incumbent.
-    let lower_bound = bound.map(|bound| match price {
-        Some(price) => bound.min(price),
-        None => bound,
-    });
-    selection.search.incumbent_cost = price;
-    selection.search.milp = Some(crate::MilpReport {
-        lower_bound,
-        first_lower_bound: first_bound,
-        gap: match (price, lower_bound) {
-            (Some(price), Some(bound)) if price > 0.0 => Some(((price - bound) / price).max(0.0)),
-            (Some(_), Some(_)) => Some(0.0),
-            _ => None,
-        },
-        rounds: iterations,
-        variable_count: size.0,
-        constraint_count: size.1,
-        solver_time_ms: solver_ms as u64,
-        time_limit_reached,
-    });
-    let roots = logical
-        .remove(&selected.from_logical)
-        .expect("the selection's logical roots are kept");
-    Ok((selection, selected, roots))
 }
 
 /// The model's input for `memo`: each group's shared choices (copies and

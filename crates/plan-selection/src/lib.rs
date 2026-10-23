@@ -1072,6 +1072,35 @@ pub struct MilpReport {
     /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]): the plan is
     /// then proven optimal only if `gap` is 0.
     pub time_limit_reached: bool,
+    /// Each independent cluster's search, ordered by its first query: one
+    /// cluster when the memo was searched as one. The fields above are
+    /// their totals: bounds, rounds, model sizes and solver time summed,
+    /// the gap from the summed bound and incumbent cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<MilpClusterReport>,
+}
+
+/// One independent cluster of the MILP search: queries whose plans share
+/// no cost with other clusters' under cost model 1, searched with their
+/// own model and lazy loop.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MilpClusterReport {
+    /// Its queries, by index in the workload.
+    pub queries: Vec<usize>,
+    /// The memo groups of its own workload.
+    pub groups: usize,
+    /// Its lazy loop's rounds.
+    pub rounds: u32,
+    /// (incumbent cost − lower bound) / incumbent cost, at least 0.
+    pub gap: Option<f64>,
+    /// Its MILP lower bound at the end.
+    pub lower_bound: Option<f64>,
+    /// Its selected plan's cost per second.
+    pub incumbent_cost: Option<f64>,
+    /// The wall time in milliseconds its solves took, together.
+    pub solver_time_ms: u64,
+    /// Whether it stopped at the search's time limit.
+    pub time_limit_reached: bool,
 }
 
 /// The size of a sub-expression memo (planner-layering design, "The
@@ -1119,7 +1148,6 @@ impl SearchAlgorithm {
         *self == SearchAlgorithm::Legacy
     }
 }
-
 
 /// Why the legacy search ran instead of the requested memo search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
