@@ -2026,3 +2026,25 @@ fn workload_files_that_disagree_on_the_data_are_refused() {
     std::fs::remove_file(promql).unwrap();
     std::fs::remove_file(other).unwrap();
 }
+
+/// Issue #890: a classic-bucket `histogram_quantile` with exact accuracy
+/// enforced gets a selected plan the executor compiles, as its bucket rates
+/// alone (the control) already did.
+#[test]
+fn a_classic_histogram_quantile_gets_a_selected_plan() {
+    let buckets = r#"sum by (le) (rate(http_request_duration_seconds_bucket{service="customer-orders-service"}[5m]))"#;
+    for query in [
+        format!("histogram_quantile(0.5, {buckets})"),
+        buckets.to_string(),
+    ] {
+        let document = document_of(&[
+            "--promql",
+            &query,
+            "--sample-interval-ms",
+            "15000",
+            "--enforce-accuracy-guarantees",
+        ]);
+        let selection = &document["stage3_plan_selection"];
+        assert!(selection["selected"].is_string(), "{query}: {selection}");
+    }
+}

@@ -1110,6 +1110,20 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                         "per-entity aggregate requires an explicit entity binding",
                     ));
                 };
+                // PromQL `histogram_quantile` over classic buckets: one
+                // histogram per label set but `le`, interpolated as
+                // Prometheus does. The frontend groups `without (le)`.
+                if let [AggIntent::HistogramQuantile { q, le }] = measures.as_slice() {
+                    if !(keys.is_without()
+                        && keys.keys() == [*le]
+                        && filters.iter().all(Option::is_none))
+                    {
+                        return Err(invalid(
+                            "histogram_quantile requires grouping without([le]) and no measure filter",
+                        ));
+                    }
+                    return Operator::series_histogram_quantile(input.clone(), *q, *le);
+                }
                 let measures = measures
                     .iter()
                     .zip(output_names)

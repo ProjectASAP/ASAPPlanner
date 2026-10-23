@@ -188,16 +188,17 @@ Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
 
 | Row | Change |
 |---|---|
-| 10 | A classic-bucket `histogram_quantile(q, v)` lowers to `Aggregate{Reduce(without([le])), [HistogramQuantile{q, le}]}`, where `le` is the argument's `le` column. The frontend seeds `le` into the selector's schema. The Fallback compiles it to one operator that groups rows by every label except `le` and applies Prometheus `bucketQuantile`. The output labels are the input labels without `le` and `__name__`; result label sets that become equal are an error, as in Prometheus. Covers `histogram_quantile(q, rate(x_bucket[5m]))`, `histogram_quantile(q, sum by (le, job) (…))`, and bare bucket selectors. Now Supported. |
+| 10 | A classic-bucket `histogram_quantile(q, v)` lowers to `Aggregate{Reduce(without([le])), [HistogramQuantile{q, le}]}`, where `le` is the argument's `le` column. The frontend seeds `le` into the selector's schema. `compile` binds that `Aggregate` (and only that grouping) to one operator, `Operator::series_histogram_quantile`, that groups rows by every label except `le` and applies Prometheus `bucketQuantile`: buckets sorted by bound, equal bounds summed, counts made monotonic, NaN without a `+Inf` bucket or with no observations, and the largest finite bound for a rank past every finite bucket. The output labels are the input labels without `le` and `__name__`; result label sets that become equal are an error, as in Prometheus. Covers `histogram_quantile(q, rate(x_bucket[5m]))`, `histogram_quantile(q, sum by (le, job) (…))`, and bare bucket selectors. Now Supported. |
 
 An argument whose output provably lacks `le`, such as
 `sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
 returns an empty vector for it. Candidate search keeps the classic form as one
 retained exact ordinary sub-DAG for every accuracy target; it has no sketch
-candidate. `histogram_quantiles` lowers each branch the same way; the
-Fallback compiler accepts its `Concat` of relabeled branches and rejects
-duplicate output label sets. Nested aggregation, such as
-`sum(histogram_quantile(…))`, resolves the renamed sample-value column.
+candidate. `histogram_quantiles` lowers each branch the same way, but
+`compile` does not yet bind its `Concat` of relabeled branches. Nested
+aggregation, such as `sum(histogram_quantile(…))`, does not compile either:
+the outer aggregate looks for a value column named `value`, while the
+quantile's is named `histogram_quantile`. Both are tracked in issue #911.
 
 Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 

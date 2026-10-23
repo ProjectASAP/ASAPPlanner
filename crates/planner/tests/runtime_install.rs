@@ -3132,3 +3132,172 @@ async fn a_forced_heap_grouped_topk_sum_plan_compiles_and_answers_within_its_bou
         }
     }
 }
+
+// ── Classic-histogram `histogram_quantile` (issue #890) ─────────────────────
+
+/// The classic bucket metric of the histogram tests.
+const BUCKET_METRIC: &str = "http_request_duration_seconds_bucket";
+
+/// Exact PromQL `queries`, every minute, over ingesting classic-bucket
+/// series of [`BUCKET_METRIC`] sampled every 10 s.
+fn exact_bucket_workload(queries: &[&str]) -> PlanningWorkload {
+    let entries: Vec<String> = queries
+        .iter()
+        .map(|query| {
+            format!(
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval": 60000}},
+                  "requirements": {{"accuracy": {{"max_error": 0.0, "failure_probability": 0.0}}}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
+    serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 2.4}}}},
+              "sources": {{"{BUCKET_METRIC}": {{"series_count": 24, "sample_interval": 10000}}}}}}}}"#,
+        entries.join(",")
+    ))
+    .unwrap()
+}
+
+/// Cumulative bucket counters of [`BUCKET_METRIC`], one sample every 10 s
+/// over the 5 minutes before `EVALUATION_MS` (first 295 s before it, last
+/// 5 s before it), each rising at a constant per-second rate from 1000, so
+/// `rate(…[5m])` of each is its slope. Per `(service, job)`, the slopes of
+/// buckets `le` 0.1, 0.5, 1 and `+Inf`, each on instances `1` and `2`:
+/// - `orders`/`api`: 0.5, 1.5, 2, 2 (summed over instances: 1, 3, 4, 4);
+/// - `batch`/`worker`: 0.5, 0.5, 0.5, 2.5 (most observations above 1, in
+///   `+Inf` alone; summed: 1, 1, 1, 5);
+/// - `idle`/`idle`: 0 everywhere (no observations).
+fn bucket_samples() -> Vec<RawDataSample> {
+    let mut samples = Vec::new();
+    for (service, job, slopes) in [
+        ("orders", "api", [0.5, 1.5, 2.0, 2.0]),
+        ("batch", "worker", [0.5, 0.5, 0.5, 2.5]),
+        ("idle", "idle", [0.0; 4]),
+    ] {
+        for (le, slope) in ["0.1", "0.5", "1", "+Inf"].into_iter().zip(slopes) {
+            for instance in ["1", "2"] {
+                for step in 0..30 {
+                    samples.push(RawDataSample {
+                        labels: BTreeMap::from([
+                            ("__name__".to_string(), BUCKET_METRIC.to_string()),
+                            ("service".to_string(), service.to_string()),
+                            ("job".to_string(), job.to_string()),
+                            ("instance".to_string(), instance.to_string()),
+                            ("le".to_string(), le.to_string()),
+                        ]),
+                        timestamp_ms: EVALUATION_MS - 295_000 + step * 10_000,
+                        value: 1000.0 + slope * 10.0 * step as f64,
+                    });
+                }
+            }
+        }
+    }
+    samples
+}
+
+/// The plan file of exact `queries` over [`bucket_samples`]' metric, on a
+/// deployment that keeps raw data samples.
+async fn bucket_plan_json(queries: &[&str]) -> String {
+    plan_json_for(
+        exact_bucket_workload(queries),
+        &DeploymentCapabilities::default(),
+    )
+    .await
+}
+
+/// `histogram_quantile` over classic buckets as the issue's dashboard
+/// writes it: p50, p95 and p99 of the summed bucket rates of one service,
+/// in one workload. Stage 3 selects an exact plan the executor compiles,
+/// and it answers with Prometheus' cumulative-bucket interpolation: over
+/// summed rates 1, 3, 4, 4 at `le` 0.1, 0.5, 1, `+Inf`, rank 0.5 · 4 = 2
+/// lies in the 0.5 bucket, 0.1 + 0.4 · (2 − 1) / (3 − 1) = 0.3; rank 3.8
+/// and 3.96 in the 1 bucket, 0.5 + 0.5 · 0.8 = 0.9 and 0.5 + 0.5 · 0.96 =
+/// 0.98. The result has no labels: `sum by (le)` keeps only `le`, which
+/// the quantile drops.
+#[tokio::test]
+async fn classic_histogram_quantiles_run_with_prometheus_interpolation() {
+    let selector = format!(r#"rate({BUCKET_METRIC}{{service="orders"}}[5m])"#);
+    let queries: Vec<String> = [0.5, 0.95, 0.99]
+        .iter()
+        .map(|q| format!("histogram_quantile({q}, sum by (le) ({selector}))"))
+        .collect();
+    let queries: Vec<&str> = queries.iter().map(String::as_str).collect();
+    let plan_json = bucket_plan_json(&queries).await;
+    let run = run_data_plane(
+        &plan_json,
+        &bucket_samples(),
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    assert_eq!(run.answers_per_query.len(), 3);
+    for (answers, expected) in run.answers_per_query.iter().zip([0.3, 0.9, 0.98]) {
+        assert_eq!(answers.len(), 1, "{answers:?}");
+        let (labels, value) = &answers[0];
+        assert!(labels.is_empty(), "le is dropped: {labels:?}");
+        assert!((value - expected).abs() < 1e-9, "{value} vs {expected}");
+    }
+    assert_eq!(run.answers_per_query, run.reference_answers_per_query);
+}
+
+/// One p99 per `job` (`sum by (job, le)`): the result keeps `job` and
+/// drops `le`. `worker`'s rank 0.99 · 5 = 4.95 lies past every finite
+/// bucket (most observations are in `+Inf` alone), so Prometheus answers
+/// the largest finite bound, 1; `idle` has no observations, so NaN. The
+/// p99 alert (`> 0.5`) keeps `api` (0.98) and `worker` (1) and drops
+/// `idle` (NaN compares false). A selector that matches no series gives an
+/// empty result. Over one series' buckets, without `sum`, the result keeps
+/// that series' labels but `le` (and the name `rate` dropped).
+#[tokio::test]
+async fn a_classic_histogram_quantile_keeps_labels_and_handles_inf_and_empty_input() {
+    let by_job = format!("histogram_quantile(0.99, sum by (job, le) (rate({BUCKET_METRIC}[5m])))");
+    let alert = format!("{by_job} > 0.5");
+    let empty = format!(
+        r#"histogram_quantile(0.5, sum by (le) (rate({BUCKET_METRIC}{{service="missing"}}[5m])))"#
+    );
+    // Without `sum`, each series is its own histogram: `instance` 1's
+    // buckets alone (rates 0.5, 1.5, 2, 2), keeping its labels but `le`.
+    let per_series = format!(
+        r#"histogram_quantile(0.99, rate({BUCKET_METRIC}{{service="orders",instance="1"}}[5m]))"#
+    );
+    let plan_json = bucket_plan_json(&[&by_job, &alert, &empty, &per_series]).await;
+    let run = run_data_plane(
+        &plan_json,
+        &bucket_samples(),
+        EVALUATION_MS,
+        &mut SummaryStore::new(),
+    );
+    let job = |answers: &[Answer]| -> Vec<(String, f64)> {
+        answers
+            .iter()
+            .map(|(labels, value)| {
+                assert_eq!(labels.keys().collect::<Vec<_>>(), ["job"], "{labels:?}");
+                (labels["job"].clone(), *value)
+            })
+            .collect()
+    };
+    for answers in [&run.answers_per_query, &run.reference_answers_per_query] {
+        let per_job = job(&answers[0]);
+        assert_eq!(per_job.len(), 3, "{per_job:?}");
+        assert_eq!(per_job[0].0, "api");
+        assert!((per_job[0].1 - 0.98).abs() < 1e-9, "{per_job:?}");
+        assert_eq!(per_job[1].0, "idle");
+        assert!(per_job[1].1.is_nan(), "{per_job:?}");
+        assert_eq!(per_job[2], ("worker".to_string(), 1.0));
+        let alerting = job(&answers[1]);
+        assert_eq!(alerting.len(), 2, "{alerting:?}");
+        assert_eq!(alerting[0].0, "api");
+        assert_eq!(alerting[1], ("worker".to_string(), 1.0));
+        assert!(answers[2].is_empty(), "{:?}", answers[2]);
+        let [(labels, value)] = answers[3].as_slice() else {
+            panic!("{:?}", answers[3]);
+        };
+        assert_eq!(
+            labels.keys().collect::<Vec<_>>(),
+            ["instance", "job", "service"],
+            "{labels:?}"
+        );
+        assert!((value - 0.98).abs() < 1e-9, "{value}");
+    }
+}
