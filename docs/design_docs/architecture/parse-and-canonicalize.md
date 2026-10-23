@@ -67,7 +67,7 @@ both partitioned by `city`:
 2. Otherwise (e.g. `SELECT host, c`), the SELECT list stays on top:
    `Project{Limit{Sort{Aggregate}}}`.
 
-`rn < k` is `rn <= k - 1`. A visible `rn`, another window function or a computed SELECT item
+`rn < k` is `rn <= k - 1` and `rn = 1` is `rn <= 1`. A visible `rn`, another window function or a computed SELECT item
 keep the window. Rows tied on the ordering value at the k-th place are cut arbitrarily, as
 `ROW_NUMBER` itself numbers ties in no particular order; an exact plan and a heavy-hitter sketch
 may keep different ones of them.
@@ -77,8 +77,8 @@ may keep different ones of them.
 The heavy-hitter promotion changes the node's output columns: `Limit{Sort{Aggregate}}` outputs
 the aggregate's `[keys.., items.., value]`, `Aggregate([TopK])` its partition keys and
 `topk_k`. A consumer reads its input's columns by position, so the promotion applies only to a
-node no consumer reads that way: a query's root, or a `Concat` branch. Under any other
-consumer (`SELECT host FROM (… ORDER BY c DESC LIMIT 5)`, a join) the ranking stays
+node no consumer reads that way: a query's root, or a branch of a `Concat` no consumer
+reads that way either. Under any other consumer (`SELECT host FROM (… ORDER BY c DESC LIMIT 5)`, a join) the ranking stays
 `Limit{Sort}`.
 
 A top-k answers, after its `[keys.., topk_k]` columns, the columns naming each ranked item, in

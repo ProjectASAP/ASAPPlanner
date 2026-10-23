@@ -397,3 +397,25 @@ async fn a_plan_whose_stored_output_does_not_build_is_rejected() {
         other => panic!("no plan is selected: {:?}", other.map(|_| ())),
     }
 }
+
+/// A per-city top 5 the heavy-hitter `TopK` does not cover runs exactly as
+/// the per-partition `Limit{Sort}`, with the query's own columns: ordered by
+/// the count then the host (a tie-breaking second key), and with a SELECT
+/// list that drops the partition column.
+#[tokio::test]
+async fn generic_per_city_top_5_forms_run_exactly() {
+    let tie_broken = TOP_5_HOSTS_PER_CITY.replace("COUNT(*) DESC)", "COUNT(*) DESC, host)");
+    let plan = plan_sql(&[&tie_broken], EXACT).await;
+    assert_eq!(
+        ranked_rows(&run_sql(&plan, 0), "c"),
+        expected_top_5_per_city()
+    );
+    let hosts_only =
+        TOP_5_HOSTS_PER_CITY.replace("SELECT city, host, c FROM", "SELECT host, c FROM");
+    let plan = plan_sql(&[&hosts_only], EXACT).await;
+    let expected: BTreeSet<_> = expected_top_5_per_city()
+        .into_iter()
+        .map(|(_, host, count)| (String::new(), host, count))
+        .collect();
+    assert_eq!(ranked_rows(&run_sql(&plan, 0), "c"), expected);
+}

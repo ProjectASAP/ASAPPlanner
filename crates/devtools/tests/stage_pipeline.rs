@@ -1895,7 +1895,10 @@ fn mixed_language_workload_files(sql_arrival: Value, sql_facts: Value) -> (PathB
     (promql_path, sql_path)
 }
 
-const FLOWS_TABLE: &str = r#"{"name": "flows", "columns": [{"name": "ts", "type": "timestamp"}, {"name": "service", "type": "utf8", "nullable": false}], "time_index": 0}"#;
+/// `flows(ts, service)`. The time index is declared non-null: the executor
+/// builds no count over a nullable time column, so a plan of the SQL query
+/// over it would not compile.
+const FLOWS_TABLE: &str = r#"{"name": "flows", "columns": [{"name": "ts", "type": "timestamp", "nullable": false}, {"name": "service", "type": "utf8", "nullable": false}], "time_index": 0}"#;
 
 /// One run can plan PromQL and SQL queries together: `--workload` repeats,
 /// each file is lowered by its own language's frontend (SQL over the

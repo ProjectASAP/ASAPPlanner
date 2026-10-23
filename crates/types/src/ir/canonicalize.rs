@@ -20,7 +20,7 @@
 //! match is positional, aliases do not affect it. Other ranked expressions
 //! retain Sort + Limit. The promotion changes the node's columns, so it
 //! applies only where no consumer reads them by position: at the root or
-//! in a `Concat` branch.
+//! in a branch of a `Concat` that is not read so either.
 //!
 //! SQL's per-partition top-k, `WHERE rn <= k` over `ROW_NUMBER() OVER
 //! (PARTITION BY p ORDER BY o)` under a SELECT list that drops `rn`, is
@@ -56,17 +56,34 @@ pub fn canonicalize(root: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, SchemaDe
 }
 
 /// The nodes under `root` some consumer reads by column position: every
-/// input of an operator other than `Concat` (whose branches each give the
-/// whole output). A rewrite that changes a node's columns, as heavy-hitter
+/// input of an operator other than `Concat`, and the branches of a `Concat`
+/// itself read so (a branch gives the whole output of a `Concat` that is
+/// the answer). A rewrite that changes a node's columns, as heavy-hitter
 /// promotion does, applies only to a node outside this set, whose columns
 /// are the query's answer: rewritten under a positional reader, a column
 /// index would name another column.
 fn read_by_position(root: &Rc<OperatorNode>) -> HashSet<*const OperatorNode> {
-    OperatorNode::reachable(root)
+    let nodes = OperatorNode::reachable(root);
+    let is_concat = |node: &OperatorNode| matches!(node.non_asap(), Some(NonASAPOp::Concat { .. }));
+    let mut read: HashSet<*const OperatorNode> = nodes
         .iter()
-        .filter(|node| !matches!(node.non_asap(), Some(NonASAPOp::Concat { .. })))
+        .filter(|node| !is_concat(node))
         .flat_map(|node| node.children().into_iter().map(Rc::as_ptr))
-        .collect()
+        .collect();
+    // A `Concat` read by position passes that on to its branches, through
+    // nested `Concat`s too.
+    let mut pending: Vec<&Rc<OperatorNode>> = nodes
+        .iter()
+        .filter(|node| is_concat(node) && read.contains(&Rc::as_ptr(node)))
+        .collect();
+    while let Some(concat) = pending.pop() {
+        for branch in concat.children() {
+            if read.insert(Rc::as_ptr(branch)) && is_concat(branch) {
+                pending.push(branch);
+            }
+        }
+    }
+    read
 }
 
 /// Already-canonicalized nodes, by pointer. The recursion needs this table so
@@ -324,7 +341,7 @@ fn try_promote_additive_top_ranking(
 ///   or sum of an aggregate `X`.
 /// - otherwise: `Project{P}{Limit{k, p}{Sort{o, p}{X}}}`.
 ///
-/// `rn < k` is `rn <= k - 1`. Rows tied on `o` at the k-th place are cut
+/// `rn < k` is `rn <= k - 1`, and `rn = 1` is `rn <= 1`. Rows tied on `o` at the k-th place are cut
 /// arbitrarily, as by `ROW_NUMBER` itself. `None` when the shape does not
 /// match: a visible `rn`, another window function or predicate, a computed
 /// SELECT item.
@@ -356,6 +373,8 @@ fn try_rewrite_row_number_top_k(
     let rows_per_partition = match op {
         CompareOpKind::Le => *bound,
         CompareOpKind::Lt => bound.saturating_sub(1),
+        // `rn = 1`: the top row per partition.
+        CompareOpKind::Eq if *bound == 1 => 1,
         _ => return Ok(None),
     };
     let Ok(rows_per_partition @ 1..) = usize::try_from(rows_per_partition) else {
@@ -1225,6 +1244,58 @@ mod tests {
         assert_partitioned_sort_limit(child, 5, 1);
         assert!(!reaches_window(&out));
         assert_idempotent(&out);
+    }
+
+    /// `rn = 1` (the top row per region) is `rn <= 1`; `rn <= 0`, `rn < 1`
+    /// and `rn = 2` are no top-k and keep the window.
+    #[test]
+    fn rownumber_bounds() {
+        let with = |op, k| {
+            select(
+                &[0, 1, 2],
+                filter_cmp(
+                    3,
+                    op,
+                    k,
+                    select(&[0, 1, 2, 3], rownumber_window(grouped(count()))),
+                ),
+            )
+        };
+        let top_1 = canonicalize(with(CompareOpKind::Eq, 1)).unwrap();
+        assert!(matches!(measures(&top_1), [AggIntent::TopK { k: 1, .. }]));
+        for (op, k) in [
+            (CompareOpKind::Le, 0),
+            (CompareOpKind::Lt, 1),
+            (CompareOpKind::Eq, 2),
+        ] {
+            let q = with(op, k);
+            assert!(Rc::ptr_eq(&canonicalize(Rc::clone(&q)).unwrap(), &q), "{k}");
+        }
+    }
+
+    /// Under a consumer reading its columns by position (`SELECT service
+    /// FROM (<per-region top 5>)`), the ROW_NUMBER top-k becomes the
+    /// per-partition `Limit{Sort}` with the same columns, not promoted.
+    #[test]
+    fn rownumber_topk_read_by_position_is_not_promoted() {
+        let original = select(&[0], rownumber_topk(grouped(count())));
+        let out = canonicalize(Rc::clone(&original)).unwrap();
+        assert_eq!(out.schema, original.schema);
+        let Some(NonASAPOp::Project { child, .. }) = out.non_asap() else {
+            panic!("the outer SELECT stays, got {out:?}");
+        };
+        assert_partitioned_sort_limit(child, 5, 1);
+        assert_idempotent(&out);
+    }
+
+    /// A `Concat` read by position passes that on to its branches: a
+    /// promotable branch under `Project{Concat}` stays `Limit{Sort}`.
+    #[test]
+    fn concat_branches_read_through_a_positional_reader_are_not_promoted() {
+        let branch = limit(5, 0, sort(desc(1), count_by_service()));
+        let q = passthrough_project(concat(vec![Rc::clone(&branch), count_by_service()], None));
+        let out = canonicalize(Rc::clone(&q)).unwrap();
+        assert!(Rc::ptr_eq(&out, &q));
     }
 
     /// Without an enclosing SELECT dropping it, `rn` is an output column:

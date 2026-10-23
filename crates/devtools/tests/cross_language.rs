@@ -250,3 +250,25 @@ async fn offset_defeats_heavy_hitter_promotion() {
         "OFFSET must not promote to TopK: {s:?}"
     );
 }
+
+/// Heavy-hitter promotion changes a node's columns, so it applies only to
+/// a ranking nothing reads by position. `topk(5, sum by (job) (m))` at the
+/// root is promoted; under `count(...)`, which reads its columns, it stays
+/// the order-by-value `Limit{Sort}`.
+#[tokio::test]
+async fn a_promql_ranking_read_by_position_stays_a_sort_limit() {
+    let root = promql("topk(5, sum by (job) (http_requests_total))");
+    assert!(
+        matches!(root.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
+            if matches!(measures.as_slice(), [AggIntent::TopK { .. }])),
+        "{root:?}"
+    );
+    let nested = promql("count(topk(5, sum by (job) (http_requests_total)))");
+    let Some(NonASAPOp::Aggregate { child, .. }) = nested.non_asap() else {
+        panic!("count at the root: {nested:?}");
+    };
+    assert!(
+        matches!(child.non_asap(), Some(NonASAPOp::Limit { .. })),
+        "{child:?}"
+    );
+}
