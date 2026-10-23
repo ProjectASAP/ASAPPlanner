@@ -849,10 +849,17 @@ fn coefficients_of(
             id != root && shareable && !scan && !is_build(&node.payload) && query_time(id)
         })
         .map(|id| {
+            // Its scans are charged as scans (`absorbed_scans`).
             let below = walk(id)
                 .0
                 .into_iter()
                 .filter(|n| direct_set.contains(n))
+                .filter(|n| {
+                    !matches!(
+                        dag.nodes[position[n]].payload,
+                        Operator::NonASAP(NonASAPOp::Scan { .. })
+                    )
+                })
                 .collect();
             (id, below)
         })

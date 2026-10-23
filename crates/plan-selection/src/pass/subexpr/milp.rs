@@ -537,6 +537,8 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
     };
     // Each scan choice's direct charge, per source (`Choice::scan_source`).
     let mut scan_charges: BTreeMap<u64, BTreeMap<usize, Expression>> = BTreeMap::new();
+    // Each cross-group node's charges per consumer, and their largest sum.
+    let mut cross_per_consumer: BTreeMap<u64, (Expression, f64)> = BTreeMap::new();
     for (&(k, c), &v) in &y {
         let total = input.choices[c].coefficients.direct.cost_per_unit_rate;
         let rate_or_slowest = match rate(k) {
@@ -547,6 +549,13 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                 Consumer::Query(_) => unreachable!("a query's rate is constant"),
             }),
         };
+        for &(key, cost) in &input.choices[c].coefficients.cross_shared {
+            let entry = cross_per_consumer
+                .entry(key)
+                .or_insert_with(|| (Expression::from(0.0), 0.0));
+            entry.0 += rate_or_slowest * cost * v;
+            entry.1 += rate_or_slowest * cost;
+        }
         for &(source, cost, pass) in &input.choices[c].coefficients.absorbed_scans {
             let pass = pass.min(cost);
             objective += rate_or_slowest * pass * v;
@@ -659,13 +668,37 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
                 .push((c, charge));
         }
     }
+    // A node several groups' choices have (`cross_shared`) costs, in the
+    // plan, its charge per consumer (one node computed per consumer, or a
+    // copy per group) or, built once, at least the dearest chosen one's
+    // charge at its group's slowest rate: the model charges the smaller.
+    let mut cross_once: BTreeMap<u64, Vec<(usize, f64)>> = BTreeMap::new();
     for (c, choice) in input.choices.iter().enumerate() {
         for &(key, cost) in &choice.coefficients.cross_shared {
-            shared_slots
-                .entry((key, usize::MAX, "node".to_string()))
+            cross_once
+                .entry(key)
                 .or_default()
                 .push((c, slowest_rate(choice.group.0 as usize) * cost));
         }
+    }
+    let mut cross_vars: Vec<(
+        Variable,
+        Variable,
+        Variable,
+        Vec<(usize, f64)>,
+        Expression,
+        f64,
+    )> = Vec::new();
+    for (key, members) in cross_once {
+        let (per_consumer, per_consumer_max) = cross_per_consumer
+            .remove(&key)
+            .unwrap_or_else(|| (Expression::from(0.0), 0.0));
+        let big_m = per_consumer_max + members.iter().map(|(_, w)| *w).fold(0.0, f64::max);
+        let once = vars.add(variable().min(0));
+        let charged = vars.add(variable().min(0));
+        let u = vars.add(binary());
+        objective += charged;
+        cross_vars.push((once, charged, u, members, per_consumer, big_m));
     }
     let mut shared_slot_vars: Vec<(Variable, Vec<(usize, f64)>)> = Vec::new();
     for members in shared_slots.into_values() {
@@ -924,6 +957,17 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         }
         constraints.push(constraint!(into >= p));
     }
+    // A slot's consumer exists only when its choice is chosen.
+    for (&(k, _), &r) in &reach {
+        if let Consumer::Slot { choice, .. } = k {
+            constraints.push(constraint!(r <= x[choice]));
+        }
+    }
+    for (&(k, _), &v) in &y {
+        if let Consumer::Slot { choice, .. } = k {
+            constraints.push(constraint!(v <= x[choice]));
+        }
+    }
     for (c, choice) in input.choices.iter().enumerate() {
         for (child, via) in choice.children.iter().zip(&choice.coefficients.child_via) {
             let h = child.0 as usize;
@@ -1105,6 +1149,13 @@ fn solve_scaled(input: &ModelInput) -> Result<Option<ModelSolution>, String> {
         for charge in charges {
             constraints.push(constraint!(m >= charge));
         }
+    }
+    for (once, charged, u, members, per_consumer, big_m) in cross_vars {
+        for (c, charge) in members {
+            constraints.push(constraint!(once >= charge * x[c]));
+        }
+        constraints.push(constraint!(charged >= per_consumer - big_m * u));
+        constraints.push(constraint!(charged >= once - big_m * (1 - u)));
     }
     for (m, members) in &shared_slot_vars {
         for &(c, charge) in members {

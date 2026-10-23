@@ -1807,3 +1807,14 @@ fn a_sketch_rollup_beside_other_quantiles_selects_the_exhaustive_price() {
     assert_memo_selects_the_exhaustive_price("Q1, Q3, Q4", &workload(&[q1, q3, q4]));
     assert_memo_selects_the_exhaustive_price("Q2, Q3, Q4", &workload(&[q2, q3, q4]));
 }
+
+/// Debugging aid: the random workload of seed `JP_SEED` (over the gauge
+/// `m`) as stage_pipeline's `--workload` JSON, at `JP_SEED_OUT`.
+#[test]
+#[ignore = "debugging aid"]
+fn dump_random_workload() {
+    let seed: u64 = std::env::var("JP_SEED").map_or(43, |s| s.parse().unwrap());
+    let out = std::env::var("JP_SEED_OUT").unwrap_or_else(|_| format!("seed{seed}.json"));
+    let workload = random_workload(seed);
+    std::fs::write(&out, serde_json::to_string_pretty(&workload).unwrap()).unwrap();
+}
