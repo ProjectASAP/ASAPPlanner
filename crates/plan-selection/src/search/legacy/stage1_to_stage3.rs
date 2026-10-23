@@ -672,8 +672,10 @@ fn search_stage2_and_stage3<Id>(
                             k => format!("P{number}-m{k}"),
                         };
                         if let Ok(stage3) = &mut selector {
-                            if let Err(error) = stage3.offer(&p) {
-                                selector = Err(error);
+                            if let Some(sized) = stage3.sized(&p) {
+                                if let Err(error) = stage3.offer(&sized) {
+                                    selector = Err(error);
+                                }
                             }
                         }
                         if keep_every_candidate {

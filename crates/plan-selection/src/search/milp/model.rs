@@ -2499,6 +2499,9 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             return;
         }
         candidate.id = "P0".to_string();
+        let Some(candidate) = self.selector.sized(&candidate) else {
+            return;
+        };
         if self.selector.offer(&candidate).is_ok() && self.selector.keeps_from_logical(ID) {
             self.logical.insert(ID.to_string(), roots);
         }
@@ -2613,7 +2616,9 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             let logical_id = decoded.physical.from_logical.clone();
             let mut physical = decoded.physical;
             physical.id = format!("P{}-{k}", self.number);
-            self.selector.offer(&physical)?;
+            if let Some(sized) = self.selector.sized(&physical) {
+                self.selector.offer(&sized)?;
+            }
             if self.selector.keeps_from_logical(&logical_id) {
                 self.logical.insert(logical_id, decoded.roots);
             }

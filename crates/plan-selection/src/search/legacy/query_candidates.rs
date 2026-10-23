@@ -217,7 +217,12 @@ fn alone_violation<Id: Clone>(
         )
         .ok()?;
         for candidate in &physical {
-            match checked_candidate(candidate, targets, data, models) {
+            // Composed with its summaries at their final size first.
+            let Ok(candidate) = crate::sized_for_failure_probability(candidate, targets, data)
+            else {
+                return None;
+            };
+            match checked_candidate(&candidate, targets, data, models) {
                 Err(failed) if failed.size_independent => {
                     first.get_or_insert((failed.cause, failed.reason));
                 }

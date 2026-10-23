@@ -185,6 +185,7 @@ pub(crate) fn combine(
     // cluster capacity are not sums over clusters, and would be checked
     // here on the combined plan.
     let mut selector = PlanSelector::new(entries, data, models, false).ok()?;
+    let candidate = selector.sized(&candidate)?;
     selector.offer(&candidate).ok()?;
     let (mut selection, selected) = selector.finish().ok()?;
     let price = selection.costs[&selection.selected].cost_per_second?;

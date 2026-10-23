@@ -503,6 +503,9 @@ pub(crate) fn search_components<Id: Clone + std::fmt::Debug>(
     candidate.id = id;
     let mut selector =
         PlanSelector::new(entries, data, models, false).map_err(|_| SearchedAsOne::NotAdditive)?;
+    let candidate = selector
+        .sized(&candidate)
+        .ok_or(SearchedAsOne::NotAdditive)?;
     selector
         .offer(&candidate)
         .map_err(|_| SearchedAsOne::NotAdditive)?;

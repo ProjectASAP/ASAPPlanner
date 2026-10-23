@@ -567,7 +567,9 @@ pub(crate) fn offer_group_choice<Id: Clone>(
                     0 => format!("P{number}"),
                     k => format!("P{number}-m{k}"),
                 };
-                selector.offer(&physical)?;
+                if let Some(sized) = selector.sized(&physical) {
+                    selector.offer(&sized)?;
+                }
             }
             if selector.keeps_from_logical(&id) {
                 logical.insert(id, roots);

@@ -1263,6 +1263,11 @@ pub enum SelectionError {
     },
     #[error("no valid candidate: {0:?}")]
     NoValidCandidate(Vec<Rejection>),
+    /// A bug: a search offered a candidate whose summaries are not at
+    /// their final size ([`PlanSelector::sized`] changes it). Stage 3
+    /// takes each summary's configuration as composed and never resizes.
+    #[error("candidate {0}: its summaries are not at their final size")]
+    NotSized(String),
     /// The memo search's MILP solver failed.
     #[error("MILP solver: {0}")]
     Solver(String),
@@ -1292,7 +1297,9 @@ pub fn select_plan(
         selector.set_calibration(fit);
     }
     for candidate in cands {
-        selector.offer(candidate)?;
+        if let Some(sized) = selector.sized(candidate) {
+            selector.offer(&sized)?;
+        }
     }
     selector.finish().map(|(selection, _)| selection)
 }
@@ -1948,7 +1955,10 @@ impl<'a> PlanSelector<'a> {
                 entries: self.entries.len(),
             });
         }
-        let Ok((sized, _)) = checked_candidate(candidate, &self.targets, self.data, &self.models)
+        let Ok(sized) = sized_for_failure_probability(candidate, &self.targets, self.data) else {
+            return Ok(CalibrationFit::default());
+        };
+        let Ok((sized, _)) = checked_candidate(&sized, &self.targets, self.data, &self.models)
         else {
             return Ok(CalibrationFit::default());
         };
@@ -1983,8 +1993,30 @@ impl<'a> PlanSelector<'a> {
         self.formula_scale = fit.factor();
     }
 
+    /// `candidate` composed with each summary at its final size for its
+    /// queries' failure probabilities ([`sized_for_failure_probability`]):
+    /// what a search offers. `None` when its resized summaries do not
+    /// rebuild into a plan, recorded as the candidate's rejection
+    /// ([`RejectionCause::FailureProbabilityResizeFailed`]).
+    pub fn sized(&mut self, candidate: &PhysicalCandidate) -> Option<PhysicalCandidate> {
+        match sized_for_failure_probability(candidate, &self.targets, self.data) {
+            Ok(sized) => Some(sized),
+            Err(reason) => {
+                self.candidates_checked += 1;
+                self.reject(
+                    &candidate.id,
+                    RejectionCause::FailureProbabilityResizeFailed,
+                    reason,
+                );
+                None
+            }
+        }
+    }
+
     /// Check and price `candidate`, the next in candidate order, and keep
-    /// it if it can still be selected.
+    /// it if it can still be selected. Its summaries must be at their
+    /// final size ([`Self::sized`]): Stage 3 never resizes, and a candidate
+    /// that is not is an error ([`SelectionError::NotSized`]).
     pub fn offer(&mut self, candidate: &PhysicalCandidate) -> Result<(), SelectionError> {
         if candidate.roots.len() != self.entries.len() {
             return Err(SelectionError::EntryCount {
@@ -1992,6 +2024,11 @@ impl<'a> PlanSelector<'a> {
                 roots: candidate.roots.len(),
                 entries: self.entries.len(),
             });
+        }
+        if !sized_for_failure_probability(candidate, &self.targets, self.data)
+            .is_ok_and(|sized| sized.roots == candidate.roots)
+        {
+            return Err(SelectionError::NotSized(candidate.id.clone()));
         }
         self.candidates_checked += 1;
         let (sized, accepted_accuracy) =
@@ -2205,23 +2242,17 @@ impl<'a> PlanSelector<'a> {
     }
 }
 
-/// `candidate` sized for its queries' failure probabilities, with the
-/// accuracy Stage 3 accepted for each query, or the first check it fails
-/// that does not depend on its materialization or prices: its resized
-/// summaries do not rebuild, the executor cannot run a per-series
-/// aggregate it reads, or a query misses its accuracy target.
+/// `candidate`, its summaries at their final size, with the accuracy
+/// Stage 3 accepted for each query, or the first check it fails that does
+/// not depend on its materialization or prices: the executor cannot run a
+/// per-series aggregate it reads, or a query misses its accuracy target.
 pub(crate) fn checked_candidate(
     candidate: &PhysicalCandidate,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> Result<(PhysicalCandidate, Vec<AcceptedAccuracy>), CheckFailure> {
-    let sized =
-        sized_for_failure_probability(candidate, targets, data).map_err(|reason| CheckFailure {
-            cause: RejectionCause::FailureProbabilityResizeFailed,
-            reason,
-            size_independent: false,
-        })?;
+    let sized = candidate.clone();
     if let Some(reason) = per_entity_aggregate_violation(&sized.dag) {
         // The aggregate is the plan's own exact per-series reduction, which
         // no summary size changes.
@@ -2912,21 +2943,11 @@ pub fn resize_for_failure_probability(
 ) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
     let mut required: HashMap<*const OperatorNode, f64> = HashMap::new();
     for (root, target) in roots.iter().zip(targets) {
-        let Some((target, delta)) = target
-            .failure_probability
-            .map(|delta| (target, delta))
-            .filter(|(t, delta)| !t.is_exact() && *delta > 0.0)
-        else {
+        let Some(per_value) = failure_probability_per_value(root, target, data) else {
             continue;
         };
-        let values = target.accuracy_scope.max_values_covered(values_per_result(
-            root,
-            series_read(root, data),
-            data,
-        ));
-        let Some(values) = values else { continue };
         let inputs = approximate_inputs(root);
-        let per_input_failure_probability = delta / (inputs.len() as f64 * values as f64);
+        let per_input_failure_probability = per_value / inputs.len() as f64;
         for state in &inputs {
             let entry = required
                 .entry(Rc::as_ptr(state))
@@ -2939,24 +2960,59 @@ pub fn resize_for_failure_probability(
     }
     let resize = |state: &OperatorNode, params: &SketchParams| {
         let delta = *required.get(&std::ptr::from_ref(state))?;
-        Some(match params {
-            SketchParams::Hll {
-                precision,
-                relative_error,
-            } => {
-                let source = distinct_bound_source(state)?;
-                let bound = data.sources.get(&source)?.max_distinct_per_evaluation?;
-                // The guarantee keeps the relative error Pass 1 sized for.
-                let relative_error = hll::classic_relative_error(*precision, *relative_error);
-                SketchParams::Hll {
-                    precision: hll::min_precision(relative_error, delta, bound, *precision),
-                    relative_error: Some(relative_error),
-                }
-            }
-            params => with_failure_probability(params, delta),
-        })
+        params_for_failure_probability(state, params, delta, data)
     };
     with_resized_summaries(roots, &resize)
+}
+
+/// `δ / V`: the failure probability query `root`'s approximate inputs
+/// share for `target` ([`resize_for_failure_probability`]), each of its
+/// `n` inputs taking `δ / (n · V)`. `None` when its summaries are not
+/// enlarged for it: an exact target, no failure probability, or an
+/// unbound `V`.
+pub(crate) fn failure_probability_per_value(
+    root: &QueryRoot,
+    target: &AccuracyTarget,
+    data: &DataWorkload,
+) -> Option<f64> {
+    let delta = target
+        .failure_probability
+        .filter(|delta| !target.is_exact() && *delta > 0.0)?;
+    let values = target.accuracy_scope.max_values_covered(values_per_result(
+        root,
+        series_read(root, data),
+        data,
+    ))?;
+    Some(delta / values as f64)
+}
+
+/// The parameters of summary `state`, now `params`, enlarged for a
+/// failure probability of at most `delta`
+/// ([`resize_for_failure_probability`]): classic HLL's precision from its
+/// source's distinct bound (`None`, kept as is, without one), every other
+/// family's by [`with_failure_probability`]. Never smaller than `params`.
+pub(crate) fn params_for_failure_probability(
+    state: &OperatorNode,
+    params: &SketchParams,
+    delta: f64,
+    data: &DataWorkload,
+) -> Option<SketchParams> {
+    Some(match params {
+        SketchParams::Hll {
+            precision,
+            relative_error,
+        } => {
+            let source = distinct_bound_source(state)?;
+            let bound = data.sources.get(&source)?.max_distinct_per_evaluation?;
+            // The guarantee keeps the relative error Pass 1 sized for.
+            let relative_error = hll::classic_relative_error(*precision, *relative_error);
+            SketchParams::Hll {
+                precision: hll::min_precision(relative_error, delta, bound, *precision),
+                relative_error: Some(relative_error),
+            }
+        }
+        params => with_failure_probability(params, delta),
+    })
 }
 
 /// `roots` with each summary at the most any target can make
@@ -6522,7 +6578,9 @@ mod tests {
             let all = select_plan(candidates, &entries, &data, models).unwrap();
             let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
             for candidate in candidates {
-                selector.offer(candidate).unwrap();
+                if let Some(sized) = selector.sized(candidate) {
+                    selector.offer(&sized).unwrap();
+                }
             }
             let (streamed, built) = selector.finish().unwrap();
             assert_eq!(streamed.selected, all.selected);
@@ -6999,6 +7057,61 @@ mod tests {
             .map(|n| n.cost_per_second.unwrap())
             .sum();
         assert_eq!(cost.cost_per_second.unwrap(), sum);
+    }
+
+    /// The difference of two Count-Min counts, within ε = 0.01 with
+    /// δ = 0.001 per value: Pass 1 sizes each count for δ/2, and the final
+    /// size splits δ over the root's two approximate inputs once more only
+    /// as `δ / (n · V)` with `n` = 2 and `V` = 1, i.e. still δ/2 each, not
+    /// δ/4 (the split is not applied twice).
+    #[test]
+    fn the_final_size_splits_the_failure_probability_once() {
+        use asap_logical_asap_optimization::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        };
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_scope(AccuracyScope::PerValue);
+        let root = lower_promql("count by (job) (a) - count by (job) (b)", target.clone());
+        let inventory =
+            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let choice: Vec<usize> = inventory
+            .targets
+            .iter()
+            .map(|t| {
+                t.choices
+                    .candidates
+                    .iter()
+                    .position(|c| *c == ComputationCandidate::Summary(SketchAlgorithm::Cms))
+                    .unwrap()
+            })
+            .collect();
+        let roots: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        let cms = |roots: &[QueryRoot]| -> Vec<SketchParams> {
+            roots
+                .iter()
+                .flat_map(root_operators)
+                .flat_map(OperatorNode::reachable)
+                .filter_map(|node| match node.asap() {
+                    Some(ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    }) if *kind.algorithm() == SketchAlgorithm::Cms => Some(kind.params().clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let pass1 = cms(&roots);
+        assert_eq!(pass1.len(), 2, "{pass1:?}");
+        let sized = cms(&resize_for_failure_probability(&roots, &[target], &data()).unwrap());
+        for (sized, pass1) in sized.iter().zip(&pass1) {
+            assert_eq!(*sized, with_failure_probability(pass1, 0.001 / 2.0));
+            assert_ne!(*sized, with_failure_probability(pass1, 0.001 / 4.0));
+        }
     }
 
     /// One summary two queries read is sized for the stricter one: its
