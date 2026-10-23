@@ -38,7 +38,7 @@ pub(crate) struct Sizing {
     /// its plan may be exact over approximate inputs.
     pub per_value: Vec<Vec<f64>>,
     /// Per query, at most how many summaries its plan's value composes:
-    /// the most any candidate of each group it reaches has.
+    /// the most any plan of each of its root groups composes.
     pub max_inputs: Vec<usize>,
     /// Per group, the per-input failure probabilities its summaries may be
     /// sized for, the largest first. Groups whose builds one coupling site
@@ -165,19 +165,30 @@ pub(crate) fn sizing(memo: &Memo, entries: &[QueryWorkloadEntry], data: &DataWor
             values
         })
         .collect();
-    let most_per_group: Vec<usize> = (0..memo.groups.len())
-        .map(|g| {
-            memo.candidates[g]
-                .iter()
-                .map(|c| private_summaries(memo, c).len())
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
+    // The most summaries a plan of each group composes: its candidate's
+    // own and its children's, the most over its candidates.
+    let mut most_below = vec![0usize; memo.groups.len()];
+    let order: Vec<usize> = match memo.topological_order() {
+        Some(order) => order.into_iter().map(|g| g.0 as usize).collect(),
+        None => (0..memo.groups.len()).collect(),
+    };
+    for g in order {
+        most_below[g] = memo.candidates[g]
+            .iter()
+            .map(|c| {
+                private_summaries(memo, c).len()
+                    + c.children
+                        .iter()
+                        .map(|h| most_below[h.0 as usize])
+                        .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
+    }
     let mut max_inputs = vec![0; query_count];
     for (g, group) in memo.groups.iter().enumerate() {
-        for &q in &group.queries {
-            max_inputs[q] += most_per_group[g];
+        for &q in &group.roots_of {
+            max_inputs[q] += most_below[g];
         }
     }
     // Groups one site's shared build or chain links take one set of levels.

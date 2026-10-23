@@ -241,6 +241,12 @@ pub(crate) struct ModelInput {
     /// ([`crate::search::milp::sizing::Sizing::max_inputs`]): the bound of
     /// each choice's [`Choice::input_limits`].
     pub max_inputs: Vec<usize>,
+    /// Per choice, the choices equal to it but for their own summaries at
+    /// a size at least as large (sizing once): their plans cost at least
+    /// as much and meet the same targets, so a no-good cut of a plan cuts
+    /// them too. Empty for a choice with a summary another group's choice
+    /// may also build (one node with it at equal sizes may cost less).
+    pub larger_sizes: Vec<Vec<usize>>,
     /// Lower bounds on the omitted cost, added as `extra ≥ bound` when all
     /// of a choice set is chosen (local cuts).
     pub extra_bounds: Vec<(Vec<usize>, f64)>,
@@ -2731,9 +2737,13 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
         while input.excluded_once.len() < input.excluded.len() {
             input.excluded_once.push((Vec::new(), Vec::new()));
         }
-        input
-            .excluded
-            .push((solution.chosen.clone(), outside, bound));
+        // With each chosen choice's variants at larger sizes: one per
+        // group, so the bound still cuts every plan of them.
+        let mut cut = solution.chosen.clone();
+        for &c in &solution.chosen {
+            cut.extend(input.larger_sizes.get(c).into_iter().flatten().copied());
+        }
+        input.excluded.push((cut, outside, bound));
         input.excluded_once.push((built, not_built));
         Ok(())
     }
@@ -3132,6 +3142,57 @@ pub(crate) fn model_input_of(
         .map(|lazy| lazy.direct_at_ingestion.map(|p| p.cost_per_unit_rate))
         .collect();
     input.site_thresholds = site_thresholds;
+    // Choices equal but for their own summaries' final size.
+    let mut same: HashMap<String, Vec<usize>> = HashMap::new();
+    for (c, choice) in input.choices.iter().enumerate() {
+        let key = format!(
+            "{:?}",
+            (
+                choice.group,
+                choice.candidate,
+                choice.copy_of,
+                &choice.assignment,
+                &choice.scan_children,
+                choice.scan_horizon_ms,
+                &lazies[c].thresholds,
+            )
+        );
+        same.entry(key).or_default().push(c);
+    }
+    // A larger size is one for a smaller failure probability.
+    let delta = |c: usize| {
+        input.choices[c]
+            .per_input_failure_probability
+            .unwrap_or(f64::INFINITY)
+    };
+    // A summary another group's choice may also build may be one node
+    // with it at equal sizes, cheaper than both larger: not cut together.
+    let mut groups_of_summary: HashMap<u64, BTreeSet<GroupId>> = HashMap::new();
+    for choice in &input.choices {
+        for &key in &choice.summary_keys {
+            groups_of_summary
+                .entry(key)
+                .or_default()
+                .insert(choice.group);
+        }
+    }
+    input.larger_sizes = vec![Vec::new(); input.choices.len()];
+    for variants in same.values() {
+        for &c in variants {
+            let shared = input.choices[c]
+                .summary_keys
+                .iter()
+                .any(|key| groups_of_summary[key].len() > 1);
+            if shared {
+                continue;
+            }
+            input.larger_sizes[c] = variants
+                .iter()
+                .copied()
+                .filter(|&d| d != c && delta(d) <= delta(c))
+                .collect();
+        }
+    }
     input.cuts.shared_slot_held = input
         .choices
         .iter()
@@ -3265,6 +3326,7 @@ fn model_input_clone(input: &ModelInput) -> ModelInput {
         excluded_once: input.excluded_once.clone(),
         site_thresholds: input.site_thresholds.clone(),
         max_inputs: input.max_inputs.clone(),
+        larger_sizes: input.larger_sizes.clone(),
         extra_bounds: input.extra_bounds.clone(),
         requires: input.requires.clone(),
         exclusive: input.exclusive.clone(),
@@ -3731,6 +3793,7 @@ fn model_input(
         excluded_once: Vec::new(),
         site_thresholds: Vec::new(),
         max_inputs: sizing.max_inputs,
+        larger_sizes: Vec::new(),
         extra_bounds: Vec::new(),
         requires,
         exclusive,
@@ -3819,6 +3882,7 @@ pub(crate) mod tests {
             excluded_once: Vec::new(),
             site_thresholds: Vec::new(),
             max_inputs: Vec::new(),
+            larger_sizes: Vec::new(),
             extra_bounds: Vec::new(),
             requires: Vec::new(),
             exclusive: (Vec::new(), Vec::new()),
@@ -3887,6 +3951,7 @@ pub(crate) mod tests {
             excluded_once: Vec::new(),
             site_thresholds: Vec::new(),
             max_inputs: Vec::new(),
+            larger_sizes: Vec::new(),
             extra_bounds: Vec::new(),
             requires: Vec::new(),
             exclusive: (Vec::new(), Vec::new()),
@@ -4425,6 +4490,7 @@ pub(crate) mod tests {
             excluded_once: Vec::new(),
             site_thresholds: Vec::new(),
             max_inputs: Vec::new(),
+            larger_sizes: Vec::new(),
             extra_bounds: Vec::new(),
             requires: Vec::new(),
             exclusive: (Vec::new(), Vec::new()),

@@ -1967,6 +1967,62 @@ mod tests {
         .is_empty());
     }
 
+    /// The model input of `queries` (every 10 s, raw data kept).
+    fn input_of(
+        queries: &[&str],
+        targets: &[AccuracyTarget],
+    ) -> crate::search::milp::model::ModelInput {
+        let roots: Vec<(usize, QueryRoot)> = queries
+            .iter()
+            .zip(targets)
+            .map(|(q, target)| {
+                let root = lower_promql(q, target.clone());
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
+            })
+            .enumerate()
+            .collect();
+        let per_computation = generate_per_computation_candidates(roots).unwrap();
+        let entries = entries(&vec![10_000; queries.len()], targets);
+        let models = PlanningModels::builtin();
+        let memo = memo(&per_computation, &entries);
+        crate::search::milp::model::model_input_of(&memo, &entries, &data(), models)
+            .unwrap()
+            .0
+    }
+
+    /// A no-good cut of a plan also cuts its choices at larger final
+    /// sizes, which cost at least as much: with one quantile, its KLL
+    /// choices have such variants. Two quantiles over one window read
+    /// identical KLL builds, which may be one node at equal sizes, cheaper
+    /// than either larger: those are never cut together.
+    #[test]
+    fn a_cut_takes_larger_sizes_only_of_summaries_no_other_group_builds() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+        let one = input_of(&["quantile_over_time(0.9, m[5m])"], &[target.clone()]);
+        assert!(one.larger_sizes.iter().any(|larger| !larger.is_empty()));
+        let two = input_of(
+            &[
+                "quantile_over_time(0.9, m[5m])",
+                "quantile_over_time(0.5, m[5m])",
+            ],
+            &[target.clone(), target],
+        );
+        let mut groups_of: HashMap<u64, BTreeSet<GroupId>> = HashMap::new();
+        for choice in &two.choices {
+            for &key in &choice.summary_keys {
+                groups_of.entry(key).or_default().insert(choice.group);
+            }
+        }
+        let mut shared = 0;
+        for (c, choice) in two.choices.iter().enumerate() {
+            if choice.summary_keys.iter().any(|k| groups_of[k].len() > 1) {
+                shared += 1;
+                assert!(two.larger_sizes[c].is_empty(), "{c}");
+            }
+        }
+        assert!(shared > 0);
+    }
+
     /// The model restricted to each group choice ([`crate::search::milp::model::lower_bound_check`])
     /// is a lower bound of the group choice's exact price.
     fn assert_model_is_a_lower_bound(
