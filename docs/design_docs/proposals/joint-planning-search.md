@@ -198,6 +198,77 @@ Exact search finishes when every remaining branch has been explored or certified
 
 Validate each rule against exhaustive enumeration on small workloads, alone and in combination. Include donor-dependent sharing, global memory/core limits, overlapping reuse, per-source retention, repairable accuracy failures, and near ties. Verify bounds against the best exhaustive completion of each tested partial state. Measure planning time and peak memory on Examples 1–4, the mixed workloads, and Kubernetes recording rules without claiming a universal scaling guarantee.
 
+## The problem: sharing is a decision
+
+The main difficulty: whether to share, and at what granularity, is a decision the solver must make, and this is multi-query optimization (MQO).
+
+The problem we solve. Given a workload of queries, each with an accuracy target and a repeat interval, choose for every query one way to compute it, and for every computation it reads, whether it is computed alone or shared with other queries, and at which granularity (a sketch, a pane chain, a scan, a finer grouping rolled up). The choice must meet every query's accuracy and latency, fit the deployment's memory and cores, and minimize the workload's cost under the chosen cost model.
+
+Three properties make the decision hard. The cost of sharing depends on who shares:
+
+1. **A query can read several shared units.** Its latency is a sum over the units it reads, and its held memory is that sum times the latency. For example, `max_over_time(m[5m]) - min_over_time(m[5m])` together with `max_over_time(m[5m])`: the first query reads two units, one shared with the second. Pricing each unit alone overestimates the pair (0.4617 against an exact 0.4165).
+2. **A unit's cost depends on its reader set.** A shared unit runs at the union of its readers' repeat intervals (60 s and 90 s → 30 s), keeps data for the longest reader's window (5 min vs 24 h), and is sized for the strictest reader's accuracy (0.01 vs 0.05). Adding one reader can make a unit more expensive for all the others.
+3. **Units interact.** A shared scan reads the longest reader's window, which changes the inputs, and so the costs, of the units above it.
+
+### Is this MQO?
+
+Yes. The memo is MQO's AND-OR DAG: groups are the OR nodes (alternative ways to compute one sub-expression), implementation candidates are the AND nodes (one way, reading its child groups), and choosing a sub-DAG that covers every query, with shared nodes counted once, is the classic MQO problem.
+
+It is NP-hard. Classic MQO is NP-hard (Sellis 1988): choosing which shared nodes to compute is at least as hard as set cover, since each shared node covers the queries that read it. Our problem contains classic MQO as the special case where sizes, accuracy and time do not depend on the reader set, so it is NP-hard too, and no exact algorithm is polynomial in the worst case. Our problem goes beyond classic MQO in four ways: a shared node's size depends on its strictest reader; accuracy composes across the nodes a query reads; time matters (pane grids, retention, repeat intervals); and memory held during a query multiplies by its latency.
+
+### How MQO is solved
+
+| Family | Idea | Fit here |
+|---|---|---|
+| Greedy materialization | Add the shared node with the best benefit until none helps. | No optimality bound; misses sharing that pays only in combination. |
+| A* / branch and bound | Search plan combinations, prune by a cost bound. | Exact, but the current enumerator is this, and it does not finish on whole workloads. |
+| Integer programming | Binary variables per node and per choice; a solver finds the optimum. | Exact, but reader-set-dependent and multiplicative costs are not linear. |
+| Logic-based Benders decomposition | A MILP master chooses with linear lower-bound costs; a subproblem prices the choice exactly and returns cuts. | Fits: Stage 3 is the exact subproblem. |
+| Column generation (branch and price) | Each column is a whole sharing pattern, priced exactly; a pricing problem finds new columns. | Fits reader-set-dependent costs exactly; columns grow with reader subsets. |
+
+### How we solve it
+
+Logic-based Benders decomposition. The MILP over the memo is the master: it chooses candidates and sharing with linear coefficients that are lower bounds of the true cost. Stage 3 evaluates the decoded plan exactly. When the exact cost exceeds the master's estimate, a cut returns to the master. The loop ends when the incumbent's cost is within the gap of the master's lower bound, so the result is optimal within that gap.
+
+The algorithm:
+
+```text
+input:  memo M, cost model C, gap tolerance g, time limit T
+output: plan P*, its exact cost U, lower bound L
+
+build master MILP from M:
+    variables x (candidate chosen), m (group materialized),
+              u (shared unit used), r (reader of unit), ...
+    constraints: every query covered; a chosen candidate's child groups
+                 are computed; validity (accuracy, latency, capacity)
+    objective: sum of lower-bound coefficients of the chosen terms
+cuts := {}
+U := +inf; P* := none
+loop:
+    solve master with cuts            -> solution s, objective L
+    if master infeasible: return no plan
+    P := decode(s)                    # exactly one plan
+    c := Stage 3 exact cost of P under C
+    if c < U: U := c; P* := P         # incumbent
+    if (U - L) / U <= g: return (P*, U, L)        # optimal within g
+    if time limit T reached: return (P*, U, L)    # reported with its gap
+    for each term t of P whose exact cost exceeds its coefficient:
+        add cut: (t chosen) => (objective >= exact cost of t)
+    if no term cut applies:
+        add no-good cut excluding s
+```
+
+Two properties make it correct. Every coefficient is a lower bound of the exact cost of its term, so L never exceeds the optimum. Every cut is valid: it removes no plan whose exact cost is below what the cut states. Together, when the loop stops at gap g, P* is within g of the optimum.
+
+The number of rounds depends on the strength of the master and the cuts, so the work goes there, in the standard ways:
+
+- **Validity before cost.** Invalid candidates are pruned per candidate; composed accuracy and path latency are MILP constraints, not cuts.
+- **Stronger cuts.** A cut prices the terms that were underestimated (a reader set's union rate, retention, size; a query's held memory), so one cut excludes every plan sharing that term, not just one plan.
+- **Decomposition into clusters.** Groups that share nothing are solved as separate MILPs.
+- **Decoding.** One master solution decodes to exactly one plan.
+
+For a small cluster whose costs depend heavily on the reader set, column generation prices each sharing pattern exactly and needs no cuts for it. It is a complement for those clusters, not a replacement for the master. No heuristic replaces the exact search; a run that hits its time limit reports its gap.
+
 ## Memo-group search
 
 The rules above prune a search that still builds and prices whole-workload candidates, one at a time, at about a millisecond each: RangeHeavy's 24-hour quantiles component checks 153,086 of them in 92 s, and whole workloads link most queries over one source into one component (shared scans, SQL windows as time ranges, sketch rollup). The memo-group search replaces whole-candidate enumeration with a Cascades-style memo over the workload's logical sub-expressions. The stages keep their semantics and code boundaries; what changes is the unit they exchange.
