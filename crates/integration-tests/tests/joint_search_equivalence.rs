@@ -1573,6 +1573,63 @@ fn assert_three_way_on_seeds(
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// Queries over two gauges, two per gauge, are two independent clusters of
+/// the memo, each searched with its own MILP and lazy loop: with raw data
+/// kept and without, the MILP reports both clusters, each certified, and
+/// the three searches select plans of one price.
+#[test]
+fn three_way_on_two_independent_clusters() {
+    let mut workload = random_workload_over(3, &["m", "n"]);
+    let queries = [
+        "quantile_over_time(0.9, m[5m])",
+        "sum_over_time(m[1m])",
+        "max_over_time(n[5m])",
+        "quantile_over_time(0.99, n[10m])",
+    ];
+    workload.query_workload.repeating_queries = workload_of(
+        &queries.map(|q| (q, 60_000)),
+        AccuracyTarget::max_error(0.05),
+    )
+    .query_workload
+    .repeating_queries;
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    for deployment in [
+        asap_logical_asap_optimization::DeploymentCapabilities::default(),
+        no_raw_data(),
+    ] {
+        let models = PlanningModels::builtin().with_deployment_capabilities(&deployment);
+        let label = format!("raw data retained {}", deployment.raw_data_retained);
+        assert!(
+            assert_three_way(&label, &roots, &entries, &data, models),
+            "{label}"
+        );
+        let run = run_stage1_to_stage3_with(
+            roots.iter().cloned().enumerate().collect(),
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search::with_algorithm(SearchAlgorithm::MemoMilp),
+        )
+        .unwrap();
+        let milp = run.stage3_plan_selection.unwrap().search.milp.unwrap();
+        let clusters: Vec<_> = milp.clusters.iter().map(|c| c.queries.clone()).collect();
+        assert_eq!(clusters, [vec![0, 1], vec![2, 3]], "{label}");
+        assert!(
+            milp.clusters
+                .iter()
+                .all(|c| c.gap.is_some_and(|gap| gap <= 1e-9)),
+            "{label}: {milp:?}"
+        );
+        assert_eq!(
+            milp.rounds,
+            milp.clusters.iter().map(|c| c.rounds).sum::<u32>(),
+            "{label}"
+        );
+    }
+}
+
 /// The three searches agree on the random workloads under cost model 1.
 #[test]
 #[ignore = "the exhaustive search and the brute force over every seed take minutes in a debug build; run with --release --ignored"]
