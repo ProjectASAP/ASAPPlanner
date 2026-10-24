@@ -674,7 +674,8 @@ pub struct NodeCost {
 pub struct CandidateCost {
     pub usage: ResourceUsage,
     /// Its price per second under cost model 1 or 2 (under cost model 1, the
-    /// sum of its nodes'); `None` under cost model 3.
+    /// sum of its nodes' charges plus request overhead for queries without
+    /// operator nodes); `None` under cost model 3.
     pub cost_per_second: Option<f64>,
     /// The unit of `cost_per_second`: always [`COST_UNIT`].
     pub cost_unit: &'static str,
@@ -1055,6 +1056,29 @@ pub struct SearchReport {
     /// groups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo_plan: Option<MemoPlanReport>,
+    /// Explicit candidate-connection route; optimality is limited to its
+    /// reported finite catalog and configured evaluator, not other search routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_connections: Option<CandidateConnectionReport>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CandidateConnectionReport {
+    pub catalog_scope: String,
+    pub status: String,
+    pub groups: usize,
+    pub logical_candidates: usize,
+    pub immediate_candidates: usize,
+    pub physical_configurations: usize,
+    pub compatible_connections: usize,
+    pub output_references: usize,
+    pub refinements: usize,
+    pub lower_bound: f64,
+    pub relative_gap: Option<f64>,
+    /// Includes logical group population and concrete state sharing, not frontend lowering.
+    pub memo_expansion_ms: f64,
+    pub inventory_construction_ms: f64,
+    pub search_and_validation_ms: f64,
 }
 
 /// The selected plan over the memo (joint-planning-search design, "How the
@@ -1248,6 +1272,9 @@ pub enum SearchAlgorithm {
     /// The memo over logical sub-expressions solved as a mixed-integer
     /// linear program.
     MemoMilp,
+    /// Explicit bounded connection search over Pass 1 candidates and concrete
+    /// shared summary groups. Its report identifies omitted rule families.
+    CandidateConnections,
 }
 
 impl SearchAlgorithm {
@@ -4031,22 +4058,45 @@ fn price_at_scale(
     let evaluation_ms = table.ns_per_evaluation * 1e-6;
     let starts = query_starts(dag);
     let mut evaluation_ms_per_query = vec![0.0; starts.len()];
+    let mut request_ms_per_second = 0.0;
+    // Literal-only roots have no operator to own their fee. Keep that charge
+    // at plan level while preserving existing attribution for operator queries.
+    let mut unattached_request_cost = 0.0;
+    let mut has_unattached_request_overhead = false;
     for (query, start) in starts.iter().enumerate() {
-        let Some(&first_read) = start.first().filter(|_| evaluation_ms > 0.0) else {
+        if evaluation_ms <= 0.0 {
             continue;
-        };
+        }
+        let diagnostic_node = start.first().copied().unwrap_or(first);
         let requests_per_second = evaluation_rate(
             recurrence.get(query).map(|r| (r, None)),
             settings.non_repeating_query_horizon_seconds,
         )
-        .map_err(|error| (first_read, error))?;
+        .map_err(|error| (diagnostic_node, error))?;
         let ops_per_second = evaluation_ms / speed.ms_per_cpu_op * requests_per_second;
         usage.cpu_ops_per_second += ops_per_second;
+        request_ms_per_second += evaluation_ms * requests_per_second;
+        if !usage.cpu_ops_per_second.is_finite() || !request_ms_per_second.is_finite() {
+            return Err((diagnostic_node, AnalyticalCostError::Overflow));
+        }
         evaluation_ms_per_query[query] = evaluation_ms;
+        let Some(&first_read) = start.first() else {
+            has_unattached_request_overhead = true;
+            if let Some(prices) = usage_prices {
+                unattached_request_cost += prices.cost_per_cpu_op * ops_per_second;
+                if !unattached_request_cost.is_finite() {
+                    return Err((diagnostic_node, AnalyticalCostError::Overflow));
+                }
+            }
+            continue;
+        };
         let node = per_node
             .get_mut(&first_read)
             .expect("every node is measured");
         node.cpu_core_seconds_per_second += evaluation_ms * requests_per_second / 1_000.0;
+        if !node.cpu_core_seconds_per_second.is_finite() {
+            return Err((first_read, AnalyticalCostError::Overflow));
+        }
         node.detail += &format!(
             "; q{} request overhead {:.3} ns x {requests_per_second:.4}/s",
             query + 1,
@@ -4054,6 +4104,9 @@ fn price_at_scale(
         );
         if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
             *cost += prices.cost_per_cpu_op * ops_per_second;
+            if !cost.is_finite() {
+                return Err((first_read, AnalyticalCostError::Overflow));
+            }
         }
     }
     for (bytes, id) in raw_data.into_values() {
@@ -4148,10 +4201,24 @@ fn price_at_scale(
             }
         }
     }
-    usage.peak_cpu_cores = peak_cpu_cores(dag, nodes, &work_ms, &multipliers, &latency);
+    usage.peak_cpu_cores = peak_cpu_cores(
+        dag,
+        nodes,
+        &work_ms,
+        &multipliers,
+        &latency,
+        request_ms_per_second,
+    );
     usage.latency_per_query = latency;
     let cost = match &settings.cost_model {
-        CostModel::UsageOverTime(_) => per_node.values().map(|node| node.cost_per_second).sum(),
+        CostModel::UsageOverTime(_) => {
+            let node_cost: Option<f64> = per_node.values().map(|node| node.cost_per_second).sum();
+            let total = node_cost.map(|cost| cost + unattached_request_cost);
+            if total.is_some_and(|cost| !cost.is_finite()) {
+                return Err((first, AnalyticalCostError::Overflow));
+            }
+            total
+        }
         CostModel::ProvisionedCapacity(prices) => {
             let cost = prices.cost_per_provisioned_memory_byte_second
                 * usage.peak_memory_bytes as f64
@@ -4169,7 +4236,18 @@ fn price_at_scale(
             usage,
             cost_per_second: cost,
             cost_unit: COST_UNIT,
-            source: cost_source(&per_node),
+            source: if has_unattached_request_overhead {
+                if per_node
+                    .values()
+                    .all(|node| node.price_source == NodePriceSource::Measured)
+                {
+                    MEASURED_COST_SOURCE
+                } else {
+                    MIXED_COST_SOURCE
+                }
+            } else {
+                cost_source(&per_node)
+            },
             per_node,
         },
         fit,
@@ -5059,9 +5137,12 @@ fn peak_cpu_cores(
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
     multipliers: &HashMap<PhysicalASAPNodeId, (u64, f64)>,
     latency: &[QueryLatency],
+    request_ms_per_second: f64,
 ) -> u32 {
     let mut ingestion_ms_per_second = 0.0;
-    let mut query_ms_per_second = 0.0;
+    // Request overhead is attributed in per_node reports, not work_ms, and so
+    // must enter the throughput floor separately (including literal queries).
+    let mut query_ms_per_second = request_ms_per_second;
     for node in &dag.nodes {
         let per_second = multipliers[&node.id].1;
         if nodes[&node.id].output_state.timing == ExecutionTiming::IngestionTime {
@@ -11553,6 +11634,93 @@ mod tests {
         assert!(close(
             after.cost_per_second.unwrap() - before.cost_per_second.unwrap(),
             0.1
+        ));
+    }
+
+    // A literal query has no operator to own its fee, but still incurs one
+    // request's CPU, latency and price; range steps do not multiply that fee.
+    #[test]
+    fn literal_requests_pay_overhead_without_operator_nodes() {
+        use asap_types::workload::{DemandEstimate, Rate};
+        let roots = [QueryRoot::Scalar(ScalarExpr::Literal(
+            ScalarValue::Float64(1.0),
+        ))];
+        let recurrence = QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
+            expected_rate: Rate(2000.0),
+            observed_at: None,
+            valid_for: None,
+        }));
+        let entries = [entry_with(AccuracyTarget::exact(), recurrence.clone())];
+        let candidate = optimize_physical_asap(
+            "literal",
+            &roots,
+            &entries,
+            &data(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap()
+        .remove(0);
+        assert!(candidate.dag.nodes.is_empty());
+        let mut settings = PlanSelectionSettings::default();
+        settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;
+        for range in [
+            None,
+            Some(RangeEvaluation {
+                step_ms: 1000,
+                span_ms: 3000,
+            }),
+        ] {
+            let cost = super::price(
+                &candidate.dag,
+                &node_map(&candidate.dag),
+                &kept_pane_chains(&candidate.dag),
+                &[recurrence.clone()],
+                &[range],
+                &data(),
+                &settings,
+            )
+            .unwrap();
+            let CostModel::UsageOverTime(prices) = &settings.cost_model else {
+                unreachable!()
+            };
+            assert!(close(
+                cost.usage.cpu_ops_per_second,
+                2.0 / settings.resource_speed.ms_per_cpu_op * 2000.0
+            ));
+            assert!(close(
+                cost.cost_per_second.unwrap(),
+                prices.cost_per_cpu_op * cost.usage.cpu_ops_per_second
+            ));
+            assert!(cost.cost_per_second.unwrap() > 0.0);
+            assert_eq!(cost.usage.latency_per_query[0].query_ms, 2.0);
+            assert_eq!(cost.usage.peak_cpu_cores, 4);
+            assert!(cost.per_node.is_empty());
+            assert_eq!(cost.source, MEASURED_COST_SOURCE);
+        }
+        // Cluster capacity must enforce overhead's throughput requirement too.
+        settings.cost_model = CostModel::ClusterCapacity(ClusterLimits {
+            memory_bytes: u64::MAX,
+            disk_bytes: u64::MAX,
+            cpu_cores: Some(3),
+            objective: ClusterObjective::LowestLatency,
+        });
+        let facts = data();
+        let models = PlanningModels {
+            plan_selection: &settings,
+            ..PlanningModels::builtin()
+        };
+        let mut selector = PlanSelector::new(&entries, &facts, models, false).unwrap();
+        selector.set_calibration(CalibrationFit::default());
+        selector.offer(&candidate).unwrap();
+        assert!(matches!(
+            selector.finish(),
+            Err(SelectionError::NoValidCandidate(_))
+        ));
+        // Finite input coefficients can still overflow when multiplied by demand.
+        settings.measured_operation_costs.ns_per_evaluation = f64::MAX;
+        assert!(matches!(
+            price(&candidate.dag, &[recurrence], &facts, &settings),
+            Err((_, AnalyticalCostError::Overflow))
         ));
     }
 
