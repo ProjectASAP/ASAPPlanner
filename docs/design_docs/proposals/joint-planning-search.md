@@ -241,6 +241,18 @@ order[c] ∈ [0, N−1]     continuous topological rank of candidate c
 
 `order[c]` witnesses dependency order in the selected execution DAG; it is not a start time, latency, or runtime schedule. Ranks need not be unique or integral. Unselected candidates' ranks have no execution meaning. These variables can be omitted when the candidate dependency graph is already acyclic.
 
+#### Execution-demand variables
+
+For query-time recomputation on a fixed evaluation schedule, let `Ticks` be the finite evaluation events in the accounting horizon and `evaluates[q,t]` a known binary parameter indicating whether query `q` evaluates at event `t`. A shared event means compatible evaluation context, not merely equal wall-clock timestamps. Introduce:
+
+```text
+run[c,t] ∈ {0,1}                          candidate c executes at event t
+need[producer,consumer,requirement,t] ∈ {0,1}
+                                         the connected consumer needs this producer at t
+```
+
+This demand model assumes every required producer executes at the same event as its consumer, with one execution reusable by all compatible consumers at that event. It applies to query-time recomputation with legal within-evaluation sharing. Ingestion maintenance and retained state need their own update/freshness/lifetime constraints; the model below must not be applied to them unchanged.
+
 #### Objective
 
 For candidates whose execution demand and lifetime are fixed, the objective is:
@@ -252,6 +264,15 @@ min Σ_c local_cost[c] × x[c]
 Each selected candidate owns its local work and state, excluding producers. This includes shared-resource candidates such as `Retain15m`, so no separate shared-resource charge is needed. Fixed request overhead is omitted from the objective because it is constant for the workload; Section 4 describes its inclusion in reported total cost. Where selected consumers or connections change cost, additional expressions model that dependence rather than treating it as a constant.
 
 Here `local_cost[c]` covers the entire accounting horizon, not just one invocation. If selected connections change demand, the fixed-coefficient expression above is insufficient. The MILP must instead include the resulting execution and retention costs, with constraints tying execution counts and lifetimes to the selected connections. Selecting `x[c] = 1` alone determines neither the number of executions nor their total cost; the same accounting applies to resource limits.
+
+For the query-time demand model, replace the fixed-context objective with:
+
+```text
+min Σ_c standing_cost[c] × x[c]
+  + Σ_{c,t} execution_cost[c,t] × run[c,t]
+```
+
+`standing_cost` contains only horizon-wide costs independent of execution count; `execution_cost` contains local per-execution costs, excluding producers. They partition the modeled charges rather than adding them to `local_cost` again. Any connection-dependent retention or peak-memory cost requires additional constraints.
 
 ### 5.2 Constraints
 
@@ -272,6 +293,40 @@ connect[producer,consumer,requirement] ≤ x[producer]
 ```
 
 The equality applies to every `requirement ∈ ProducerRequirements(consumer)`: each selected consumer must have every dependency supplied by one compatible producer. Several consumers may connect to the same producer. There is **no general** constraint `Σ_{c ∈ Candidates(g)} x[c] ≤ 1`: multiple candidates in one group may be needed.
+
+#### Derive execution demand from selected connections
+
+For every compatible connection and event `t`, linearize the conjunction of a selected connection and a running consumer:
+
+```text
+need[producer,consumer,requirement,t] ≤ connect[producer,consumer,requirement]
+need[producer,consumer,requirement,t] ≤ run[consumer,t]
+need[producer,consumer,requirement,t] ≥ connect[producer,consumer,requirement]
+                                          + run[consumer,t] − 1
+```
+
+A candidate runs if a query root or a connected, running consumer demands it. For every candidate `c` and event `t`:
+
+```text
+run[c,t] ≤ x[c]
+run[c,t] ≥ evaluates[q,t] × r[q,c]              for each compatible query root q
+run[c,t] ≥ need[c,consumer,requirement,t]       for each outgoing connection
+run[c,t] ≤ Σ_q evaluates[q,t] × r[q,c]
+           + Σ_{consumer,requirement} need[c,consumer,requirement,t]
+```
+
+Only defined assignments and connections appear in the sums; an empty sum is zero. `evaluates` is a fixed parameter, so these expressions are linear. Together with acyclicity, the constraints propagate demand from query roots through every required producer and prevent unsupported execution. Multiple consumers demanding the same candidate at one event still produce a single `run[c,t] = 1`.
+
+For example, Q1 evaluates every minute and Q2 every five minutes on the same grid. Over 60 minute ticks, assuming compatible evaluations and fresh query-time builds:
+
+| Consumers connected to one KLL build | Build executions |
+| --- | ---: |
+| Q1 only | 60 |
+| Q2 only | 12 |
+| Q1 and Q2 | 60 |
+| Neither, and no other demand | 0 |
+
+The build's execution cost is `Σ_t execution_cost[build,t] × run[build,t]`. Additive per-execution resource usage follows the same pattern in capacity constraints. This is a joint optimization, not a circular cost definition: the solver selects connections and execution variables together, constrained by the fixed query schedule. The objective compares their resulting costs. Execution-graph cycles remain a separate issue handled by the ordering constraints.
 
 #### Shared raw-retention configuration
 
