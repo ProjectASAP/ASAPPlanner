@@ -15,6 +15,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
+    local_candidate_generation_ms: Option<f64>,
 ) -> crate::search::milp::model::MemoSearchResult {
     use crate::search::milp::candidate_configurations::enumerate_candidate_configurations;
     use crate::search::milp::candidate_inventory::build_candidate_inventory;
@@ -28,7 +29,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     use std::time::{Duration, Instant};
     let unsupported = |reason: &str| {
         SelectionError::Solver(format!(
-        "candidate-connections: {reason}; this route currently supports Pass 1 and concrete shared summaries. Use memo-milp or legacy for the existing broader rule catalog."
+        "candidate-connections: {reason}; this route currently supports Pass 1, local panes, and concrete shared summaries. Use memo-milp or legacy for the existing broader rule catalog."
     ))
     };
     if search.exhaustive || search.keep_every_candidate {
@@ -81,8 +82,9 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         ));
     }
     let started = Instant::now();
-    let memo =
+    let mut memo =
         try_populate_pass1(initial, inventory).map_err(|error| unsupported(&error.to_string()))?;
+    crate::search::memo::rules::windows::add_local_window_composition(&mut memo, entries);
     let memo = expand_concrete_summary_state_groups(memo)
         .map_err(|error| unsupported(&error.to_string()))?
         .memo;
@@ -130,14 +132,14 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         CandidateSearchStatus::NumericalStall => "numerical_stall".into(),
     };
     let report = crate::CandidateConnectionReport {
-        catalog_scope: "Pass 1 + concrete equal-configuration shared summaries; pane, rollup, scan-widening and top-k-reuse rule expansion is not included".into(),
+        catalog_scope: "Pass 1 + local pane composition + concrete equal-configuration shared summaries; cross-group shared pane chains, rollup, scan-widening and top-k-reuse rule expansion is not included".into(),
         status, groups, logical_candidates, immediate_candidates,
         physical_configurations: configured.configurations.len(),
         compatible_connections: configured.inventory.graph.candidates.iter().flat_map(|candidate| &candidate.producer_requirements).map(|input| input.compatible_producers.len()).sum(),
         output_references: output_groups.len(), refinements: result.search.refinements,
         max_refinements: 128, time_limit_ms: search.milp_time_limit_ms.unwrap_or(30_000),
         lower_bound: result.search.lower_bound, relative_gap: result.search.relative_gap,
-        memo_expansion_ms, inventory_construction_ms, search_and_validation_ms,
+        memo_expansion_ms, local_candidate_generation_ms, inventory_construction_ms, search_and_validation_ms,
         model_construction_ms: result.search.solve_metrics.model_construction_seconds * 1000.0,
         solver_ms: result.search.solve_metrics.solver_seconds * 1000.0,
         validation_ms: result.search.validation_seconds * 1000.0,
@@ -272,6 +274,53 @@ mod tests {
         assert_eq!(report.output_references, 2);
         run.stage3_selected.unwrap().dag.validate().unwrap();
         assert!(run.stage1_selected.is_some());
+    }
+
+    // Sliding evaluations without retained raw data need a maintained pane chain.
+    #[test]
+    fn candidate_connections_uses_panes_for_frequent_window_evaluations() {
+        let (mut roots, mut entries, data) = workload();
+        roots.truncate(1);
+        entries.truncate(1);
+        entries[0].recurrence =
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(1_000)));
+        let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
+            raw_data_retained: false,
+            query_time_results_retained: false,
+            ..Default::default()
+        };
+        let models = PlanningModels {
+            deployment_capabilities: &deployment,
+            ..PlanningModels::builtin()
+        };
+        let run = run_stage1_to_stage3_with(
+            roots,
+            &entries,
+            &data,
+            models,
+            Stage1ToStage3Search {
+                milp_time_limit_ms: Some(10_000),
+                ..Stage1ToStage3Search::with_algorithm(SearchAlgorithm::CandidateConnections)
+            },
+        )
+        .unwrap();
+        let selected = run.stage3_plan_selection.unwrap();
+        assert!(selected
+            .search
+            .candidate_connections
+            .as_ref()
+            .unwrap()
+            .local_candidate_generation_ms
+            .is_some());
+        let physical = run.stage3_selected.unwrap();
+        assert!(physical
+            .roots
+            .iter()
+            .flat_map(|root| match root {
+                QueryRoot::Operator(node) => OperatorNode::reachable(node),
+                QueryRoot::Scalar(_) => Vec::new(),
+            })
+            .any(|node| matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. }))));
     }
 
     // Unsupported presentation/objective requests never silently route to legacy.

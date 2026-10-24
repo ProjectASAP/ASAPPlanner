@@ -113,7 +113,18 @@ pub(crate) fn combinable<'a>(
 /// weight, filter and names) is also offered reading a shared chain: the
 /// same node with a [`CouplingKind::PaneChain`] site per such build, whose
 /// chain the site's threshold sets ([`read_at_threshold`]).
-pub(crate) fn add_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
+/// Reuse existing pane rules without introducing implicit shared-chain sites.
+/// Connection-based selection binds these local candidates through normal inputs.
+pub(crate) fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
+    for (group, candidate) in local_pane_candidates(memo, entries) {
+        push_new(memo, group, candidate);
+    }
+}
+
+fn local_pane_candidates(
+    memo: &Memo,
+    entries: &[QueryWorkloadEntry],
+) -> Vec<(usize, ImplementationCandidate)> {
     let group_of = group_of_node(&memo.groups);
     let mut own: Vec<(usize, ImplementationCandidate)> = Vec::new();
     for (g, group) in memo.groups.iter().enumerate() {
@@ -154,6 +165,11 @@ pub(crate) fn add_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEn
             }
         }
     }
+    own
+}
+
+pub(crate) fn add_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
+    let own = local_pane_candidates(memo, entries);
     // The chain keys each group builds.
     let mut builders: HashMap<u64, BTreeSet<usize>> = HashMap::new();
     for (g, candidate) in &own {

@@ -196,6 +196,7 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
         }
     }
     let initial = uses_memo.then(|| LogicalMemo::from_roots(&roots));
+    let generation_started = std::time::Instant::now();
     let per_computation = match &initial {
         Some(memo) => generate_per_computation_candidates_with_memo(roots, memo)?,
         None => generate_per_computation_candidates(roots)?,
@@ -207,6 +208,7 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
         models,
         search,
         initial,
+        Some(generation_started.elapsed().as_secs_f64() * 1000.0),
     ))
 }
 
@@ -225,7 +227,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
-    run_with_initial_memo(per_computation, entries, data, models, search, None)
+    run_with_initial_memo(per_computation, entries, data, models, search, None, None)
 }
 
 fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
@@ -235,12 +237,19 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
     initial: Option<LogicalMemo>,
+    local_candidate_generation_ms: Option<f64>,
 ) -> Stage1ToStage3Run<Id> {
     if search.search == SearchAlgorithm::CandidateConnections {
         let pruned = per_computation.without_unsupported_summaries(models.deployment_capabilities);
         let initial = initial.unwrap_or_else(|| LogicalMemo::from_roots(&pruned.roots));
         let found = crate::search::milp::candidate_route::candidate_connection_search(
-            initial, &pruned, entries, data, models, search,
+            initial,
+            &pruned,
+            entries,
+            data,
+            models,
+            search,
+            local_candidate_generation_ms,
         );
         return memo_run(
             pruned,

@@ -45,7 +45,7 @@
 // search report says which ran (`algorithm`, omitted for legacy) and,
 // when the legacy search ran instead, why (`routed_to_legacy`). These choices
 // cannot be combined with `--exhaustive`.
-// `candidate-connections` is an explicit restricted catalog (Pass 1 and
+// `candidate-connections` is an temporary migration catalog (Pass 1, local panes and
 // concrete shared summaries), with a separate scope/termination report. It
 // defaults to 30 seconds and 128 evaluator refinements; --milp-time-limit-s
 // overrides its time budget. It does not replace the other rule catalogs.

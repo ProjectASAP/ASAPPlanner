@@ -1080,6 +1080,9 @@ pub struct CandidateConnectionReport {
     /// Memo population and concrete state sharing only; excludes frontend
     /// lowering, initial memo identity, and Pass 1 local rule generation.
     pub memo_expansion_ms: f64,
+    /// Pass 1 local rule generation; absent when supplied by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_candidate_generation_ms: Option<f64>,
     pub inventory_construction_ms: f64,
     pub search_and_validation_ms: f64,
     pub model_construction_ms: f64,
@@ -11683,7 +11686,7 @@ mod tests {
                 &candidate.dag,
                 &node_map(&candidate.dag),
                 &kept_pane_chains(&candidate.dag),
-                &[recurrence.clone()],
+                std::slice::from_ref(&recurrence),
                 &[range],
                 &data(),
                 &settings,
