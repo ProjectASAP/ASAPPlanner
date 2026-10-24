@@ -76,10 +76,9 @@
 //! `1 − (1 + ε)^{−1/n}`) and `δ/n` for `n` inputs (#669b). Only the inputs
 //! approximate in this candidate count. Stage 1 sizes for ε and δ per output
 //! value; plan selection enlarges the parameters that depend on δ for a
-//! target over the whole result. Sizing belongs after Pass 2, where a shared
-//! summary takes the strictest requirement among its consumers; Pass 2
-//! sharing is not implemented yet, so this is that post-Pass-2 sizing step
-//! with no sharing.
+//! target over the whole result. These local sizes seed the memo; shared
+//! state configurations must satisfy the requirements of their selected
+//! consumers and are checked during joint selection.
 //!
 //! Every node of the candidate gets a theoretical guarantee, composed with
 //! the built-in accuracy model through operators (#669): exact over exact

@@ -186,12 +186,12 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
 
 /// [`run_stage1_to_stage3_with`] after Pass 1: searches the Stage 1
 /// candidates of `per_computation` (the Pass 1 inventory of the frontends'
-/// roots, [`asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_optimization`]) without the summaries the
+/// roots) without the summaries the
 /// deployment does not support
 /// ([`PerComputationCandidates::without_unsupported_summaries`]), so a
 /// caller can read the inventory, e.g. its
 /// [`combinations`](PerComputationCandidates::combinations), before
-/// enumerating.
+/// generating the memo.
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
