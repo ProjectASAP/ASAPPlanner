@@ -6,6 +6,19 @@
 
 ASAP primitives increase both the opportunities for query optimization and the difficulty of searching for a good plan. A quantile, for example, may be computed directly or estimated from a summary. Several quantiles may use the same summary, and several windows may use overlapping sets of panes. The cost of one query therefore depends on decisions made for other queries. Selecting the cheapest implementation of each query independently can miss the cheapest workload plan.
 
+ASAPPlanner also optimizes for **workload patterns**, including repeated queries, their evaluation frequencies and alignment, and overlap among their windows. The unit of optimization is therefore a workload over time, not just a set of queries executed once. These patterns introduce further choices about when to recompute, which consumers can share an execution, and which intermediate states to maintain or retain across evaluations.
+
+For example, consider two queries over the same input and aligned 15m window:
+
+```text
+Q1: P95(X[15m]), evaluated every 1m
+Q2: P99(X[15m]), evaluated every 5m
+```
+
+Over 60 aligned minute ticks, separate query-time KLL builds require 60 + 12 executions. A compatible shared build can serve both queries at the 12 common query evaluation events, reducing the total to 60 builds. Another supported candidate may maintain 1m panes at ingestion and merge them at evaluation, trading update and retained-state costs against repeated whole-window construction. Eligible retained-state candidates introduce refresh and lifetime choices as well. Repetition alone does not make an earlier window's state valid for a later window; reuse must preserve coverage and freshness.
+
+The search space therefore grows across algorithm, configuration, consumer sharing, materialization, and temporal reuse choices together. Selecting a producer's consumers can change its execution frequency and required retention, so these decisions cannot be priced independently. Explicitly expanding every query evaluation event can further multiply the optimization model's size, even when query texts and algorithm candidates remain unchanged. Workload-pattern optimization thus adds both a combinatorial planning challenge and a need for compact representation of repeated execution demand.
+
 The problem addressed here is to find a minimum-cost execution DAG that produces every requested result and satisfies accuracy, latency, and resource requirements. The optimizer must account for shared computation and retained data without charging them repeatedly along different query paths. It must also keep its own search time and memory manageable as the number of queries and implementation choices grows.
 
 The following sections develop a memo-based representation and a joint selection procedure for this problem. The proposal concerns the finite candidates supported by the planner and its configured cost and constraint models. It does not introduce new sketch or window algorithms, or a runtime scheduler. An optimal solution consequently means an optimum within the generated model, not among all imaginable execution plans.
