@@ -1290,3 +1290,51 @@ fn grouped_avg_composition_preserves_the_whole_schema() {
         .any(|node| matches!(node.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))));
     assert_eq!(out.schema, root.schema);
 }
+
+// Cached local rules preserve filtered and unfiltered consumers independently.
+#[test]
+fn memo_cached_rules_preserve_occurrence_specific_having() {
+    use asap_logical_asap_optimization::memo::LogicalMemo;
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates_with_memo,
+    };
+    let shared = grouped_count(None);
+    let other = grouped_count(None);
+    let key = equals(0, ScalarValue::Utf8("a".into()));
+    let roots = vec![
+        (
+            0,
+            QueryRoot::Operator(having_filter(shared.clone(), key.clone())),
+        ),
+        (1, QueryRoot::Operator(shared)),
+        (2, QueryRoot::Operator(having_filter(other, key))),
+    ];
+    let memo = LogicalMemo::from_roots(&roots);
+    let baseline = generate_per_computation_candidates(roots.clone()).unwrap();
+    let cached = generate_per_computation_candidates_with_memo(roots, &memo).unwrap();
+    assert_eq!(cached.targets.len(), 2);
+    assert_ne!(
+        cached.targets[0].having[0].placement,
+        cached.targets[1].having[0].placement
+    );
+    for (before, after) in baseline.targets.iter().zip(&cached.targets) {
+        assert_eq!(before.choices, after.choices);
+        assert_eq!(before.having, after.having);
+        assert_eq!(before.fused, after.fused);
+    }
+    for target in 0..baseline.targets.len() {
+        for choice in 0..baseline.targets[target].choice_count() {
+            let mut selected = vec![0; baseline.targets.len()];
+            selected[target] = choice;
+            assert_eq!(
+                compose_logical_candidate(&baseline, &selected).unwrap(),
+                compose_logical_candidate(&cached, &selected).unwrap()
+            );
+        }
+    }
+    let other_roots = vec![(0, QueryRoot::Operator(grouped_count(None)))];
+    assert!(matches!(
+        generate_per_computation_candidates_with_memo(other_roots, &memo),
+        Err(PerComputationCandidateError::MemoRootsChanged)
+    ));
+}

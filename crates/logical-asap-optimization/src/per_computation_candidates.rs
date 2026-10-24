@@ -449,6 +449,8 @@ fn absorbed_targets(targets: &[ComputationTarget]) -> impl Iterator<Item = usize
 
 #[derive(Debug, Error)]
 pub enum PerComputationCandidateError {
+    #[error("candidate-generation roots do not match the initial logical memo")]
+    MemoRootsChanged,
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
     #[error("logical candidate input already has assigned execution timing or materialization")]
@@ -595,6 +597,29 @@ fn placement(below: bool) -> HavingPlacement {
 pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
+    generate_with_local_candidate_cache(roots, None, &mut HashMap::new())
+}
+
+/// Expand consumer-independent local rules once per logical group and measure.
+/// Consumer predicates, nullable-input checks, fusion, and absorption remain
+/// occurrence-specific. Cached choices are cloned before any contextual pruning.
+pub fn generate_per_computation_candidates_with_memo<Id: std::fmt::Debug>(
+    roots: Vec<(Id, QueryRoot)>,
+    memo: &crate::memo::LogicalMemo,
+) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
+    if !memo.matches_root_dependencies(&roots) {
+        return Err(PerComputationCandidateError::MemoRootsChanged);
+    }
+    generate_with_local_candidate_cache(roots, Some(memo), &mut HashMap::new())
+}
+
+type LocalCandidateCache = HashMap<(crate::memo::MemoGroupId, usize), ComputationChoices>;
+
+fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
+    roots: Vec<(Id, QueryRoot)>,
+    memo: Option<&crate::memo::LogicalMemo>,
+    local_candidates: &mut LocalCandidateCache,
+) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
     let mut seen = HashSet::new();
     // Each aggregate with the first root that reaches it.
     let mut aggregates = Vec::new();
@@ -676,8 +701,15 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
             });
         }
         for (measure, intent) in measures.iter().enumerate() {
-            let mut choices =
-                computation_candidates_for_intent(intent).map_err(|error| match error {
+            let group_measure = memo
+                .and_then(|memo| memo.group_for_node(&node))
+                .map(|group| (group, measure));
+            let cached = group_measure
+                .and_then(|key| local_candidates.get(&key))
+                .cloned();
+            let mut choices = cached
+                .map_or_else(|| computation_candidates_for_intent(intent), Ok)
+                .map_err(|error| match error {
                     PerComputationCandidateError::InvalidAccuracy { .. } => {
                         PerComputationCandidateError::InvalidAccuracy {
                             root: Some(root.clone()),
@@ -686,6 +718,11 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
                     }
                     error => error,
                 })?;
+            if let Some(key) = group_measure {
+                local_candidates
+                    .entry(key)
+                    .or_insert_with(|| choices.clone());
+            }
             if choices.candidates == [ComputationCandidate::Exact] && choices.pruned.is_empty() {
                 continue;
             }
@@ -4328,6 +4365,48 @@ mod tests {
                     .evaluate(),
                 Some(1.0)
             );
+        }
+    }
+
+    // Repeated groups reuse local rules without changing contextual candidates.
+    #[test]
+    fn memo_local_rules_cache_repeated_groups_without_changing_fusion() {
+        let queries = [
+            "sum by (job) (requests)",
+            "sum by (job) (requests)",
+            "topk(3, sum by (job) (requests))",
+        ];
+        let roots: Vec<_> = queries
+            .iter()
+            .enumerate()
+            .map(|(id, query)| {
+                let inventory = inventory(query);
+                (id, inventory.roots[0].1.clone())
+            })
+            .collect();
+        let memo = crate::memo::LogicalMemo::from_roots(&roots);
+        let baseline = generate_per_computation_candidates(roots.clone()).unwrap();
+        let mut cache = LocalCandidateCache::new();
+        let cached = generate_with_local_candidate_cache(roots, Some(&memo), &mut cache).unwrap();
+        assert!(
+            cache.len() < cached.targets.len(),
+            "repeated eligible groups reuse local rules"
+        );
+        assert_eq!(baseline.targets.len(), cached.targets.len());
+        for (before, after) in baseline.targets.iter().zip(&cached.targets) {
+            assert_eq!(before.choices, after.choices);
+            assert_eq!(before.having, after.having);
+            assert_eq!(before.fused, after.fused);
+        }
+        for target in 0..baseline.targets.len() {
+            for choice in 0..baseline.targets[target].choice_count() {
+                let mut selected = vec![0; baseline.targets.len()];
+                selected[target] = choice;
+                assert_eq!(
+                    compose_logical_candidate(&baseline, &selected).unwrap(),
+                    compose_logical_candidate(&cached, &selected).unwrap()
+                );
+            }
         }
     }
 

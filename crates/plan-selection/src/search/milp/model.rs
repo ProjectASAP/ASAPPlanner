@@ -2259,7 +2259,7 @@ fn search_clusters<Id: Clone + std::fmt::Debug>(
             .collect();
         let initial = LogicalMemo::from_roots(&roots);
         let inventory =
-            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots)
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates_with_memo(roots, &initial)
                 .ok()?
                 .without_unsupported_summaries(models.deployment_capabilities);
         let cluster_entries: Vec<QueryWorkloadEntry> =
@@ -2500,8 +2500,9 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
             let query_roots = vec![(q, root.clone())];
             let initial = LogicalMemo::from_roots(&query_roots);
             let Ok(inventory) =
-                asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+                asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates_with_memo(
                     query_roots,
+                    &initial,
                 )
             else {
                 return;

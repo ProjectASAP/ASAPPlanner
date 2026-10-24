@@ -16,7 +16,8 @@ use crate::search::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutp
 use crate::PlanningModels;
 use crate::{CostModel, RoutedToLegacy, SearchAlgorithm, Selection, SelectionError};
 use asap_logical_asap_optimization::per_computation_candidates::{
-    generate_per_computation_candidates, PerComputationCandidateError, PerComputationCandidates,
+    generate_per_computation_candidates, generate_per_computation_candidates_with_memo,
+    PerComputationCandidateError, PerComputationCandidates,
 };
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalCandidate;
@@ -193,7 +194,10 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
         }
     }
     let initial = uses_memo.then(|| LogicalMemo::from_roots(&roots));
-    let per_computation = generate_per_computation_candidates(roots)?;
+    let per_computation = match &initial {
+        Some(memo) => generate_per_computation_candidates_with_memo(roots, memo)?,
+        None => generate_per_computation_candidates(roots)?,
+    };
     Ok(run_with_initial_memo(
         per_computation,
         entries,
