@@ -11,9 +11,7 @@ use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 #[cfg(feature = "sql")]
 use asap_frontend_sql::SqlCatalog;
 use asap_logical_asap_optimization::realization::{default_size_params, DEFAULT_DELTA};
-use asap_plan_selection::pass::{
-    run_stage1_to_stage3_with, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
-};
+use asap_plan_selection::pass::{PlanOutput, PlanningModels, QueryPlan};
 use asap_plan_selection::RejectionCause;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::ir::operator::agg_intent::default_quantile;
@@ -94,18 +92,74 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
     e2e_plan(input).await.expect("workload plans")
 }
 
-/// Every planning stage's output for `queries`, run over the frontend's roots.
-fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
+/// Explicit exact, all-KLL, and all-DDS assignments for composition checks.
+/// These fixtures test candidate support and rejection independently of which
+/// candidates a bounded search happens to visit.
+fn composed_summary_candidates(
+    queries: &[(&str, f64)],
+) -> (
+    Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
+    asap_plan_selection::Selection,
+) {
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload).expect("lowers");
-    run_stage1_to_stage3_with(
-        roots.into_iter().enumerate().collect(),
-        &workload.query_workload.entries().collect::<Vec<_>>(),
-        &workload.data_workload.clone().unwrap(),
-        PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
-    )
-    .expect("Pass 1 accepts the workload")
+    let inventory =
+        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let mut assignments = vec![vec![0; inventory.targets.len()]];
+    for family in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
+        let choices: Vec<_> = inventory
+            .targets
+            .iter()
+            .map(|target| {
+                target
+                    .choices
+                    .candidates
+                    .iter()
+                    .position(|candidate| {
+                        *candidate == ComputationCandidate::Summary(family.clone())
+                    })
+                    .unwrap_or(0)
+            })
+            .collect();
+        assert_eq!(
+            choices.iter().filter(|choice| **choice != 0).count(),
+            2,
+            "both quantile references must explicitly use {family:?}"
+        );
+        assignments.push(choices);
+    }
+    let entries = workload.query_workload.entries().collect::<Vec<_>>();
+    let data = workload.data_workload.as_ref().unwrap();
+    let models = PlanningModels::builtin();
+    let candidates: Vec<_> = assignments
+        .into_iter()
+        .enumerate()
+        .map(|(index, choices)| {
+            let roots: Vec<_> = compose_logical_candidate(&inventory, &choices)
+                .unwrap()
+                .into_iter()
+                .map(|(_, root)| root)
+                .collect();
+            let mut candidate = asap_physical_asap_optimization::optimize_physical_asap_chosen(
+                "explicit-composition",
+                &roots,
+                &entries,
+                data,
+                models.deployment_capabilities,
+                &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
+            )
+            .unwrap()
+            .expect("supported physical computation");
+            candidate.id = format!("composition-{index}");
+            candidate
+        })
+        .collect();
+    let selection = asap_plan_selection::select_plan(&candidates, &entries, data, models)
+        .expect("the exact candidate meets the requested accuracy");
+    (candidates, selection)
 }
 
 /// Construct a legal shared-KLL candidate explicitly. Sharing capability must
@@ -550,38 +604,41 @@ async fn scalar_queries_read_planned_sub_dags() {
 /// selection rejects it with that reason.
 #[test]
 fn combined_scalar_references_keep_summary_candidates() {
-    let run = promql_stages(&[(
+    let (candidates, selection) = composed_summary_candidates(&[(
         "scalar(quantile(0.99, rate(x[5m]))) - scalar(quantile(0.5, rate(x[5m])))",
         0.01,
     )]);
-    let both = run
-        .stage2_physical_asap_optimization
-        .iter()
-        .find(|candidate| {
-            let refs = root_operators(&candidate.roots[0]);
-            refs.len() == 2 && refs.into_iter().all(reads_sketch)
-        })
-        .expect("a candidate reads a sketch in both references");
-    let selection = run.stage3_plan_selection.as_ref().unwrap();
-    let rejection = selection
-        .rejected
-        .iter()
-        .find(|r| r.id == both.id)
-        .expect("not selected");
+    for both in candidates.iter().skip(1) {
+        let refs = root_operators(&both.roots[0]);
+        assert_eq!(refs.len(), 2);
+        assert!(
+            refs.into_iter().all(reads_sketch),
+            "both references use the explicit sketch family"
+        );
+        let rejection = selection
+            .rejected
+            .iter()
+            .find(|r| r.id == both.id)
+            .expect("not selected");
+        assert_eq!(
+            rejection.cause,
+            RejectionCause::NoAccuracyGuarantee,
+            "{rejection:?}"
+        );
+        assert!(
+            rejection.reason.contains("no guarantee"),
+            "{}",
+            rejection.reason
+        );
+    }
     assert_eq!(
-        rejection.cause,
-        RejectionCause::NoAccuracyGuarantee,
-        "{rejection:?}"
-    );
-    assert!(
-        rejection.reason.contains("no guarantee"),
-        "{}",
-        rejection.reason
+        selection.selected, candidates[0].id,
+        "the exact assignment is selected"
     );
 }
 
-/// The vector form of a combination of approximate values keeps its summary
-/// candidates (nothing prunes them), but a difference or a comparison of
+/// Candidate generation supports summary implementations of the vector
+/// operands, but a difference or a comparison of
 /// estimates composes to no guarantee in the MVP (#669; a comparison's band
 /// guarantee is later work) and the built-in models have no empirical
 /// output-level evidence (plan selection, #576), so it is not selected
@@ -592,24 +649,28 @@ async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
         "quantile(0.99, rate(x[5m])) - quantile(0.5, rate(x[5m]))",
         "quantile(0.99, rate(x[5m])) > quantile(0.5, rate(x[5m]))",
     ] {
-        let run = promql_stages(&[(query, 0.01)]);
-        let summary = run
-            .stage2_physical_asap_optimization
-            .iter()
-            .find(|candidate| {
-                root_operators(&candidate.roots[0])
-                    .into_iter()
-                    .any(reads_sketch)
-            })
-            .unwrap_or_else(|| panic!("{query}: summary candidate expected"));
-        let QueryRoot::Operator(root) = &summary.roots[0] else {
-            panic!("{query}: operator root");
-        };
-        assert!(root.guarantee.is_none(), "{query}");
-        assert_ne!(
-            run.stage3_plan_selection.as_ref().unwrap().selected,
-            summary.id,
-            "{query}"
+        let (candidates, selection) = composed_summary_candidates(&[(query, 0.01)]);
+        for summary in candidates.iter().skip(1) {
+            let QueryRoot::Operator(root) = &summary.roots[0] else {
+                panic!("{query}: operator root");
+            };
+            assert!(reads_sketch(root), "{query}: explicit summary candidate");
+            assert!(root.guarantee.is_none(), "{query}");
+            let rejection = selection
+                .rejected
+                .iter()
+                .find(|rejection| rejection.id == summary.id)
+                .expect("uncertified vector computation is rejected");
+            assert_eq!(
+                rejection.cause,
+                RejectionCause::NoAccuracyGuarantee,
+                "{query}: {rejection:?}"
+            );
+            assert!(rejection.reason.contains("no guarantee"), "{rejection:?}");
+        }
+        assert_eq!(
+            selection.selected, candidates[0].id,
+            "{query}: exact assignment selected"
         );
 
         let output = plan_promql(&[(query, 0.01)]).await;
