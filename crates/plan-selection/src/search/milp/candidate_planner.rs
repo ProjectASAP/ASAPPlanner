@@ -8,10 +8,11 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::collections::BTreeMap;
 
 use super::candidate_configurations::CandidateConfigurationInventory;
-use super::candidate_connections::SelectedCandidateGraph;
+use super::candidate_connections::{RejectedQuerySubgraph, SelectedCandidateGraph};
 use super::candidate_physical::{materialize_selected_candidates, PhysicalCandidateError};
 use super::candidate_search::{
-    search_candidates_with_weighted_baseline, CandidateSearchLimits, CandidateSearchResult,
+    search_candidates_with_feedback, CandidateEvaluation, CandidateSearchLimits,
+    CandidateSearchResult,
 };
 use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
 
@@ -84,7 +85,7 @@ pub(super) fn optimize_configured_candidates(
     let mut rejections = CandidateRejectionSummary::default();
     let weighting_started = std::time::Instant::now();
     let weights = accuracy_baseline_weights(configured, context)?;
-    let search = search_candidates_with_weighted_baseline(
+    let search = search_candidates_with_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
             wall_time: limits.wall_time.saturating_sub(weighting_started.elapsed()),
@@ -93,15 +94,20 @@ pub(super) fn optimize_configured_candidates(
         Some(&weights),
         |selected| {
             evaluation_number += 1;
+            let mut rejected_queries = Vec::new();
             let Some((selection, physical)) = evaluate_configured_candidate(
                 configured,
                 context,
                 selected,
                 evaluation_number,
                 &mut rejections,
+                &mut rejected_queries,
             )?
             else {
-                return Ok(None);
+                return Ok(CandidateEvaluation {
+                    actual_cost: None,
+                    rejected_queries,
+                });
             };
             let cost = selection
                 .costs
@@ -111,7 +117,7 @@ pub(super) fn optimize_configured_candidates(
             if best.as_ref().is_none_or(|(previous, ..)| cost < *previous) {
                 best = Some((cost, selected.clone(), selection, physical));
             }
-            Ok(Some(cost))
+            Ok(Some(cost).into())
         },
     )?;
     match (&search.incumbent, &best) {
@@ -227,6 +233,7 @@ fn evaluate_configured_candidate(
     selected: &SelectedCandidateGraph,
     evaluation_number: usize,
     rejections: &mut CandidateRejectionSummary,
+    rejected_queries: &mut Vec<RejectedQuerySubgraph>,
 ) -> Result<Option<(Selection, PhysicalCandidate)>, String> {
     let mut modes = vec![None; configured.configurations.len()];
     for id in &selected.selected_candidates {
@@ -259,6 +266,48 @@ fn evaluate_configured_candidate(
                 "candidate {} requested timing {:?}, Stage 2 produced {:?}",
                 id.0, configured.configurations[id.0].timing, node.timing
             ));
+        }
+    }
+    // Reuse the legacy evaluator's size-independent proof after its normal
+    // resizing step. Other consumers can change sizes, but cannot repair this
+    // certified failure of the same complete query dependency subgraph.
+    let targets = crate::accuracy_targets(context.entries);
+    if let Ok(sized) =
+        crate::sized_for_failure_probability(&realized.physical, &targets, context.data)
+    {
+        let mut output_index = 0;
+        for (query, root) in sized.roots.iter().enumerate() {
+            let mut outputs = Vec::new();
+            match &context.original_roots[query] {
+                QueryRoot::Operator(_) => {
+                    outputs.push(output_index);
+                    output_index += 1;
+                }
+                QueryRoot::Scalar(expression) => {
+                    expression.map_operator_refs(&mut |node| {
+                        outputs.push(output_index);
+                        output_index += 1;
+                        std::rc::Rc::clone(node)
+                    });
+                }
+            }
+            if let Err(failure) =
+                crate::guarantee_check(query, root, &targets[query], context.data, &context.models)
+            {
+                if failure.size_independent && !outputs.is_empty() {
+                    rejected_queries.push(RejectedQuerySubgraph::from_query_outputs(
+                        selected, &outputs,
+                    )?);
+                    let category = serde_json::to_value(failure.cause)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| format!("{:?}", failure.cause));
+                    rejections.record(category, &failure.reason);
+                }
+            }
+        }
+        if !rejected_queries.is_empty() {
+            return Ok(None);
         }
     }
     // Stage 2 leaves IDs to its caller. A nonempty, stable proposal label keeps
@@ -481,16 +530,20 @@ mod tests {
             wall_time: Duration::from_secs(20),
         };
         let mut rejected = CandidateRejectionSummary::default();
+        let mut rejected_queries = Vec::new();
+        let mut bad_assignment = None;
         let plain = super::super::candidate_search::search_candidates_with_baseline(
             &configured.inventory.graph,
             limits,
             |selected| {
+                bad_assignment = Some(selected.clone());
                 Ok(evaluate_configured_candidate(
                     &configured,
                     &context,
                     selected,
                     1,
                     &mut rejected,
+                    &mut rejected_queries,
                 )?
                 .map(|(selection, _)| {
                     selection.costs[&selection.selected]
@@ -505,6 +558,37 @@ mod tests {
             "fixture must expose node-count baseline's missing contract"
         );
         assert!(rejected.counts.contains_key("no_accuracy_guarantee"));
+        assert!(
+            !rejected_queries.is_empty(),
+            "composed value/top-k failures must supply certified cuts"
+        );
+        // A deployment may acquire evidence at another shared summary size.
+        // Reuse the original predicate's conservative guard, not a new model.
+        struct PotentialEvidence;
+        impl crate::AccuracyEvidenceProvider for PotentialEvidence {}
+        let evidence = PotentialEvidence;
+        let evidence_context = CandidatePlanningContext {
+            models: PlanningModels {
+                evidence: &evidence,
+                ..models
+            },
+            ..context
+        };
+        let mut guarded_cuts = Vec::new();
+        let _ = evaluate_configured_candidate(
+            &configured,
+            &evidence_context,
+            bad_assignment.as_ref().unwrap(),
+            2,
+            &mut CandidateRejectionSummary::default(),
+            &mut guarded_cuts,
+        )
+        .unwrap();
+        assert!(
+            guarded_cuts.is_empty(),
+            "custom evidence cannot justify size-independent cuts"
+        );
+
         let result = optimize_configured_candidates(&configured, &context, limits).unwrap();
         assert!(
             result.best.is_some(),

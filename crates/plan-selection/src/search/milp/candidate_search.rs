@@ -1,12 +1,28 @@
 //! Bounded evaluator refinement over candidate connections, without enumerating
-//! complete plans up front. Full-assignment cuts are a correctness fallback;
+//! complete plans up front. Certified query cuts reuse size-independent accuracy
+//! failures; full-assignment cuts remain a correctness fallback;
 //! they make no claim of scalable demand modeling or support for every cost model.
 use std::time::{Duration, Instant};
 
 use super::candidate_connections::{
     solve_candidate_proposal_with_metrics, CandidateDependencyGraph, CandidateSelectionError,
-    CandidateSolveMetrics, ObservedAssignment, SelectedCandidateGraph,
+    CandidateSolveMetrics, ObservedAssignment, RejectedQuerySubgraph, SelectedCandidateGraph,
 };
+
+#[derive(Debug, Default)]
+pub(super) struct CandidateEvaluation {
+    pub actual_cost: Option<f64>,
+    pub rejected_queries: Vec<RejectedQuerySubgraph>,
+}
+
+impl From<Option<f64>> for CandidateEvaluation {
+    fn from(actual_cost: Option<f64>) -> Self {
+        Self {
+            actual_cost,
+            rejected_queries: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CandidateSearchLimits {
@@ -45,6 +61,8 @@ pub(super) struct CandidateSearchResult {
     pub solve_metrics: CandidateSolveMetrics,
     /// Includes physical reconstruction, accuracy/latency checks and pricing.
     pub validation_seconds: f64,
+    /// Complete query closures rejected by the original size-independent proof.
+    pub certified_query_cuts: usize,
 }
 
 /// The callback returns an actual total cost for a validated feasible plan, or
@@ -57,9 +75,11 @@ pub(super) struct CandidateSearchResult {
 pub(super) fn search_candidates(
     graph: &CandidateDependencyGraph,
     limits: CandidateSearchLimits,
-    evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
+    mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
 ) -> Result<CandidateSearchResult, String> {
-    search_with_structural_baseline(graph, limits, false, None, evaluate)
+    search_with_structural_baseline(graph, limits, false, None, |selected| {
+        evaluate(selected).map(Into::into)
+    })
 }
 
 /// Seed the same certified-cost search with a bounded minimum-active-node plan.
@@ -75,11 +95,24 @@ pub(super) fn search_candidates_with_baseline(
 }
 
 /// Optional weights order baseline proposals only; they never modify cost bounds.
+#[cfg(test)]
 pub(super) fn search_candidates_with_weighted_baseline(
     graph: &CandidateDependencyGraph,
     limits: CandidateSearchLimits,
     weights: Option<&[f64]>,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
+) -> Result<CandidateSearchResult, String> {
+    let mut evaluate = evaluate;
+    search_candidates_with_feedback(graph, limits, weights, |selected| {
+        evaluate(selected).map(Into::into)
+    })
+}
+
+pub(super) fn search_candidates_with_feedback(
+    graph: &CandidateDependencyGraph,
+    limits: CandidateSearchLimits,
+    weights: Option<&[f64]>,
+    evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_structural_baseline(graph, limits, true, weights, evaluate)
 }
@@ -89,7 +122,7 @@ fn search_with_structural_baseline(
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
-    mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
+    mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     graph.validate().map_err(|error| error.to_string())?;
     let started = Instant::now();
@@ -151,6 +184,7 @@ fn search_with_structural_baseline(
                     ObservedAssignment {
                         selected,
                         exact_cost: None,
+                        rejected_queries: observation.rejected_queries.clone(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -222,10 +256,14 @@ fn search_with_structural_baseline(
         let validation_started = Instant::now();
         let evaluated = evaluate(&proposal.selected);
         validation_seconds += validation_started.elapsed().as_secs_f64();
-        let actual_cost = match evaluated {
+        let feedback = match evaluated {
             Ok(cost) => cost,
             Err(error) => break CandidateSearchStatus::EvaluatorStopped(error),
         };
+        let actual_cost = feedback.actual_cost;
+        if actual_cost.is_some() && !feedback.rejected_queries.is_empty() {
+            return Err("feasible evaluator result cannot reject query subgraphs".into());
+        }
         if let Some(cost) = actual_cost {
             if !cost.is_finite() || cost < 0.0 {
                 return Err("evaluator returned a nonfinite or negative cost".into());
@@ -252,6 +290,7 @@ fn search_with_structural_baseline(
         observations.push(ObservedAssignment {
             selected: proposal.selected,
             exact_cost: actual_cost,
+            rejected_queries: feedback.rejected_queries,
         });
         if started.elapsed() >= limits.wall_time {
             break CandidateSearchStatus::TimeLimit;
@@ -278,6 +317,7 @@ fn search_with_structural_baseline(
         refinements,
         solve_metrics,
         validation_seconds,
+        certified_query_cuts: observations.iter().map(|o| o.rejected_queries.len()).sum(),
     })
 }
 
@@ -333,6 +373,48 @@ mod tests {
             max_refinements,
             wall_time: Duration::from_secs(10),
         }
+    }
+
+    #[test]
+    fn certified_feedback_survives_heuristic_phase_without_changing_cost_bounds() {
+        let mut graph = choices(&[0.0, 0.0, 0.0, 0.0]);
+        graph.query_roots = vec![
+            QueryRootCandidates {
+                compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+            },
+            QueryRootCandidates {
+                compatible_candidates: vec![PhysicalCandidateId(2), PhysicalCandidateId(3)],
+            },
+        ];
+        let mut bad_evaluations = 0;
+        let result =
+            search_candidates_with_feedback(
+                &graph,
+                limits(10),
+                Some(&[1.0, 10.0, 1.0, 2.0]),
+                |selected| {
+                    assert_eq!(selected.modeled_cost, 0.0);
+                    if selected.query_roots.iter().any(|root| {
+                        root.query_root == 0 && root.candidate == PhysicalCandidateId(0)
+                    }) {
+                        bad_evaluations += 1;
+                        Ok(CandidateEvaluation {
+                            actual_cost: None,
+                            rejected_queries: vec![RejectedQuerySubgraph::from_query_outputs(
+                                selected,
+                                &[0],
+                            )?],
+                        })
+                    } else {
+                        Ok(Some(2.0).into())
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(bad_evaluations, 1);
+        assert_eq!(result.certified_query_cuts, 1);
+        assert_eq!(result.incumbent.unwrap().actual_cost, 2.0);
+        assert_eq!(result.status, CandidateSearchStatus::Optimal);
     }
 
     // Structural node counts must never be reported as monetary lower bounds.

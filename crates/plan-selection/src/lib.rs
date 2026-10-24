@@ -1093,6 +1093,9 @@ pub struct CandidateConnectionReport {
     pub peak_milp_constraints: usize,
     #[serde(default)]
     pub validation_rejection_counts: BTreeMap<String, usize>,
+    /// Proven query-local failures excluded across unrelated workload choices.
+    #[serde(default)]
+    pub certified_query_cuts: usize,
     /// Up to eight representative failures, with bounded reason lengths.
     #[serde(default)]
     pub validation_rejection_examples: Vec<String>,

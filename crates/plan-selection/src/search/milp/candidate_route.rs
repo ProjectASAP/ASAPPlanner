@@ -132,7 +132,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         CandidateSearchStatus::NumericalStall => "numerical_stall".into(),
     };
     let report = crate::CandidateConnectionReport {
-        catalog_scope: "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included".into(),
+        catalog_scope: "Pass 1 + local panes + identical-configuration shared summary/pane states with compatible per-entity scan-label widening; cross-width/horizon pane reuse, rollup, general shared scans and top-k-reuse expansion is not included".into(),
         status, groups, logical_candidates, immediate_candidates,
         physical_configurations: configured.configurations.len(),
         compatible_connections: configured.inventory.graph.candidates.iter().flat_map(|candidate| &candidate.producer_requirements).map(|input| input.compatible_producers.len()).sum(),
@@ -147,6 +147,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         peak_milp_variables: result.search.solve_metrics.peak_variables,
         peak_milp_constraints: result.search.solve_metrics.peak_constraints,
         validation_rejection_counts: result.rejections.counts,
+        certified_query_cuts: result.search.certified_query_cuts,
         validation_rejection_examples: result.rejections.examples,
     };
     let Some((mut selection, physical)) = result.best else {

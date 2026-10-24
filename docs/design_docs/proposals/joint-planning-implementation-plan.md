@@ -23,10 +23,10 @@ The existing planner's behavior is the migration baseline. A new representation 
 | Exact, accumulator, sketch, fused and scalar computations | Implemented for the current bridge; remaining shapes must be audited | Existing generation/composition tests; all output contracts preserved |
 | Exact TopK physical lowering and ranked-row contracts | Implemented, including retained labels/identity | Logical, physical, frontend and selected-graph regressions |
 | Local panes and identical-configuration shared pane states | Implemented | Window alignment, separate/shared state, and actual evaluator-cost tests |
-| Different label projections reading one shared scan/state | In progress | Original ASAPQuery q03/q04/q05 can share the wider state through typed projections |
+| Different label projections reading one shared scan/state | Implemented for compatible per-entity summary/pane states; broader scan cases remain | Original ASAPQuery q03/q04/q05 can share the wider state through typed projections |
 | Cross-capacity summary reuse, pane widths/horizons and newest-pane reads | Partial: exact configurations only | Existing capability/window reuse cases, preserving local choices |
 | Exact/sketch rollup and shared TopK ranking | Pending | Existing rollup/ranking rules and their conditional input requirements |
-| Size-independent per-query accuracy pruning | In progress; final validation already reused | Reuse existing `CheckFailure::size_independent` policy; changing unrelated queries cannot repair a certified failure, changing a relevant producer can |
+| Size-independent per-query accuracy pruning | Certified query-closure cuts implemented; earlier generation-time pruning remains | Reuse existing `CheckFailure::size_independent` policy; changing unrelated queries cannot repair a certified failure, changing a relevant producer can |
 | Safe cost lower bounds and context-dependent term cuts | Pending beyond zero bounds and exact-assignment refinement | Existing evaluator parity/lower-bound tests, including execution frequency, held memory and raw retention |
 | Feasible incumbent before cost optimization | Bounded same-graph baseline implemented | Actual accuracy/materialization validation; heuristic scores never become cost bounds |
 | Independent-component optimization | Pending on the connection graph | Preserve shared resources and global constraints; match unsplit optimum on small inputs |

@@ -258,12 +258,87 @@ pub(crate) fn select_candidates(
     Ok(solve_candidate_proposal(graph, &[], None)?.map(|proposal| proposal.selected))
 }
 
+/// A certified size-independent failure of a complete query dependency closure.
+/// The evaluator certifies semantics; this module verifies the structural witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RejectedQuerySubgraph {
+    pub query_roots: Vec<QueryRootAssignment>,
+    pub connections: Vec<ProducerConsumerConnection>,
+}
+
+impl RejectedQuerySubgraph {
+    pub fn from_query_outputs(
+        selected: &SelectedCandidateGraph,
+        outputs: &[usize],
+    ) -> Result<Self, String> {
+        if outputs.is_empty()
+            || outputs
+                .iter()
+                .enumerate()
+                .any(|(i, id)| outputs[..i].contains(id))
+        {
+            return Err("query cut requires distinct, nonempty output references".into());
+        }
+        let query_roots = outputs
+            .iter()
+            .map(|output| {
+                selected
+                    .query_roots
+                    .iter()
+                    .find(|root| root.query_root == *output)
+                    .copied()
+                    .ok_or_else(|| format!("query cut references missing output {output}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut pending: Vec<_> = query_roots.iter().map(|root| root.candidate).collect();
+        let mut visited = Vec::new();
+        let mut connections = Vec::new();
+        while let Some(candidate) = pending.pop() {
+            if visited.contains(&candidate) {
+                continue;
+            }
+            visited.push(candidate);
+            for edge in selected
+                .connections
+                .iter()
+                .filter(|edge| edge.consumer == candidate)
+            {
+                connections.push(*edge);
+                pending.push(edge.producer);
+            }
+        }
+        Ok(Self {
+            query_roots,
+            connections,
+        })
+    }
+
+    fn validate(&self, selected: &SelectedCandidateGraph) -> Result<(), String> {
+        let outputs: Vec<_> = self
+            .query_roots
+            .iter()
+            .map(|root| root.query_root)
+            .collect();
+        let expected = Self::from_query_outputs(selected, &outputs)?;
+        if self.query_roots != expected.query_roots
+            || self.connections.len() != expected.connections.len()
+            || self.connections.iter().enumerate().any(|(i, edge)| {
+                self.connections[..i].contains(edge) || !expected.connections.contains(edge)
+            })
+        {
+            return Err("query cut must contain the complete selected upstream closure".into());
+        }
+        Ok(())
+    }
+}
+
 /// One validated observation over every candidate, connection and output decision.
 /// `None` excludes an infeasible assignment; a cost supplies its exact objective.
 #[derive(Debug, Clone)]
 pub(super) struct ObservedAssignment {
     pub selected: SelectedCandidateGraph,
     pub exact_cost: Option<f64>,
+    pub rejected_queries: Vec<RejectedQuerySubgraph>,
 }
 
 #[derive(Debug)]
@@ -284,7 +359,8 @@ pub(super) struct CandidateSolveMetrics {
     pub peak_constraints: usize,
 }
 
-/// Solve a lower-bound model refined only at observed complete assignments.
+/// Refine exact costs at complete assignments and certified query failures at
+/// their complete upstream dependency closures.
 /// A solver timeout is an error, never a proven optimum or infeasibility.
 pub(super) fn solve_candidate_proposal(
     graph: &CandidateDependencyGraph,
@@ -315,6 +391,16 @@ pub(super) fn solve_candidate_proposal_with_metrics(
     for observation in observations {
         validate_selected_graph(graph, &observation.selected)
             .map_err(CandidateSelectionError::InvalidGraph)?;
+        for witness in &observation.rejected_queries {
+            witness
+                .validate(&observation.selected)
+                .map_err(CandidateSelectionError::InvalidGraph)?;
+        }
+        if observation.exact_cost.is_some() && !observation.rejected_queries.is_empty() {
+            return Err(CandidateSelectionError::InvalidGraph(
+                "feasible observation cannot reject a query".into(),
+            ));
+        }
         if observation
             .exact_cost
             .is_some_and(|cost| !cost.is_finite() || cost < observation.selected.modeled_cost)
@@ -584,6 +670,20 @@ pub(super) fn solve_candidate_proposal_with_metrics(
     let total_cost = variables.add(variable().min(0.0));
     constraints.push(constraint!(total_cost >= local_bound));
     for observation in observations {
+        for witness in &observation.rejected_queries {
+            let mut changed = Expression::from(0.0);
+            for (edge, variable) in &connections {
+                if witness.connections.contains(edge) {
+                    changed += 1.0 - *variable;
+                }
+            }
+            for (root, variable) in &root_assignments {
+                if witness.query_roots.contains(root) {
+                    changed += 1.0 - *variable;
+                }
+            }
+            constraints.push(constraint!(changed >= 1.0));
+        }
         let mut mismatch = Expression::from(0.0);
         for (id, &variable) in candidate_selected.iter().enumerate() {
             if observation
@@ -1008,6 +1108,96 @@ mod tests {
                 Err(CandidateSelectionError::InvalidGraph(_))
             ));
         }
+    }
+
+    #[test]
+    fn certified_query_cut_ignores_unrelated_queries_but_allows_repaired_input() {
+        let graph = dependency_graph(
+            vec![
+                candidate(0, 1.0, &[]),
+                candidate(0, 4.0, &[]),
+                candidate(1, 1.0, &[&[0, 1]]),
+                candidate(2, 1.0, &[]),
+                candidate(2, 2.0, &[]),
+            ],
+            &[&[2], &[3, 4]],
+        );
+        let selected = select_candidates(&graph).unwrap().unwrap();
+        let witness = RejectedQuerySubgraph::from_query_outputs(&selected, &[0]).unwrap();
+        assert_eq!(witness.connections.len(), 1);
+        let observations = [ObservedAssignment {
+            selected,
+            exact_cost: None,
+            rejected_queries: vec![witness],
+        }];
+        let repaired = solve_candidate_proposal(&graph, &observations, None)
+            .unwrap()
+            .unwrap();
+        assert!(repaired
+            .selected
+            .connections
+            .iter()
+            .any(|edge| edge.producer == PhysicalCandidateId(1)));
+        // Even forcing another unrelated output cannot make the bad input legal.
+        let mut changed = graph.clone();
+        changed.query_roots[1].compatible_candidates = vec![PhysicalCandidateId(4)];
+        // Keep observations structurally valid by changing that unrelated binding.
+        let mut observation = observations[0].clone();
+        observation
+            .selected
+            .selected_candidates
+            .retain(|id| *id != PhysicalCandidateId(3));
+        observation
+            .selected
+            .selected_candidates
+            .push(PhysicalCandidateId(4));
+        observation.selected.query_roots[1].candidate = PhysicalCandidateId(4);
+        observation.selected.modeled_cost += 1.0;
+        let repaired = solve_candidate_proposal(&changed, &[observation], None)
+            .unwrap()
+            .unwrap();
+        assert!(repaired
+            .selected
+            .connections
+            .iter()
+            .any(|edge| edge.producer == PhysicalCandidateId(1)));
+    }
+
+    #[test]
+    fn certified_query_cut_rejects_incomplete_or_foreign_closure() {
+        let graph = dependency_graph(
+            vec![candidate(0, 1.0, &[]), candidate(1, 1.0, &[&[0]])],
+            &[&[1]],
+        );
+        let selected = select_candidates(&graph).unwrap().unwrap();
+        let mut witness = RejectedQuerySubgraph::from_query_outputs(&selected, &[0]).unwrap();
+        witness.connections.clear();
+        let observation = ObservedAssignment {
+            selected,
+            exact_cost: None,
+            rejected_queries: vec![witness],
+        };
+        assert!(matches!(
+            solve_candidate_proposal(&graph, &[observation], None),
+            Err(CandidateSelectionError::InvalidGraph(_))
+        ));
+    }
+
+    #[test]
+    fn query_cut_contains_every_requested_scalar_output_closure() {
+        let graph = dependency_graph(
+            vec![
+                candidate(0, 1.0, &[]),
+                candidate(1, 1.0, &[&[0]]),
+                candidate(2, 1.0, &[]),
+            ],
+            &[&[1], &[2]],
+        );
+        let selected = select_candidates(&graph).unwrap().unwrap();
+        let witness = RejectedQuerySubgraph::from_query_outputs(&selected, &[0, 1]).unwrap();
+        assert_eq!(witness.query_roots.len(), 2);
+        assert_eq!(witness.connections.len(), 1);
+        witness.validate(&selected).unwrap();
     }
 
     fn candidate(group: u32, cost: f64, inputs: &[&[usize]]) -> PhysicalCandidate {
