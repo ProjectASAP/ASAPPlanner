@@ -401,8 +401,25 @@ fn search_domain<Id: Clone>(
     let check_budget = |phase: &str, progress: &mut DomainProgress| {
         if remaining().is_zero() {
             progress.budget_stopped = true;
+            // No solve has started at these preparation checkpoints. Expose
+            // measured generation time and budget; leave unfinished catalog
+            // counts unset rather than inventing completed model statistics.
+            let report = crate::CandidateConnectionReport {
+                status: "time_limit".into(),
+                catalog_scope: format!(
+                    "planning stopped after {phase}, before solving; model statistics unavailable"
+                ),
+                full_catalog_completed: progress.catalog_completed
+                    && domain == asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::Complete,
+                max_refinements: search.max_evaluations.unwrap_or(128),
+                time_limit_ms: search.milp_time_limit_ms.unwrap_or(30_000),
+                local_candidate_generation_ms,
+                ..Default::default()
+            };
+            let metrics =
+                serde_json::to_string(&report).map_err(|error| unsupported(&error.to_string()))?;
             Err(unsupported(&format!(
-                "planning budget exhausted after {phase}; no unvalidated plan is returned"
+                "planning budget exhausted after {phase}; no unvalidated plan is returned. Search report: {metrics}"
             )))
         } else {
             Ok(())
@@ -811,6 +828,19 @@ mod tests {
         assert!(error
             .to_string()
             .contains("planning budget exhausted after local candidate generation"));
+        let diagnostic = error.to_string();
+        let (_, report) = diagnostic.split_once("Search report: ").unwrap();
+        let report = serde_json::Deserializer::from_str(report)
+            .into_iter::<crate::CandidateConnectionReport>()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.status, "time_limit");
+        assert_eq!(report.time_limit_ms, 1);
+        assert_eq!(report.local_candidate_generation_ms, Some(2.0));
+        assert!(!report.full_catalog_completed);
+        assert_eq!(report.solve_calls, 0);
+        assert_eq!(report.peak_milp_variables, 0);
     }
 
     #[test]

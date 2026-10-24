@@ -1132,7 +1132,21 @@ fn plan_selection_json(
             });
         }
         Err(error) => {
-            return json!({ "costs": {}, "selected": null, "rejected": [], "error": error.to_string() })
+            let mut output = json!({ "costs": {}, "selected": null, "rejected": [], "error": error.to_string() });
+            // A budget stop without an incumbent still carries the search's
+            // report in its solver diagnostic. Decode that typed report for
+            // the viewer while preserving the complete original error.
+            if let SelectionError::Solver(diagnostic) = error {
+                if let Some((_, report)) = diagnostic.split_once("Search report: ") {
+                    if let Some(Ok(report)) = serde_json::Deserializer::from_str(report)
+                        .into_iter::<asap_plan_selection::CandidateConnectionReport>()
+                        .next()
+                    {
+                        output["search"] = json!({ "candidate_connections": report });
+                    }
+                }
+            }
+            return output;
         }
     };
     let costs: serde_json::Map<_, _> = selection

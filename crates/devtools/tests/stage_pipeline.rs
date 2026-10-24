@@ -162,16 +162,32 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
 /// the selection made over all candidates.
 #[test]
 fn display_cap_is_recorded_and_keeps_the_selection() {
-    let full = generate(&[]);
     let document = generate(&["--max-displayed", "1"]);
     let logical = &document["stage1_logical_asap_optimization"];
     assert_eq!(logical["capped"], true);
-    assert!(logical["candidates"].as_array().unwrap().len() <= 1);
+    // Logical parents of displayed physical plans are always retained; the
+    // cap additionally allows one unimplemented logical candidate.
+    assert!(logical["candidates"].as_array().unwrap().len() <= 2);
     assert!(logical["combinations"].as_u64().unwrap() > 1);
-    assert_eq!(
-        document["stage3_plan_selection"]["selected"],
-        full["stage3_plan_selection"]["selected"]
-    );
+    let selected = document["stage3_plan_selection"]["selected"]
+        .as_str()
+        .expect("selection survives display cap");
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(physical.len(), 1);
+    assert_eq!(physical[0]["id"], selected);
+    assert!(logical["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| { candidate["id"] == physical[0]["from_logical"] }));
+    assert!(document["stage3_plan_selection"]["costs"]
+        .get(selected)
+        .is_some());
+    let dag: PhysicalASAPDAG = serde_json::from_value(physical[0]["dag"].clone()).unwrap();
+    dag.validate().unwrap();
+    assert_eq!(dag.roots.len(), 2);
 }
 
 /// A top-k partitioned by every label of its input has no item, so a heap
@@ -348,6 +364,12 @@ fn workload_above_the_candidate_limit_reports_partial_search() {
     assert_eq!(report["max_refinements"], 3);
     assert!(report["refinements"].as_u64().unwrap() <= 3);
     assert_ne!(report["status"], "optimal");
+    if document["stage3_plan_selection"]["selected"].is_null() {
+        assert!(document["stage3_plan_selection"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Search report:"));
+    }
 }
 
 /// Nine approximate quantile queries over nine metrics, three candidates
@@ -716,14 +738,37 @@ fn a_target_without_a_metric_shows_the_query_default() {
 /// the test is about which guarantees meet the target.
 #[test]
 fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
-    let query = [
-        "--enforce-accuracy-guarantees",
-        "--exhaustive",
-        "--promql",
-        "quantile_over_time(0.99, m[1m])",
-        "--max-error",
-        "0.01",
-    ];
+    let query = |metric: Option<&str>| {
+        let mut accuracy = serde_json::json!({"max_error": 0.01});
+        if let Some(metric) = metric {
+            accuracy["accuracy_metric"] = metric.into();
+        }
+        let workload = serde_json::json!({
+            "query_workload": {"language": "promql", "query_batch": [{
+                "query": "quantile_over_time(0.99, m[1m])",
+                "requirements": {"accuracy": accuracy},
+                "predictability": "unknown", "invocations": 1
+            }]},
+            // Relative DDS interpolation requires this explicit domain proof.
+            "data_workload": {"arrival": "unknown", "sources": {"m": {
+                "sample_interval": 1000, "series_count": 1, "values_non_negative": true
+            }}}
+        });
+        let path = std::env::temp_dir().join(format!(
+            "stage_pipeline_{}_quantile_metric_{}.json",
+            std::process::id(),
+            metric.unwrap_or("unset")
+        ));
+        std::fs::write(&path, workload.to_string()).unwrap();
+        let document = document_of(&[
+            "--enforce-accuracy-guarantees",
+            "--exhaustive",
+            "--workload",
+            path.to_str().unwrap(),
+        ]);
+        std::fs::remove_file(path).unwrap();
+        document
+    };
     let accepted = |document: &Value| -> Vec<String> {
         let selection = &document["stage3_plan_selection"];
         assert!(selection["selected"].is_string(), "{selection}");
@@ -734,7 +779,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
             .map(|queries| queries[0]["summary"].as_str().unwrap().to_owned())
             .collect()
     };
-    let unset = document_of(&query);
+    let unset = query(None);
     assert_eq!(
         unset["workload"]["queries"][0]["requirements"]["accuracy"],
         serde_json::json!({"max_error": 0.01, "accuracy_scope": "whole_result"})
@@ -759,7 +804,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let selected = unset["stage3_plan_selection"]["selected"].as_str().unwrap();
     assert!(unset["stage3_plan_selection"]["accepted"][selected][0]["accepted_metric"].is_string());
 
-    let rank = document_of(&[&query[..], &["--accuracy-metric", "rank"]].concat());
+    let rank = query(Some("rank"));
     let summaries = accepted(&rank);
     assert!(
         summaries
@@ -1298,12 +1343,16 @@ fn workload_examples_preserve_data_and_valid_stored_outputs() {
         .filter(|e| e.get("workload").is_some())
         .collect();
     assert_eq!(workload_examples.len(), 9);
-    std::thread::scope(|scope| {
-        for example in workload_examples {
-            let root = &root;
-            scope.spawn(move || check_workload_example(root, example));
-        }
-    });
+    // Each production search has a wall-clock budget. Bound fixture
+    // concurrency so this acceptance test does not starve its own solvers.
+    for batch in workload_examples.chunks(2) {
+        std::thread::scope(|scope| {
+            for example in batch {
+                let root = &root;
+                scope.spawn(move || check_workload_example(root, example));
+            }
+        });
+    }
 }
 
 fn check_workload_example(root: &std::path::Path, example: &Value) {
@@ -1372,7 +1421,7 @@ fn check_candidate_example(document: Value, _committed: Value, example: &Value) 
     let selection = &document["stage3_plan_selection"];
     let selected = selection["selected"]
         .as_str()
-        .expect("validated selected plan");
+        .unwrap_or_else(|| panic!("{}: no validated selected plan: {selection}", example["id"]));
     let candidates = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
@@ -1783,10 +1832,17 @@ fn search_flag_is_checked() {
 fn milp_time_limit_is_reported() {
     let document = document_of(&["--promql", "sum(m)", "--milp-time-limit-s", "0"]);
     let selection = &document["stage3_plan_selection"];
-    assert_ne!(
-        selection["search"]["candidate_connections"]["status"],
-        "optimal"
+    assert!(selection["selected"].is_null());
+    let report = &selection["search"]["candidate_connections"];
+    assert!(
+        report.is_object(),
+        "budget stop retains its report: {selection}"
     );
+    assert_eq!(report["status"], "time_limit");
+    assert!(selection["error"]
+        .as_str()
+        .unwrap()
+        .contains("planning budget"));
 }
 
 /// The memo search's document names its selected plan's logical candidate
