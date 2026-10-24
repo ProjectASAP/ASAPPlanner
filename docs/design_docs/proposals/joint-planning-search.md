@@ -114,11 +114,44 @@ G_KLL += MergeLatest15(G_panes)
 
 Physical rules provide executable operators, configurations, and materialization assignments for the generated computations. For example, a supported pane implementation can maintain state at ingestion and merge it at evaluation. This introduces two timing decisions within the same query, rather than one materialization choice for the whole query. Eligibility that depends on consumers is checked against the selected connections; considering every potential consumer at once could incorrectly reject a useful candidate.
 
+For the running example, assume evaluations occur at aligned minute boundaries and the deployment supports ingestion-time pane maintenance. Stage 2 can expand the state groups as follows; `s` is a generated KLL capacity:
+
+```text
+Group     Physical candidate     Computation                 Materialization
+G_panes   P_ingest(s)             Maintain aligned 1m panes   MatAtIngestion(Memory)
+G_KLL     K_merge(s)              MergeLatest15(G_panes)      MatAtQuery(Memory)
+G_KLL     K_build(s)              BuildKLL(G_input, 15m)      MatAtQuery(Memory)
+G95       E95                    EstimateQuantile(.95, G_KLL) NotMaterialized
+G99       E99                    EstimateQuantile(.99, G_KLL) NotMaterialized
+```
+
+`P_ingest(s)` retains the panes needed to cover the 15m window. `K_merge(s)` constructs window state from those panes at evaluation; `K_build(s)` instead builds window state from available raw input. Each candidate records its input requirements and costs. The estimators can use either compatible state candidate. Exact and local KLL candidates from Pass 1 also receive supported physical implementations and remain available. Stage 2 has generated choices; it has not yet selected a build or connected an estimator to it.
+
 Window semantics, algorithms, and materialization remain separate dimensions. Their definitions and support restrictions belong in [Window and Materialization Choices](window-materialization-choices.md).
 
 ### Stage 3: select and connect candidates
 
 Selection chooses physical candidates and connects their required inputs until every query root is covered. Several consumers may connect to one KLL candidate or to different candidates from `G_KLL`. The selected graph is reconstructed as a `PhysicalASAPDAG` and validated. This is where implementation costs are compared jointly; the earlier rules expose the choices on which that comparison depends.
+
+Suppose the pane-based choice has the lowest modeled cost among feasible plans, and capacity `s*` satisfies both queries after pane merges. Stage 3 selects `P_ingest(s*)`, `K_merge(s*)`, `E95`, and `E99`, together with their required upstream input, and chooses these connections:
+
+```text
+Selected input for X
+        │
+        ▼
+P_ingest(s*)              maintain 1m panes at ingestion
+        │
+        ▼
+K_merge(s*)               merge the latest 15 panes at evaluation
+        ├───────────────┐
+        ▼               ▼
+       E95             E99
+        │               │
+        ▼               ▼
+       Q1              Q2
+```
+
+For a common evaluation of Q1 and Q2, the selected merge state serves both estimators. Pane maintenance is charged once for the shared pane chain, and merge work once per common evaluation; each estimator contributes its own extraction cost. `K_build(s*)` and the exact/local candidates are unselected in this example. If timing or accuracy prevents this sharing, Stage 3 may connect the estimators to different candidates from `G_KLL`. Thus Stage 2 enumerates executable choices, while Stage 3 determines which choices execute and which consumers share them.
 
 ## 4. Cost Model
 
@@ -127,6 +160,22 @@ The cost of a shared plan is obtained from its selected execution nodes, not by 
 A node may execute repeatedly. Its materialization, consumer schedules, and lifetime determine how frequently its work is performed and how long its state occupies resources. A constant candidate cost is appropriate only when this context is fixed. All terms use a common horizon or consistent rates, so ingestion work and evaluation work can be compared.
 
 Some charges belong to a resource shared beyond one computation. If two consumers need 5m and 15m of the same raw source, the required retention horizon is 15m, not 20m. Such retention is charged once per source and excludes intermediate state already owned by a candidate. Configured query-request overhead is accounted for separately.
+
+The following cases make the accounting concrete. Let `B` be the cost of one whole-window KLL build, `M` one pane merge, and `E95` and `E99` the extraction costs. These are illustrative work charges; retained and temporary resources are accounted for separately over the same horizon.
+
+| Case | Selected execution | Cost accounting |
+| --- | --- | --- |
+| Independent query-time builds | Q1 and Q2 each build KLL state and extract a quantile. | For one evaluation each: `2B + E95 + E99`. The two builds are separate work. |
+| Shared query-time build | Q1 and Q2 use one compatible build in a common evaluation. | `B + E95 + E99`. Query-local state is charged for its actual lifetime. |
+| Repeated common evaluations | Both queries evaluate together `n` times; state is discarded after each evaluation. | `n × (B + E95 + E99)`. Selecting one candidate does not mean building only once over the entire horizon. |
+| Different evaluation timestamps | Q1 evaluates every minute; Q2 every five minutes on the same grid. Both use a 15m window. | Over 15 evaluation ticks, a shareable query-local build executes 15 times, with 15 P95 extractions and 3 P99 extractions: `15B + 15E95 + 3E99`. This assumes sharing at the three common timestamps; an earlier window state cannot automatically answer a later window. |
+| Ingestion-maintained panes | One pane chain feeds a shared query-time merge and both estimators. | Ingestion updates and pane retention are charged once for the chain. Add `n × (M + E95 + E99)` for `n` common evaluations, plus query-local merge memory. |
+| State retained across evaluations | An eligible pane-chain candidate uses `MatAtQueryKeptAcrossEvaluations(Memory)`. | Charge initial construction, required refresh/update work, retained memory/storage over its lifetime, and evaluation work. Reuse does not eliminate freshness maintenance; generate this case only when supported. |
+| Multiple selected candidates in one group | Some consumers use a small KLL state and others a separate large state. | Charge each selected state's build/update and retention, then each consumer's local work. Equal group identity does not collapse two physical candidates into one charge. |
+| Shared raw-data retention | Two consumers need 5m and 15m of the same raw source and compatible retention scope. | Charge source storage for the 15m horizon once, with reads charged according to actual work. Do not add 5m and 15m or include intermediate KLL state in this charge. |
+| Per-request overhead | Two requests share computation but still require separate response handling. | Charge configured request overhead for each request. Compute sharing does not remove request-specific work. |
+
+Memory-time and capacity answer different questions. A state occupying `m` bytes for duration `t` contributes `m × t` to memory-time. A capacity limit instead considers simultaneous residency, including temporary allocations; it cannot be inferred from memory-time alone.
 
 The configured Stage 3 objective and evaluators remain authoritative. Current memo MILP supports usage-over-time pricing; broader cost-model support is an extension. Accuracy is an output requirement, since locally acceptable errors may compose into an unacceptable query result. Latency and resource limits likewise depend on the configured timing and capacity assumptions.
 
