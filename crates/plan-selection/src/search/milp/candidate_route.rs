@@ -82,8 +82,47 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         ));
     }
     let started = Instant::now();
-    let mut memo =
-        try_populate_pass1(initial, inventory).map_err(|error| unsupported(&error.to_string()))?;
+    let pruned =
+        crate::search::query_pruning::prune_query_candidates(inventory, entries, data, models, 64)
+            .map_err(|error| unsupported(&error))?;
+    let early_query_pruning_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let pruning = pruned.report;
+    let early_query_pruning_counts = [
+        ("choices_checked".into(), pruning.choices_checked),
+        ("choices_removed".into(), pruning.removed.len()),
+        ("queries_skipped".into(), pruning.queries_skipped),
+        (
+            "final_choices_retained".into(),
+            pruning.final_choices_retained,
+        ),
+        (
+            "shared_producer_choices_retained".into(),
+            pruning.shared_producer_choices_retained,
+        ),
+        (
+            "non_summary_choices_retained".into(),
+            pruning.non_summary_choices_retained,
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let early_query_pruning_examples = pruning
+        .removed
+        .iter()
+        .take(8)
+        .map(|choice| {
+            format!(
+                "target {} choice {}: {:?}: {}",
+                choice.target,
+                choice.choice,
+                choice.cause,
+                choice.reason.chars().take(512).collect::<String>()
+            )
+        })
+        .collect();
+    let started = Instant::now();
+    let mut memo = try_populate_pass1(initial, &pruned.inventory)
+        .map_err(|error| unsupported(&error.to_string()))?;
     crate::search::memo::rules::windows::add_local_window_composition(&mut memo, entries);
     let memo = expand_concrete_summary_state_groups(memo)
         .map_err(|error| unsupported(&error.to_string()))?
@@ -134,7 +173,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         CandidateSearchStatus::NumericalStall => "numerical_stall".into(),
     };
     let report = crate::CandidateConnectionReport {
-        catalog_scope: "Pass 1 + local panes + identical-configuration shared summary/pane states with compatible per-entity scan-label widening; cross-width/horizon pane reuse, rollup, general shared scans and top-k-reuse expansion is not included".into(),
+        catalog_scope: "Pass 1 + local panes + shared summary/pane states with finite capacity, pane-width and horizon configurations and compatible per-entity scan-label widening; rollup, general shared scan discovery and top-k-reuse expansion is not included".into(),
         status, groups, logical_candidates, immediate_candidates,
         physical_configurations: configured.configurations.len(),
         compatible_connections: configured.inventory.graph.candidates.iter().flat_map(|candidate| &candidate.producer_requirements).map(|input| input.compatible_producers.len()).sum(),
@@ -150,6 +189,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         peak_milp_constraints: result.search.solve_metrics.peak_constraints,
         validation_rejection_counts: result.rejections.counts,
         certified_query_cuts: result.search.certified_query_cuts,
+        early_query_pruning_ms, early_query_pruning_counts, early_query_pruning_examples,
         validation_rejection_examples: result.rejections.examples,
     };
     let Some((mut selection, physical)) = result.best else {

@@ -1096,6 +1096,12 @@ pub struct CandidateConnectionReport {
     /// Proven query-local failures excluded across unrelated workload choices.
     #[serde(default)]
     pub certified_query_cuts: usize,
+    #[serde(default)]
+    pub early_query_pruning_ms: f64,
+    #[serde(default)]
+    pub early_query_pruning_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub early_query_pruning_examples: Vec<String>,
     /// Up to eight representative failures, with bounded reason lengths.
     #[serde(default)]
     pub validation_rejection_examples: Vec<String>,

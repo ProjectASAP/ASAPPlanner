@@ -19,6 +19,7 @@ pub(crate) mod milp;
 /// Costed reuse of compatible physical pane producers.
 pub mod pane_sharing;
 pub(crate) mod pipeline;
+pub(crate) mod query_pruning;
 pub(crate) mod workload_dependencies;
 
 use std::collections::BTreeMap;

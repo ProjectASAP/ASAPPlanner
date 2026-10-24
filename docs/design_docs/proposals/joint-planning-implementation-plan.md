@@ -24,14 +24,14 @@ The existing planner's behavior is the migration baseline. A new representation 
 | Exact TopK physical lowering and ranked-row contracts | Implemented, including retained labels/identity | Logical, physical, frontend and selected-graph regressions |
 | Local panes and identical-configuration shared pane states | Implemented | Window alignment, separate/shared state, and actual evaluator-cost tests |
 | Different label projections reading one shared scan/state | Implemented for compatible per-entity summary/pane states; broader scan cases remain | Original ASAPQuery q03/q04/q05 can share the wider state through typed projections |
-| Cross-capacity summary reuse, pane widths/horizons and newest-pane reads | Partial: exact configurations only | Existing capability/window reuse cases, preserving local choices |
+| Cross-capacity summary reuse, pane widths/horizons and newest-pane reads | Finite capacity/grid/horizon expansion implemented for supported simple state readers; broader producer shapes remain | Existing capability/window reuse cases, preserving local choices |
 | Exact/sketch rollup and shared TopK ranking | Pending | Existing rollup/ranking rules and their conditional input requirements |
-| Size-independent per-query accuracy pruning | Certified query-closure cuts implemented; earlier generation-time pruning remains | Reuse existing `CheckFailure::size_independent` policy; changing unrelated queries cannot repair a certified failure, changing a relevant producer can |
+| Size-independent per-query accuracy pruning | Certified query-closure cuts and conservative bounded early pruning implemented; shared producer families and uncertain contexts retained | Reuse existing `CheckFailure::size_independent` policy; changing unrelated queries cannot repair a certified failure, changing a relevant producer can |
 | Safe cost lower bounds and context-dependent term cuts | Initial certified ingestion Scan/DDSketch pane bounds implemented; contextual term cuts remain | Existing evaluator parity/lower-bound tests, including execution frequency, held memory and raw retention |
 | Feasible incumbent before cost optimization | Bounded same-graph baseline implemented | Actual accuracy/materialization validation; heuristic scores never become cost bounds |
 | Independent-component optimization | Pending on the connection graph | Preserve shared resources and global constraints; match unsplit optimum on small inputs |
 | Summary materialization and execution-demand accounting | Implemented for supported modes | Existing timing, selected-reader, range/repeated-query and retained-state cases |
-| Non-summary shared materialization | Pending | Highest-shared-node behavior and consumer-dependent eligibility |
+| Non-summary shared materialization | Implemented using selected-graph Stage 2 eligibility | Highest-shared-node behavior and consumer-dependent eligibility |
 | Usage-over-time and provisioned-price objectives | Evaluator-backed path implemented | Same objective, resources, accuracy and latency as independent final evaluation |
 | Cluster-capacity priorities and Pareto output | Pending | Existing lexicographic/frontier semantics; no arbitrary scalar replacement |
 | Measured-cost calibration | Frozen-fit internal API exists; driver integration pending | One consistent workload fit reused across all proposals |

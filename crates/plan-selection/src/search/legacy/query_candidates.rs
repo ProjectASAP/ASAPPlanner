@@ -7,7 +7,7 @@
 //! target the query reads. It is rejected only when no remaining choice can
 //! repair it (design method 2): planned alone, its composed candidate and
 //! every Pass 2 candidate of it, in every Stage 2 materialization, fail a
-//! check that no summary size changes ([`checked_candidate`],
+//! check that no summary size changes ([`crate::checked_candidate`],
 //! [`CheckFailure::size_independent`](crate::CheckFailure::size_independent)): the executor has no kernel for a
 //! per-series aggregate it reads, a Count-Min reads weights not proven
 //! non-negative, or its output has no guarantee or one whose bound stays
@@ -20,19 +20,15 @@
 //! plan is still checked by Stage 3.
 
 use std::collections::HashSet;
-use std::rc::Rc;
 
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
-use asap_logical_asap_optimization::workload_candidates::stage1_candidates_of_choice;
-use asap_physical_asap_optimization::optimize_physical_asap;
-use asap_types::ir::{OperatorNode, QueryRoot};
 
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use crate::{
-    accuracy_targets, checked_candidate, DiscardedQueryCandidate, PlanningModels,
-    QuerySearchReport, RejectionCause,
-};
+use crate::{accuracy_targets, DiscardedQueryCandidate, PlanningModels, QuerySearchReport};
+
+use crate::search::query_pruning::alone_violation;
+pub(crate) use crate::search::query_pruning::{next_digits, query_digits};
 
 /// Each query's own candidates, checked: which whole-workload choices
 /// compose only valid ones.
@@ -138,92 +134,4 @@ impl QueryCandidates {
     pub(crate) fn reports(&self) -> Vec<QuerySearchReport> {
         self.queries.iter().map(|q| q.report.clone()).collect()
     }
-}
-
-/// The digits of a whole-workload choice that decide `root`'s plan: the
-/// targets whose aggregate it reads, and the targets whose fused
-/// computation absorbs one of those, in increasing order.
-pub(crate) fn query_digits<Id>(
-    per_computation: &PerComputationCandidates<Id>,
-    root: &QueryRoot,
-) -> Vec<usize> {
-    let starts: Vec<&Rc<OperatorNode>> = match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
-    };
-    let reachable: HashSet<*const OperatorNode> = starts
-        .into_iter()
-        .flat_map(OperatorNode::reachable)
-        .map(|node| Rc::as_ptr(&node))
-        .collect();
-    let read: Vec<bool> = per_computation
-        .targets
-        .iter()
-        .map(|target| reachable.contains(&Rc::as_ptr(&target.aggregate)))
-        .collect();
-    (0..per_computation.targets.len())
-        .filter(|&t| {
-            read[t]
-                || per_computation.targets[t]
-                    .fused
-                    .as_ref()
-                    .is_some_and(|fused| fused.absorbs.iter().any(|&a| read[a]))
-        })
-        .collect()
-}
-
-/// Mixed-radix increment of `choice` over `digits` only (the last varying
-/// fastest); `false` after the last combination.
-pub(crate) fn next_digits<Id>(
-    per_computation: &PerComputationCandidates<Id>,
-    digits: &[usize],
-    choice: &mut [usize],
-) -> bool {
-    for &digit in digits.iter().rev() {
-        choice[digit] += 1;
-        if choice[digit] < per_computation.targets[digit].choice_count() {
-            return true;
-        }
-        choice[digit] = 0;
-    }
-    false
-}
-
-/// The check the one-query workload `alone` fails with `choice` whatever
-/// joint planning does: its composed candidate and every Pass 2 candidate
-/// of it (the rules a single query can apply, such as window composition),
-/// each in every Stage 2 materialization, fail the checks, each failure
-/// independent of summary sizes ([`CheckFailure::size_independent`](crate::CheckFailure::size_independent)), which
-/// sharing with another query can change. `None` when one passes, one
-/// fails a check a larger summary might pass, or none composes or is
-/// implemented (the whole-workload candidates are then checked as usual).
-fn alone_violation<Id: Clone>(
-    alone: &PerComputationCandidates<Id>,
-    choice: &[usize],
-    entries: &[QueryWorkloadEntry],
-    targets: &[asap_types::ir::properties::AccuracyTarget],
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-) -> Option<(RejectionCause, String)> {
-    let mut first = None;
-    for candidate in stage1_candidates_of_choice(alone, entries, choice, &|_| true) {
-        let roots = candidate.roots.ok()?;
-        let physical = optimize_physical_asap(
-            "alone",
-            &roots,
-            entries,
-            data,
-            models.deployment_capabilities,
-        )
-        .ok()?;
-        for candidate in &physical {
-            match checked_candidate(candidate, targets, data, models) {
-                Err(failed) if failed.size_independent => {
-                    first.get_or_insert((failed.cause, failed.reason));
-                }
-                _ => return None,
-            }
-        }
-    }
-    first
 }
