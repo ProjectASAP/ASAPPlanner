@@ -10,7 +10,7 @@ ASAP primitives create opportunities to replace expensive exact computations and
 
 The challenge is cross-query dependence: a candidate's incremental cost changes when another candidate enables a shared producer, requires a larger summary, or extends retention. Selecting the cheapest candidate for each group independently can therefore lose the workload optimum.
 
-The design uses a memo to represent candidates compactly and a mixed-integer linear program (MILP) to select a consistent physical plan. The goals are to avoid repeated candidate generation, expose ASAP-aware sharing, and minimize the configured objective subject to accuracy, latency, and resource constraints. Optimality applies to the generated finite candidate set and configured models, not every imaginable plan. New sketch/window algorithms and runtime scheduling are outside this proposal.
+The optimization problem is to select and connect physical implementation instances into a minimum-cost execution DAG covering every query. The memo generates and organizes the supported candidates; a mixed-integer linear program (MILP) selects instance activation, implementations, and compatible connections jointly. The goals are to avoid repeated candidate generation, expose ASAP-aware sharing, and minimize the configured objective subject to accuracy, latency, and resource constraints. Optimality applies to the generated finite candidate set and configured models, not every imaginable plan. New sketch/window algorithms and runtime scheduling are outside this proposal.
 
 ## 2. Traditional Memo Groups and Rule Expansion
 
@@ -139,13 +139,29 @@ Stage 2 checks deployment capabilities, ingestion eligibility, and upstream timi
 
 ### Stage 3: select a joint physical plan
 
-The MILP chooses which group instances to enable, one candidate per enabled instance, and the instance serving each selected input edge and query-root reference. It may select exact/local computation, a shared whole-window build, or a legal pane-based candidate. It enforces reader/state compatibility, accuracy, latency, and resource constraints, then reconstructs and validates one `PhysicalASAPDAG`.
+Stage 3 covers all query roots by choosing which group instances to enable, one candidate per enabled instance, and the supplier instance for every selected input edge and query-root reference. It may select exact/local computation, a shared whole-window build, or a legal pane-based candidate. It enforces reader/state compatibility, accuracy, latency, and resource constraints, then reconstructs and validates one `PhysicalASAPDAG`.
 
 Each physical instance owns its work/state charges; an instance shared by several readers is not charged once per reader. A higher standalone cost can enable a cheaper joint plan, so earlier stages retain valid candidates and Stage 3 performs cost-based selection.
 
 Window semantics, implementation candidates, and materialization are defined separately in [Window and Materialization Choices](window-materialization-choices.md). That design also describes pane/EH terminology, supported configurations, and materialization eligibility.
 
 ## 4. Cost Model and Optimization Objective
+
+### Covering queries with an execution DAG
+
+A query is covered only when its root references connect to enabled instances, every required input is recursively supplied by a compatible instance, and the resulting DAG satisfies accuracy, timing, and deployment constraints. Selecting a KLL build alone does not cover a quantile query: the estimator and the build's upstream dependencies must also be provided.
+
+The decisions are instance activation, implementation selection, and input assignment. Sharing occurs when several consumers connect to the same instance. The objective is the total cost of those instances under their assigned demand, not the sum of independently priced query paths.
+
+### Why MILP rather than bipartite matching
+
+A bipartite compatibility graph captures which suppliers can serve each input, but ordinary matching cannot express the whole problem. Suppliers can serve multiple consumers, enabling a supplier has a pay-once cost, candidates can require several inputs together, and suppliers themselves depend on upstream instances. Accuracy and deployment limits further couple the choices.
+
+For example, enabling a KLL build costs 8 and each of two estimators costs 1. Sharing costs 10. Charging the build on both assignment edges incorrectly gives 18; omitting it leaves activation unpriced. Allowing multiple assignments through b-matching or min-cost flow does not by itself model that activation cost or the dependency DAG. Facility location captures activation and assignment more closely, but must still be extended for upstream dependencies and demand-dependent costs.
+
+MILP is the proposed joint solver, not a claim that it is the only exact method. Matching or min-cost flow can solve a restricted assignment subproblem after supplier activation, implementations, rates, and costs are fixed, provided its remaining capacities and constraints admit that formulation. Without assignment coupling, choosing each input's cheapest compatible supplier may suffice. Any local assignment must preserve the global demand and feasibility assumptions.
+
+### Resource pricing and demand
 
 Attribute resource usage to physical nodes in the selected DAG, then apply the existing Stage 3 cost model:
 
@@ -170,7 +186,7 @@ Accuracy is an end-to-end root requirement. Compose summary and window error onl
 
 ## 5. MILP Formulation
 
-Groups represent computation contracts; instances represent physical realizations. A group can have several enabled instances with different candidates. Each enabled instance chooses exactly one candidate. Reuse is expressed by multiple consumers connecting to the same instance, without a separate producer catalog.
+The formulation selects a covering execution DAG. Groups represent computation contracts; instances represent physical realizations. A group can have several enabled instances with different candidates. Each enabled instance chooses exactly one candidate. Reuse is expressed by multiple consumers connecting to the same instance, without a separate producer catalog.
 
 ### 5.1 Variables
 
@@ -356,13 +372,13 @@ Current main places memo/rules in `search/memo` and solver code in `search/milp`
 | --- | --- |
 | 1. Memo generation | Move identity construction before Pass 1 and generate candidates directly into groups without losing semantics, reader obligations, or fusion. |
 | 2. Shared-state groups | Extend group contracts; generate intermediate groups, instance slots, and compatible reader connections with legal materializations and per-instance cost ownership. |
-| 3. Joint selection | Extend MILP coverage as required; match exhaustive and memo brute force under the same inventory/models. |
+| 3. Joint selection | Encode covering-DAG activation, implementations, assignments, and demand; match an independent tiny-instance enumerator under the same inventory/models. |
 | 4. Validation and scaling | Validate reconstructed plans, prove safe reductions, and measure generation/model/solve costs under budgets. |
 
 ### Evaluation
 
 **Correctness:** test identity versus sharing, producer compatibility, exact-once cost ownership, active dependencies, fusion with external intermediate readers, multiple input edges, multiple configurations/partial-sharing subsets of one group, zero-price resources, pane boundaries, legal materializations, end-to-end accuracy, and capacity/status handling. Validate any relaxed bounds and cuts against enumerated plans.
 
-**Optimality:** tiny workloads must match exhaustive enumeration and memo brute force on minimum validated cost, with an explicit numerical/tie policy and the same candidate inventory.
+**Optimality:** compare MILP with an independent tiny-instance enumerator covering instance activation, candidate selection, root/input assignments, and dependency validity under the same inventory/models. The existing group-level brute-force reference must be extended before it can verify arbitrary instance partitions. Test candidate-generation coverage separately, including cases where two independently shared instances outperform full sharing and separate computation. Use an explicit numerical/tie policy.
 
 **Scalability:** measure groups, candidates, instance slots/enabled instances, state configurations, input connections, variables/constraints, generation/solve/validation time, and peak planner memory. Compare joint versus independent planning savings, time-limited gaps, and modeled versus validated costs across query overlap, window configurations, and materializations.
