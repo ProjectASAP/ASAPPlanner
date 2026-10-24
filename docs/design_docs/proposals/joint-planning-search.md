@@ -292,6 +292,8 @@ min Σ_c standing_cost[c] × x[c]
 
 ### 5.2 Constraints
 
+A feasible plan must cover every query, meet every query's accuracy target, provide executable implementations and valid materializations, and respect configured CPU, memory, disk, and latency limits. Dependency, execution-demand, configuration, and acyclicity constraints below make those requirements consistent across shared computation. Limits are imposed when configured; a missing limit does not mean that its resource has zero cost.
+
 #### Cover every query output
 
 ```text
@@ -372,19 +374,85 @@ order[producer] + 1 ≤ order[consumer]
 
 When `connect = 1`, the consumer's rank must exceed the producer's by at least one. When `connect = 0`, the `N` term makes the constraint nonbinding under the rank bounds. For example, `build → merge → estimate` can use ranks `0, 1, 2`. Adding `estimate → build` would require `order[build] ≥ order[estimate] + 1`, making the cycle infeasible. Independent candidates may have equal ranks.
 
-#### Enforce requirements
+#### Physical implementation for every selected operation
 
-Candidate and connection compatibility eliminate unsupported operators, illegal materializations, and invalid window combinations. End-to-end accuracy still requires composition bounds, feasible-combination constraints, or sound feasibility refinement. Query deadlines are enforced under the configured latency model.
-
-For additive resource usage with fixed execution context, capacity constraints take the form:
+A physical candidate must identify an executable operator for every operation it owns, including fused internal operations. Let `executable[c]` be a fixed Boolean obtained from the operator registry and deployment capabilities:
 
 ```text
-Σ_c usage[k,c] × x[c] ≤ capacity[k] − fixed_usage[k]
+x[c] ≤ executable[c]                       for every candidate c
 ```
 
-Here candidate usage includes shared raw-retention candidates. `fixed_usage[k]` is usage fixed by the workload and independent of plan selection, such as fixed request handling, measured in the same units and accounting context; it is zero when absent. Peak usage and temporary allocations need lifetime and concurrency accounting when a simple sum is inappropriate. These extensions preserve the same ownership rule: producers and shared resources are not charged again through each consumer.
+Unsupported candidates can equivalently be omitted. Coverage and dependency constraints then ensure that every required operation has a selected implementation; logical expressions alone cannot be selected for execution. Only exposed outputs can supply consumers. A fused `topk(sum(...))` does not supply another query's full `sum(...)` unless that output is explicitly exposed.
 
-Only exposed candidate outputs can supply consumers. A fused `topk(sum(...))` candidate does not automatically supply another query's full `sum(...)`; that result needs a separate candidate unless explicitly exposed.
+#### Valid materialization and window configuration
+
+Materialization is bundled into physical candidates. Define fixed Boolean parameters `valid_materialization[c]` and `valid_window[c]` for locally checkable legality, and `compatible[producer,consumer,requirement]` for pairwise legality:
+
+```text
+x[c] ≤ valid_materialization[c]
+x[c] ≤ valid_window[c]
+connect[producer,consumer,requirement]
+    ≤ compatible[producer,consumer,requirement]
+```
+
+These checks include supported modes, deployment capabilities, pane alignment and coverage, retention guarantees, and producer/consumer timing. Omitting invalid candidates and connections implements the same restrictions. For example, an ingestion-maintained candidate cannot depend on data available only at query time, and a 15m consumer cannot connect to a raw-retention candidate covering only 5m.
+
+Consumer-dependent freshness, invalidation, and lifetime checks may involve several selected connections; pairwise compatibility alone does not establish them. Such checks require a valid joint linear encoding or the feasibility cuts defined below. Retained-state candidates are eligible only with a defined refresh/update policy and its cost. The query-time `run` equations do not constitute an ingestion or retained-state model.
+
+#### Every query meets its accuracy target
+
+For each query `q`, the configured accuracy contract specifies an error metric and target, and, when probabilistic, a failure-probability target. A plan is feasible only if its composed output error and failure probability satisfy those targets. These are end-to-end checks, not a sum of arbitrary local sketch errors.
+
+When proven composition rules exist, encode their bounds directly. Otherwise use the exact finite-assignment exclusion below for each plan whose validated accuracy fails. For example, if a selected P99 estimator and its small KLL producer violate the target regardless of all other choices, the following focused cut is sound:
+
+```text
+connect[small-build,estimate-P99,KLL-state] = 0
+```
+
+If upstream choices or other connections affect the error, this focused cut is insufficiently justified; exclude the complete failing assignment or a proven sufficient subset instead. Each query must pass, including those sharing the same producer. An exact operator above approximate input is not automatically exact end to end.
+
+#### CPU, memory, and disk capacities
+
+Resource coefficients have explicit ownership and units. For query-time recomputation, let `cpu_exec[c,t]` be local CPU-seconds per execution, `cpu_standing[c]` local background CPU-seconds over the horizon, and `cpu_fixed` nonselectable workload CPU-seconds. With `CPU_budget` measured over the same horizon:
+
+```text
+Σ_c cpu_standing[c] × x[c]
+  + Σ_{c,t} cpu_exec[c,t] × run[c,t]
+  + cpu_fixed ≤ CPU_budget
+```
+
+A core limit can give a CPU-time budget through available cores times horizon duration and an allowed utilization factor. This aggregate bound does not guarantee short-term throughput or deadlines; configured interval budgets and latency checks must also hold. Ingestion-maintained candidates need separately modeled update demand rather than the query-time `run` term.
+
+For a conservative capacity model, let `resident_memory[c]` and `retained_disk[c]` bound persistent allocation, and `temporary_memory[c]` and `temporary_disk[c]` bound peak local temporary allocation per candidate under the permitted concurrency. All are bytes; fixed allocations are `memory_fixed` and `disk_fixed`:
+
+```text
+Σ_c (resident_memory[c] + temporary_memory[c]) × x[c]
+    + memory_fixed ≤ Memory_capacity
+
+Σ_c (retained_disk[c] + temporary_disk[c]) × x[c]
+    + disk_fixed ≤ Disk_capacity
+```
+
+These bounds conservatively allow all selected candidates' allocations to overlap. They are safe only when the coefficients bound each candidate's concurrent executions, not merely one invocation. A phase-aware allocation model may admit more plans, but must encode actual overlap rather than substituting average occupancy. Shared state and raw retention are counted through their owning candidates once. Memory-time and disk-time used in billing are not substitutes for capacity bounds.
+
+#### Every query meets its latency limit
+
+For each query `q`, the configured evaluator must establish latency at or below `Latency_limit[q]` for all required query evaluation events under the declared deployment assumptions. The latency quantity must match the requirement, including any freshness or ingestion-to-visibility component. CPU-time summed over the workload is not query latency, and `order[c]` is not an execution schedule.
+
+Where the configured latency model has a valid linear encoding, include it directly. Otherwise evaluate the selected graph and add a feasibility cut for a failing assignment. For instance, if a particular query-time build path exceeds Q1's deadline but an ingestion-maintained pane path does not, the failing path is excluded without excluding the pane choice. A focused path cut is valid only if omitted choices cannot repair its latency; otherwise use the full-assignment cut below.
+
+#### Feasibility cuts for checks without a direct linear encoding
+
+This rule makes deferred accuracy, latency, and joint materialization checks explicit. Let `v` be the vector of binary plan decisions: candidate selection, producer–consumer connections, root assignments, and any additional discrete policy configurations affecting the check. With a fixed schedule and acyclic graph, the query-time `run` and `need` values are derived from these decisions. For a rejected assignment `v_bar`, add:
+
+```text
+Σ_{i: v_bar[i] = 1} (1 − v[i])
+  + Σ_{i: v_bar[i] = 0} v[i] ≥ 1
+```
+
+The constraint requires at least one plan decision to change. For example, rejecting `(v1,v2,v3) = (1,1,0)` gives `(1−v1) + (1−v2) + v3 ≥ 1`. The reason must be a definite failure under fixed configured models, not evaluator timeout or numerical uncertainty. If continuous settings can repair the plan, excluding only its binary assignment is not sound; include a valid continuous constraint or discretize the relevant settings.
+
+The complete finite feasibility specification contains this inequality for every assignment violating any configured accuracy, materialization, window, resource, or latency requirement. Enumerating all such assignments is generally impractical, so a solver may add them lazily: solve, validate every requirement, exclude a failing assignment, and re-solve. Every returned plan must pass all checks. Exhaustion establishes infeasibility only for the declared finite inventory and models; timeout does not. These feasibility cuts do not repair an underestimated objective—cost refinement requires separate valid bounds.
 
 ## 6. Example: Shared KLL
 
