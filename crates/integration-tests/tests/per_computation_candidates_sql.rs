@@ -164,13 +164,18 @@ async fn a_sql_fold_over_estimates_leaves_its_row_count_unbound() {
         ]),
     );
     let accuracy = AccuracyTarget::max_error(0.01);
+    // q=1 is an endpoint, so this isolates the fold's row-count statistic
+    // without assuming a sign for SQL bytes or interpolating across zero.
     let sql = "SELECT max(p) FROM \
-               (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s";
+               (SELECT src, approx_percentile_cont(bytes, 1.0) AS p FROM flows GROUP BY src) s";
     let root = lower_sql(sql, &catalog, accuracy.clone()).await.unwrap();
-    let candidates: Vec<_> = asap_integration_tests::planning::logical_candidates(root, accuracy)
-        .into_iter()
-        .filter(reads_ddsketch)
-        .collect();
+    let candidates = vec![
+        asap_integration_tests::planning::explicit_summary_candidate(
+            root,
+            SketchAlgorithm::DDSketch,
+        ),
+    ];
+    assert!(candidates.iter().all(reads_ddsketch));
     assert!(!candidates.is_empty());
     for candidate in candidates {
         let g = candidate.guarantee.clone().expect("a relative max");
@@ -203,10 +208,18 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
     let name = |expr: &SummaryInputExpr| match expr {
         SummaryInputExpr::Column(ColumnRef::Named(name)) => name.clone(),
+        SummaryInputExpr::Column(ColumnRef::Qualified { table, name }) => {
+            assert_eq!(table, "flows");
+            name.clone()
+        }
         // The ranked value when it is the child's one sample value.
         SummaryInputExpr::Column(ColumnRef::SampleValue) => "<sample value>".into(),
         SummaryInputExpr::Tuple(items) => match items.as_slice() {
             [SummaryInputExpr::Column(ColumnRef::Named(name))] => name.clone(),
+            [SummaryInputExpr::Column(ColumnRef::Qualified { table, name })] => {
+                assert_eq!(table, "flows");
+                name.clone()
+            }
             other => panic!("one item column: {other:?}"),
         },
         other => panic!("a named column: {other:?}"),

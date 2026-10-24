@@ -342,8 +342,7 @@
     });
   }
 
-  // The memo-MILP search's summary and the selected plan's shared units
-  // with their readers and threshold; hidden for other searches.
+  // Joint-search metrics; historical documents may additionally list shared units.
   function renderMemoSearch() {
     const view = memoSearchView(doc);
     $('memoPanel').hidden = !view;
@@ -354,7 +353,9 @@
       ? table(['shared unit', 'kind', 'readers', 'queries', 'threshold', 'runs', 'strictest reader'],
         view.sharedUnits.map((u) => `<tr><td class="wrap">${esc(u.unit)}</td><td>${esc(u.kind)}</td><td class="wrap">${esc(u.readers.join(', '))}</td><td>${esc(u.queries.join(', '))}</td>` +
           `<td class="wrap">${esc(u.threshold)}</td><td class="wrap">${esc(u.schedule)}</td><td>${esc(u.strictest)}</td></tr>`).join(''))
-      : '<span class="status">The selected plan shares nothing: every group has one reader.</span>';
+      : (view.summary && view.summary.status
+        ? '<span class="status">Inspect the selected execution DAG for shared producer nodes.</span>'
+        : '<span class="status">No shared units recorded.</span>');
   }
 
   // Show the selected plan in the Stage 2 lane and select its node `id`.

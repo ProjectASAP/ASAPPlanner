@@ -72,7 +72,7 @@
     },
     "cost_model": "aws-fargate-us-east-1",
     "accuracy_guarantees": "enforced",
-    "search": "memo-milp",
+    "search": "candidate-connections",
     "file": "examples/memo-rangeheavy-t5-q05-q09-1h.json",
     "story": "Shared sketch: W-RangeHeavy template 5, quantile_over_time(q, data[1h]) for q = 0.5 and 0.9, both read one DDSketch pane chain (1 min panes over 1 h) sized for both."
   },
@@ -86,7 +86,7 @@
     },
     "cost_model": "aws-fargate-us-east-1",
     "accuracy_guarantees": "enforced",
-    "search": "memo-milp",
+    "search": "candidate-connections",
     "file": "examples/memo-rangeheavy-t8-t5-1h.json",
     "story": "Shared groups: W-RangeHeavy template 8, the ratio quantile_over_time(0.9, data[1h]) / quantile_over_time(0.5, data[1h]), reads the same two groups as template 5's q = 0.9 and q = 0.5 queries."
   },
@@ -100,7 +100,7 @@
     },
     "cost_model": "aws-fargate-us-east-1",
     "accuracy_guarantees": "enforced",
-    "search": "memo-milp",
+    "search": "candidate-connections",
     "file": "examples/memo-rangeheavy-t5-q09-15m-1h.json",
     "story": "Nested windows: W-RangeHeavy template 5, quantile_over_time(0.9, data[w]) for w = 15 min and 1 h, one DDSketch chain of 1 min panes over 1 h; the 15 min query merges its newest 15 panes."
   },
@@ -114,7 +114,7 @@
     },
     "cost_model": "aws-fargate-us-east-1",
     "accuracy_guarantees": "enforced",
-    "search": "memo-milp",
+    "search": "candidate-connections",
     "file": "examples/memo-rangeheavy-t7-t4-1h.json",
     "story": "Widened scan: W-RangeHeavy templates 7 and 4 over 1 h; one scan of data with the job label feeds one pane chain of per-series sums, which T4 reads and T7 sums by job."
   },
@@ -128,7 +128,7 @@
     },
     "cost_model": "aws-fargate-us-east-1",
     "accuracy_guarantees": "enforced",
-    "search": "memo-milp",
+    "search": "candidate-connections",
     "file": "examples/memo-rangeheavy-t5-q05-1h-60s-300s.json",
     "story": "Union rate: W-RangeHeavy template 5, quantile_over_time(0.5, data[1h]) asked every 60 s and every 300 s (two of the 8-user dashboards): one group, run on the union of the two schedules."
   },
@@ -142,7 +142,7 @@
     },
     "cost_model": "aws-fargate-us-east-1",
     "accuracy_guarantees": "enforced",
-    "search": "memo-milp",
+    "search": "candidate-connections",
     "file": "examples/memo-rollupheavy-t11-service-endpoint-5m.json",
     "story": "Sketch rollup: W-RollupHeavy template 11, distinct users over 5 min by (service, endpoint) and by (service); the coarser grouping merges the finer one's KMV states, sized for both."
   }

@@ -101,11 +101,63 @@ async fn roots(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 async fn run(deployment: &DeploymentCapabilities) -> Run {
     let workload = workload();
     let roots = roots(&workload).await;
-    run_stages_with(
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    let local =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let compose = |choices: &[usize]| {
+        compose_logical_candidate(&local, choices)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect::<Vec<_>>()
+    };
+    let exact = compose(&vec![0; local.targets.len()]);
+    let choices = local
+        .targets
+        .iter()
+        .map(|target| {
+            target
+                .choices
+                .candidates
+                .iter()
+                .position(|choice| {
+                    matches!(
+                        choice,
+                        ComputationCandidate::Summary(asap_types::ir::schema::SketchAlgorithm::Kmv)
+                    )
+                })
+                .expect("KMV distinct-count sketch with a failure bound")
+        })
+        .collect::<Vec<_>>();
+    let summary = compose(&choices);
+    let grids = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.evaluation_grid_ms())
+        .collect::<Vec<_>>();
+    let panes = pane_candidates(&summary, &grids);
+    assert_eq!(panes.len(), WINDOWS_MS.len());
+    let mut candidates = vec![exact, summary.clone()];
+    candidates.extend(
+        window_composition_pass2_candidates(&summary, &panes)
+            .unwrap()
+            .into_iter()
+            .filter(|candidate| candidate.pane_candidates.len() == panes.len())
+            .map(|candidate| candidate.roots.unwrap()),
+    );
+    let settings = PlanSelectionSettings::default();
+    run_explicit_candidates(
         &workload,
         roots,
-        &PlanSelectionSettings::default(),
-        deployment,
+        candidates,
+        asap_plan_selection::PlanningModels::builtin()
+            .with_plan_selection(&settings)
+            .with_deployment_capabilities(deployment),
     )
 }
 

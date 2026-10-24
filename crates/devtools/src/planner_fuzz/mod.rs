@@ -223,8 +223,7 @@ impl FuzzWorkload {
             ));
         }
         match settings.search {
-            SearchKind::Legacy => {}
-            SearchKind::MemoBruteForce => command.push_str(" --search memo-brute-force"),
+            SearchKind::CandidateConnections => {}
             SearchKind::Exhaustive => command.push_str(" --exhaustive"),
         }
         let stem = workload_file.strip_suffix(".json").unwrap_or(workload_file);
@@ -292,18 +291,14 @@ pub fn read_seed_file(path: &std::path::Path) -> Result<FuzzWorkload, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SearchKind {
-    /// The default search, the one `plan_installable` runs
-    /// (`stage_pipeline` without `--exhaustive` or `--search`; `--search
-    /// legacy`).
-    Legacy,
-    /// The reference search over the memo (`--search memo-brute-force`).
-    MemoBruteForce,
+    /// Joint candidate-connection planning (`stage_pipeline`'s default).
+    CandidateConnections,
     /// Every generated candidate (`--exhaustive`), up to
     /// [`EXHAUSTIVE_MAX_COMBINATIONS`].
     Exhaustive,
 }
 
-/// `--exhaustive`'s default limit on Stage 1 and Stage 2 candidates.
+/// `--exhaustive`'s default evaluated-assignment budget.
 pub const EXHAUSTIVE_MAX_COMBINATIONS: usize = 10_000;
 
 /// How the tester plans and judges.
@@ -323,7 +318,7 @@ pub struct FuzzSettings {
 impl Default for FuzzSettings {
     fn default() -> Self {
         Self {
-            search: SearchKind::Legacy,
+            search: SearchKind::CandidateConnections,
             enforce_accuracy_guarantees: true,
             relative_tolerance: 0.01,
             absolute_tolerance: 1e-6,
@@ -340,14 +335,14 @@ impl FuzzSettings {
 /// One workload planned by the planner's search.
 #[derive(Debug)]
 pub struct Planned {
-    /// The selected candidate's id, e.g. `P6-m1`.
+    /// The selected physical plan's stable archive ID.
     pub selected: String,
     /// Its price per second under cost model 1.
     pub cost_per_second: f64,
     /// The frontends' roots, one per query.
     pub stage0_roots: Vec<QueryRoot>,
     /// The selected Stage 1 (logical) candidate's roots, the plan a witness
-    /// extends; `None` when the search keeps none (the memo search).
+    /// extends; absent only when the selected logical plan is unavailable.
     pub logical_roots: Option<Vec<QueryRoot>>,
 }
 
@@ -438,17 +433,13 @@ impl Planner {
                 Some(EXHAUSTIVE_MAX_COMBINATIONS),
                 models,
             ),
-            search => run_search_over(
+            SearchKind::CandidateConnections => run_search_over(
                 roots.clone(),
                 &entries,
                 &data,
                 models,
                 Stage1ToStage3Search {
-                    search: if search == SearchKind::MemoBruteForce {
-                        SearchAlgorithm::MemoBruteForce
-                    } else {
-                        SearchAlgorithm::Legacy
-                    },
+                    search: SearchAlgorithm::CandidateConnections,
                     ..Stage1ToStage3Search::default()
                 },
             ),

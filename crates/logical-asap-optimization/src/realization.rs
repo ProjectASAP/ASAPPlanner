@@ -14,7 +14,9 @@ use asap_types::ir::schema::{
     EntityIdentity, Field, FieldDataType, NonNegativeWeightProof, Schema, SketchAlgorithm,
     SketchParams, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+use asap_types::ir::{NonASAPOp, OperatorNode};
+#[cfg(test)]
+use asap_types::ir::{Operator, ScalarExpr};
 use std::rc::Rc;
 
 /// Confidence δ assumed when the target carries only an ε
@@ -143,49 +145,7 @@ pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> Co
     }
 }
 
-/// The column a top-k ranks `child` by. Over a one-measure grouped
-/// aggregate (the SQL heavy-hitter shape and PromQL `topk(k, sum by ..)`) it
-/// is that measure, the last column after the group keys, whichever Stage 1
-/// candidate realizes it: the aggregate itself, or a `SummaryAgg` read by
-/// `FinalizeExactAccumulator` or `SummaryEstimate`, under the `Project`
-/// restoring its names (a renaming) and a value `HAVING`'s `Filter`. Over
-/// per-series rows (PromQL `topk by (..) (k, rows)`) it is the sample value.
-pub fn ranked_column(child: &OperatorNode) -> Result<ColumnId, ResolveError> {
-    let mut node = child;
-    let reduction = loop {
-        match &node.operator {
-            // Only a renaming keeps the measure last.
-            Operator::NonASAP(NonASAPOp::Project { cols, child, .. })
-                if cols.len() == child.schema.fields.len()
-                    && cols
-                        .iter()
-                        .enumerate()
-                        .all(|(i, item)| item.expr == ScalarExpr::Column(i)) =>
-            {
-                node = child
-            }
-            Operator::NonASAP(NonASAPOp::Filter { child, .. })
-            | Operator::ASAP(
-                ASAPOp::FinalizeExactAccumulator { child }
-                | ASAPOp::SummaryEstimate {
-                    summary_input: child,
-                    ..
-                },
-            ) => node = child,
-            Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => break Some(reduction),
-            Operator::NonASAP(NonASAPOp::Aggregate {
-                reduction,
-                measures,
-                ..
-            }) if measures.len() == 1 => break Some(reduction),
-            _ => break None,
-        }
-    };
-    match reduction {
-        Some(Reduction::Reduce(_)) => Ok(child.schema.fields.len() - 1),
-        _ => resolve_column_ref(&ColumnRef::SampleValue, &child.schema),
-    }
-}
+pub use asap_types::ir::schema::topk::ranked_column;
 
 /// [`ranked_column`] as a reference: the sample value when it is that
 /// column, else the column by name.

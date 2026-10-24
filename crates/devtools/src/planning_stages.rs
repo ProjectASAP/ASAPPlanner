@@ -3,14 +3,10 @@
 //! tests, so both see the same candidates, ids and selection.
 
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
-use asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_optimization;
 pub use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
-use asap_physical_asap_optimization::{physical_candidate_count, PhysicalCandidate};
-use asap_plan_selection::pass::{
-    run_stage1_to_stage3_from_pass1, run_stage2_and_stage3, Stage1ToStage3Search,
-};
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
+use asap_plan_selection::pass::{run_stage1_to_stage3_with, Stage1ToStage3Search};
 pub use asap_plan_selection::pass::{LogicalCandidate, PrunedCandidate};
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{Selection, SelectionError};
@@ -29,8 +25,8 @@ pub struct PlanningStagesRun {
     /// candidates' `choice` indexes (query `i` has id `i`).
     pub stage1_pass1_per_computation: PerComputationCandidates<usize>,
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
-    /// `P<n>` implements `L<n>`.
-    pub stage2_physical_asap_optimization: Vec<PhysicalCandidate>,
+    /// Evaluated physical plans reference their archived logical source by ID.
+    pub stage2_physical_asap_optimization: Vec<PhysicalWorkloadPlan>,
     pub stage2_pruned: Vec<PrunedCandidate>,
     pub stage3_plan_selection: Result<Selection, SelectionError>,
 }
@@ -85,14 +81,6 @@ pub fn lower_sql_roots(
 pub enum PlanningStagesError {
     /// Pass 1 failed: there are no candidates, only the frontends' roots.
     Pass1(String),
-    /// Stage 1 enumerated more candidates (Pass 1's and Pass 2's) than the
-    /// caller's limit; enumeration stopped there and nothing was planned.
-    TooManyCandidates { limit: usize },
-    /// Stage 2 would build more physical candidates (one per
-    /// materialization assignment of each Stage 1 candidate) than the
-    /// caller's limit; they were counted, not built, and nothing was
-    /// planned.
-    TooManyPhysicalCandidates { limit: usize },
     /// The frontends' roots or a composed candidate failed validation.
     Validation(String),
 }
@@ -101,16 +89,6 @@ impl std::fmt::Display for PlanningStagesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pass1(error) => write!(f, "Pass 1: {error}"),
-            Self::TooManyCandidates { limit } => write!(
-                f,
-                "workload has more than {limit} Stage 1 candidates, Pass 2's included; \
-the exhaustive search refuses it"
-            ),
-            Self::TooManyPhysicalCandidates { limit } => write!(
-                f,
-                "workload has more than {limit} Stage 2 physical candidates (materialization \
-options included); the exhaustive search refuses it"
-            ),
             Self::Validation(error) => write!(f, "validation: {error}"),
         }
     }
@@ -122,24 +100,10 @@ impl From<PlanningStagesError> for String {
     }
 }
 
-/// Logical ASAP-aware optimization (Pass 1, composition and Pass 2's
-/// identical-expression rule),
-/// physical ASAP-aware optimization and plan selection over `roots`, the
-/// lowered entries of `workload`: the library's planner pipeline
-/// ([`stage1_logical_asap_optimization`], [`run_stage2_and_stage3`]) with
-/// the built-in models. Logical candidates are every choice of a
-/// per-computation candidate for every target, the last target varying
-/// fastest, each followed by its Pass 2 candidates. Every candidate is
-/// enumerated and priced, so the selection is the cheapest of all; a caller
-/// that shows fewer cuts only its display. With `max_combinations`, Stage 1
-/// candidates (Pass 2's included) are counted as they are enumerated, and a
-/// workload with more is refused as soon as the count passes the limit; the
-/// library itself never caps. The same limit applies to Stage 2's physical
-/// candidates, counted before they are built. Stage 2 reads the
-/// recurrences, predictabilities and the data workload; plan selection the
-/// accuracy targets, the recurrences, the latency bounds and the data
-/// workload. The frontends' roots and every composed candidate are
-/// validated.
+/// Traverse the candidate-connection catalog while archiving evaluated plans.
+/// `max_combinations` bounds evaluated assignments, not a Cartesian product.
+/// Exhaustive mode uses the same engine and honors its time and evaluation
+/// budgets; consult the search report before claiming catalog exhaustion.
 pub fn run_planning_stages(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
@@ -171,60 +135,23 @@ pub fn run_planning_stages_over(
     max_combinations: Option<usize>,
     models: PlanningModels<'_>,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
-    let deployment = models.deployment_capabilities;
-    validate(&roots)?;
-    let per_computation =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
-            .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?
-            .without_unsupported_summaries(deployment);
-    // Count Stage 1 candidates as they are enumerated and stop as soon as
-    // the count passes the limit; never truncate.
-    let mut stage1 = Vec::new();
-    for candidate in stage1_logical_asap_optimization(&per_computation, entries) {
-        if max_combinations.is_some_and(|limit| stage1.len() == limit) {
-            return Err(PlanningStagesError::TooManyCandidates {
-                limit: stage1.len(),
-            });
-        }
-        stage1.push(candidate);
-    }
-    if let Some(limit) = max_combinations {
-        let mut physical = 0usize;
-        for roots in stage1.iter().filter_map(|c| c.roots.as_ref().ok()) {
-            physical += physical_candidate_count(roots, entries, data, deployment).unwrap_or(0);
-            if physical > limit {
-                return Err(PlanningStagesError::TooManyPhysicalCandidates { limit });
-            }
-        }
-    }
-    let run = run_stage2_and_stage3(per_computation, stage1, entries, data, models);
-    for candidate in &run.stage1_logical_asap_optimization {
-        if let Ok(roots) = &candidate.roots {
-            validate(roots)?;
-        }
-    }
-    Ok(PlanningStagesRun {
-        stage0_query_language_frontends: roots,
-        stage1_pass1_per_computation: run.stage1_pass1_per_computation,
-        stage1_logical_asap_optimization: run.stage1_logical_asap_optimization,
-        stage2_physical_asap_optimization: run.stage2_physical_asap_optimization,
-        stage2_pruned: run.stage2_pruned,
-        stage3_plan_selection: run.stage3_plan_selection,
-    })
+    run_search_over(
+        roots,
+        entries,
+        data,
+        models,
+        Stage1ToStage3Search {
+            max_evaluations: max_combinations,
+            search: asap_plan_selection::SearchAlgorithm::CandidateConnections,
+            ..Stage1ToStage3Search::exhaustive()
+        },
+    )
 }
 
-/// The default search over `roots` (query `i` is `roots[i]`, with
-/// workload entry `entries[i]`): the one the planner's own pass and
-/// `plan_installable` run ([`Stage1ToStage3Search::default`]: each query's
-/// own candidates checked first, a whole-workload choice that picks a
-/// discarded one not composed, independent components searched separately,
-/// and, without raw data retained, the candidates that scan it at query
-/// time skipped). It keeps only the best candidate so far, so the run holds
-/// the selected Stage 1 and Stage 2 candidates alone (none when selection
-/// fails), and Stage 3 records the first rejection of each cause and the
-/// search's report (`Selection::search`). `models` should be the ones
-/// `plan_installable` plans with (the executor's summary families and
-/// compile check) to see what it selects. No limit applies.
+/// The same bounded candidate-connection search used by `plan_installable`.
+/// The run retains the selected logical and physical plans, validation
+/// diagnostics, and search metrics. Use the executor's summary capabilities
+/// and compile check in `models` when comparing with installation behavior.
 pub fn run_default_search_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
@@ -250,19 +177,33 @@ pub fn run_search_over(
     search: Stage1ToStage3Search,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
-    let per_computation =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
-            .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
-    let run = run_stage1_to_stage3_from_pass1(per_computation, entries, data, models, search);
+    // Use the production entry point so Pass 1 generation is included in the
+    // same planning budget and report rather than happening outside the timer.
+    let run = run_stage1_to_stage3_with(
+        roots.iter().cloned().enumerate().collect(),
+        entries,
+        data,
+        models,
+        search,
+    )
+    .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
     if let Some(Ok(roots)) = run.stage1_selected.as_ref().map(|c| &c.roots) {
         validate(roots)?;
     }
     Ok(PlanningStagesRun {
         stage0_query_language_frontends: roots,
         stage1_pass1_per_computation: run.stage1_pass1_per_computation,
-        stage1_logical_asap_optimization: run.stage1_selected.into_iter().collect(),
-        stage2_physical_asap_optimization: run.stage3_selected.into_iter().collect(),
-        stage2_pruned: Vec::new(),
+        stage1_logical_asap_optimization: if search.keep_every_candidate {
+            run.stage1_logical_asap_optimization
+        } else {
+            run.stage1_selected.into_iter().collect()
+        },
+        stage2_physical_asap_optimization: if search.keep_every_candidate {
+            run.stage2_physical_asap_optimization
+        } else {
+            run.stage3_selected.into_iter().collect()
+        },
+        stage2_pruned: run.stage2_pruned,
         stage3_plan_selection: run.stage3_plan_selection,
     })
 }

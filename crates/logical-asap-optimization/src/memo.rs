@@ -7,10 +7,13 @@
 /// Logical implementation candidates populated after initial identity construction.
 pub mod candidates;
 mod groups;
-/// Pass 2 summary-capability expansion and consistent producer/reader resizing.
-pub mod shared_builds;
-/// Concrete summary-state groups for the connection-based planner migration.
+mod rules;
+/// Shared finite state configuration enumeration.
+pub mod state_configurations;
+/// Concrete summary-state groups exposed by sharing rules.
 pub mod state_groups;
+/// Local pane candidates with selected-reader grid configurations.
+pub mod window_candidates;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -18,6 +21,22 @@ use std::time::{Duration, Instant};
 
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
+
+/// Candidate generation stopped before its finite catalog was complete.
+/// Callers must discard the partial catalog and cannot certify optimality from it.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("candidate generation deadline exceeded")]
+pub struct CandidateGenerationTimeout;
+
+pub(crate) fn check_generation_deadline(
+    deadline: Option<Instant>,
+) -> Result<(), CandidateGenerationTimeout> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        Err(CandidateGenerationTimeout)
+    } else {
+        Ok(())
+    }
+}
 
 /// A group, by index in [`LogicalMemo::groups`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

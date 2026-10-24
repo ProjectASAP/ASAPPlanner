@@ -24,7 +24,7 @@ fn univmon_estimate(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
 /// The logical candidate of `query` that evaluates a UnivMon state.
 fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy.clone()).unwrap();
-    logical_candidates(root, accuracy)
+    logical_candidates(root)
         .into_iter()
         .find_map(|node| univmon_estimate(&node))
         .expect("UnivMon candidate")
@@ -129,26 +129,23 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
             AccuracyTarget::max_error(0.02).failure_probability(0.01),
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
+            let generated = logical_candidates(Rc::clone(&root));
             let run = run_stage1_to_stage3(root, target.clone());
-            let unknown: Vec<_> = run
-                .stage2_physical_asap_optimization
+            let unknown: Vec<_> = generated
                 .iter()
-                .filter(|candidate| {
-                    let asap_types::ir::QueryRoot::Operator(node) = &candidate.roots[0] else {
-                        return false;
-                    };
-                    univmon_estimate(node).is_some() && node.guarantee.is_none()
-                })
+                .filter(|node| univmon_estimate(node).is_some() && node.guarantee.is_none())
                 .collect();
             if target.is_exact() {
                 assert!(unknown.is_empty(), "{query}");
             } else {
                 assert!(!unknown.is_empty(), "{query}");
-                let selected = &run.stage3_plan_selection.as_ref().unwrap().selected;
-                assert!(
-                    unknown.iter().all(|candidate| &candidate.id != selected),
-                    "{query}"
-                );
+                let [asap_types::ir::QueryRoot::Operator(selected)] = run
+                    .selected_logical()
+                    .expect("a certified plan is selected")
+                else {
+                    panic!("one operator result");
+                };
+                assert!(selected.guarantee.is_some(), "{query}");
             }
         }
     }

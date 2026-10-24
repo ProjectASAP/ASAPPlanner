@@ -379,7 +379,7 @@ class PlanEndpointTests(unittest.TestCase):
                               "sources": {"m": {"series_count": 100, "sample_interval": 1000}}},
         }
         document = post_plan({"workload": workload, "deployment_capabilities": {"raw_data_retained": False}}, "/api/plan-workload")
-        self.assertEqual(document["search"], "default")
+        self.assertEqual(document["search"], "candidate-connections")
         self.assertEqual(document["workload"]["data_workload"]["sources"]["m"]["series_count"], 100)
         self.assertFalse(document["deployment_capabilities"]["raw_data_retained"])
         self.assertIsNotNone(document["stage3_plan_selection"]["selected"])

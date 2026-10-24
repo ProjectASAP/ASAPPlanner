@@ -1,7 +1,7 @@
 // cargo run -p asap-devtools --bin planner_fuzz -- \
 //     --seed 1 --cases 200 --time-budget-s 600 --out /tmp/planner-fuzz
 // cargo run -p asap-devtools --bin planner_fuzz -- \
-//     --seed 2 --cases 50 --relations a,b,tighter-accuracy --search memo-brute-force \
+//     --seed 2 --cases 50 --relations a,b,tighter-accuracy --search candidate-connections \
 //     --seed-workload eval/rangeheavy.workload.json --out out
 //
 // Metamorphic fuzz testing for missed reuse and sharing
@@ -15,7 +15,7 @@
 // is filed.
 //
 // `--relations` takes relation names or the letters a–k (default: all);
-// `--search` is `legacy` (the default search), `memo-brute-force` or
+// `--search` is `candidate-connections` (the default search) or
 // `exhaustive`; `--ignore-accuracy-guarantees` plans as `stage_pipeline`
 // does by default (guarantees are enforced here by default, as
 // `plan_installable` does). A relation is violated when it misses by more
@@ -33,7 +33,7 @@ use asap_devtools::planner_fuzz::report::{run_campaign, serve, Campaign, WorkerR
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, SearchKind};
 
 const USAGE: &str = "usage: planner_fuzz --seed <u64> --cases <n> --time-budget-s <s> \
-[--relations <name|letter>,...] [--search legacy|memo-brute-force|exhaustive] \
+[--relations <name|letter>,...] [--search candidate-connections|exhaustive] \
 [--seed-workload <file>]... [--ignore-accuracy-guarantees] [--relative-tolerance <f64>] \
 [--absolute-tolerance <f64>] [--max-shrink-attempts <n>] [--case-timeout-s <s>] --out <dir>";
 
@@ -93,8 +93,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
             "--search" => {
                 settings.search = match value()?.as_str() {
-                    "legacy" | "default" => SearchKind::Legacy,
-                    "memo-brute-force" => SearchKind::MemoBruteForce,
+                    "candidate-connections" => SearchKind::CandidateConnections,
                     "exhaustive" => SearchKind::Exhaustive,
                     other => return Err(format!("unknown search {other}")),
                 }
