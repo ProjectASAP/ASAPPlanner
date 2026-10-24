@@ -3,8 +3,8 @@
 //! This is the selection core for the joint-planning migration, not a new
 //! production search entry point. Candidate generation must supply executable
 //! candidates and compatible producers. Costs cover a fixed accounting context;
-//! demand-dependent costs, accuracy refinement, materialization policy, resource
-//! limits, and physical IR decoding still belong to the surrounding pipeline.
+//! demand-dependent costs, accuracy refinement, materialization policy,
+//! nonadditive resource limits, and physical IR decoding still belong to the surrounding pipeline.
 
 use std::collections::HashSet;
 
@@ -41,10 +41,21 @@ pub(crate) struct QueryRootCandidates {
     pub compatible_candidates: Vec<PhysicalCandidateId>,
 }
 
+/// Additive usage over a fixed accounting context, owned once per candidate.
+/// Peak temporaries and connection-dependent demand require a different model.
+#[derive(Debug, Clone)]
+pub(crate) struct ResourceBudget {
+    pub name: String,
+    pub capacity: f64,
+    /// Same index order as the graph's candidates.
+    pub candidate_usage: Vec<f64>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CandidateDependencyGraph {
     pub candidates: Vec<PhysicalCandidate>,
     pub query_roots: Vec<QueryRootCandidates>,
+    pub resource_budgets: Vec<ResourceBudget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +95,7 @@ pub(crate) enum CandidateSelectionError {
 const MINIMUM_RELATIVE_COST: f64 = 1e-9;
 
 impl CandidateDependencyGraph {
-    fn validate(&self) -> Result<(), CandidateSelectionError> {
+    pub(super) fn validate(&self) -> Result<(), CandidateSelectionError> {
         let validate_ids = |ids: &[PhysicalCandidateId], context: &str| {
             let mut seen = HashSet::new();
             for id in ids {
@@ -103,6 +114,22 @@ impl CandidateDependencyGraph {
             }
             Ok(())
         };
+        for budget in &self.resource_budgets {
+            if budget.name.is_empty()
+                || !budget.capacity.is_finite()
+                || budget.capacity < 0.0
+                || budget.candidate_usage.len() != self.candidates.len()
+                || budget
+                    .candidate_usage
+                    .iter()
+                    .any(|usage| !usage.is_finite() || *usage < 0.0)
+                || !budget.candidate_usage.iter().sum::<f64>().is_finite()
+            {
+                return Err(CandidateSelectionError::InvalidGraph(format!(
+                    "resource budget {:?} needs finite nonnegative capacity and one finite nonnegative usage per candidate", budget.name
+                )));
+            }
+        }
         let mut total_cost = 0.0;
         for (index, candidate) in self.candidates.iter().enumerate() {
             if !candidate.local_cost.is_finite() || candidate.local_cost < 0.0 {
@@ -233,6 +260,22 @@ pub(crate) fn select_candidates(
             candidate_selected[candidate] <= support[candidate].clone()
         ));
     }
+    for budget in &graph.resource_budgets {
+        // Normalize each resource independently of currency and other resources.
+        let scale = budget
+            .candidate_usage
+            .iter()
+            .copied()
+            .fold(budget.capacity, f64::max)
+            .max(f64::MIN_POSITIVE);
+        let usage: Expression = budget
+            .candidate_usage
+            .iter()
+            .zip(&candidate_selected)
+            .map(|(usage, selected)| (*usage / scale) * *selected)
+            .sum();
+        constraints.push(constraint!(usage <= budget.capacity / scale));
+    }
     // Validation rejects positive coefficients outside the supported relative
     // range; uniform currency-unit changes do not alter the selected graph.
     let maximum_cost = graph
@@ -297,7 +340,7 @@ pub(crate) fn select_candidates(
 }
 
 /// Check the decoded integral graph instead of trusting rounded solver values.
-fn validate_selected_graph(
+pub(super) fn validate_selected_graph(
     graph: &CandidateDependencyGraph,
     selected: &SelectedCandidateGraph,
 ) -> Result<(), String> {
@@ -309,6 +352,15 @@ fn validate_selected_graph(
         || selected.query_roots.len() != graph.query_roots.len()
     {
         return Err(invalid());
+    }
+    for budget in &graph.resource_budgets {
+        let usage: f64 = active.iter().map(|c| budget.candidate_usage[c.0]).sum();
+        if usage > budget.capacity {
+            return Err(format!(
+                "decoded selection exceeds resource budget {:?}",
+                budget.name
+            ));
+        }
     }
     let mut root_seen = vec![false; graph.query_roots.len()];
     for root in &selected.query_roots {
@@ -408,6 +460,38 @@ fn validate_selected_graph(
 mod tests {
     use super::*;
 
+    // A shared producer owns resident state once, regardless of its reader count.
+    #[test]
+    fn resource_limits_price_shared_state_once_and_change_the_selected_plan() {
+        let mut graph = dependency_graph(
+            vec![
+                candidate(0, 8.0, &[]),
+                candidate(1, 1.0, &[&[0]]),
+                candidate(2, 1.0, &[&[0]]),
+                candidate(1, 12.0, &[]),
+                candidate(2, 12.0, &[]),
+            ],
+            &[&[1, 3], &[2, 4]],
+        );
+        graph.resource_budgets.push(ResourceBudget {
+            name: "resident memory".into(),
+            capacity: 6.0,
+            candidate_usage: vec![6.0, 0.0, 0.0, 1.0, 1.0],
+        });
+        assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 10.0);
+        let shared = compare_with_oracle(&graph).unwrap();
+        graph.resource_budgets[0].capacity = 5.0;
+        assert!(validate_selected_graph(&graph, &shared).is_err());
+        assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 24.0);
+        graph.resource_budgets[0].capacity = 1.0;
+        assert!(compare_with_oracle(&graph).is_none());
+        graph.resource_budgets[0].candidate_usage.pop();
+        assert!(matches!(
+            select_candidates(&graph),
+            Err(CandidateSelectionError::InvalidGraph(_))
+        ));
+    }
+
     fn candidate(group: u32, cost: f64, inputs: &[&[usize]]) -> PhysicalCandidate {
         PhysicalCandidate {
             group: MemoGroupId(group),
@@ -431,6 +515,7 @@ mod tests {
     ) -> CandidateDependencyGraph {
         CandidateDependencyGraph {
             candidates,
+            resource_budgets: Vec::new(),
             query_roots: roots
                 .iter()
                 .map(|choices| QueryRootCandidates {
@@ -531,6 +616,18 @@ mod tests {
                 .enumerate()
                 .any(|(c, edges)| marks[c] == 0 && !edges.is_empty())
             {
+                continue;
+            }
+            if graph.resource_budgets.iter().any(|budget| {
+                budget
+                    .candidate_usage
+                    .iter()
+                    .zip(&marks)
+                    .filter(|(_, mark)| **mark == 2)
+                    .map(|(usage, _)| usage)
+                    .sum::<f64>()
+                    > budget.capacity
+            }) {
                 continue;
             }
             let cost = graph
