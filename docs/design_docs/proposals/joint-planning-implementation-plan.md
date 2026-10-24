@@ -65,6 +65,19 @@ The current `PhysicalCandidate` means a whole-workload DAG. Resolve that collisi
 
 Logical memo data and rule expansion belong in `logical-asap-optimization`, which Stage 2 already depends on. Physical candidates and materialization legality belong in `physical-asap-optimization`; prices and selection belong in `plan-selection`. Earlier stages must not depend on the solver crate. Move common driver/report types out of the legacy namespace without adding a new framework crate merely to share names.
 
+### Directory organization at final cutover
+
+Legacy deletion includes reorganizing files by responsibility, not merely moving the old directory or retaining migration-era names. Use the existing crate boundaries:
+
+- Logical memo identity, candidate generation and sharing rules: `logical-asap-optimization`.
+- Executable candidates, timing and materialization legality: `physical-asap-optimization`.
+- Cost, execution demand and accuracy evaluation: the corresponding evaluation modules in `plan-selection`, independent of a specific search algorithm.
+- MILP variables, constraints, solver integration and refinement: a focused solver directory under `plan-selection`.
+- Selected-plan reconstruction and validation: dedicated plan modules, not mixed into MILP coefficient construction.
+- Pipeline orchestration and public reports: shared driver modules, outside solver internals and the deleted legacy namespace.
+
+Final acceptance requires one production path, no `legacy`, `old`, `new`, or `v2` implementation directories, no temporary comparison routes or forwarding reexports, and no shared evaluator or rule implementation hidden under a solver-specific folder. Keep tests with the scope they verify. Update imports, public names and documentation together; verify dependency direction and existing public behavior after the moves. Reuse existing folders where they express these responsibilities clearly rather than adding a folder for every file.
+
 ## Implementation sequence
 
 ### 1. Capture behavior and extract shared infrastructure
