@@ -92,6 +92,7 @@ pub(crate) enum CandidateSelectionError {
 // The core normalizes its largest local cost to one. Smaller positive
 // coefficients must stay representable by HiGHS; rejecting a wider range is an
 // explicit model restriction, not proof of infeasibility or a completeness claim.
+// Resource rows use the same conservative positive coefficient range.
 const MINIMUM_RELATIVE_COST: f64 = 1e-9;
 
 impl CandidateDependencyGraph {
@@ -127,6 +128,24 @@ impl CandidateDependencyGraph {
             {
                 return Err(CandidateSelectionError::InvalidGraph(format!(
                     "resource budget {:?} needs finite nonnegative capacity and one finite nonnegative usage per candidate", budget.name
+                )));
+            }
+        }
+        for budget in &self.resource_budgets {
+            let scale = budget
+                .candidate_usage
+                .iter()
+                .copied()
+                .fold(budget.capacity, f64::max);
+            if scale > 0.0
+                && budget
+                    .candidate_usage
+                    .iter()
+                    .chain(std::iter::once(&budget.capacity))
+                    .any(|value| *value > 0.0 && *value / scale < MINIMUM_RELATIVE_COST)
+            {
+                return Err(CandidateSelectionError::InvalidGraph(format!(
+                    "resource budget {:?} exceeds the supported positive coefficient range ({MINIMUM_RELATIVE_COST}); rescale or reformulate the resource model", budget.name
                 )));
             }
         }
@@ -486,6 +505,28 @@ mod tests {
         graph.resource_budgets[0].capacity = 1.0;
         assert!(compare_with_oracle(&graph).is_none());
         graph.resource_budgets[0].candidate_usage.pop();
+        assert!(matches!(
+            select_candidates(&graph),
+            Err(CandidateSelectionError::InvalidGraph(_))
+        ));
+    }
+
+    // Unreachable large states must not silently erase a live resource constraint.
+    #[test]
+    fn unsupported_resource_dynamic_range_is_explicitly_rejected() {
+        let mut graph = dependency_graph(
+            vec![
+                candidate(0, 2.0, &[]),
+                candidate(0, 1.0, &[]),
+                candidate(1, 1.0, &[]),
+            ],
+            &[&[0, 1]],
+        );
+        graph.resource_budgets.push(ResourceBudget {
+            name: "memory".into(),
+            capacity: 1.0,
+            candidate_usage: vec![1.0, 2.0, 1e20],
+        });
         assert!(matches!(
             select_candidates(&graph),
             Err(CandidateSelectionError::InvalidGraph(_))
