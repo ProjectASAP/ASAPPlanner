@@ -10,7 +10,21 @@ All runs retain the viewer's settings: raw data and query-time results are not r
 
 The external wall deadline is 120 seconds per run. Memo-MILP receives a 120-second internal budget; candidate-connections receives 30 seconds and the route's 128-refinement cap. These differing internal budgets are intentional diagnostic settings, not an equal-budget comparison. The budget is checked between solver/evaluator calls, so a final call can overshoot it. A killed process does not provide a completed plan, even if an internal incumbent existed. An exit code of zero is not sufficient: the devtool can serialize a selection error with `selected: null`.
 
-## Observed results
+## Latest migration checkpoint: sharing, accuracy pruning and cost bounds
+
+At `c196e423`, compatible scan-label projections can share one pane state; certified query-closure cuts remove size-independent accuracy failures, and conservative ingestion Scan/DDSketch pane costs supply nonzero lower bounds. The same three unchanged nine-query manifests all produced plans accepted by the accuracy evaluator.
+
+| Workload | Wall s | Peak RSS KiB | Modeled cost/s | Reported gap | Termination |
+|---|---:|---:|---:|---:|---|
+| seed-862 | 21.31 | 92468 | 1.63143868138e-06 | 15.56% | solver GapLimit |
+| seed-862-x5 | 15.03 | 91904 | 8.15816843789e-06 | 15.57% | solver GapLimit |
+| seed-862-long | 33.08 | 111624 | 4.69721193613e-06 | 13.47% | time limit |
+
+The seed-862 cost is 45.5% below the preceding contract-aware baseline and approximately 3.5% above the legacy selected cost. All runs retained `joint-plan-1`; better candidate generation improved the initial plan, while the new lower bounds improved the optimization certificate. They do not demonstrate proven optimality or equal-budget runtime speedup. The two `GapLimit` runs stopped because the solver adapter did not expose a certified bound for its nonoptimal-status proposal; the validated incumbent and last certified bound were retained. The long run exceeded its cooperative 30-second search budget during a final call. Broader rule coverage, tighter contextual bounds and budget enforcement remain migration work.
+
+Artifacts use the `migrated-bounds-seed862` prefix in the local artifact directory. The JSON report records executable SHA-256, all stage timings, model sizes, rejection counts and query cuts. Earlier results below are retained as historical checkpoints.
+
+## Earlier checkpoint results
 
 Wall time includes CLI startup, parsing/lowering, planning, validation, and JSON serialization. Peak RSS is from `/usr/bin/time -v` and measures planner-process memory, not selected-plan memory.
 
@@ -109,4 +123,4 @@ The diagnostic executable is `stage_pipeline-bounded-baseline`; its SHA-256 and 
 
 The archived bounded-baseline selected DAG confirms two state producers in `joint-plan-3`. Scan 0 exposes `job`, `region`, and `service` plus series identity; PaneChain 1 feeds both the P99 reader (node 3, original q03) and P75 reader (node 25, q05). Scan 12 exposes only `region` plus series identity; a second PaneChain 13 feeds P95 (node 15, q04). Both are DDSketch configurations with alpha 0.05, 100 panes of 1,000 ms, and per-entity state. Each retains 1,179,680,000 bytes and contributes 1.3590971293056488e-6/s to modeled cost.
 
-The legacy selected DAG `P6-m3` has only the wider Scan 0 and PaneChain 1. Its single Merge 2 feeds all three quantile readers (nodes 3, 12, and 22). Thus the extra chain, scan, and repeated merge work are directly visible in the selected plans; this is not merely a speculation based on total cost. The new catalog's exact-schema connections do not provide the conversion needed to reuse the wider state for the region-only consumer. The legacy DAG demonstrates that wider-input reuse occurs, although this export does not identify the particular rule that introduced it. Compact extracted evidence is in `subset-sharing-evidence.json` in the artifact directory.
+The legacy selected DAG `P6-m3` has only the wider Scan 0 and PaneChain 1. Its single Merge 2 feeds all three quantile readers (nodes 3, 12, and 22). Thus the extra chain, scan, and repeated merge work are directly visible in the selected plans; this is not merely a speculation based on total cost. At that earlier checkpoint, the catalog's exact-schema connections did not provide the conversion needed to reuse the wider state for the region-only consumer. The legacy DAG demonstrates that wider-input reuse occurs, although this export does not identify the particular rule that introduced it. Compact extracted evidence is in `subset-sharing-evidence.json` in the artifact directory.
