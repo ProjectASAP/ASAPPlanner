@@ -459,8 +459,19 @@ impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
             Err(InstallablePlanError::StoredOutputNotExecutable { node_id, reason }) => Err(
                 ExecutorCompileError::Rejected(format!("stored output {node_id}: {reason}")),
             ),
-            // Not installable for another reason, which `plan_installable`
-            // reports as such (e.g. a scalar root); not the compiler's to say.
+            // Runtime input binding and stored-state coverage are part of
+            // executability too. Passing these failures through as success lets
+            // selection accept a plan that final installation must reject.
+            Err(
+                error @ (InstallablePlanError::UnsupportedRawDataSampleWindow { .. }
+                | InstallablePlanError::StoredOutputReadsUnwindowedSource { .. }
+                | InstallablePlanError::StoredOutputWithoutCoverage { .. }),
+            ) => {
+                check_compile_deadline(deadline)?;
+                Err(ExecutorCompileError::Rejected(error.to_string()))
+            }
+            // Other installation diagnostics (e.g. a standalone scalar root)
+            // remain owned by plan_installable rather than this compiler check.
             Err(InstallablePlanError::DeadlineExceeded) => {
                 Err(ExecutorCompileError::DeadlineExceeded)
             }
@@ -791,7 +802,8 @@ impl<'a> IndexedDag<'a> {
                 .flatten()
                 .any(|input| match payload(input) {
                     Operator::NonASAP(NonASAPOp::Scan { .. }) => true,
-                    Operator::NonASAP(NonASAPOp::TimeRange { .. }) => false,
+                    Operator::NonASAP(NonASAPOp::TimeRange { .. })
+                    | Operator::ASAP(ASAPOp::PaneChain { .. }) => false,
                     _ => reading_raw_data_samples.contains(input),
                 });
             if reads {
@@ -879,11 +891,25 @@ impl<'a> IndexedDag<'a> {
         let Some(NonASAPOp::TimeRange { range, .. }) = self.relational(time_range) else {
             return Err(unsupported("not a TimeRange"));
         };
+        self.raw_window_below(time_range, range.as_millis())
+    }
+
+    /// Shared shape check for an explicit range and the range each pane will
+    /// introduce. It does not allocate or compile every pane in a chain.
+    fn raw_window_below(
+        &self,
+        time_range: PhysicalASAPNodeId,
+        width_ms: u128,
+    ) -> Result<RawDataSampleWindow, InstallablePlanError> {
+        let unsupported = |reason| InstallablePlanError::UnsupportedRawDataSampleWindow {
+            time_range_node_id: time_range,
+            reason,
+        };
         if self.re_timed_from_above.contains(&time_range) {
             return Err(unsupported("a subquery or a TimeShift above the range"));
         }
         let width_ms =
-            i64::try_from(range.as_millis()).map_err(|_| unsupported("window width overflows"))?;
+            i64::try_from(width_ms).map_err(|_| unsupported("window width overflows"))?;
         let mut end_offset_ms = 0i64;
         let mut current = time_range;
         loop {
@@ -1301,6 +1327,24 @@ fn pane_retention_of_expanded_panes_before(
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
     check_installation_deadline(deadline)?;
     let selected = compile_physical_asap_workload_with_node_ids(timed)?;
+    // Reject unsupported raw-source shapes before expanding possibly thousands
+    // of panes. The complete expanded-plan validation remains authoritative.
+    let indexed = IndexedDag::new(&selected.dag);
+    for node in &selected.dag.nodes {
+        check_installation_deadline(deadline)?;
+        if !indexed.reading_raw_data_samples.contains(&node.id) {
+            continue;
+        }
+        match &node.payload {
+            Operator::NonASAP(NonASAPOp::TimeRange { .. }) => {
+                indexed.window_at(node.id)?;
+            }
+            Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }) => {
+                indexed.raw_window_below(node.id, u128::from(*pane_width_ms))?;
+            }
+            _ => {}
+        }
+    }
     let mut retention_by_chain: Vec<(Rc<OperatorNode>, u64)> = Vec::new();
     for (&node_id, &retention_ms) in selection.iter().flat_map(|s| &s.pane_retention_ms) {
         let chain = selected
@@ -1436,6 +1480,91 @@ mod tests {
         assert_eq!(
             PlannerExecutorCompileCheck.compiles_before(&[], Some(Instant::now())),
             Err(ExecutorCompileError::DeadlineExceeded)
+        );
+    }
+
+    /// Selection must reject the same unsupported raw-window shape as final
+    /// installation, rather than accepting a candidate that cannot be installed.
+    #[test]
+    fn executor_check_rejects_projection_below_raw_window() {
+        use asap_types::ir::operator::Source;
+        use asap_types::ir::scalar::{ProjectItem, ScalarExpr};
+        use asap_types::ir::schema::{DataType, Field, Schema};
+        use asap_types::ir::{OperatorNode, TimeRangeKind};
+        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: "latency".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        }))
+        .unwrap();
+        let project = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+            child: scan.clone(),
+            qualifier: None,
+            cols: vec![
+                ProjectItem {
+                    alias: Some("ts".into()),
+                    expr: ScalarExpr::Column(0),
+                },
+                ProjectItem {
+                    alias: Some("value".into()),
+                    expr: ScalarExpr::Column(1),
+                },
+            ],
+        }))
+        .unwrap();
+        let range = |child| {
+            QueryRoot::Operator(
+                OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+                    child,
+                    range: std::time::Duration::from_secs(300),
+                    kind: TimeRangeKind::Range,
+                }))
+                .unwrap(),
+            )
+        };
+        let rejected =
+            PlannerExecutorCompileCheck.compiles_before(&[range(Rc::clone(&project))], None);
+        assert!(
+            matches!(rejected, Err(ExecutorCompileError::Rejected(ref reason))
+            if reason.contains("operator other than TimeShift below the range")),
+            "{rejected:?}"
+        );
+        assert!(PlannerExecutorCompileCheck
+            .compiles_before(&[range(scan)], None)
+            .is_ok());
+        // An invalid source shape must be rejected before allocating millions
+        // of pane nodes; it is not a validation timeout.
+        use asap_types::ir::operator::Reduction;
+        use asap_types::ir::scalar::ColumnRef;
+        use asap_types::ir::schema::sketch::SummaryUpdate;
+        use asap_types::ir::schema::{ExactKind, ExactParams, FieldDataType, GroupingStrategy};
+        let chain = OperatorNode::new_shared(Operator::ASAP(ASAPOp::PaneChain {
+            child: project,
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            grouping: GroupingStrategy::default(),
+            filter: None,
+            pane_width_ms: 1,
+            pane_count: 10_000_000,
+        }))
+        .unwrap();
+        let rejected = PlannerExecutorCompileCheck.compiles_before(
+            &[QueryRoot::Operator(chain)],
+            Some(Instant::now() + std::time::Duration::from_secs(1)),
+        );
+        assert!(
+            matches!(rejected, Err(ExecutorCompileError::Rejected(_))),
+            "{rejected:?}"
         );
     }
 

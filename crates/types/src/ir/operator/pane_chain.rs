@@ -197,16 +197,7 @@ fn build_over(
     Ok(build)
 }
 
-/// `root` with every `PaneChain` expanded into its panes: a `SummaryMerge`
-/// reads each pane of each chain it read, newest first, as plain
-/// `SummaryAgg` nodes the executor runs; a merge of the newest `n` panes
-/// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
-/// guarantee, timing and materialization. Each pane takes its chain's
-/// timing and materialization, and the range and shift it reads take the
-/// chain's timing: a chain materialized at ingestion time expands into
-/// panes each built and stored at ingestion time. Expanding before timings
-/// are applied leaves the panes untimed. A chain read by anything but a
-/// `SummaryMerge` is an error.
+/// Expansion failure distinguishes invalid IR from an interrupted valid plan.
 #[derive(Debug, thiserror::Error)]
 pub enum PaneChainExpansionError {
     #[error(transparent)]
@@ -224,6 +215,16 @@ fn without_deadline(error: PaneChainExpansionError) -> SchemaDerivationError {
     }
 }
 
+/// `root` with every `PaneChain` expanded into its panes: a `SummaryMerge`
+/// reads each pane of each chain it read, newest first, as plain
+/// `SummaryAgg` nodes the executor runs; a merge of the newest `n` panes
+/// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
+/// guarantee, timing and materialization. Each pane takes its chain's
+/// timing and materialization, and the range and shift it reads take the
+/// chain's timing: a chain materialized at ingestion time expands into
+/// panes each built and stored at ingestion time. Expanding before timings
+/// are applied leaves the panes untimed. A chain read by anything but a
+/// `SummaryMerge` is an error.
 pub fn expand_pane_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
@@ -312,6 +313,10 @@ pub fn expand_pane_chains_in_workload_before(
             ExpandedPaneChain { chain, panes }
         })
         .collect();
+    // Catalog assembly follows expansion and is part of the same budget.
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(PaneChainExpansionError::DeadlineExceeded);
+    }
     Ok(PaneChainExpansion {
         roots,
         chains,
