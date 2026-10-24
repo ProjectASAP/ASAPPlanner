@@ -56,9 +56,11 @@ pub(super) fn optimize_configured_candidates(
         return Err("candidate search requires a finite positive frozen calibration".into());
     }
     let mut best: Option<(f64, SelectedCandidateGraph, Selection, PhysicalCandidate)> = None;
+    let mut evaluation_number = 0;
     let search = search_candidates(&configured.inventory.graph, limits, |selected| {
+        evaluation_number += 1;
         let Some((selection, physical)) =
-            evaluate_configured_candidate(configured, context, selected)?
+            evaluate_configured_candidate(configured, context, selected, evaluation_number)?
         else {
             return Ok(None);
         };
@@ -88,6 +90,7 @@ fn evaluate_configured_candidate(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
     selected: &SelectedCandidateGraph,
+    evaluation_number: usize,
 ) -> Result<Option<(Selection, PhysicalCandidate)>, String> {
     let mut modes = vec![None; configured.configurations.len()];
     for id in &selected.selected_candidates {
@@ -95,7 +98,7 @@ fn evaluate_configured_candidate(
     }
     // Only a typed infeasible assignment justifies a no-good cut. Missing
     // identity, incompatible contracts and unsupported rewrites stop search.
-    let realized = match materialize_selected_candidates(
+    let mut realized = match materialize_selected_candidates(
         &configured.inventory,
         selected,
         &modes,
@@ -119,6 +122,9 @@ fn evaluate_configured_candidate(
             ));
         }
     }
+    // Stage 2 leaves IDs to its caller. A nonempty, stable proposal label keeps
+    // selected-plan references and viewer cost lookups consistent.
+    realized.physical.id = format!("joint-plan-{evaluation_number}");
     let mut selector = PlanSelector::new(context.entries, context.data, context.models, false)
         .map_err(|e| e.to_string())?;
     selector.set_calibration(context.calibration);
@@ -278,6 +284,11 @@ mod tests {
                 .best
                 .as_ref()
                 .expect("search should retain a validated KLL plan");
+            assert!(
+                !selection.selected.is_empty(),
+                "selected plan needs a viewer-visible ID"
+            );
+            assert_eq!(selection.selected, physical.id);
             let mut independent = PlanSelector::new(&entries, &data, models, false).unwrap();
             independent.set_calibration(context.calibration);
             independent.offer(physical).unwrap();
