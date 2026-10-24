@@ -191,9 +191,9 @@ pub enum PhysicalASAPOptimizationError {
 }
 
 /// Why a summary build cannot be materialized at ingestion time (S4).
-/// Stage 2 bookkeeping, like [`MaterializationCandidate`].
+/// Shared by complete-plan Stage 2 and explicit selected-reader eligibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum IngestionPruneReason {
+pub enum IngestionPruneReason {
     /// The data workload is at rest, or its arrival is unknown.
     NotIngesting,
     /// A query reading it is not repeated.
@@ -227,6 +227,97 @@ pub(crate) enum IngestionPruneReason {
     /// It is not a summary build (e.g. a shared `Scan`): only a summary's
     /// state is maintained as data arrives.
     NotASummaryBuild,
+}
+
+/// Workload eligibility for one summary and only its selected query readers.
+/// These are local options, not a complete physical assignment. Ingestion still
+/// requires selected upstream implementations to pass timing/down-closure checks.
+#[derive(Debug)]
+pub struct SummaryMaterializationEligibility {
+    pub at_ingestion: Result<(), IngestionPruneReason>,
+    pub may_keep_across_evaluations: bool,
+    pub may_materialize_at_query: bool,
+    /// A pane's selected readers must also meet their range-step grids.
+    pub range_compatibility: Result<(), PhysicalASAPOptimizationError>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SummaryEligibilityError {
+    #[error("selected reader {query} has no workload entry")]
+    UnknownReader { query: usize },
+    #[error("materialization eligibility requires a summary build or pane chain")]
+    NotSummary,
+    #[error("materialization eligibility requires at least one selected reader")]
+    NoSelectedReaders,
+    #[error("pane width must be positive")]
+    ZeroPaneWidth,
+}
+
+/// Evaluate an implemented summary against explicit selected query indices.
+/// Never supply the union of potential readers. Duplicate indices count once;
+/// missing workload entries are rejected as malformed reader references. The node must carry the actual bound source/filter/window subtree,
+/// and `data` describes that source's arrival. This function does not implement
+/// operators, assign upstream timing, or prove complete execution legality.
+pub fn summary_materialization_eligibility(
+    node: &OperatorNode,
+    selected_readers: &[usize],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+) -> Result<SummaryMaterializationEligibility, SummaryEligibilityError> {
+    if !is_summary_build(node) {
+        return Err(SummaryEligibilityError::NotSummary);
+    }
+    if selected_readers.is_empty() {
+        return Err(SummaryEligibilityError::NoSelectedReaders);
+    }
+    if matches!(
+        node.asap(),
+        Some(ASAPOp::PaneChain {
+            pane_width_ms: 0,
+            ..
+        })
+    ) {
+        return Err(SummaryEligibilityError::ZeroPaneWidth);
+    }
+    if let Some(&query) = selected_readers
+        .iter()
+        .find(|&&query| query >= entries.len())
+    {
+        return Err(SummaryEligibilityError::UnknownReader { query });
+    }
+    let mut readers = selected_readers.to_vec();
+    readers.sort_unstable();
+    readers.dedup();
+    Ok(summary_reader_eligibility(
+        node, &readers, entries, data, deployment,
+    ))
+}
+
+fn summary_reader_eligibility(
+    node: &OperatorNode,
+    readers: &[usize],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+) -> SummaryMaterializationEligibility {
+    let recurrences: Option<Vec<&QueryRecurrence>> = readers
+        .iter()
+        .map(|&query| entries.get(query).map(|entry| &entry.recurrence))
+        .collect();
+    let may_keep_across_evaluations = deployment.query_time_results_retained
+        && match (node.asap(), recurrences) {
+            (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
+                builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
+            }
+            _ => false,
+        };
+    SummaryMaterializationEligibility {
+        at_ingestion: ingestion_eligibility(node, readers, entries, data),
+        may_keep_across_evaluations,
+        may_materialize_at_query: readers.len() > 1,
+        range_compatibility: check_summary_range_steps(node, readers, entries),
+    }
 }
 
 /// One summary build, or one highest shared non-summary node, Stage 2 may
@@ -311,6 +402,9 @@ pub(crate) fn builds_one_pane_per_evaluation<'a>(
     pane_width_ms: u64,
     readers: impl IntoIterator<Item = &'a QueryRecurrence>,
 ) -> bool {
+    if pane_width_ms == 0 {
+        return false;
+    }
     let mut phase_ms = None;
     let mut any_reader = false;
     for recurrence in readers {
@@ -613,25 +707,33 @@ fn check_panes_on_range_steps(
     mat_candidates: &[MaterializationCandidate],
     entries: &[QueryWorkloadEntry],
 ) -> Result<(), PhysicalASAPOptimizationError> {
-    for mat_candidate in mat_candidates {
-        let Some(ASAPOp::PaneChain { pane_width_ms, .. }) = mat_candidate.node.asap() else {
+    for candidate in mat_candidates {
+        check_summary_range_steps(&candidate.node, &candidate.readers, entries)?;
+    }
+    Ok(())
+}
+
+fn check_summary_range_steps(
+    node: &OperatorNode,
+    readers: &[usize],
+    entries: &[QueryWorkloadEntry],
+) -> Result<(), PhysicalASAPOptimizationError> {
+    let Some(ASAPOp::PaneChain { pane_width_ms, .. }) = node.asap() else {
+        return Ok(());
+    };
+    for &query in readers {
+        let Some(range) = entries
+            .get(query)
+            .and_then(|entry| entry.range_evaluation)
+            .filter(|range| range.evaluations_per_request() > 1)
+        else {
             continue;
         };
-        for &query in &mat_candidate.readers {
-            // A one-step range evaluates only at the request's end.
-            let Some(range) = entries
-                .get(query)
-                .and_then(|e| e.range_evaluation)
-                .filter(|range| range.evaluations_per_request() > 1)
-            else {
-                continue;
-            };
-            if range.step_ms % pane_width_ms.max(&1) != 0 {
-                return Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
-                    pane_width_ms: *pane_width_ms,
-                    step_ms: range.step_ms,
-                });
-            }
+        if range.step_ms % pane_width_ms.max(&1) != 0 {
+            return Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
+                pane_width_ms: *pane_width_ms,
+                step_ms: range.step_ms,
+            });
         }
     }
     Ok(())
@@ -705,7 +807,8 @@ pub(crate) fn materialization_candidates(
     let below = candidates_below(&nodes);
     let builds = nodes.iter().enumerate().map(|(c, node)| {
         let readers = readers[&Rc::as_ptr(node)].clone();
-        let at_ingestion = ingestion_eligibility(node, &readers, entries, data).and_then(|()| {
+        let eligibility = summary_reader_eligibility(node, &readers, entries, data, deployment);
+        let at_ingestion = eligibility.at_ingestion.and_then(|()| {
             // Only this build and the builds below it at ingestion time.
             let mut trial =
                 MaterializationAssignment::with_default(Materialization::NotMaterialized);
@@ -716,23 +819,11 @@ pub(crate) fn materialization_candidates(
                 .map(|_| ())
                 .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
         });
-        // A reader without a workload entry has an unknown recurrence.
-        let recurrences: Option<Vec<&QueryRecurrence>> = readers
-            .iter()
-            .map(|&q| entries.get(q).map(|e| &e.recurrence))
-            .collect();
-        let may_keep_across_evaluations = deployment.query_time_results_retained
-            && match (node.asap(), recurrences) {
-                (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
-                    builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
-                }
-                _ => false,
-            };
         MaterializationCandidate {
             node: Rc::clone(node),
             readers,
             at_ingestion,
-            may_keep_across_evaluations,
+            may_keep_across_evaluations: eligibility.may_keep_across_evaluations,
         }
     });
     // A node fixed at ingestion time cannot be built at query time.
@@ -1509,6 +1600,115 @@ mod tests {
             .copied()
             .filter(|m| *m != Materialization::NotMaterialized)
             .collect()
+    }
+
+    // An unselected unpredictable query must not restrict an ingestion candidate.
+    #[test]
+    fn selected_reader_eligibility_ignores_optional_unpredictable_consumers() {
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let node = root_operators(&root)
+            .into_iter()
+            .flat_map(OperatorNode::reachable)
+            .find(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .unwrap();
+        let entries = vec![
+            every_minute(),
+            QueryWorkloadEntry {
+                predictability: Predictability::AdHoc,
+                ..every_minute()
+            },
+        ];
+        let data = arriving();
+        let deployment = DeploymentCapabilities::default();
+        let selected =
+            summary_materialization_eligibility(&node, &[0, 0], &entries, &data, &deployment)
+                .unwrap();
+        assert_eq!(selected.at_ingestion, Ok(()));
+        assert!(
+            !selected.may_materialize_at_query,
+            "duplicate reader indices are one query"
+        );
+        assert!(matches!(
+            summary_materialization_eligibility(&node, &[0, entries.len()], &entries, &data, &deployment),
+            Err(SummaryEligibilityError::UnknownReader { query }) if query == entries.len()
+        ));
+        let combined =
+            summary_materialization_eligibility(&node, &[0, 1], &entries, &data, &deployment)
+                .unwrap();
+        assert_eq!(
+            combined.at_ingestion,
+            Err(IngestionPruneReason::NotPredictable)
+        );
+        assert!(combined.may_materialize_at_query);
+        // The complete-DAG path uses the same selected-reader workload rules.
+        let candidates = materialization_candidates(&[root], &entries, &data, &deployment);
+        let original = candidates
+            .iter()
+            .find(|candidate| matches!(candidate.node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .unwrap();
+        assert_eq!(original.at_ingestion, selected.at_ingestion);
+        assert_eq!(
+            original.may_keep_across_evaluations,
+            selected.may_keep_across_evaluations
+        );
+    }
+
+    // Phase and range-step restrictions apply only to the selected reader set.
+    #[test]
+    fn selected_reader_eligibility_checks_phase_and_range_compatibility() {
+        use asap_types::workload::RangeEvaluation;
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let node = root_operators(&root)
+            .into_iter()
+            .flat_map(OperatorNode::reachable)
+            .find(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .unwrap();
+        let at = |phase| QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(MINUTE as u32),
+                evaluation_phase: TimestampMs(phase),
+            }),
+            ..every_minute()
+        };
+        let entries = vec![
+            at(0),
+            at(MINUTE / 2),
+            QueryWorkloadEntry {
+                range_evaluation: Some(RangeEvaluation {
+                    step_ms: MINUTE / 2,
+                    span_ms: 10 * MINUTE,
+                }),
+                ..at(0)
+            },
+        ];
+        let deployment = DeploymentCapabilities {
+            query_time_results_retained: true,
+            ..DeploymentCapabilities::default()
+        };
+        let data = arriving();
+        let one =
+            summary_materialization_eligibility(&node, &[0], &entries, &data, &deployment).unwrap();
+        assert!(one.may_keep_across_evaluations);
+        assert!(one.range_compatibility.is_ok());
+        let different_phase =
+            summary_materialization_eligibility(&node, &[0, 1], &entries, &data, &deployment)
+                .unwrap();
+        assert!(!different_phase.may_keep_across_evaluations);
+        assert_eq!(
+            different_phase.at_ingestion,
+            Err(IngestionPruneReason::PanesOffPhase)
+        );
+        let off_grid =
+            summary_materialization_eligibility(&node, &[0, 2], &entries, &data, &deployment)
+                .unwrap();
+        assert!(matches!(
+            off_grid.range_compatibility,
+            Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep { .. })
+        ));
+        assert!(matches!(
+            summary_materialization_eligibility(&node, &[], &entries, &data, &deployment),
+            Err(SummaryEligibilityError::NoSelectedReaders)
+        ));
     }
 
     /// A predictable query evaluated every minute.
