@@ -74,9 +74,9 @@ Sharing a memo group shares optimization representation, not necessarily runtime
 
 Given the benefits of Memo groups, ASAPPlanner should introduce the Memo group while representing summaries and reuse strategies.
 
-In ASAPPlanner, we extend the definition of a **memo group**, whose output can be a query-result expression or a reusable intermediate summary state. A result group preserves input, filters, grouping, window semantics, and requested output. A state group additionally specifies its state family/interface and guarantees. **Implementation candidates** provide exact computation, accumulators, or summaries and reference input groups. Physical candidates add legal operators and materialization assignments. A **physical instance** is one enabled realization of a group, with its own selected candidate, materialization, reader set, and lifetime. Several instances of the same group can coexist. A **shared producer** is an instance read by several consumers, not a separately selected catalog entry.
+In ASAPPlanner, we extend the definition of a **memo group**, whose output can be a query or intermediate relational result, or reusable intermediate state. A result group preserves input, filters, grouping, window semantics, and requested output. A state group additionally specifies its state family/interface and guarantees. **Implementation candidates** provide exact computation, accumulators, or summaries and reference input groups. Physical candidates add legal operators and materialization assignments. A **physical instance** is one enabled realization of a group, with its own selected candidate, materialization, consumer set, and lifetime. Several instances of the same group can coexist. A **shared producer** is an instance read by several consumers, not a separately selected catalog entry.
 
-Unlike exact expressions in a traditional equivalence group, approximate candidates target the same requested result under explicit accuracy obligations. State candidates must satisfy their group's contract, and readers can impose stricter compatibility requirements. One group identity neither forces shared execution nor limits the plan to one physical instance. A stage-level candidate remains a whole-workload DAG; local group candidates compactly represent its component choices.
+Unlike exact expressions in a traditional equivalence group, approximate candidates target the same requested result under explicit accuracy obligations. State candidates must satisfy their group's contract, and consumers can impose stricter compatibility requirements. One group identity neither forces shared execution nor limits the plan to one physical instance. A stage-level candidate remains a whole-workload DAG; local group candidates compactly represent its component choices.
 
 The following example traces how the proposed memo expands:
 
@@ -87,7 +87,7 @@ Q2: quantile_over_time(0.99, X[15m]), every 1m
 
 ### Stage 0 and initial memo: establish logical identity
 
-Frontends produce language-independent `LogicalDAGs`. Build groups for distinct logical sub-expressions and record query roots and reader requirements. Intern eligible identical inputs only after semantic equality and sharing legality are established; preserve keyless-node rules. P95 and P99 are different computations, so their result groups remain separate:
+Frontends produce language-independent `LogicalDAGs`. Build groups for distinct logical sub-expressions and record query roots and consumer requirements. Intern eligible identical inputs only after semantic equality and sharing legality are established; preserve keyless-node rules. P95 and P99 are different computations, so their result groups remain separate:
 
 ```text
 G_input: common eligible input computation X
@@ -106,11 +106,11 @@ G95 = { ExactQuantile(0.95, G_input, 15m), LocalKLLQuantile(0.95, G_input, 15m, 
 G99 = { ExactQuantile(0.99, G_input, 15m), LocalKLLQuantile(0.99, G_input, 15m, s) }
 ```
 
-Here `s` ranges over generated capacities; each candidate records its accuracy contract and dependencies. Other computations can receive exact accumulator or fused candidates. Cache generation with relevant reader requirements and avoid composing the Cartesian product of complete workload plans.
+Here `s` ranges over generated capacities; each candidate records its accuracy contract and dependencies. Other computations can receive exact accumulator or fused candidates. Cache generation with relevant consumer requirements and avoid composing the Cartesian product of complete workload plans.
 
 ### Stage 1, Pass 2: add intermediate groups and sharing candidates
 
-ASAP-aware CSE recognizes that compatible KLL state supports both quantiles. Introduce or reuse a state group and add reader candidates:
+ASAP-aware CSE recognizes that compatible KLL state supports both quantiles. Introduce or reuse a state group and add consumer candidates:
 
 ```text
 G_KLL: KLL state over X[15m]
@@ -135,13 +135,13 @@ This is another way to produce compatible window state. Other generated pane wid
 
 Generate supported physical operators and assignments for these candidates. For example, an eligible `G_panes` implementation can maintain panes at ingestion while merge and estimation execute at query time. Query-time construction and supported retention modes remain candidates where legal.
 
-Stage 2 checks deployment capabilities, ingestion eligibility, and upstream timing. It does not choose the cheapest candidate. Assignments can differ between internal nodes. Prepare finite instance slots for each group so readers can share one instance, form several sharing subsets, or compute separately; do not enumerate all reader partitions as complete plans. Reader-dependent eligibility must use the selected instance's readers; defer unknown joint checks instead of pruning a mode based on every potential reader of the logical group.
+Stage 2 checks deployment capabilities, ingestion eligibility, and upstream timing. It does not choose the cheapest candidate. Assignments can differ between internal nodes. Prepare finite instance slots for each group so consumers can share one instance, form several sharing subsets, or compute separately; do not enumerate all consumer partitions as complete plans. Consumer-dependent eligibility must use the selected instance's consumers; defer unknown joint checks instead of pruning a mode based on every potential consumer of the logical group.
 
 ### Stage 3: select a joint physical plan
 
-Stage 3 covers all query roots by choosing which group instances to enable, one candidate per enabled instance, and the supplier instance for every selected input edge and query-root reference. It may select exact/local computation, a shared whole-window build, or a legal pane-based candidate. It enforces reader/state compatibility, accuracy, latency, and resource constraints, then reconstructs and validates one `PhysicalASAPDAG`.
+Stage 3 covers all query roots by choosing which group instances to enable, one candidate per enabled instance, and the supplier instance for every selected input edge and query-root reference. It may select exact/local computation, a shared whole-window build, or a legal pane-based candidate. It enforces consumer/state compatibility, accuracy, latency, and resource constraints, then reconstructs and validates one `PhysicalASAPDAG`.
 
-Each physical instance owns its work/state charges; an instance shared by several readers is not charged once per reader. A higher standalone cost can enable a cheaper joint plan, so earlier stages retain valid candidates and Stage 3 performs cost-based selection.
+Each physical instance owns its work/state charges; an instance shared by several consumers is not charged once per consumer. A higher standalone cost can enable a cheaper joint plan, so earlier stages retain valid candidates and Stage 3 performs cost-based selection.
 
 Window semantics, implementation candidates, and materialization are defined separately in [Window and Materialization Choices](window-materialization-choices.md). That design also describes pane/EH terminology, supported configurations, and materialization eligibility.
 
@@ -176,11 +176,11 @@ Current memo MILP supports usage-over-time pricing; unsupported models route to 
 Give every charge one owner:
 
 - **Producer:** build/update, maintenance, and retained state.
-- **Reader:** local merge, extraction, read, and finalization.
+- **Consumer:** local merge, extraction, read, and finalization.
 - **Other physical work:** local operators and temporary state.
 - **Shared accounting:** per-source raw retention and other plan-level charges.
 
-Charge shared work once per actual execution or maintained state, not once per query path. Reader-specific work remains separately charged. Use a common horizon or consistent per-second rates; distinguish memory/storage occupancy over time from peak capacity. Producer costs can depend on selected readers, evaluation schedules, upstream materialization, and retention. Model that context rather than assuming every producer has a constant cost.
+Charge shared work once per actual execution or maintained state, not once per query path. Consumer-specific work remains separately charged. Use a common horizon or consistent per-second rates; distinguish memory/storage occupancy over time from peak capacity. Producer costs can depend on selected consumers, evaluation schedules, upstream materialization, and retention. Model that context rather than assuming every producer has a constant cost.
 
 Accuracy is an end-to-end root requirement. Compose summary and window error only with valid contracts; locally admissible sketches do not prove a composed query accurate. Latency and resource limits must use the configured evaluator's timing and concurrency assumptions. Current latency accounting sums reached query-time work plus applicable compaction; this proposal does not silently replace it with a general parallel scheduler. Keep calibrated model inputs fixed during a solve.
 
@@ -213,7 +213,7 @@ b[g,i,c,e,j]     ∈ {0,1}   input edge e connects to instance j of H(g,c,e)
 r[q,t,i]         ∈ {0,1}   root reference t of query q uses instance i
 ```
 
-Each instance's materialization can be bundled into its candidate or represented by consistent legal assignment variables. Several internal nodes can have separate assignment slots. Two enabled instances may use the same candidate but have different readers or execution scopes.
+Each instance's materialization can be bundled into its candidate or represented by consistent legal assignment variables. Several internal nodes can have separate assignment slots. Two enabled instances may use the same candidate but have different consumers or execution scopes.
 
 #### Objective and cost attribution
 
@@ -223,9 +223,9 @@ For fixed-context costs:
 min  Σ_{g,i,c} cost[g,i,c] × x[g,i,c] + plan-level charges
 ```
 
-The cost belongs to the instance's local work/state, excluding input instances. A KLL-state instance owns build and retention; estimator instances own extraction. A reused merge result also has its own instance. Two readers sharing one state instance incur its owned charge once; two enabled state instances incur two charges.
+The cost belongs to the instance's local work/state, excluding input instances. A KLL-state instance owns build and retention; estimator instances own extraction. A reused merge result also has its own instance. Two consumers sharing one state instance incur its owned charge once; two enabled state instances incur two charges.
 
-An enabled instance is not necessarily executed only once: query-time work can repeat. Its materialization, reader schedules, phases, range steps, and upstream consumers determine the execution rate and state lifetime. Extend the base model with reach/rate/lifetime variables or finite context configurations constrained to match the selected graph. Do not assign a fixed cost independent of that context. Raw retention and other non-computation charges remain shared resource/accounting variables.
+An enabled instance is not necessarily executed only once: query-time work can repeat. Its materialization, consumer schedules, phases, range steps, and upstream consumers determine the execution rate and state lifetime. Extend the base model with reach/rate/lifetime variables or finite context configurations constrained to match the selected graph. Do not assign a fixed cost independent of that context. Raw retention and other non-computation charges remain shared resource/accounting variables.
 
 ### 5.2 Constraints
 
@@ -249,7 +249,7 @@ b[g,i,c,e,j] ≤ u[h,j]
 b[g,i,c,e,j] ≤ Σ_{d ∈ K(g,c,e)} x[h,j,d]
 ```
 
-Several consumers can choose the same `j`; other consumers can choose another instance of the same group. Compatibility covers state family, grouping, reduction, window coverage, capacity, timing, and freshness. If two readers attach to one instance, its selected candidate must satisfy both readers.
+Several consumers can choose the same `j`; other consumers can choose another instance of the same group. Compatibility covers state family, grouping, reduction, window coverage, capacity, timing, and freshness. If two consumers attach to one instance, its selected candidate must satisfy both consumers.
 
 Every enabled instance must have a selected root reference or incoming input edge:
 
@@ -268,7 +268,7 @@ This orders producers before their selected consumers. Interchangeable slots may
 
 #### Fusion and available outputs
 
-A fused candidate can eliminate internal computation boundaries without exposing those intermediate results. In the base model it implements its owning group; only explicitly available outputs can serve external readers. For example, a fused `topk(sum(...))` does not automatically supply another query's full `sum(...)` result. That query can require a separate sum instance. Multi-output fusion needs explicit output mappings before it can satisfy several groups; absorption alone is not coverage.
+A fused candidate can eliminate internal computation boundaries without exposing those intermediate results. In the base model it implements its owning group; only explicitly available outputs can serve external consumers. For example, a fused `topk(sum(...))` does not automatically supply another query's full `sum(...)` result. That query can require a separate sum instance. Multi-output fusion needs explicit output mappings before it can satisfy several groups; absorption alone is not coverage.
 
 #### Accuracy, materialization, and resources
 
@@ -305,7 +305,7 @@ G_input[i0] → G_KLL[i1]: build KLL state
 
 Illustrative costs per common horizon, assuming all listed candidates satisfy requirements:
 
-| Choice | Build cost | Reader costs | Total |
+| Choice | Build cost | Consumer costs | Total |
 | --- | ---: | ---: | ---: |
 | Separate KLL builds | 8 + 8 | 1 + 1 | 18 |
 | Shared KLL build | 8 | 1 + 1 | 10 |
@@ -315,23 +315,23 @@ The shared choice enables one state instance, and both estimator instances conne
 
 ```text
 u[G_KLL,1] = x[G_KLL,1,build-s] = 1
-x[G95,1,KLL-reader] = x[G99,1,KLL-reader] = 1
-b[G95,1,KLL-reader,state-input,1] = 1
-b[G99,1,KLL-reader,state-input,1] = 1
+x[G95,1,KLL-estimator] = x[G99,1,KLL-estimator] = 1
+b[G95,1,KLL-estimator,state-input,1] = 1
+b[G99,1,KLL-estimator,state-input,1] = 1
 ```
 
 The build cost is owned by `G_KLL[1]`; each estimator instance owns its extraction cost. If accuracy requires larger state, the solver compares compatible shared capacity, local states, and exact candidates. Quantile level alone does not determine capacity.
 
-With four readers, the same group can also have two shared instances:
+With four consumers, the same group can also have two shared instances:
 
 ```text
-G_KLL[1]: small-capacity query-time state ← readers A, B
-G_KLL[2]: large-capacity query-time state ← readers C, D
+G_KLL[1]: small-capacity query-time state ← consumers A, B
+G_KLL[2]: large-capacity query-time state ← consumers C, D
 ```
 
-Both can be enabled if their combined cost is lower or one instance cannot satisfy all requirements. Their selected candidates can differ in capacity, materialization, retention, and execution frequency. Each instance must satisfy every attached reader; readers do not all have to share one configuration.
+Both can be enabled if their combined cost is lower or one instance cannot satisfy all requirements. Their selected candidates can differ in capacity, materialization, retention, and execution frequency. Each instance must satisfy every attached consumer; consumers do not all have to share one configuration.
 
-For ingestion-time reuse, a supported implementation maintains 1m KLL panes and merges the latest 15 at evaluation. Both readers can share panes and an eligible merge result. A direct whole-window sketch cannot be assumed to delete expired samples. Different window lengths or pane widths require separate compatibility and coverage checks.
+For ingestion-time reuse, a supported implementation maintains 1m KLL panes and merges the latest 15 at evaluation. Both consumers can share panes and an eligible merge result. A direct whole-window sketch cannot be assumed to delete expired samples. Different window lengths or pane widths require separate compatibility and coverage checks.
 
 ## 7. Search-Space Reduction and Validation
 
@@ -339,7 +339,7 @@ Reduce search without losing valid joint choices:
 
 1. Intern duplicate identities and cache generation with complete relevant context.
 2. Remove provably invalid candidates early; apply cost dominance at Stage 3 only when external sharing interfaces and resource obligations are preserved.
-3. Split coupling components only when all possible sharing, dependencies, raw retention, and constraints separate. Global capacities or calibration can prevent independent optimization.
+3. Split independent workload components only when all possible sharing, dependencies, raw retention, and constraints separate. Global capacities or calibration can prevent independent optimization.
 4. Use a validated baseline incumbent and solver time/gap limits. Restricted parameter inventories narrow the optimality claim; enrichment requires solving the expanded inventory.
 
 Define a finite rule/configuration inventory and process new groups/candidates through a worklist, including newly enabled matches with existing candidates, until no eligible rule produces a new item. Deduplicate rule applications and do not discard candidates merely because they are more expensive alone. If generation stops early, report the restricted inventory rather than claiming rule closure.
@@ -352,17 +352,19 @@ A complete MILP does not require LBBD. Current code uses a lower-bound model wit
 
 ## 8. Implementation and Evaluation
 
-Reuse current structures rather than create a parallel optimizer framework:
+Reuse existing structures rather than create a parallel optimizer framework; proposed names and extensions are marked below:
 
 | Structure | Responsibility |
 | --- | --- |
 | `MemoGroup`, `Memo` | Result/state contracts, dependencies, roots, and per-group candidates. |
 | `ImplementationCandidate` | Local nodes, fusion absorption/output metadata, child groups, contracts, and reuse requirements. |
-| `CouplingSite` and thresholds | Existing shared-configuration representation; migrate state choices into intermediate-group candidates, retaining genuinely cross-group constraints. |
-| MILP `Choice` and proposed instance records | Instance identity, selected physical/materialization assignment, reader connections, and cost context. |
+| `SharedDecision`, `SharedDecisionKind` (proposed names) | Configuration choices coordinated across candidates; migrate state-local choices into instance candidates and retain cross-instance decisions where needed. |
+| MILP `Choice` and proposed instance records | Instance identity, selected physical/materialization assignment, consumer connections, and cost context. |
 | `PhysicalASAPDAG`, `Selection`, reports | Selected output, validation, bounds, and search status. |
 
-This is an extension of the current representation: shared builds are primarily coordinated through coupling sites today. Introduce intermediate-state contracts, finite instance slots, and reader compatibility; migrate state choices into instance candidates and assign costs to physical instances. This requires changes to generation, selection, decoding, and pricing; it is not merely renaming coupling sites. Raw retention and global capacities remain accounting constraints.
+`SharedDecision` replaces the design term `CouplingSite`; `SharedDecisionKind` replaces `CouplingKind`. Current Rust code still uses the latter names. A shared decision has an identity and kind, with legal configurations and compatibility checks. Use **configuration**, rather than **threshold**, because pane layouts and scan-label sets need not be scalar or ordered. This is a proposed naming change, not a claim that the Rust types have already been renamed.
+
+This design extends the current shared-decision representation. Introduce intermediate-state contracts, finite instance slots, and consumer compatibility; migrate state choices into instance candidates and assign costs to physical instances. This requires changes to generation, selection, decoding, and pricing; it also changes behavior beyond the proposed type rename. Raw retention and global capacities remain accounting constraints.
 
 Current main places memo/rules in `search/memo` and solver code in `search/milp`, with Stage 2 physical generation and Stage 3 pricing remaining authoritative. `Legacy` is the default; `MemoBruteForce` is the reference and `MemoMilp` the solver path. Early memo construction, unified shared-state groups with selectable physical instances, broader cost-model support, EH/direct sliding algorithms, and arbitrary pane hierarchies are proposed extensions.
 
@@ -370,14 +372,14 @@ Current main places memo/rules in `search/memo` and solver code in `search/milp`
 
 | Phase | Deliverable and acceptance criterion |
 | --- | --- |
-| 1. Memo generation | Move identity construction before Pass 1 and generate candidates directly into groups without losing semantics, reader obligations, or fusion. |
-| 2. Shared-state groups | Extend group contracts; generate intermediate groups, instance slots, and compatible reader connections with legal materializations and per-instance cost ownership. |
-| 3. Joint selection | Encode covering-DAG activation, implementations, assignments, and demand; match an independent tiny-instance enumerator under the same inventory/models. |
+| 1. Memo generation | Move identity construction before Pass 1 and generate candidates directly into groups without losing semantics, consumer obligations, or fusion. |
+| 2. Shared-state groups | Extend group contracts; generate intermediate groups, instance slots, and compatible consumer connections with legal materializations and per-instance cost ownership. |
+| 3. Joint selection | Encode instance activation, implementation selection, input connections, and demand to cover all queries; match an independent tiny-instance enumerator under the same inventory/models. |
 | 4. Validation and scaling | Validate reconstructed plans, prove safe reductions, and measure generation/model/solve costs under budgets. |
 
 ### Evaluation
 
-**Correctness:** test identity versus sharing, producer compatibility, exact-once cost ownership, active dependencies, fusion with external intermediate readers, multiple input edges, multiple configurations/partial-sharing subsets of one group, zero-price resources, pane boundaries, legal materializations, end-to-end accuracy, and capacity/status handling. Validate any relaxed bounds and cuts against enumerated plans.
+**Correctness:** test identity versus sharing, producer compatibility, per-instance cost attribution, active dependencies, fusion with external intermediate consumers, multiple input edges, multiple configurations/partial-sharing subsets of one group, zero-price resources, pane boundaries, legal materializations, end-to-end accuracy, and capacity/status handling. Validate any relaxed bounds and cuts against enumerated plans.
 
 **Optimality:** compare MILP with an independent tiny-instance enumerator covering instance activation, candidate selection, root/input assignments, and dependency validity under the same inventory/models. The existing group-level brute-force reference must be extended before it can verify arbitrary instance partitions. Test candidate-generation coverage separately, including cases where two independently shared instances outperform full sharing and separate computation. Use an explicit numerical/tie policy.
 
