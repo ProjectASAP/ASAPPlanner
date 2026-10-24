@@ -3742,9 +3742,13 @@ pub(crate) fn price_node<'a>(
         .copied()
         .unwrap_or(EdgeStatistics { rows: 1, bytes: 1 });
     let width = row_bytes(&node.output_schema);
-    let edge = |rows: u64| EdgeStatistics {
-        rows,
-        bytes: rows * width,
+    let edge = |rows: u64| -> Result<EdgeStatistics, AnalyticalCostError> {
+        Ok(EdgeStatistics {
+            rows,
+            bytes: rows
+                .checked_mul(width)
+                .ok_or(AnalyticalCostError::Overflow)?,
+        })
     };
     // Whether a summary built here sees raw data samples (its producer a
     // scan or a time range) of sources all declared non-negative.
@@ -3844,7 +3848,7 @@ pub(crate) fn price_node<'a>(
                         }
                     })?,
                 };
-                let out = edge(rows.max(1));
+                let out = edge(rows.max(1))?;
                 let estimate = estimate_operator(
                     PhysicalOperator::Scan,
                     OperatorStatistics::Scan {
@@ -3868,7 +3872,7 @@ pub(crate) fn price_node<'a>(
                     Reduction::Reduce(keys) => keys.keys().len() as u64,
                     _ => 1,
                 };
-                let out = edge(group_count);
+                let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
                 let estimate = estimate_operator(
                     PhysicalOperator::HashAggregate {
@@ -3878,11 +3882,19 @@ pub(crate) fn price_node<'a>(
                     OperatorStatistics::HashAggregate {
                         edges: unary(out),
                         group_count,
-                        key_bytes: 16 * keys,
+                        key_bytes: keys.checked_mul(16).ok_or(AnalyticalCostError::Overflow)?,
                         accumulator_bytes_per_group: measures
                             .iter()
-                            .map(|m| if keeps_every_value(m) { 8 * held } else { 8 })
-                            .sum::<u64>()
+                            .try_fold(0_u64, |total, measure| {
+                                let values = if keeps_every_value(measure) { held } else { 1 };
+                                total
+                                    .checked_add(
+                                        values
+                                            .checked_mul(8)
+                                            .ok_or(AnalyticalCostError::Overflow)?,
+                                    )
+                                    .ok_or(AnalyticalCostError::Overflow)
+                            })?
                             .max(8),
                     },
                 );
@@ -3932,7 +3944,7 @@ pub(crate) fn price_node<'a>(
                 };
                 let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
                 let offset = (*offset as u64).saturating_mul(partitions);
-                let out = edge(input.rows.saturating_sub(offset).min(limit));
+                let out = edge(input.rows.saturating_sub(offset).min(limit))?;
                 let estimate = estimate_operator(
                     PhysicalOperator::Limit { limit, offset },
                     OperatorStatistics::Limit { edges: unary(out) },
@@ -3959,7 +3971,7 @@ pub(crate) fn price_node<'a>(
                     }),
                     TimeRangeKind::Instant => series.unwrap_or(input.rows),
                 };
-                let out = edge(input.rows.min(kept.max(1)));
+                let out = edge(input.rows.min(kept.max(1)))?;
                 let out = EdgeStatistics {
                     rows: out.rows,
                     bytes: out.bytes.min(input.bytes),
@@ -4006,7 +4018,9 @@ pub(crate) fn price_node<'a>(
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: group_count * state_bytes,
+                bytes: group_count
+                    .checked_mul(state_bytes)
+                    .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
                 out,
@@ -4033,14 +4047,19 @@ pub(crate) fn price_node<'a>(
             // as a time range keeps it (one operation), and updates
             // that pane.
             let group_count = groups(reduction)?;
-            let states = group_count * u64::from(*pane_count);
+            let states = group_count
+                .checked_mul(u64::from(*pane_count))
+                .ok_or(AnalyticalCostError::Overflow)?;
             // Each pane's state sees its group's rows in one pane: of
             // one second's rows at ingestion time, of the rows read at
             // query time (all of them for a chain kept across
             // evaluations, whose scan Stage 2 bounds to its newest pane,
             // the only one it builds).
             let rows_per_pane = match (ingestion, node.materialization) {
-                (true, _) => (input.rows * *pane_width_ms).div_ceil(1_000),
+                (true, _) => u64::try_from(
+                    (u128::from(input.rows) * u128::from(*pane_width_ms)).div_ceil(1_000),
+                )
+                .map_err(|_| AnalyticalCostError::Overflow)?,
                 (false, Materialization::MatAtQueryKeptAcrossEvaluations(_)) => input.rows,
                 (false, _) => input.rows.div_ceil(u64::from(*pane_count).max(1)),
             };
@@ -4052,7 +4071,9 @@ pub(crate) fn price_node<'a>(
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: states,
-                bytes: states * state_bytes,
+                bytes: states
+                    .checked_mul(state_bytes)
+                    .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
                 out,
@@ -4087,13 +4108,17 @@ pub(crate) fn price_node<'a>(
                 };
                 group_count = group_count.max(producer.output.rows / panes.max(1));
             }
-            let states = merged_states(*newest_panes, producers);
+            let states = merged_states(*newest_panes, producers)?;
             if let Some(keys) = group_by {
                 group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
             }
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: input.bytes.div_ceil(input.rows.max(1)) * group_count,
+                bytes: input
+                    .bytes
+                    .div_ceil(input.rows.max(1))
+                    .checked_mul(group_count)
+                    .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
                 out,
@@ -4106,7 +4131,12 @@ pub(crate) fn price_node<'a>(
                 SketchStatistic::TopK { k } => *k as u64,
                 _ => 1,
             };
-            let out = edge(input.rows * per_group);
+            let out = edge(
+                input
+                    .rows
+                    .checked_mul(per_group)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            )?;
             (
                 out,
                 Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
@@ -4114,12 +4144,12 @@ pub(crate) fn price_node<'a>(
             )
         }
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
-            edge(input.rows),
+            edge(input.rows)?,
             Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
             format!("finalize {} accumulators", input.rows),
         ),
         _ => (
-            edge(input.rows),
+            edge(input.rows)?,
             Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
             format!("{} rows", input.rows),
         ),
@@ -4134,7 +4164,7 @@ pub(crate) fn price_node<'a>(
     let units = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
         Payload::ASAP(ASAPOp::SummaryMerge { newest_panes, .. }) => {
-            merged_states(*newest_panes, producers)
+            merged_states(*newest_panes, producers)?
         }
         _ => input.rows,
     };
@@ -4206,13 +4236,21 @@ pub(crate) fn price_node<'a>(
         (Materialization::MatAtQueryKeptAcrossEvaluations(medium), _) => {
             let panes = panes_of(node);
             let retained = retained_pane_count;
-            let between = state / panes * (retained - 1);
+            let between = (state / panes)
+                .checked_mul(
+                    retained
+                        .checked_sub(1)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                )
+                .ok_or(AnalyticalCostError::Overflow)?;
             match medium {
                 Medium::Memory => {
                     average_memory_bytes = between as f64;
                     peak_memory_bytes = match retained == panes {
                         true => state,
-                        false => state / panes * retained,
+                        false => (state / panes)
+                            .checked_mul(retained)
+                            .ok_or(AnalyticalCostError::Overflow)?,
                     };
                 }
                 Medium::Disk => disk_bytes = between,
@@ -4233,9 +4271,21 @@ pub(crate) fn price_node<'a>(
         // The retained panes and the one being built.
         (Materialization::MatAtIngestion(medium), Payload::ASAP(ASAPOp::PaneChain { .. })) => {
             let panes = panes_of(node);
-            (state / panes * (retained_pane_count + 1), medium)
+            (
+                (state / panes)
+                    .checked_mul(
+                        retained_pane_count
+                            .checked_add(1)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    )
+                    .ok_or(AnalyticalCostError::Overflow)?,
+                medium,
+            )
         }
-        (Materialization::MatAtIngestion(medium), _) => (2 * state, medium),
+        (Materialization::MatAtIngestion(medium), _) => (
+            state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
+            medium,
+        ),
     };
     if node.materialization == Materialization::MatAtIngestion(Medium::Memory) {
         maintained = Some(state / panes_of(node));
@@ -4554,19 +4604,21 @@ fn chain_input_offset_ms(
 /// The input states a `SummaryMerge` over `producers` reads: every row of
 /// each, or of the one pane chain whose newest `newest_panes` it merges,
 /// that many panes' states per group.
-fn merged_states(newest_panes: Option<u32>, producers: &[ProducerOutput<'_>]) -> u64 {
-    producers
-        .iter()
-        .map(|p| {
-            let rows = p.output.rows;
-            match (newest_panes, p.payload) {
-                (Some(n), Payload::ASAP(ASAPOp::PaneChain { pane_count, .. })) => {
-                    rows / u64::from(*pane_count).max(1) * u64::from(n)
-                }
-                _ => rows,
+fn merged_states(
+    newest_panes: Option<u32>,
+    producers: &[ProducerOutput<'_>],
+) -> Result<u64, AnalyticalCostError> {
+    producers.iter().try_fold(0_u64, |total, producer| {
+        let rows = match (newest_panes, producer.payload) {
+            (Some(count), Payload::ASAP(ASAPOp::PaneChain { pane_count, .. })) => {
+                (producer.output.rows / u64::from(*pane_count).max(1))
+                    .checked_mul(u64::from(count))
+                    .ok_or(AnalyticalCostError::Overflow)?
             }
-        })
-        .sum()
+            _ => producer.output.rows,
+        };
+        total.checked_add(rows).ok_or(AnalyticalCostError::Overflow)
+    })
 }
 
 /// The panes a chain in `retention_ms` ([`pane_retention_ms`]) keeps
@@ -11043,6 +11095,39 @@ mod tests {
         };
         let half = memory(Some(sketch_shape(&kll, samples).1 as f64 / 2.0));
         assert!(half < formula && half > 0.0, "{half} vs {formula}");
+    }
+
+    // Oversized state configurations must be rejected as unrepresentable,
+    // never wrap to a cheap candidate or panic while pricing pane choices.
+    #[test]
+    fn pane_state_byte_overflow_returns_a_cost_error() {
+        for candidate in pane_candidates(10_000.0) {
+            let kll = candidate
+                .dag
+                .nodes
+                .iter()
+                .find_map(|node| match &node.payload {
+                    Payload::ASAP(ASAPOp::PaneChain {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    }) => Some(kind.params().clone()),
+                    _ => None,
+                })
+                .unwrap();
+            let settings = measured(vec![OperatorCost {
+                memory_bytes_per_state: Some(u64::MAX as f64),
+                ..sketch_entry(OperatorKind::PaneChain, kll, 1.0)
+            }]);
+            assert!(matches!(
+                price(
+                    &candidate.dag,
+                    &[repeating(MINUTE)],
+                    &arriving(10_000.0),
+                    &settings
+                ),
+                Err((_, AnalyticalCostError::Overflow))
+            ));
+        }
     }
 
     /// The table of earlier versions, a JSON array of sketch operations,
