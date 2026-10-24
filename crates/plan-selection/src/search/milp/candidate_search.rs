@@ -4,7 +4,8 @@
 use std::time::{Duration, Instant};
 
 use super::candidate_connections::{
-    solve_candidate_proposal, CandidateDependencyGraph, ObservedAssignment, SelectedCandidateGraph,
+    solve_candidate_proposal_with_metrics, CandidateDependencyGraph, CandidateSolveMetrics,
+    ObservedAssignment, SelectedCandidateGraph,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +42,9 @@ pub(super) struct CandidateSearchResult {
     /// None without an incumbent. Zero-cost incumbent has zero gap only at bound zero.
     pub relative_gap: Option<f64>,
     pub refinements: usize,
+    pub solve_metrics: CandidateSolveMetrics,
+    /// Includes physical reconstruction, accuracy/latency checks and pricing.
+    pub validation_seconds: f64,
 }
 
 /// The callback returns an actual total cost for a validated feasible plan, or
@@ -60,6 +64,8 @@ pub(super) fn search_candidates(
     let mut incumbent: Option<EvaluatedCandidate> = None;
     let mut lower_bound: f64 = 0.0;
     let mut refinements = 0;
+    let mut solve_metrics = CandidateSolveMetrics::default();
+    let mut validation_seconds = 0.0;
     let status = loop {
         let remaining = limits.wall_time.saturating_sub(started.elapsed());
         if remaining.is_zero() {
@@ -68,23 +74,27 @@ pub(super) fn search_candidates(
         if refinements >= limits.max_refinements {
             break CandidateSearchStatus::RefinementLimit;
         }
-        let proposal =
-            match solve_candidate_proposal(graph, &observations, Some(remaining.as_secs_f64())) {
-                Ok(Some(proposal)) => proposal,
-                Ok(None) => {
-                    if incumbent.is_some() {
-                        return Err("refined model excluded a validated feasible assignment".into());
-                    }
-                    break CandidateSearchStatus::Infeasible;
+        let proposal = match solve_candidate_proposal_with_metrics(
+            graph,
+            &observations,
+            Some(remaining.as_secs_f64()),
+            &mut solve_metrics,
+        ) {
+            Ok(Some(proposal)) => proposal,
+            Ok(None) => {
+                if incumbent.is_some() {
+                    return Err("refined model excluded a validated feasible assignment".into());
                 }
-                Err(error) => {
-                    break if started.elapsed() >= limits.wall_time {
-                        CandidateSearchStatus::TimeLimit
-                    } else {
-                        CandidateSearchStatus::SolverStopped(error.to_string())
-                    };
-                }
-            };
+                break CandidateSearchStatus::Infeasible;
+            }
+            Err(error) => {
+                break if started.elapsed() >= limits.wall_time {
+                    CandidateSearchStatus::TimeLimit
+                } else {
+                    CandidateSearchStatus::SolverStopped(error.to_string())
+                };
+            }
+        };
         lower_bound = lower_bound.max(proposal.model_lower_bound);
         if let Some(best) = &incumbent {
             if closes_gap(lower_bound, best.actual_cost) {
@@ -102,7 +112,10 @@ pub(super) fn search_candidates(
             break CandidateSearchStatus::NumericalStall;
         }
         refinements += 1;
-        let actual_cost = match evaluate(&proposal.selected) {
+        let validation_started = Instant::now();
+        let evaluated = evaluate(&proposal.selected);
+        validation_seconds += validation_started.elapsed().as_secs_f64();
+        let actual_cost = match evaluated {
             Ok(cost) => cost,
             Err(error) => break CandidateSearchStatus::EvaluatorStopped(error),
         };
@@ -156,6 +169,8 @@ pub(super) fn search_candidates(
         lower_bound,
         relative_gap,
         refinements,
+        solve_metrics,
+        validation_seconds,
     })
 }
 
@@ -240,10 +255,15 @@ mod tests {
         .unwrap();
         assert_eq!(result.status, CandidateSearchStatus::Optimal);
         assert_eq!(result.refinements, 2);
+        assert_eq!(result.solve_metrics.solve_calls, 2);
+        assert!(result.solve_metrics.model_construction_seconds > 0.0);
+        assert!(result.solve_metrics.solver_seconds > 0.0);
+        assert!(result.validation_seconds > 0.0);
         assert_eq!(result.incumbent.unwrap().actual_cost, 2.0);
         let impossible = search_candidates(&graph, limits(10), |_| Ok(None)).unwrap();
         assert_eq!(impossible.status, CandidateSearchStatus::Infeasible);
         assert!(impossible.incumbent.is_none());
+        assert_eq!(impossible.solve_metrics.solve_calls, 3);
     }
 
     // Adding a candidate changes the context: positive-only activation cuts are unsound.

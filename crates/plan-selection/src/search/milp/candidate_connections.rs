@@ -273,12 +273,37 @@ pub(super) struct CandidateProposal {
     pub model_lower_bound: f64,
 }
 
+/// Accumulated across refinement rounds, including infeasible and stopped solves.
+#[derive(Debug, Default)]
+pub(super) struct CandidateSolveMetrics {
+    pub model_construction_seconds: f64,
+    pub solver_seconds: f64,
+    pub solve_calls: usize,
+    /// Largest model submitted across refinement rounds, before solver presolve.
+    pub peak_variables: usize,
+    pub peak_constraints: usize,
+}
+
 /// Solve a lower-bound model refined only at observed complete assignments.
 /// A solver timeout is an error, never a proven optimum or infeasibility.
 pub(super) fn solve_candidate_proposal(
     graph: &CandidateDependencyGraph,
     observations: &[ObservedAssignment],
     remaining_seconds: Option<f64>,
+) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
+    solve_candidate_proposal_with_metrics(
+        graph,
+        observations,
+        remaining_seconds,
+        &mut CandidateSolveMetrics::default(),
+    )
+}
+
+pub(super) fn solve_candidate_proposal_with_metrics(
+    graph: &CandidateDependencyGraph,
+    observations: &[ObservedAssignment],
+    remaining_seconds: Option<f64>,
+    metrics: &mut CandidateSolveMetrics,
 ) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
     let started = std::time::Instant::now();
     graph.validate()?;
@@ -592,12 +617,15 @@ pub(super) fn solve_candidate_proposal(
             None => constraints.push(constraint!(mismatch >= 1.0)),
         }
     }
+    metrics.peak_variables = metrics.peak_variables.max(variables.len());
+    metrics.peak_constraints = metrics.peak_constraints.max(constraints.len());
     let mut model = variables
         .minimise(total_cost)
         .using(highs)
         .set_option("mip_rel_gap", 0.0)
         .set_option("mip_abs_gap", 0.0)
         .with_all(constraints);
+    metrics.model_construction_seconds += started.elapsed().as_secs_f64();
     if let Some(seconds) = remaining_seconds {
         let remaining = seconds - started.elapsed().as_secs_f64();
         if remaining <= 0.0 {
@@ -607,7 +635,11 @@ pub(super) fn solve_candidate_proposal(
         }
         model = model.set_option("time_limit", remaining);
     }
-    let solution = match model.solve() {
+    let solve_started = std::time::Instant::now();
+    metrics.solve_calls += 1;
+    let result = model.solve();
+    metrics.solver_seconds += solve_started.elapsed().as_secs_f64();
+    let solution = match result {
         Ok(solution) => solution,
         Err(ResolutionError::Infeasible) => return Ok(None),
         Err(error) => return Err(CandidateSelectionError::Solver(error.to_string())),
