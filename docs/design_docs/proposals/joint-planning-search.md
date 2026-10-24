@@ -183,7 +183,7 @@ The configured Stage 3 objective and evaluators remain authoritative. Current me
 
 ## 5. MILP Formulation
 
-The selection problem combines supplier activation with input assignment. Ordinary bipartite matching describes compatible pairs, but does not directly capture a producer paid for once, used by several consumers, and itself dependent on other producers. A MILP expresses these decisions together. The following formulation gives the fixed-context base; demand-dependent costs require rate/lifetime variables or finite context configurations consistent with the selected graph.
+The selection problem combines producer activation with dependency assignment. Ordinary bipartite matching describes compatible pairs, but does not directly capture a producer paid for once, used by several consumers, and itself dependent on other producers. A MILP expresses these decisions together. The following formulation gives the fixed-context base; demand-dependent costs require rate/lifetime variables or finite context configurations consistent with the selected graph.
 
 ### 5.1 Variables
 
@@ -197,7 +197,7 @@ Groups and their candidates:
     G95:   {exact-P95, estimate-P95}
     G99:   {exact-P99, estimate-P99}
 
-Allowed state-input connections (source → consumer):
+Allowed producer–consumer connections (producer → consumer):
     small-build ────────→ estimate-P95
     large-build ────────→ estimate-P95
     large-build ────────→ estimate-P99
@@ -213,22 +213,22 @@ The builds and exact candidates also require raw-input dependencies, omitted fro
 | --- | --- | --- |
 | `Groups` | Logical result and state groups. | `{G_KLL, G95, G99, ...}` |
 | `Candidates(g)` | Finite physical candidates in group `g`. | `Candidates(G95) = {exact-P95, estimate-P95}` |
-| `Inputs(c)` | Inputs that candidate `c` must receive. | `Inputs(estimate-P95) = {state}` |
-| `CompatibleSources(c,input)` | Candidates allowed to supply that input. | `CompatibleSources(estimate-P99,state) = {large-build}` |
+| `ProducerRequirements(consumer)` | Dependencies that the consumer must have supplied. | `ProducerRequirements(estimate-P95) = {KLL-state}` |
+| `CompatibleProducers(consumer,requirement)` | Producer candidates allowed to satisfy that dependency. | `CompatibleProducers(estimate-P99,KLL-state) = {large-build}` |
 | `QueryRoots` | Required query outputs. | `{Q1, Q2}` |
 | `RootCandidates(q)` | Candidates allowed to provide query root `q`. | `RootCandidates(Q1) = {exact-P95, estimate-P95}` |
 
-Candidate IDs are globally unique; `Candidates` denotes their union across groups. Input positions remain distinct: a join needs both `left` and `right`, even if both refer to the same group. For this formulation, each query has one explicit output root. If its output combines several computations, a finalization candidate has those computations as required inputs; covering the root therefore covers all of them.
+Candidate IDs are globally unique; `Candidates` denotes their union across groups. A producer requirement describes what must be supplied, not a producer already selected. For example, P95 requires KLL state; either compatible build may satisfy it. Requirements remain distinct: a join needs both `left` and `right`, even if the same producer can supply both. For this formulation, each query has one explicit output root. If its output combines several computations, a finalization candidate has those computations as required inputs; covering the root therefore covers all of them.
 
-Three binary variables select nodes, dependency connections, and query-root assignments:
+A candidate can be a producer on one connection and a consumer on another. Three binary variables select nodes, producer–consumer connections, and query-root assignments:
 
 ```text
-x[c]              ∈ {0,1}   select candidate c
-b[c,input,d]      ∈ {0,1}   connect source candidate d to input of c
-r[q,c]            ∈ {0,1}   use candidate c to provide query root q
+x[c]                                      ∈ {0,1}   select candidate c
+connect[producer,consumer,requirement]     ∈ {0,1}   producer satisfies this consumer requirement
+r[q,c]                                    ∈ {0,1}   candidate c provides query root q
 ```
 
-Connection variables exist only for compatible sources. Capacity and materialization belong to candidate configuration, so selection needs no separate copy or instance variables.
+Connection variables exist only for compatible producer–consumer requirements. Capacity and materialization belong to candidate configuration, so selection needs no separate copy or instance variables.
 
 #### Objective
 
@@ -236,7 +236,7 @@ Connection variables exist only for compatible sources. Capacity and materializa
 min Σ_c local_cost[c] × x[c]
 ```
 
-Each selected candidate owns its local work and state, excluding suppliers. This includes shared-resource candidates such as `Retain15m`, so no separate shared-resource charge is needed. Fixed request overhead is omitted from the objective because it is constant for the workload; Section 4 describes its inclusion in reported total cost. Where selected consumers or connections change cost, additional expressions model that dependence rather than treating it as a constant.
+Each selected candidate owns its local work and state, excluding producers. This includes shared-resource candidates such as `Retain15m`, so no separate shared-resource charge is needed. Fixed request overhead is omitted from the objective because it is constant for the workload; Section 4 describes its inclusion in reported total cost. Where selected consumers or connections change cost, additional expressions model that dependence rather than treating it as a constant.
 
 ### 5.2 Constraints
 
@@ -247,14 +247,16 @@ Each selected candidate owns its local work and state, excluding suppliers. This
 r[q,c] ≤ x[c]
 ```
 
-#### Supply every selected candidate's inputs
+#### Satisfy every selected consumer's producer requirements
 
 ```text
-Σ_{d ∈ CompatibleSources(c,input)} b[c,input,d] = x[c]
-b[c,input,d] ≤ x[d]                        for each input ∈ Inputs(c)
+Σ_{producer ∈ CompatibleProducers(consumer,requirement)}
+    connect[producer,consumer,requirement] = x[consumer]
+
+connect[producer,consumer,requirement] ≤ x[producer]
 ```
 
-Several consumers may connect to the same supplier. There is **no general** constraint `Σ_{c ∈ Candidates(g)} x[c] ≤ 1`: multiple candidates in one group may be needed.
+The equality applies to every `requirement ∈ ProducerRequirements(consumer)`: each selected consumer must have every dependency supplied by one compatible producer. Several consumers may connect to the same producer. There is **no general** constraint `Σ_{c ∈ Candidates(g)} x[c] ≤ 1`: multiple candidates in one group may be needed.
 
 #### Shared raw-retention configuration
 
@@ -264,12 +266,13 @@ For one raw-storage scope, retention candidates configure the same stored copy, 
 Σ_{c ∈ Candidates(G_raw[d])} x[c] ≤ 1
 ```
 
-This is a resource-specific constraint, not a restriction on every group. For a consumer needing 15m, its compatible suppliers include `Retain15m` and any generated longer-retention candidates, but exclude `Retain5m`. The input constraints above require a selected compatible supplier. A second consumer needing 5m can connect to the same `Retain15m`; storage is therefore charged once. Separate stored copies require distinct storage scopes and are charged separately.
+This is a resource-specific constraint, not a restriction on every group. For a consumer needing 15m, its compatible producers include `Retain15m` and any generated longer-retention candidates, but exclude `Retain5m`. The dependency constraints above require a selected compatible producer. A second consumer needing 5m can connect to the same `Retain15m`; storage is therefore charged once. Separate stored copies require distinct storage scopes and are charged separately.
 
 #### Keep only connected, acyclic computation
 
 ```text
-x[d] ≤ Σ_q r[q,d] + Σ_{c,input} b[c,input,d]
+x[producer] ≤ Σ_q r[q,producer]
+            + Σ_{consumer,requirement} connect[producer,consumer,requirement]
 ```
 
 Only defined connections appear in these sums. Every selected candidate must serve a query output or another selected candidate. Together with acyclicity, this excludes unused computation.
@@ -277,7 +280,8 @@ Only defined connections appear in these sums. Every selected candidate must ser
 If candidate generation does not already guarantee acyclicity, introduce `0 ≤ order[c] ≤ N−1`, where `N = |Candidates|`:
 
 ```text
-order[d] + 1 ≤ order[c] + N × (1 − b[c,input,d])
+order[producer] + 1 ≤ order[consumer]
+    + N × (1 − connect[producer,consumer,requirement])
 ```
 
 #### Enforce requirements
@@ -290,7 +294,7 @@ For additive resource usage with fixed execution context, capacity constraints t
 Σ_c usage[k,c] × x[c] ≤ capacity[k] − fixed_usage[k]
 ```
 
-Here candidate usage includes shared raw-retention candidates. `fixed_usage[k]` is usage fixed by the workload and independent of plan selection, such as fixed request handling, measured in the same units and accounting context; it is zero when absent. Peak usage and temporary allocations need lifetime and concurrency accounting when a simple sum is inappropriate. These extensions preserve the same ownership rule: suppliers and shared resources are not charged again through each consumer.
+Here candidate usage includes shared raw-retention candidates. `fixed_usage[k]` is usage fixed by the workload and independent of plan selection, such as fixed request handling, measured in the same units and accounting context; it is zero when absent. Peak usage and temporary allocations need lifetime and concurrency accounting when a simple sum is inappropriate. These extensions preserve the same ownership rule: producers and shared resources are not charged again through each consumer.
 
 Only exposed candidate outputs can supply consumers. A fused `topk(sum(...))` candidate does not automatically supply another query's full `sum(...)`; that result needs a separate candidate unless explicitly exposed.
 
@@ -317,7 +321,7 @@ Both estimators connect to the same selected build candidate, so its cost appear
 
 Candidate generation maintains a worklist of new expressions and applicable rules. Interning prevents duplicate derivations, while compatibility checks eliminate unsupported connections. Generation is relative to a finite inventory of rules, configurations, and execution scopes. If exploration stops before closure or imposes a cap, the reported optimality claim must reflect that restriction.
 
-Let `n` be the number of physical candidates, `m` the number of compatible input connections, and `r` the number of compatible query-output connections. The base formulation has `n + m + r` binary variables, plus ordering and any cost-model auxiliaries. This counts the model size, not its solution time. Even a restricted supplier-selection case contains set cover: suppliers cover subsets of outputs and have activation costs. Removing interchangeable instance slots reduces redundant representation but does not remove this combinatorial difficulty.
+Let `n` be the number of physical candidates, `m` the number of compatible producer–consumer connections, and `r` the number of compatible query-output connections. The base formulation has `n + m + r` binary variables, plus ordering and any cost-model auxiliaries. This counts the model size, not its solution time. Even a restricted producer-selection case contains set cover: producers cover subsets of outputs and have activation costs. Removing interchangeable instance slots reduces redundant representation but does not remove this combinatorial difficulty.
 
 Search reductions must preserve joint choices. A candidate that costs more alone may enable useful sharing, so local cost dominance is insufficient. Independent components can be solved separately only when dependencies, sharing, and global constraints also separate. Generation caching and sparse compatibility edges reduce overhead without requiring enumeration of complete workload plans.
 
