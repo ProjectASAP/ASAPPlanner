@@ -230,6 +230,15 @@ r[q,c]                                    ∈ {0,1}   candidate c provides query
 
 Connection variables exist only for compatible producer–consumer requirements. Capacity and materialization belong to candidate configuration, so selection needs no separate copy or instance variables.
 
+If the candidate dependency graph may contain cycles, the model also introduces an auxiliary variable for every candidate:
+
+```text
+N = |Candidates|
+order[c] ∈ [0, N−1]     continuous topological rank of candidate c
+```
+
+`order[c]` witnesses dependency order in the selected execution DAG; it is not a start time, latency, or runtime schedule. Ranks need not be unique or integral. Unselected candidates' ranks have no execution meaning. These variables can be omitted when the candidate dependency graph is already acyclic.
+
 #### Objective
 
 ```text
@@ -277,12 +286,14 @@ x[producer] ≤ Σ_q r[q,producer]
 
 Only defined connections appear in these sums. Every selected candidate must serve a query output or another selected candidate. Together with acyclicity, this excludes unused computation.
 
-If candidate generation does not already guarantee acyclicity, introduce `0 ≤ order[c] ≤ N−1`, where `N = |Candidates|`:
+Using the auxiliary `order[c]` variables defined in Section 5.1, impose the following constraint for every allowed producer–consumer connection:
 
 ```text
 order[producer] + 1 ≤ order[consumer]
     + N × (1 − connect[producer,consumer,requirement])
 ```
+
+When `connect = 1`, the consumer's rank must exceed the producer's by at least one. When `connect = 0`, the `N` term makes the constraint nonbinding under the rank bounds. For example, `build → merge → estimate` can use ranks `0, 1, 2`. Adding `estimate → build` would require `order[build] ≥ order[estimate] + 1`, making the cycle infeasible. Independent candidates may have equal ranks.
 
 #### Enforce requirements
 
