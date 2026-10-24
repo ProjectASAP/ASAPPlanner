@@ -494,6 +494,76 @@ Let `n` be the number of physical candidates, `m` the number of compatible produ
 
 Search reductions must preserve joint choices. A candidate that costs more alone may enable useful sharing, so local cost dominance is insufficient. Independent components can be solved separately only when dependencies, sharing, and global constraints also separate. Generation caching and sparse compatibility edges reduce overhead without requiring enumeration of complete workload plans.
 
+### Conditional optimal substructure
+
+Memo groups alone do not make the workload separable. A group's cheapest candidate can depend on which other consumers share its producers. However, a region has optimal substructure when its interaction with the rest of the plan is completely described by fixed **boundary conditions**. These include exposed inputs and outputs, producer identity/configuration, accuracy and freshness contracts, execution demand, and any resource or latency information needed outside the region. Given the same boundary conditions, replacing the interior with a cheaper feasible implementation must preserve every external cost and constraint.
+
+For a region without shared internal work, additive costs permit the familiar dynamic program (DP):
+
+```text
+Best(group, requirements) = min over compatible candidates c:
+    LocalCost(c, requirements)
+    + sum over required inputs i: Best(input_group(i), input_requirements(c, i))
+```
+
+The requirements must include relevant physical properties and execution context. This recurrence applies only when input subproblems are independent: summing their costs is invalid if they share a paid producer. Potential candidate cycles also require care; apply this simple recurrence to acyclic subproblems rather than recursively following cyclic memo references. Regions that do not meet these conditions remain in joint selection.
+
+For example, P95 and P99 can share one KLL producer. Once its configuration, materialization, supplied guarantees, and consumer execution demand are fixed, their downstream extraction regions can be optimized independently if no other constraints couple them. The shared build cost belongs to the joint selection problem and is excluded from both local costs. With evaluations every 1m and 5m, the shared producer's demand is their compatible evaluation-time union. Frequencies alone do not determine that union: alignment and freshness also matter. A boundary must preserve the required schedule information or an exact equivalent representation.
+
+### Local DP with joint MILP selection
+
+Use DP to compress only regions with a proven sufficient boundary. A local result stores its boundary contract, incremental cost, resource/accuracy/latency profile, and enough information to reconstruct the selected candidates and connections. If global budgets can distinguish local plans, retain their Pareto frontier rather than only the cheapest one. Dominance comparisons require equivalent external sharing interfaces and no weaker guarantees; a cheaper plan with fewer reuse opportunities does not dominate another plan.
+
+DP can reduce the candidates and connections passed to MILP without reducing the candidates initially generated. These are distinct mechanisms:
+
+| Mechanism | What it reduces |
+| --- | --- |
+| Memo interning and rule-generation caching | Duplicate candidate derivation and repeated exploration. |
+| DP caching under identical boundary conditions | Repeated solution of the same local optimization subproblem. |
+| DP with safe dominance pruning and region compression | Local choices and internal connections that the MILP must explicitly select. |
+
+For example, a local region may have 20 implementations with equivalent external interfaces, sharing opportunities, and guarantees. If there are no remaining resource or other external tradeoffs, DP can retain its cheapest implementation as one representative local plan. The MILP then selects that plan through its boundary rather than selecting its internal implementation. If one plan costs 3 and uses 8 GB while another costs 5 and uses 2 GB, both may be needed under a global memory budget. Likewise, a locally more expensive candidate cannot be removed if it offers a distinct sharing opportunity. DP alone does not guarantee a smaller candidate inventory: compression comes from proving that discarded choices cannot improve any relevant external decision.
+
+The proposed workflow is:
+
+```text
+Generate memo candidates and compatible connections
+    → Identify independent components and shared boundaries
+    → Optimize eligible local regions with DP
+    → Retain boundary-compatible local plans / Pareto frontiers
+    → MILP selects local plans, shared candidates, and connections jointly
+    → Expand selected local plans and validate the execution DAG
+```
+
+The MILP retains shared producer activation, configuration, consumer assignment, connection-dependent demand, and global resource constraints. Local plans can replace their internal decisions only if boundary compatibility, cost ownership, and all cross-region constraints are preserved, including acyclicity after expansion. Shared raw retention is a boundary decision even when the computation regions otherwise appear independent. Nonseparable pricing or scheduling interactions must likewise remain represented jointly.
+
+Pane width follows the same rule. A pane chain used exclusively inside a region can be optimized locally over its generated legal widths. A chain potentially shared across regions must expose its width, coverage, materialization, and guarantees as boundary configurations. Fixing each query's locally cheapest width before joint selection can discard the globally cheapest shared chain.
+
+### Independent components and global budgets
+
+Components may be solved and combined independently only when both the feasible set and objective separate. No possible selected connection, shared resource, pricing term, or global constraint may couple them. Inspect the candidate dependency and constraint structure, not just one provisional selected plan.
+
+When only global budgets couple otherwise independent components, local optimization can still reduce the master problem. For example:
+
+| Component | Local plan | Cost | Resident memory |
+| --- | --- | ---: | ---: |
+| A | A1 | 3 | 8 GB |
+| A | A2 | 5 | 2 GB |
+| B | B1 | 3 | 8 GB |
+| B | B2 | 5 | 2 GB |
+
+Under a 10 GB budget, independently choosing A1 and B1 is infeasible. Retaining both local choices lets a small MILP select A1+B2 or A2+B1 at cost 8. This example assumes additive simultaneous residency and identical external contracts. More complex peak-memory or latency interactions require a sufficient profile rather than a single scalar.
+
+### Exactness and expected benefit
+
+Decomposition preserves the finite-model optimum only if every relevant boundary state and nondominated local choice is retained, local subproblems are solved exactly, and the joint selection is solved to optimality. Restricting boundary configurations, capping frontiers, discretizing resources approximately, or stopping early requires a corresponding qualified result; final validation establishes feasibility, not optimality.
+
+DP does not remove the worst-case combinatorial difficulty. Boundary states can grow exponentially with the number of shared producers, consumer subsets, and demand patterns. The useful case is a large amount of local computation connected through a small boundary. Dense sharing may offer little compression, and frontier construction itself may cost more than it saves.
+
+Complete and validate the current MILP implementation before implementing DP compression; use the uncompressed MILP as a correctness baseline. For subsequent DP work, implement strict independent-component splitting and acyclic, unshared local DP first. Extend to shared-boundary DP only where measurements justify the larger state space. This is a proposed acceleration of the same candidate-selection problem, not a requirement to use LBBD or a claim that DP compression is already implemented.
+
+### Reconstruction and validation
+
 After selection, the planner reconstructs the DAG and evaluates accuracy, latency, and resource cost. A complete MILP does not require LBBD. Lazy refinement is useful when difficult checks are left outside the initial model, provided the resulting feasibility or cost cuts are sound. The report includes the validated cost, solver status and gap, and generation limits; validating one solution alone does not prove a relaxed model optimal.
 
 ## 8. Implementation and Evaluation
@@ -503,6 +573,8 @@ The design extends existing memo and selection structures. `MemoGroup` stores re
 Implementation proceeds from initial memo identities and rule expansion to physical configurations and connections, then joint selection and validation. State-local choices belong in candidates. Decisions genuinely spanning candidates remain explicit constraints. `SharedDecision` and `SharedDecisionKind` are the proposed names for current `CouplingSite` and `CouplingKind`; no Rust types are renamed by this document.
 
 Evaluation must distinguish generation coverage from selection correctness. Small workloads are exhaustively enumerated over candidate subsets and compatible connections under the same inventory, then compared with MILP results. Cases include multiple selected candidates in one group, shared build costs, separate execution scopes, fusion outputs, and composed accuracy/resource requirements. Scaling experiments measure candidate and connection counts, generation and solve time, planner memory, and validated execution savings. Together these measurements establish whether the representation avoids repeated search work and whether joint selection justifies its planning cost.
+
+For decomposition, compare the original MILP, DP-compressed MILP, and exhaustive enumeration on small inventories. They must agree on feasible optima under the same models. Include shared build ownership, differing evaluation alignments, global memory budgets, competing pane widths, external reuse opportunities, and expansion-time acyclicity. Measure local DP time, boundary-state/frontier sizes, candidate and connection counts before/after compression, and total planning time; fewer MILP variables alone do not establish a speedup.
 
 ### Expected planning performance and execution benefits
 
