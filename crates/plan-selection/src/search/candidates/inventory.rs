@@ -1361,6 +1361,17 @@ mod tests {
                 valid,
                 "share={share}, one_exact={one_exact}, {guarantee:?}"
             );
+            let mut unproved_data = data.clone();
+            unproved_data
+                .sources
+                .get_mut("m")
+                .unwrap()
+                .values_non_negative = false;
+            assert!(
+                crate::bound_root_guarantee(&roots[0], Some(1), &unproved_data, &models)
+                    .is_none_or(|guarantee| !satisfies(&guarantee, &target)),
+                "capacity sizing must not establish an unproved source-sign contract"
+            );
             let physical = optimize_physical_asap_chosen(
                 "ratio-shares",
                 &roots,

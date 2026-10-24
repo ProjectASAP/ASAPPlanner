@@ -138,7 +138,11 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         })
     })
     .expect("a declared nonnegative source recovers the ratio contract");
-    assert!(proven.spec.error.evaluate().unwrap().is_finite());
+    assert!(proven.spec.error.evaluate().unwrap() <= 0.01, "{proven:?}");
+    assert!(
+        node.guarantee.is_none(),
+        "conditional sizing must not attach a hypothetical sign proof"
+    );
     physical_asap_dag(&node);
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.

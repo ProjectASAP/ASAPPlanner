@@ -193,6 +193,91 @@ pub(in crate::search) fn accuracy_baseline_weights(
     accuracy_baseline(configured, context).map(|(weights, _)| weights)
 }
 
+/// Conservative per-state DDS budgets for the feasibility seed. Counting
+/// quantile computations keeps ratio operands on composed-budget capacity tiers
+/// even when their sign contracts are still symbolic. This is a seed-only restriction,
+/// not a proof of query accuracy; the complete catalog and final validator keep
+/// mixed exact/approximate plans and all otherwise legal capacities.
+fn seed_dds_budgets(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    output_queries: &[usize],
+) -> Vec<f64> {
+    use asap_logical_asap_optimization::accuracy::budget::per_input_target;
+    use asap_types::ir::{
+        operator::AggIntent, properties::AccuracyMetric, NonASAPOp, OperatorNode,
+    };
+    let graph = &configured.inventory.graph;
+    let mut budgets = vec![f64::INFINITY; graph.candidates.len()];
+    if context.models.plan_selection.ignore_accuracy_guarantees {
+        return budgets;
+    }
+    let query_budgets: Vec<_> = context
+        .original_roots
+        .iter()
+        .zip(context.entries)
+        .map(|(root, entry)| {
+            let operators = match root {
+                QueryRoot::Operator(node) => vec![node],
+                QueryRoot::Scalar(expression) => expression.operator_refs(),
+            };
+            let mut seen = std::collections::HashSet::new();
+            let count = operators
+                .into_iter()
+                .flat_map(OperatorNode::reachable)
+                .filter(|node| seen.insert(std::rc::Rc::as_ptr(node)))
+                .map(|node| match node.non_asap() {
+                    Some(NonASAPOp::Aggregate { measures, .. }) => measures
+                        .iter()
+                        .filter(|measure| matches!(measure, AggIntent::Quantile { .. }))
+                        .count(),
+                    _ => 0,
+                })
+                .sum::<usize>();
+            (count > 1)
+                .then(|| {
+                    per_input_target(
+                        &entry.requirements.accuracy,
+                        AccuracyMetric::Relative,
+                        count,
+                    )
+                })
+                .flatten()
+                .map(|target| target.max_error)
+        })
+        .collect();
+    let mut pending = Vec::new();
+    for (root, &query) in graph.query_roots.iter().zip(output_queries) {
+        if let Some(budget) = query_budgets[query] {
+            pending.extend(
+                root.compatible_candidates
+                    .iter()
+                    .copied()
+                    .map(|id| (id, budget)),
+            );
+        }
+    }
+    while let Some((id, budget)) = pending.pop() {
+        if context
+            .deadline
+            .is_some_and(|limit| std::time::Instant::now() >= limit)
+        {
+            break;
+        }
+        if budget < budgets[id.0] {
+            budgets[id.0] = budget;
+            pending.extend(
+                graph.candidates[id.0]
+                    .producer_requirements
+                    .iter()
+                    .flat_map(|input| input.compatible_producers.iter().copied())
+                    .map(|producer| (producer, budget)),
+            );
+        }
+    }
+    budgets
+}
+
 fn accuracy_baseline(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
@@ -226,6 +311,7 @@ fn accuracy_baseline(
     if output_queries.len() != graph.query_roots.len() {
         return Err("baseline output references do not match original query roots".into());
     }
+    let dds_budgets = seed_dds_budgets(configured, context, &output_queries);
     let mut rank_requested = vec![false; graph.candidates.len()];
     let mut pending: Vec<_> = graph
         .query_roots
@@ -417,9 +503,15 @@ fn accuracy_baseline(
             } else {
                 0.0
             };
+            let insufficient_composed_budget = node.asap()
+                .and_then(ASAPOp::produced_state)
+                .is_some_and(|family| matches!(family,
+                    FieldDataType::Sketch(kind, _)
+                        if matches!(kind.params(), asap_types::ir::schema::SketchParams::DDSketch { alpha }
+                            if *alpha > dds_budgets[id])));
             Ok((
                 1.0 + penalty + cost_priority + unknown_work_priority,
-                contract_risk || contextual_materialization || projected_raw_source,
+                contract_risk || contextual_materialization || projected_raw_source || insufficient_composed_budget,
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -944,6 +1036,96 @@ mod tests {
                 .is_none(),
             "unpredictable reader cannot bind to ingestion-only panes"
         );
+    }
+
+    #[test]
+    fn ratio_seed_uses_composed_dds_capacities_without_removing_full_candidates() {
+        let target = AccuracyTarget::max_error(0.05);
+        let root = QueryRoot::Operator(lower_promql(
+            "quantile_over_time(0.9, latency[1h]) / quantile_over_time(0.5, latency[1h])",
+            target.clone(),
+        ));
+        let identified = vec![(0, root.clone())];
+        let initial = LogicalMemo::from_roots(&identified);
+        let output = MemoGroupId(
+            initial
+                .groups
+                .iter()
+                .position(|g| g.roots_of.contains(&0))
+                .unwrap() as u32,
+        );
+        let generated = generate_per_computation_candidates(identified).unwrap();
+        let memo =
+            expand_concrete_summary_state_groups(try_populate_pass1(initial, &generated).unwrap())
+                .unwrap()
+                .memo;
+        let source = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();
+        let (_, _, _, mut data) = fixture();
+        for facts in data.sources.values_mut() {
+            facts.values_non_negative = true;
+        }
+        let roots = [root];
+        let entries = [entry_with(target, QueryRecurrence::Unknown)];
+        let models = PlanningModels::builtin();
+        let configured = enumerate_candidate_configurations(
+            &source,
+            &[0],
+            &entries,
+            &data,
+            models.deployment_capabilities,
+        )
+        .unwrap();
+        let context = CandidatePlanningContext {
+            deadline: None,
+            refine_materialization: false,
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models,
+            calibration: CalibrationFit::default(),
+        };
+        let original_count = configured.inventory.graph.candidates.len();
+        let (_, excluded) = accuracy_baseline(&configured, &context).unwrap();
+        let mut coarse = 0;
+        let mut composed = 0;
+        for (id, node) in configured.inventory.templates.iter().enumerate() {
+            let Some(FieldDataType::Sketch(kind, _)) = node
+                .as_ref()
+                .unwrap()
+                .asap()
+                .and_then(ASAPOp::produced_state)
+            else {
+                continue;
+            };
+            let asap_types::ir::schema::SketchParams::DDSketch { alpha } = kind.params() else {
+                continue;
+            };
+            if *alpha >= 0.05 {
+                coarse += 1;
+                assert!(
+                    excluded.contains(&crate::search::candidates::graph::PhysicalCandidateId(id))
+                );
+            } else if !excluded.contains(&crate::search::candidates::graph::PhysicalCandidateId(id))
+            {
+                composed += 1;
+            }
+        }
+        assert!(
+            coarse > 0 && composed > 0,
+            "both whole and composed capacities remain in the catalog"
+        );
+        assert_eq!(configured.inventory.graph.candidates.len(), original_count);
+        let settings = crate::PlanSelectionSettings {
+            ignore_accuracy_guarantees: true,
+            ..Default::default()
+        };
+        let ignored = CandidatePlanningContext {
+            models: models.with_plan_selection(&settings),
+            ..context
+        };
+        assert!(seed_dds_budgets(&configured, &ignored, &[0])
+            .iter()
+            .all(|budget| budget.is_infinite()));
     }
 
     // Rank-only quantiles cannot feed value arithmetic, and approximate values

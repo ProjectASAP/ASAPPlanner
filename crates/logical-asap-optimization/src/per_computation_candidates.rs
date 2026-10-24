@@ -1316,11 +1316,23 @@ fn budget_shares(
 
 /// The approximate inputs a query's value composes: every sketch summary
 /// state reachable from `root`, each once, when the value carries a
-/// guarantee that is not exact ([`root_guarantee`]). Empty when it carries
-/// none (no rule composes the inputs) or an exact one. Plan selection sizes
-/// each for its share of the query's failure probability too.
+/// guarantee that is not exact ([`root_guarantee`]), including compositions
+/// conditional on source-sign facts supplied later. Empty when neither the
+/// current nor conditional contract composes the inputs, or the result is
+/// exact. Plan selection sizes each for its share of failure probability too.
 pub fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
-    if root_guarantee(root).is_none_or(|g| g.is_exact()) {
+    // Sizing may depend on a source-domain proof supplied only at Stage 3.
+    // Count the inputs of that conditional composition too, without attaching
+    // the hypothetical proof to the candidate or accepting its accuracy.
+    let guarantee = root_guarantee(root).or_else(|| {
+        bind_guarantees(root, &|guarantee| {
+            guarantee.bind(&|statistic| {
+                crate::accuracy::composition::parse_raw_data_samples_sign_statistic(statistic)
+                    .map(|_| 1.0)
+            })
+        })
+    });
+    if guarantee.is_none_or(|g| g.is_exact()) {
         return Vec::new();
     }
     let operators = match root {
