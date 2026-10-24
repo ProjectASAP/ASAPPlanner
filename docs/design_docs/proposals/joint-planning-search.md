@@ -503,3 +503,17 @@ The design extends existing memo and selection structures. `MemoGroup` stores re
 Implementation proceeds from initial memo identities and rule expansion to physical configurations and connections, then joint selection and validation. State-local choices belong in candidates. Decisions genuinely spanning candidates remain explicit constraints. `SharedDecision` and `SharedDecisionKind` are the proposed names for current `CouplingSite` and `CouplingKind`; no Rust types are renamed by this document.
 
 Evaluation must distinguish generation coverage from selection correctness. Small workloads are exhaustively enumerated over candidate subsets and compatible connections under the same inventory, then compared with MILP results. Cases include multiple selected candidates in one group, shared build costs, separate execution scopes, fusion outputs, and composed accuracy/resource requirements. Scaling experiments measure candidate and connection counts, generation and solve time, planner memory, and validated execution savings. Together these measurements establish whether the representation avoids repeated search work and whether joint selection justifies its planning cost.
+
+### Expected planning performance and execution benefits
+
+Planning performance and the selected plan's execution performance are separate outcomes. The following expectations are hypotheses to test, not measured speedups or solver-time guarantees.
+
+| Workload characteristic | Expected planning performance | Expected execution benefit |
+| --- | --- | --- |
+| Queries have little opportunity to share. | Smaller components are easier to solve when dependencies and global constraints permit independent optimization. | Limited savings from sharing. |
+| Many queries reuse a small number of states. | Memo reuse reduces repeated candidate generation; compatible connection counts still need control. | Strong opportunity to reduce repeated builds and state costs. |
+| Candidates and compatible connections are dense. | MILP can become harder, especially with many possible partial-sharing configurations. | Potentially substantial savings, but proving optimality can be expensive. |
+| Many window, capacity, and materialization configurations are available. | Both candidate generation and solving can grow substantially. | Benefits depend on the workload and which configurations are actually useful. |
+| Accuracy and latency rely mainly on post-solve checks. | Repeated validation and refinement can make planning time highly variable. | Benefits depend on the feasible plans remaining after validation. |
+
+Benchmark these cases separately, recording generation, model-construction, solve, and validation time, refinement rounds, peak planner memory, and validated execution cost. A richer candidate space can improve the modeled optimum while increasing planning overhead; under a fixed solver time limit, it does not guarantee a better returned plan.
