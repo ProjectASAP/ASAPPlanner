@@ -25,7 +25,6 @@
 //! search combines those rules ([`combined_pass2`]), whatever the rules'
 //! enumeration caps over the whole workload.
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::asap_aware_cse::{
@@ -38,13 +37,12 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 };
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::optimize_physical_asap_assigned;
-use asap_types::ir::operator::Source;
-use asap_types::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::search::legacy::query_candidates::{next_digits, query_digits};
-use crate::search::legacy::stage1_to_stage3::{
+use crate::search::pipeline::{
     run_stage1_to_stage3_from_pass1, selected_logical, LogicalCandidate, Stage1ToStage3Run,
     Stage1ToStage3Search,
 };
@@ -58,58 +56,6 @@ use crate::{
 /// 3's tie tolerance (1e-9 of the best price), with room for the rounding
 /// of summing the same charges in another grouping.
 const UNIQUE_MARGIN: f64 = 4e-9;
-
-/// The workload's queries grouped into components that read disjoint
-/// sources, each in workload order, ordered by their first query. A query
-/// that reads no source is a component of its own.
-pub(crate) fn source_components(roots: &[QueryRoot]) -> Vec<Vec<usize>> {
-    let mut parent: Vec<usize> = (0..roots.len()).collect();
-    fn find(parent: &mut [usize], q: usize) -> usize {
-        let mut root = q;
-        while parent[root] != root {
-            root = parent[root];
-        }
-        let mut q = q;
-        while parent[q] != root {
-            let next = parent[q];
-            parent[q] = root;
-            q = next;
-        }
-        root
-    }
-    // The first query read each source, by name (data facts are keyed by
-    // name, whatever the source's kind).
-    let mut first_reader: HashMap<String, usize> = HashMap::new();
-    for (query, root) in roots.iter().enumerate() {
-        let starts: Vec<&Rc<OperatorNode>> = match root {
-            QueryRoot::Operator(node) => vec![node],
-            QueryRoot::Scalar(expr) => expr.operator_refs(),
-        };
-        for node in starts.into_iter().flat_map(OperatorNode::reachable) {
-            let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.operator else {
-                continue;
-            };
-            let name = match source {
-                Source::TimeSeries { metric } => metric.clone(),
-                Source::Table { table_ref } => table_ref.clone(),
-            };
-            let other = *first_reader.entry(name).or_insert(query);
-            let (a, b) = (find(&mut parent, query), find(&mut parent, other));
-            parent[a.max(b)] = a.min(b);
-        }
-    }
-    let mut components: Vec<Vec<usize>> = Vec::new();
-    let mut index_of: HashMap<usize, usize> = HashMap::new();
-    for query in 0..roots.len() {
-        let root = find(&mut parent, query);
-        let index = *index_of.entry(root).or_insert_with(|| {
-            components.push(Vec::new());
-            components.len() - 1
-        });
-        components[index].push(query);
-    }
-    components
-}
 
 /// The workload's queries grouped into components that no candidate can
 /// link: [`source_components`], each split further into the queries that
@@ -658,22 +604,6 @@ fn combined_pass2<Id>(runs: &[Stage1ToStage3Run<Id>]) -> Option<Option<Pass2Cand
 /// `rejection` of a component's search with its query numbers (`q<n>` at
 /// the start of its id or reason, counted within the component) renamed to
 /// the workload's.
-pub(crate) fn renumber(rejection: Rejection, component: &[usize]) -> Rejection {
-    let rename = |text: &str| -> String {
-        let Some(rest) = text.strip_prefix('q') else {
-            return text.to_string();
-        };
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        match digits.parse::<usize>() {
-            Ok(n) if n >= 1 && n <= component.len() => {
-                format!("q{}{}", component[n - 1] + 1, &rest[digits.len()..])
-            }
-            _ => text.to_string(),
-        }
-    };
-    Rejection {
-        id: rename(&rejection.id),
-        cause: rejection.cause,
-        reason: rename(&rejection.reason),
-    }
-}
+use crate::search::workload_dependencies::{
+    remap_rejection_query_indices as renumber, source_connected_queries as source_components,
+};

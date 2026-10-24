@@ -15,6 +15,10 @@
 pub(crate) mod legacy;
 pub(crate) mod memo;
 pub(crate) mod milp;
+/// Costed reuse of compatible physical pane producers.
+pub mod pane_sharing;
+pub(crate) mod pipeline;
+pub(crate) mod workload_dependencies;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -36,7 +40,7 @@ use crate::{PlanSelectionSettings, Selection, SelectionError};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 
-pub use legacy::stage1_to_stage3::{
+pub use pipeline::{
     run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage1_to_stage3_with,
     run_stage2_and_stage3, LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass,
     Stage1ToStage3Run, Stage1ToStage3Search,

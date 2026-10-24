@@ -3,11 +3,13 @@
 //! workload's distinct sub-expressions instead of whole-workload
 //! candidates.
 //!
-//! [`brute_force::memo`] builds the [`Memo`] in this order:
+//! The stage driver establishes logical identity before Pass 1, using
+//! [`asap_logical_asap_optimization::memo::LogicalMemo`].
+//! [`brute_force::memo_from_initial`] then builds the [`Memo`] in this order:
 //!
-//! 1. [`groups::memo_of`]: the workload's logical DAG hash-consed into
-//!    groups (equal scans one group, keyless nodes such as range windows one
-//!    per reader), children first, with each group's Pass 1 candidates.
+//! 1. [`groups::populate_pass1`]: fill the initial groups with Pass 1
+//!    candidates without changing group IDs. Callers that already have a
+//!    Pass 1 inventory can use [`groups::memo_of`] to build identity first.
 //! 2. [`rules::capability::add_shared_builds`]: summary capability. A reader of a
 //!    build shared with other groups (one family over equal inputs), with a
 //!    [`CouplingKind::SharedBuildSize`] site; identical expression is group
@@ -47,6 +49,7 @@
 
 pub(crate) mod brute_force;
 pub(crate) mod groups;
+pub(crate) mod incumbent;
 pub(crate) mod rules;
 
 use std::rc::Rc;
@@ -54,25 +57,7 @@ use std::rc::Rc;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
 
-/// A group, by index in [`Memo::groups`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct GroupId(pub u32);
-
-/// One distinct logical sub-expression of the workload.
-#[derive(Debug, Clone)]
-pub(crate) struct MemoGroup {
-    /// Its logical node as the frontends (and Pass 1 targets) see it; its
-    /// children are other groups' nodes.
-    pub node: Rc<OperatorNode>,
-    /// Its child groups, in the node's child order.
-    pub children: Vec<GroupId>,
-    /// The groups that read it.
-    pub parents: Vec<GroupId>,
-    /// The queries whose roots reach it, by index in the workload.
-    pub queries: Vec<usize>,
-    /// The queries whose root it is.
-    pub roots_of: Vec<usize>,
-}
+pub(crate) use asap_logical_asap_optimization::memo::{MemoGroup, MemoGroupId as GroupId};
 
 /// The hash-consed workload: its groups, children before parents.
 #[derive(Debug, Clone, Default)]

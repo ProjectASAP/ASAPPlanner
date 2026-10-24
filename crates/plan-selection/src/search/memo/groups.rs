@@ -2,7 +2,7 @@
 //! group (design steps 1 and 2, Pass 1 part).
 //!
 //! Groups are the workload's logical DAG interned by
-//! [`share_common_sub_dags`], the identical-expression rule's legality
+//! [`asap_types::ir::cse::share_common_sub_dags`], the identical-expression rule's legality
 //! included: structurally equal nodes are one group when sharing them is
 //! legal (an ASAP node, or one whose schema has a unique key), so the
 //! unkeyed scans of two queries stay two groups while a keyed aggregate
@@ -33,10 +33,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+use asap_logical_asap_optimization::memo::LogicalMemo;
 use asap_logical_asap_optimization::per_computation_candidates::{
     compose_logical_candidate_with_budget_share, ComputationCandidate, PerComputationCandidates,
 };
-use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
@@ -47,99 +47,27 @@ use crate::search::memo::{CandidateOrigin, GroupId, ImplementationCandidate, Mem
 /// `per_computation` is the workload's Pass 1 inventory, pruned for the
 /// deployment's capabilities.
 pub(crate) fn memo_of<Id: Clone>(per_computation: &PerComputationCandidates<Id>) -> Memo {
-    let (groups, group_of) = hash_consed(&per_computation.roots);
-    let candidates = pass1_candidates(per_computation, &groups, &group_of);
-    Memo { groups, candidates }
+    populate_pass1(
+        LogicalMemo::from_roots(&per_computation.roots),
+        per_computation,
+    )
 }
 
-/// Each original node (of `roots`), by address, to its group.
-type GroupOf = HashMap<*const OperatorNode, GroupId>;
-
-/// The groups of `roots`, children before parents, and each original node's
-/// group. A scalar query's roots are the operator nodes its expression
-/// reads.
-fn hash_consed<Id>(roots: &[(Id, QueryRoot)]) -> (Vec<MemoGroup>, GroupOf) {
-    let originals: Vec<(usize, Rc<OperatorNode>)> = roots
-        .iter()
-        .enumerate()
-        .flat_map(|(query, (_, root))| {
-            operator_roots(root)
-                .into_iter()
-                .map(move |node| (query, node))
-        })
-        .collect();
-    let interned = share_common_sub_dags(originals.clone());
-    // Number the interned nodes children first.
-    let mut groups: Vec<MemoGroup> = Vec::new();
-    let mut id_of: HashMap<*const OperatorNode, GroupId> = HashMap::new();
-    for (_, root) in &interned {
-        number(root, &mut groups, &mut id_of);
+/// Fill the already-interned logical groups without changing their identities.
+/// Pass 1 and capability pruning must retain the original roots and query order.
+pub(crate) fn populate_pass1<Id: Clone>(
+    initial: LogicalMemo,
+    per_computation: &PerComputationCandidates<Id>,
+) -> Memo {
+    assert!(
+        initial.matches_root_dependencies(&per_computation.roots),
+        "Pass 1 changed the initial memo's workload"
+    );
+    let candidates = pass1_candidates(per_computation, &initial.groups, &initial);
+    Memo {
+        groups: initial.groups,
+        candidates,
     }
-    for (query, root) in &interned {
-        let g = id_of[&Rc::as_ptr(root)];
-        let roots_of = &mut groups[g.0 as usize].roots_of;
-        if !roots_of.contains(query) {
-            roots_of.push(*query);
-        }
-        let mut reached = HashSet::new();
-        reach(&groups, g, &mut reached);
-        for reached in reached {
-            let queries = &mut groups[reached.0 as usize].queries;
-            if !queries.contains(query) {
-                queries.push(*query);
-            }
-        }
-    }
-    for group in &mut groups {
-        group.queries.sort_unstable();
-    }
-    // Interning rebuilds every node over its children in order, so the two
-    // DAGs are walked side by side.
-    let mut group_of = GroupOf::new();
-    for ((_, original), (_, root)) in originals.iter().zip(&interned) {
-        pair(original, root, &id_of, &mut group_of);
-    }
-    (groups, group_of)
-}
-
-/// The operator nodes a query root reads.
-fn operator_roots(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![Rc::clone(node)],
-        QueryRoot::Scalar(expr) => expr.operator_refs().into_iter().cloned().collect(),
-    }
-}
-
-/// Number `node` (interned) and its descendants, children first.
-fn number(
-    node: &Rc<OperatorNode>,
-    groups: &mut Vec<MemoGroup>,
-    id_of: &mut HashMap<*const OperatorNode, GroupId>,
-) -> GroupId {
-    if let Some(&id) = id_of.get(&Rc::as_ptr(node)) {
-        return id;
-    }
-    let children: Vec<GroupId> = node
-        .children()
-        .into_iter()
-        .map(|child| number(child, groups, id_of))
-        .collect();
-    let id = GroupId(groups.len() as u32);
-    for &child in &children {
-        let parents = &mut groups[child.0 as usize].parents;
-        if !parents.contains(&id) {
-            parents.push(id);
-        }
-    }
-    groups.push(MemoGroup {
-        node: Rc::clone(node),
-        children,
-        parents: Vec::new(),
-        queries: Vec::new(),
-        roots_of: Vec::new(),
-    });
-    id_of.insert(Rc::as_ptr(node), id);
-    id
 }
 
 /// `g` and every group below it.
@@ -151,36 +79,19 @@ fn reach(groups: &[MemoGroup], g: GroupId, reached: &mut HashSet<GroupId>) {
     }
 }
 
-/// Map `original` and its descendants to the groups of `interned`, its
-/// interned copy.
-fn pair(
-    original: &Rc<OperatorNode>,
-    interned: &Rc<OperatorNode>,
-    id_of: &HashMap<*const OperatorNode, GroupId>,
-    group_of: &mut GroupOf,
-) {
-    if group_of
-        .insert(Rc::as_ptr(original), id_of[&Rc::as_ptr(interned)])
-        .is_some()
-    {
-        return;
-    }
-    for (child, interned_child) in original.children().into_iter().zip(interned.children()) {
-        pair(child, interned_child, id_of, group_of);
-    }
-}
-
 /// Every group's Pass 1 candidates, by group index.
 fn pass1_candidates<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     groups: &[MemoGroup],
-    group_of: &GroupOf,
+    group_of: &LogicalMemo,
 ) -> Vec<Vec<ImplementationCandidate>> {
     // Each target aggregate group's targets, one per measure (identical
     // aggregates of several queries are one group with one target each).
     let mut targets_of: HashMap<GroupId, Vec<usize>> = HashMap::new();
     for (t, target) in per_computation.targets.iter().enumerate() {
-        let g = group_of[&Rc::as_ptr(&target.aggregate)];
+        let g = group_of
+            .group_for_node(&target.aggregate)
+            .expect("target belongs to logical memo");
         let targets = targets_of.entry(g).or_default();
         if targets
             .iter()
@@ -248,7 +159,7 @@ fn pass1_candidates<Id: Clone>(
 fn target_candidates<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     groups: &[MemoGroup],
-    group_of: &GroupOf,
+    group_of: &LogicalMemo,
     g: GroupId,
     targets: &[usize],
     max_budget_share: usize,
@@ -277,7 +188,9 @@ fn target_candidates<Id: Clone>(
             if let Some((_, Some(absorbs))) = per_computation.targets[t].computation_for(choice[t])
             {
                 for &a in absorbs {
-                    let absorbed = group_of[&Rc::as_ptr(&per_computation.targets[a].aggregate)];
+                    let absorbed = group_of
+                        .group_for_node(&per_computation.targets[a].aggregate)
+                        .expect("absorbed target belongs to logical memo");
                     if !implements.contains(&absorbed) {
                         implements.push(absorbed);
                     }
@@ -589,6 +502,54 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
 
     use asap_types::ir::ASAPOp;
+
+    /// Capability pruning must change implementations, not logical identities.
+    #[test]
+    fn initial_groups_survive_pass1_expansion_and_pruning() {
+        let roots: Vec<_> = [
+            "quantile_over_time(0.95, m[5m])",
+            "quantile_over_time(0.99, m[5m])",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(query, text)| {
+            (
+                query,
+                QueryRoot::Operator(lower_promql(text, AccuracyTarget::max_error(0.01))),
+            )
+        })
+        .collect();
+        let initial = LogicalMemo::from_roots(&roots);
+        let original_groups = initial.groups.clone();
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let expanded = populate_pass1(initial.clone(), &inventory);
+        let restricted_inventory = inventory.without_unsupported_summaries(
+            &asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities {
+                supported_summaries: Some(Vec::new()),
+                ..Default::default()
+            },
+        );
+        let restricted = populate_pass1(initial, &restricted_inventory);
+        for memo in [&expanded, &restricted] {
+            assert_eq!(memo.groups.len(), original_groups.len());
+            for (before, after) in original_groups.iter().zip(&memo.groups) {
+                assert!(Rc::ptr_eq(&before.node, &after.node));
+                assert_eq!(before.children, after.children);
+                assert_eq!(before.parents, after.parents);
+                assert_eq!(before.queries, after.queries);
+                assert_eq!(before.roots_of, after.roots_of);
+            }
+            assert_ne!(
+                group_of_kind(memo, 0, "Aggregate"),
+                group_of_kind(memo, 1, "Aggregate")
+            );
+            assert!(memo.candidates.iter().all(|c| !c.is_empty()));
+        }
+        assert!(
+            expanded.candidates.iter().map(Vec::len).sum::<usize>()
+                > restricted.candidates.iter().map(Vec::len).sum::<usize>()
+        );
+    }
 
     /// The memo of PromQL `queries`, each with accuracy target `target`.
     fn memo(queries: &[&str], target: AccuracyTarget) -> Memo {

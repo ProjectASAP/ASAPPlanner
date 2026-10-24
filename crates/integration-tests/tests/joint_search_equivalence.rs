@@ -1988,8 +1988,8 @@ fn dump_random_workload() {
 }
 
 /// With no time left for a single MILP round, memo-milp still returns a
-/// plan: the warm-start incumbent, each query planned alone by the legacy
-/// search with no sharing, offered before round 1. Under cost model 1 its
+/// plan: the warm-start incumbent, each query planned alone by the memo
+/// bounded baseline with no sharing, offered before round 1. Under cost model 1 its
 /// cost is the sum of the queries' own plans' costs, and the run reports
 /// the time limit and a gap to the MILP lower bound.
 #[test]
@@ -2016,7 +2016,7 @@ fn a_time_limited_memo_milp_run_returns_the_warm_start_plan() {
                 std::slice::from_ref(entry),
                 &data,
                 models,
-                Stage1ToStage3Search::default(),
+                Stage1ToStage3Search::with_algorithm(SearchAlgorithm::MemoBruteForce),
             )
             .unwrap();
             let selection = run.stage3_plan_selection.unwrap();
@@ -2039,7 +2039,13 @@ fn a_time_limited_memo_milp_run_returns_the_warm_start_plan() {
     let selection = run.stage3_plan_selection.unwrap();
     assert_eq!(selection.selected, "P0");
     let cost = selection.search.incumbent_cost.unwrap();
-    assert!((cost - alone).abs() <= 1e-9 * alone, "{cost} vs {alone}");
+    // The bounded baseline is feasible, not necessarily the per-query optimum.
+    assert!(cost + 1e-9 * alone >= alone, "{cost} vs {alone}");
+    assert!(cost.is_finite());
+    assert_eq!(
+        Some(cost),
+        selection.costs[&selection.selected].cost_per_second
+    );
     let milp = selection.search.milp.unwrap();
     assert!(milp.time_limit_reached, "{milp:?}");
     assert!(milp.gap.is_some(), "{milp:?}");
