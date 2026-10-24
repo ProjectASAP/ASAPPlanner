@@ -311,6 +311,11 @@ pub(super) fn enumerate_candidate_configurations(
     }
     for constraint in &source.graph.reader_constraints {
         let source_candidate = match constraint {
+            ReaderConstraint::ActivationRequires { .. } => {
+                return Err(invalid(
+                    "source inventory must precede execution-scope expansion",
+                ))
+            }
             ReaderConstraint::AllowedOutputs { candidate, .. }
             | ReaderConstraint::IncompatibleOutputs { candidate, .. }
             | ReaderConstraint::MinimumQueryReaders { candidate, .. } => candidate,
@@ -321,6 +326,11 @@ pub(super) fn enumerate_candidate_configurations(
                 .graph
                 .reader_constraints
                 .push(match constraint {
+                    ReaderConstraint::ActivationRequires { .. } => {
+                        return Err(invalid(
+                            "source inventory must precede execution-scope expansion",
+                        ))
+                    }
                     ReaderConstraint::AllowedOutputs { outputs, .. } => {
                         ReaderConstraint::AllowedOutputs {
                             candidate,
@@ -351,7 +361,39 @@ pub(super) fn enumerate_candidate_configurations(
         .graph
         .validate()
         .map_err(|error| invalid(&error.to_string()))?;
-    Ok(result)
+    // Repeated identical workload entries and identical logical outputs have
+    // identical timing, accuracy and pricing requirements. Their request counts
+    // remain in the evaluator, but they do not require distinct binding scopes.
+    let mut context_ids = std::collections::HashMap::new();
+    let mut output_contexts = Vec::new();
+    for (output, root) in source.graph.query_roots.iter().enumerate() {
+        let suppliers: Vec<_> = root.compatible_candidates.iter().map(|id| id.0).collect();
+        let key = serde_json::to_string(&(&entries[output_queries[output]], suppliers))
+            .map_err(|error| invalid(&error.to_string()))?;
+        let next = context_ids.len();
+        output_contexts.push(*context_ids.entry(key).or_insert(next));
+    }
+    let mut uses = vec![std::collections::HashSet::new(); source.graph.candidates.len()];
+    for candidate in &source.graph.candidates {
+        for (position, input) in candidate.producer_requirements.iter().enumerate() {
+            for producer in &input.compatible_producers {
+                uses[producer.0].insert((candidate.group, position));
+            }
+        }
+    }
+    let mut root_uses = vec![std::collections::HashSet::new(); source.graph.candidates.len()];
+    for (output, root) in source.graph.query_roots.iter().enumerate() {
+        for candidate in &root.compatible_candidates {
+            root_uses[candidate.0].insert(output_contexts[output]);
+        }
+    }
+    let original_uses: Vec<_> = uses
+        .iter()
+        .zip(root_uses)
+        .map(|(uses, roots)| uses.len() + roots.len())
+        .collect();
+    super::candidate_scopes::expand_execution_scopes(result, &original_uses, &output_contexts)
+        .map_err(ConfigurationError::InvalidInventory)
 }
 
 fn compatible_timing(consumer: &CandidateConfiguration, producer: &CandidateConfiguration) -> bool {
@@ -473,7 +515,17 @@ mod tests {
             &DeploymentCapabilities::default(),
         )
         .unwrap();
-        assert!(expanded.configurations.len() <= 4 * source.graph.candidates.len());
+        let original_positions = source.graph.query_roots.len()
+            + source
+                .graph
+                .candidates
+                .iter()
+                .map(|candidate| candidate.producer_requirements.len())
+                .sum::<usize>();
+        assert!(
+            expanded.configurations.len()
+                <= 4 * source.graph.candidates.len() * original_positions.max(1)
+        );
         assert!(expanded
             .inventory
             .graph
@@ -526,6 +578,125 @@ mod tests {
             .iter()
             .flat_map(|root| &root.compatible_candidates)
             .all(|id| expanded.configurations[id.0].timing == ExecutionTiming::QueryTime));
+    }
+
+    // Identical logical readers need separate bindings when their whole-window
+    // ingestion phases disagree. Every copy still passes the existing Stage 2.
+    #[test]
+    fn identical_quantiles_with_distinct_phases_have_separate_execution_scopes() {
+        let (catalog, mut entries, data) = fixture();
+        let root = catalog.graph.query_roots[0]
+            .compatible_candidates
+            .iter()
+            .filter_map(|id| catalog.templates[id.0].as_ref())
+            .find(|node| OperatorNode::reachable(node).iter().any(|child| kll(child)))
+            .unwrap()
+            .clone();
+        let mut source = CandidateInventory {
+            graph: CandidateDependencyGraph::default(),
+            templates: Vec::new(),
+            group_candidates: Vec::new(),
+        };
+        fn append(node: &Rc<OperatorNode>, source: &mut CandidateInventory) -> PhysicalCandidateId {
+            let mut requirements = Vec::new();
+            node.operator.map_children(|child| {
+                requirements.push(ProducerRequirement {
+                    compatible_producers: vec![append(child, source)],
+                });
+                child.clone()
+            });
+            let id = PhysicalCandidateId(source.templates.len());
+            source.templates.push(Some(node.clone()));
+            source.graph.candidates.push(PhysicalCandidate {
+                group: MemoGroupId(id.0 as u32),
+                local_cost: 0.0,
+                producer_requirements: requirements,
+            });
+            source.group_candidates.push(vec![id]);
+            id
+        }
+        let output = append(&root, &mut source);
+        source.graph.query_roots = vec![
+            QueryRootCandidates {
+                compatible_candidates: vec![output]
+            };
+            2
+        ];
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.recurrence = QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(600_000),
+                evaluation_phase: asap_types::workload::TimestampMs(index as u64 * 300_000),
+            });
+        }
+        let deployment = DeploymentCapabilities {
+            raw_data_retained: false,
+            ..Default::default()
+        };
+        let expanded =
+            enumerate_candidate_configurations(&source, &[0, 1], &entries, &data, &deployment)
+                .unwrap();
+        let selected = select_candidates(&expanded.inventory.graph)
+            .unwrap()
+            .expect("both incompatible phases must be covered");
+        let builds: Vec<_> = selected
+            .selected_candidates
+            .iter()
+            .filter(|id| kll(expanded.inventory.templates[id.0].as_ref().unwrap()))
+            .collect();
+        assert_eq!(builds.len(), 2);
+        assert!(builds
+            .iter()
+            .all(|id| expanded.configurations[id.0].materialization
+                == Materialization::MatAtIngestion(Medium::Memory)));
+        let mut modes = vec![None; expanded.configurations.len()];
+        for id in &selected.selected_candidates {
+            modes[id.0] = Some(expanded.configurations[id.0].materialization);
+        }
+        let original_roots = vec![QueryRoot::Operator(root); 2];
+        let physical = super::super::candidate_physical::materialize_selected_candidates(
+            &expanded.inventory,
+            &selected,
+            &modes,
+            &original_roots,
+            &entries,
+            &data,
+            &deployment,
+        )
+        .unwrap();
+        physical.physical.dag.validate().unwrap();
+        assert_eq!(physical.physical.roots.len(), 2);
+    }
+
+    // Repeating the same workload entry adds output references, not a quadratic
+    // family of identical execution scopes and producer connections.
+    #[test]
+    fn repeated_identical_queries_keep_scope_and_connection_counts_constant() {
+        let (mut source, entries, data) = fixture();
+        let root = source.graph.query_roots[0].clone();
+        let mut counts = Vec::new();
+        for count in [2, 32] {
+            source.graph.query_roots = vec![root.clone(); count];
+            let entries = vec![entries[0].clone(); count];
+            let outputs: Vec<_> = (0..count).collect();
+            let expanded = enumerate_candidate_configurations(
+                &source,
+                &outputs,
+                &entries,
+                &data,
+                &DeploymentCapabilities::default(),
+            )
+            .unwrap();
+            let edges: usize = expanded
+                .inventory
+                .graph
+                .candidates
+                .iter()
+                .flat_map(|candidate| &candidate.producer_requirements)
+                .map(|input| input.compatible_producers.len())
+                .sum();
+            counts.push((expanded.configurations.len(), edges));
+        }
+        assert_eq!(counts[0], counts[1]);
     }
 
     // A deployment without raw retention cannot execute a query-time scan;

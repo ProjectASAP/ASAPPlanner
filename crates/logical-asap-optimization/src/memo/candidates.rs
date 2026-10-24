@@ -88,6 +88,8 @@ pub enum CandidateOrigin {
     Pass1,
     /// One build serving several reader groups (summary capability).
     SharedBuild,
+    /// A summary readout factored from a composite implementation.
+    SummaryResult,
     /// Tumbling panes, or the newest panes of another group's chain.
     Panes,
     /// A coarse group regrouping a finer group.

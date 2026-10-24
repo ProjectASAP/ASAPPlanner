@@ -538,6 +538,11 @@ pub struct PlanSelectionSettings {
     /// costs"). Also loads the earlier array of [`MeasuredOperationCost`].
     /// Default empty: every node is priced from the formulas.
     pub measured_operation_costs: MeasuredOperationCosts,
+    /// Externally established formula-to-measurement scale, held constant across
+    /// candidates. Must be finite and positive. None fits the complete generated
+    /// candidate catalog before pricing, preserving the default calibration policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_calibration_factor: Option<f64>,
     /// Accept every query output regardless of its accuracy guarantee:
     /// planning uses an accuracy model that accepts every output in place
     /// of [`PlanningModels::accuracy`]. This field is the one built-in way
@@ -558,6 +563,7 @@ impl Default for PlanSelectionSettings {
             resource_speed: ResourceSpeed::illustrative(),
             non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
             measured_operation_costs: MeasuredOperationCosts::default(),
+            frozen_calibration_factor: None,
             ignore_accuracy_guarantees: false,
         }
     }
@@ -570,6 +576,9 @@ impl PlanSelectionSettings {
     /// a duplicate entry, or `ms_per_cpu_op` 0), or a price the chosen cost model reads that is negative or
     /// not finite, or every such price 0 (cost model 3 reads none).
     pub fn validate(&self) -> Result<(), AnalyticalCostError> {
+        if let Some(factor) = self.frozen_calibration_factor {
+            CalibrationFit::from_factor(factor)?;
+        }
         for (name, value) in [
             ("ms_per_cpu_op", self.resource_speed.ms_per_cpu_op),
             (
@@ -1064,6 +1073,16 @@ pub struct SearchReport {
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateConnectionReport {
+    #[serde(default)]
+    pub independent_components: usize,
+    #[serde(default)]
+    pub catalog_exhausted: Option<bool>,
+    #[serde(default)]
+    pub evaluation_complete: Option<bool>,
+    #[serde(default)]
+    pub structurally_removed_candidates: usize,
+    #[serde(default)]
+    pub structurally_removed_connections: usize,
     pub catalog_scope: String,
     pub status: String,
     pub groups: usize,
@@ -1075,12 +1094,18 @@ pub struct CandidateConnectionReport {
     pub refinements: usize,
     pub max_refinements: usize,
     pub time_limit_ms: u64,
-    pub lower_bound: f64,
+    pub lower_bound: Option<f64>,
+    #[serde(default)]
+    pub objective: String,
+    #[serde(default)]
+    pub calibration_scope: String,
+    #[serde(default)]
+    pub calibration_factor: f64,
     pub relative_gap: Option<f64>,
     /// Memo population and concrete state sharing only; excludes frontend
     /// lowering, initial memo identity, and Pass 1 local rule generation.
     pub memo_expansion_ms: f64,
-    /// Pass 1 local rule generation; absent when supplied by the caller.
+    /// Initial memo construction and Pass 1 generation; absent when supplied by the caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_candidate_generation_ms: Option<f64>,
     pub inventory_construction_ms: f64,
@@ -2050,7 +2075,10 @@ impl<'a> PlanSelector<'a> {
             accepted: BTreeMap::new(),
             rejected: Vec::new(),
             kept: Vec::new(),
-            formula_scale: 1.0,
+            formula_scale: models
+                .plan_selection
+                .frozen_calibration_factor
+                .unwrap_or(1.0),
             cheapest: None,
             runner_up: None,
         })
@@ -2064,12 +2092,16 @@ impl<'a> PlanSelector<'a> {
     /// the sum to [`Self::set_calibration`] before the first
     /// [`Self::offer`].
     pub fn needs_calibration(&self) -> bool {
-        !self
-            .models
+        self.models
             .plan_selection
-            .measured_operation_costs
-            .operators
-            .is_empty()
+            .frozen_calibration_factor
+            .is_none()
+            && !self
+                .models
+                .plan_selection
+                .measured_operation_costs
+                .operators
+                .is_empty()
     }
 
     /// `candidate`'s part of the calibration fit: its measured nodes' CPU
@@ -2118,7 +2150,11 @@ impl<'a> PlanSelector<'a> {
     /// Calibrate the formulas with `fit`, the sum of every candidate's
     /// [`Self::calibration_fit`].
     pub fn set_calibration(&mut self, fit: CalibrationFit) {
-        self.formula_scale = fit.factor();
+        self.formula_scale = self
+            .models
+            .plan_selection
+            .frozen_calibration_factor
+            .unwrap_or_else(|| fit.factor());
     }
 
     /// Check and price `candidate`, the next in candidate order, and keep
@@ -5125,6 +5161,20 @@ pub struct CalibrationFit {
 }
 
 impl CalibrationFit {
+    /// A validated externally established scale, without fitting candidate data.
+    pub fn from_factor(factor: f64) -> Result<Self, AnalyticalCostError> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(AnalyticalCostError::InvalidCalibration(
+                "frozen_calibration_factor",
+                factor,
+            ));
+        }
+        Ok(Self {
+            measured_ms_per_second: factor,
+            formula_ms_per_second: 1.0,
+        })
+    }
+
     /// Add `other`'s CPU time to this fit.
     pub fn add(&mut self, other: CalibrationFit) {
         self.measured_ms_per_second += other.measured_ms_per_second;

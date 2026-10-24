@@ -5,7 +5,7 @@
 //! Concrete state identity includes capacity, guarantee, update/filter semantics,
 //! and materialization. Private preprocessing is not inferred.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
@@ -38,12 +38,14 @@ pub enum StateGroupExpansionError {
     ScanLabelWidening(String),
     #[error("state configuration expansion: {0}")]
     StateConfiguration(String),
+    #[error("producer reuse rule: {0}")]
+    ReuseRule(String),
 }
 
 struct BuildReaders {
     build: Rc<OperatorNode>,
     children: Vec<MemoGroupId>,
-    readers: Vec<(usize, usize)>,
+    readers: Vec<(usize, usize, Rc<OperatorNode>)>,
 }
 
 /// Preserve local candidates and add explicit shared-state reader candidates.
@@ -65,35 +67,37 @@ pub fn expand_concrete_summary_state_groups(
         return Err(StateGroupExpansionError::CyclicDependencies);
     }
     super::scan_label_candidates::add_scan_label_candidates(&mut memo)?;
+    super::topk_candidates::add_topk_candidates(&mut memo)?;
+    super::rollup_candidates::add_rollup_candidates(&mut memo)?;
+    super::rollup_candidates::add_window_rollup_candidates(&mut memo)?;
+    super::summary_result_candidates::factor_summary_results(&mut memo)?;
     super::state_configuration_candidates::add_state_configuration_candidates(&mut memo)?;
     let mut builds: Vec<BuildReaders> = Vec::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for (index, candidate) in candidates.iter().enumerate() {
-            let Some((build, children)) = simple_build(&memo, candidate) else {
-                continue;
-            };
-            if let Some(existing) = builds
-                .iter_mut()
-                .find(|entry| same_concrete_build(&entry.build, &build))
-            {
-                existing.readers.push((group, index));
-            } else {
-                builds.push(BuildReaders {
-                    build,
-                    children,
-                    readers: vec![(group, index)],
-                });
+            for (build, children) in direct_input_builds(&memo, candidate) {
+                if let Some(existing) = builds
+                    .iter_mut()
+                    .find(|entry| same_concrete_build(&entry.build, &build))
+                {
+                    existing.readers.push((group, index, build));
+                } else {
+                    builds.push(BuildReaders {
+                        build: Rc::clone(&build),
+                        children,
+                        readers: vec![(group, index, build)],
+                    });
+                }
             }
         }
     }
     let mut state_groups = Vec::new();
-    let mut added_reader_candidates = 0;
+    let mut replacements: BTreeMap<(usize, usize), HashMap<*const OperatorNode, Rc<OperatorNode>>> =
+        BTreeMap::new();
     for build in builds {
-        if !build
-            .readers
-            .iter()
-            .any(|&(group, _)| group != build.readers[0].0)
-        {
+        // Repeated private builds within one result are reusable too. The
+        // reader list records concrete build occurrences, not just owners.
+        if build.readers.len() < 2 {
             continue;
         }
         let state_group = MemoGroupId(
@@ -103,7 +107,7 @@ pub fn expand_concrete_summary_state_groups(
         let mut queries: Vec<_> = build
             .readers
             .iter()
-            .flat_map(|&(group, _)| memo.groups[group].queries.iter().copied())
+            .flat_map(|(group, _, _)| memo.groups[*group].queries.iter().copied())
             .collect();
         queries.sort_unstable();
         queries.dedup();
@@ -126,24 +130,34 @@ pub fn expand_concrete_summary_state_groups(
             materializations: Vec::new(),
             requires_sites: Vec::new(),
         }]);
-        for (group, index) in build.readers {
-            let mut reader = memo.candidates[group][index].clone();
-            // Each reader may have an equal but separately allocated build.
-            let (own_build, _) = simple_build(&memo, &reader)
-                .ok_or(StateGroupExpansionError::InvalidReaderBoundary)?;
-            reader.node = replace_node(&reader.node, &own_build, &build.build);
-            let boundaries: HashMap<_, _> = reader
-                .children
-                .iter()
-                .map(|&id| (Rc::as_ptr(&memo.groups[id.0 as usize].node), id))
-                .chain([(Rc::as_ptr(&build.build), state_group)])
-                .collect();
-            reader.children = boundary_groups(&reader.node, &boundaries);
-            reader.origin = CandidateOrigin::SharedBuild;
-            memo.candidates[group].push(reader);
-            added_reader_candidates += 1;
+        for (group, index, own_build) in build.readers {
+            replacements
+                .entry((group, index))
+                .or_default()
+                .insert(Rc::as_ptr(&own_build), Rc::clone(&build.build));
         }
         state_groups.push(state_group);
+    }
+    let mut added_reader_candidates = 0;
+    for ((group, index), replacements) in replacements {
+        // Factor every available producer boundary together. A producer used by
+        // only one selected reader is still legal; no state-subset enumeration
+        // is required. Retain the original entirely local implementation too.
+        let mut reader = memo.candidates[group][index].clone();
+        // Only declared inputs and newly lifted states are boundaries. A
+        // factored result group's representative can equal its candidate root;
+        // treating every memo node as an input would create a self-alias here.
+        let boundaries = reader
+            .children
+            .iter()
+            .chain(&state_groups)
+            .map(|id| (Rc::as_ptr(&memo.groups[id.0 as usize].node), *id))
+            .collect();
+        reader.node = super::reuse_candidates::replace(&reader.node, &replacements);
+        reader.children = boundary_groups(&reader.node, &boundaries);
+        reader.origin = CandidateOrigin::SharedBuild;
+        memo.candidates[group].push(reader);
+        added_reader_candidates += 1;
     }
     // Parents describe every possible group/candidate dependency, not a selected plan.
     for group in &mut memo.groups {
@@ -241,18 +255,30 @@ pub(super) fn simple_build(
     memo: &CandidateMemo,
     candidate: &ImplementationCandidate,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
+    let mut builds = direct_input_builds(memo, candidate);
+    (builds.len() == 1).then(|| builds.remove(0))
+}
+
+pub(super) fn direct_input_builds(
+    memo: &CandidateMemo,
+    candidate: &ImplementationCandidate,
+) -> Vec<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     if !matches!(
         candidate.origin,
-        CandidateOrigin::Pass1 | CandidateOrigin::Panes | CandidateOrigin::WidenedScans
-    ) || candidate.implements.len() != 1
+        CandidateOrigin::Pass1
+            | CandidateOrigin::Panes
+            | CandidateOrigin::WidenedScans
+            | CandidateOrigin::Rollup
+            | CandidateOrigin::SummaryResult
+    ) || candidate.implements.is_empty()
         || !candidate.coupling_sites.is_empty()
         || !candidate.requires_sites.is_empty()
         || !candidate.requires_exact_children.is_empty()
         || candidate.rollup_of.is_some()
         || !candidate.materializations.is_empty()
-        || candidate.budget_share != 1
+        || candidate.budget_share == 0
     {
-        return None;
+        return Vec::new();
     }
     let boundaries: HashMap<_, _> = candidate
         .children
@@ -261,34 +287,30 @@ pub(super) fn simple_build(
         .collect();
     let mut stack = vec![Rc::clone(&candidate.node)];
     let mut seen = HashSet::new();
-    let mut build = None;
+    let mut builds = Vec::new();
     while let Some(node) = stack.pop() {
         if boundaries.contains_key(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
             continue;
         }
-        if matches!(
-            node.asap(),
-            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
-        ) {
-            if build.is_some() {
-                return None;
+        if !Rc::ptr_eq(&node, &candidate.node)
+            && matches!(
+                node.asap(),
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+            )
+        {
+            let children: Option<Vec<_>> = node
+                .children()
+                .iter()
+                .map(|child| boundaries.get(&Rc::as_ptr(child)).copied())
+                .collect();
+            if let Some(mut children) = children {
+                children.dedup();
+                builds.push((Rc::clone(&node), children));
             }
-            build = Some(Rc::clone(&node));
         }
         stack.extend(node.children().into_iter().cloned());
     }
-    let build = build?;
-    if Rc::ptr_eq(&build, &candidate.node) {
-        return None;
-    }
-    let mut children = Vec::new();
-    for child in build.children() {
-        let group = *boundaries.get(&Rc::as_ptr(child))?;
-        if !children.contains(&group) {
-            children.push(group);
-        }
-    }
-    Some((build, children))
+    builds
 }
 
 pub(super) fn boundary_groups(
@@ -362,42 +384,13 @@ fn same_local_fields(left: &OperatorNode, right: &OperatorNode) -> bool {
         && matches!((serde_json::to_string(&left), serde_json::to_string(&right)), (Ok(left), Ok(right)) if left == right)
 }
 
+#[cfg(test)]
 fn replace_node(
     node: &Rc<OperatorNode>,
     old: &Rc<OperatorNode>,
     new: &Rc<OperatorNode>,
 ) -> Rc<OperatorNode> {
-    replace_node_cached(node, old, new, &mut HashMap::new())
-}
-
-fn replace_node_cached(
-    node: &Rc<OperatorNode>,
-    old: &Rc<OperatorNode>,
-    new: &Rc<OperatorNode>,
-    rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Rc<OperatorNode> {
-    if Rc::ptr_eq(node, old) {
-        return Rc::clone(new);
-    }
-    if let Some(existing) = rebuilt.get(&Rc::as_ptr(node)) {
-        return Rc::clone(existing);
-    }
-    let mut changed = false;
-    let operator = node.operator.map_children(|child| {
-        let replacement = replace_node_cached(child, old, new, rebuilt);
-        changed |= !Rc::ptr_eq(child, &replacement);
-        replacement
-    });
-    let result = if changed {
-        Rc::new(OperatorNode {
-            operator,
-            ..(**node).clone()
-        })
-    } else {
-        Rc::clone(node)
-    };
-    rebuilt.insert(Rc::as_ptr(node), Rc::clone(&result));
-    result
+    super::reuse_candidates::replace(node, &HashMap::from([(Rc::as_ptr(old), Rc::clone(new))]))
 }
 
 #[cfg(test)]
@@ -510,7 +503,7 @@ mod tests {
         assert!(expanded
             .state_groups
             .iter()
-            .all(|id| expanded.memo.groups[id.0 as usize].queries == vec![0, 1]));
+            .any(|id| expanded.memo.groups[id.0 as usize].queries == vec![0, 1]));
     }
 
     // Resizing never makes different source predicates compatible.
@@ -740,7 +733,10 @@ mod tests {
             &[60_000, 60_000],
         );
         let expanded = expand_concrete_summary_state_groups(original).unwrap();
-        assert!(expanded.state_groups.is_empty());
+        assert!(expanded
+            .state_groups
+            .iter()
+            .all(|id| expanded.memo.groups[id.0 as usize].queries.len() == 1));
     }
 
     // Real pane rewrites expose one identical chain to distinct quantile readers.
@@ -844,6 +840,402 @@ mod tests {
                     .any(|after| Rc::ptr_eq(&before.node, &after.node))));
         }
         assert!(expanded.memo.topological_order().is_some());
+    }
+
+    // Rollup readers preserve original outputs while referencing explicit finer
+    // producers; no legacy coupling or exact-child flags escape into the graph.
+    #[test]
+    fn exact_rollup_exposes_shared_finalized_values() {
+        let original = workload(&[
+            ("sum by (job) (m)", 0.01),
+            ("sum by (job, instance) (m)", 0.01),
+        ]);
+        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let rollups: Vec<_> = expanded
+            .memo
+            .candidates
+            .iter()
+            .flatten()
+            .filter(|candidate| candidate.origin == CandidateOrigin::Rollup)
+            .collect();
+        assert!(!rollups.is_empty());
+        assert!(rollups
+            .iter()
+            .all(|candidate| candidate.coupling_sites.is_empty()
+                && candidate.requires_exact_children.is_empty()
+                && candidate.rollup_of.is_none()));
+        assert!(expanded.memo.groups.iter().enumerate().any(|(id, group)| id
+            >= original.groups.len()
+            && matches!(
+                group.node.asap(),
+                Some(ASAPOp::FinalizeExactAccumulator { .. })
+            )
+            && group.parents.len() >= 2));
+        assert!(expanded.memo.topological_order().is_some());
+    }
+
+    // Sketch rollup exposes the resized finer state through an ordinary group
+    // dependency, while each output retains its own grouping and quantile.
+    #[test]
+    fn sketch_rollup_exposes_shared_finer_state() {
+        let original = workload(&[
+            ("quantile(0.9, m)", 0.01),
+            ("quantile by (job) (0.9, m)", 0.02),
+        ]);
+        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        assert!(expanded
+            .memo
+            .candidates
+            .iter()
+            .flatten()
+            .any(|candidate| candidate.origin == CandidateOrigin::SharedBuild
+                && OperatorNode::reachable(&candidate.node)
+                    .iter()
+                    .any(|node| matches!(
+                        node.asap(),
+                        Some(ASAPOp::SummaryMerge {
+                            group_by: Some(_),
+                            ..
+                        })
+                    ))));
+        assert!(expanded.memo.topological_order().is_some());
+    }
+
+    // Different k outputs share one sorted ranking, backed by a recursively
+    // exact candidate group rather than an unenforced exact-input annotation.
+    #[test]
+    fn topk_outputs_share_explicit_exact_ranking() {
+        let original = workload(&[
+            ("topk by (job) (3, sum_over_time(m[1m]))", 0.01),
+            ("topk by (job) (5, sum_over_time(m[1m]))", 0.01),
+        ]);
+        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        assert!(expanded.memo.groups.iter().any(|group| matches!(
+            group.node.non_asap(),
+            Some(NonASAPOp::Limit { n: Some(5), .. })
+        ) && group.parents.len() >= 2));
+        assert!(expanded
+            .memo
+            .candidates
+            .iter()
+            .flatten()
+            .any(|candidate| candidate.origin == CandidateOrigin::TopKReuse));
+        assert!(expanded.memo.topological_order().is_some());
+    }
+
+    // Widened source-group candidates make shared scans available even to
+    // ordinary operators that do not build an ASAP summary.
+    #[test]
+    fn general_source_groups_offer_typed_union_scan_readers() {
+        let original = workload(&[
+            ("topk by (job) (3, m)", 0.01),
+            ("topk by (region) (5, m)", 0.01),
+        ]);
+        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let union = expanded
+            .memo
+            .groups
+            .iter()
+            .enumerate()
+            .find(|(_, group)| {
+                matches!(group.node.non_asap(), Some(NonASAPOp::Scan { .. }))
+                    && ["job", "region"].iter().all(|name| {
+                        group
+                            .node
+                            .schema
+                            .fields
+                            .iter()
+                            .any(|field| field.name == *name)
+                    })
+            })
+            .map(|(id, _)| MemoGroupId(id as u32))
+            .expect("union scan");
+        let readers = original
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| matches!(group.node.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .filter(|(group, _)| {
+                expanded.memo.candidates[*group].iter().any(|candidate| {
+                    candidate.origin == CandidateOrigin::WidenedScans
+                        && candidate.children.contains(&union)
+                })
+            })
+            .count();
+        assert!(readers >= 2);
+    }
+
+    // A composite average can share only its sum state with another query while
+    // retaining the count state locally; reader budget allocation is preserved.
+    #[test]
+    fn multiple_private_states_can_share_only_the_common_producer() {
+        let mut original = workload(&[("avg(m)", 0.01), ("sum(m)", 0.01)]);
+        let average = original
+            .groups
+            .iter()
+            .position(|group| group.roots_of.contains(&0))
+            .unwrap();
+        assert!(original.candidates[average]
+            .iter()
+            .any(|candidate| direct_input_builds(&original, candidate).len() >= 2));
+        for candidates in &mut original.candidates {
+            for candidate in candidates {
+                candidate.budget_share = 2;
+            }
+        }
+        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        assert!(!expanded.state_groups.is_empty());
+        let reader = expanded.memo.candidates[average]
+            .iter()
+            .find(|candidate| {
+                candidate.origin == CandidateOrigin::SharedBuild
+                    && candidate
+                        .children
+                        .iter()
+                        .any(|group| expanded.state_groups.contains(group))
+            })
+            .expect("average has shared state input");
+        assert_eq!(reader.budget_share, 2);
+        assert!(
+            reader
+                .children
+                .iter()
+                .any(|id| expanded.state_groups.contains(id)
+                    && expanded.memo.groups[id.0 as usize].queries == vec![0, 1]),
+            "sum state is reusable by both queries"
+        );
+        assert!(
+            reader
+                .children
+                .iter()
+                .any(|id| expanded.state_groups.contains(id)
+                    && expanded.memo.groups[id.0 as usize].queries == vec![0]),
+            "count state belongs only to the average query"
+        );
+        assert!(original.candidates[average]
+            .iter()
+            .all(|before| expanded.memo.candidates[average]
+                .iter()
+                .any(|after| Rc::ptr_eq(&before.node, &after.node))));
+    }
+
+    // A global SQL-window quantile can consume newest panes of a longer,
+    // finer-grouped chain through the existing regrouping rule.
+    #[test]
+    fn grouped_window_rollup_exposes_one_finer_chain() {
+        use crate::test_support::{agg, scan_from, time_range};
+        use asap_types::ir::operator::{AggIntent, Source};
+        use asap_types::ir::schema::{DataType, Field, Schema};
+        let scan = || {
+            scan_from(
+                Source::Table {
+                    table_ref: "metrics".into(),
+                },
+                Schema::with_time_index(
+                    vec![
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("city", DataType::Utf8, true),
+                        Field::plain("value", DataType::Float64, true),
+                    ],
+                    0,
+                    vec![],
+                ),
+            )
+        };
+        let quantile = |q| AggIntent::Quantile {
+            col: Some(2),
+            q,
+            accuracy: AccuracyTarget::max_error(0.01),
+        };
+        let roots = vec![
+            (
+                0,
+                QueryRoot::Operator(agg(
+                    vec![],
+                    quantile(0.5),
+                    time_range(std::time::Duration::from_secs(300), scan()),
+                )),
+            ),
+            (
+                1,
+                QueryRoot::Operator(agg(
+                    vec![1],
+                    quantile(0.9),
+                    time_range(std::time::Duration::from_secs(1200), scan()),
+                )),
+            ),
+        ];
+        let initial = LogicalMemo::from_roots(&roots);
+        let generated = generate_per_computation_candidates(roots).unwrap();
+        let memo = with_local_panes(
+            try_populate_pass1(initial, &generated).unwrap(),
+            &[10_000, 10_000],
+        );
+        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        assert!(expanded
+            .memo
+            .candidates
+            .iter()
+            .flatten()
+            .any(|candidate| candidate.origin == CandidateOrigin::SharedBuild
+                && OperatorNode::reachable(&candidate.node)
+                    .iter()
+                    .any(|node| matches!(
+                        node.asap(),
+                        Some(ASAPOp::SummaryMerge {
+                            group_by: Some(_),
+                            ..
+                        })
+                    ))
+                && candidate.children.iter().any(|group| matches!(
+                    expanded.memo.groups[group.0 as usize].node.asap(),
+                    Some(ASAPOp::PaneChain {
+                        pane_count: 120,
+                        ..
+                    })
+                ))));
+    }
+
+    // Reader deduplication must retain distinct recorded probability contracts
+    // even though SketchParams structural equality intentionally ignores them.
+    #[test]
+    fn same_capacity_readers_retain_distinct_failure_probability_contracts() {
+        use asap_types::ir::schema::{
+            sketch::{SketchAlgorithm, SketchKind, SketchParams},
+            FieldDataType,
+        };
+        let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
+        let (owner, mut base, build) = memo.candidates.iter().enumerate().find_map(|(owner, candidates)| candidates.iter().find_map(|candidate| {
+            let (build, _) = simple_build(&memo, candidate)?;
+            matches!(build.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::Kll).then(|| (owner, candidate.clone(), build))
+        })).unwrap();
+        let Some(ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(kind, grouping),
+            ..
+        }) = build.asap()
+        else {
+            unreachable!()
+        };
+        let SketchParams::Kll { k, .. } = kind.params() else {
+            unreachable!()
+        };
+        let boundaries: HashSet<_> = base
+            .children
+            .iter()
+            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].node))
+            .collect();
+        fn without_private_guarantees(
+            node: &Rc<OperatorNode>,
+            boundaries: &HashSet<*const OperatorNode>,
+        ) -> Rc<OperatorNode> {
+            if boundaries.contains(&Rc::as_ptr(node)) {
+                return Rc::clone(node);
+            }
+            Rc::new(OperatorNode {
+                operator: node
+                    .operator
+                    .map_children(|child| without_private_guarantees(child, boundaries)),
+                guarantee: None,
+                ..(**node).clone()
+            })
+        }
+        let rewritten = |probability| {
+            let family = FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k: *k,
+                        failure_probability: Some(probability),
+                    },
+                ),
+                grouping.clone(),
+            );
+            let roots = crate::asap_aware_cse::with_resized_build(
+                &[QueryRoot::Operator(Rc::clone(&base.node))],
+                &build,
+                family,
+            )
+            .unwrap();
+            let QueryRoot::Operator(root) = &roots[0] else {
+                unreachable!()
+            };
+            let root = super::super::reuse_candidates::restore_inputs(root, &memo, &base.children);
+            without_private_guarantees(&root, &boundaries)
+        };
+        let weak = rewritten(0.001);
+        let strict = rewritten(0.0001);
+        assert_eq!(
+            *weak, *strict,
+            "ordinary equality omits the probability metadata"
+        );
+        base.node = weak;
+        memo.candidates[owner] = vec![base.clone()];
+        assert!(super::super::reuse_candidates::append_reader(
+            &mut memo,
+            owner,
+            &base,
+            strict,
+            CandidateOrigin::Rollup
+        )
+        .unwrap());
+        assert_eq!(memo.candidates[owner].len(), 2);
+    }
+
+    // Equal private producers can be shared within one composite result; they
+    // do not need to originate from different memo owner groups.
+    #[test]
+    fn repeated_states_within_one_owner_share_a_producer() {
+        let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
+        let (owner, mut candidate) = memo
+            .candidates
+            .iter()
+            .enumerate()
+            .find_map(|(group, candidates)| {
+                candidates
+                    .iter()
+                    .find(|candidate| simple_build(&memo, candidate).is_some())
+                    .map(|candidate| (group, candidate.clone()))
+            })
+            .unwrap();
+        let boundaries: HashSet<_> = candidate
+            .children
+            .iter()
+            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].node))
+            .collect();
+        fn duplicate(
+            node: &Rc<OperatorNode>,
+            boundaries: &HashSet<*const OperatorNode>,
+        ) -> Rc<OperatorNode> {
+            if boundaries.contains(&Rc::as_ptr(node)) {
+                return Rc::clone(node);
+            }
+            Rc::new(OperatorNode {
+                operator: node
+                    .operator
+                    .map_children(|child| duplicate(child, boundaries)),
+                ..(**node).clone()
+            })
+        }
+        let second = duplicate(&candidate.node, &boundaries);
+        let combined =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Concat {
+                discriminator_unique_key: None,
+                children: vec![Rc::clone(&candidate.node), second],
+            }))
+            .unwrap();
+        candidate.node = Rc::clone(&combined);
+        memo.groups[owner].node = combined;
+        memo.candidates[owner] = vec![candidate];
+        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        assert_eq!(expanded.state_groups.len(), 1);
+        let state = expanded.state_groups[0];
+        assert!(expanded.memo.groups[state.0 as usize]
+            .parents
+            .contains(&MemoGroupId(owner as u32)));
+        assert!(expanded.memo.candidates[owner]
+            .iter()
+            .any(|candidate| candidate.origin == CandidateOrigin::SharedBuild
+                && candidate.children.contains(&state)));
     }
 
     // Public expansion rejects malformed IDs before indexing dependency arrays.

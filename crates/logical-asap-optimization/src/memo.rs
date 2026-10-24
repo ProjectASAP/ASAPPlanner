@@ -7,6 +7,8 @@
 /// Logical implementation candidates populated after initial identity construction.
 pub mod candidates;
 mod groups;
+mod reuse_candidates;
+mod rollup_candidates;
 mod scan_label_candidates;
 /// Pass 2 summary-capability expansion and consistent producer/reader resizing.
 pub mod shared_builds;
@@ -15,6 +17,10 @@ mod state_configuration_candidates;
 pub mod state_configurations;
 /// Concrete summary-state groups for the connection-based planner migration.
 pub mod state_groups;
+mod summary_result_candidates;
+mod topk_candidates;
+/// Local pane candidates with selected-reader grid configurations.
+pub mod window_candidates;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;

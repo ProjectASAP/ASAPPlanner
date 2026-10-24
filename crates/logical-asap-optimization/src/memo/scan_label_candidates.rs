@@ -19,6 +19,14 @@ pub(super) fn add_scan_label_candidates(
     let mut roots = Vec::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for (index, candidate) in candidates.iter().enumerate() {
+            // Source-group candidates expose scan reuse to every downstream
+            // operator, including exact/non-summary computations. Their public
+            // schemas stay narrow through the existing projection rewrite.
+            if is_source_chain(&candidate.node) && super::reuse_candidates::eligible(candidate) {
+                owners.push((group, index));
+                roots.push(QueryRoot::Operator(Rc::clone(&candidate.node)));
+                continue;
+            }
             let Some((build, children)) = simple_build(memo, candidate) else {
                 continue;
             };
@@ -65,7 +73,34 @@ pub(super) fn add_scan_label_candidates(
             continue;
         }
         let queries = memo.groups[group].queries.clone();
-        let node = intern_inputs(&node, memo, &queries, &mut canonical)?;
+        let mut node = intern_inputs(&node, memo, &queries, &mut canonical)?;
+        if memo
+            .groups
+            .iter()
+            .any(|group| Rc::ptr_eq(&group.node, &node))
+        {
+            // Interning an equivalent range/source can return another group's
+            // canonical value. Keep a concrete reader instead of a root alias.
+            node =
+                OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
+                    cols: node
+                        .schema
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .map(|(column, field)| asap_types::ir::ProjectItem {
+                            alias: Some(field.name.clone()),
+                            expr: asap_types::ir::ScalarExpr::Column(column),
+                        })
+                        .collect(),
+                    qualifier: None,
+                    child: node,
+                }))
+                .map_err(|error| StateGroupExpansionError::ScanLabelWidening(error.to_string()))?;
+            if !same_output_contract(&original.node, &node) {
+                continue;
+            }
+        }
         let boundaries = memo
             .groups
             .iter()

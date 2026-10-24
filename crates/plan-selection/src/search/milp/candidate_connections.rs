@@ -55,6 +55,12 @@ pub(crate) struct ResourceBudget {
 /// References index `query_roots`; multiple references of one query stay distinct.
 #[derive(Debug, Clone)]
 pub(crate) enum ReaderConstraint {
+    /// Symmetry only: interchangeable execution-scope copies activate in order.
+    /// Both copies still need genuine consumers; this does not create a DAG edge.
+    ActivationRequires {
+        candidate: PhysicalCandidateId,
+        required_candidate: PhysicalCandidateId,
+    },
     /// Each bucket is one query's output references; together they partition
     /// every output exactly once. Empty buckets represent literal-only queries.
     MinimumQueryReaders {
@@ -174,6 +180,20 @@ impl CandidateDependencyGraph {
         }
         for requirement in &self.reader_constraints {
             let (candidate, outputs) = match requirement {
+                ReaderConstraint::ActivationRequires {
+                    candidate,
+                    required_candidate,
+                } => {
+                    if required_candidate.0 >= self.candidates.len()
+                        || candidate == required_candidate
+                    {
+                        return Err(CandidateSelectionError::InvalidGraph(
+                            "activation constraint references missing or identical candidate"
+                                .into(),
+                        ));
+                    }
+                    (*candidate, Vec::new())
+                }
                 ReaderConstraint::MinimumQueryReaders {
                     candidate,
                     query_outputs,
@@ -568,6 +588,14 @@ pub(super) fn solve_candidate_proposal_with_metrics(
         }
         for requirement in &graph.reader_constraints {
             match requirement {
+                ReaderConstraint::ActivationRequires {
+                    candidate,
+                    required_candidate,
+                } => {
+                    constraints.push(constraint!(
+                        candidate_selected[candidate.0] <= candidate_selected[required_candidate.0]
+                    ));
+                }
                 ReaderConstraint::MinimumQueryReaders {
                     candidate,
                     query_outputs,
@@ -946,6 +974,10 @@ pub(super) fn validate_selected_graph(
         |output: usize, target: PhysicalCandidateId| output_reach[output].contains(&target);
     for requirement in &graph.reader_constraints {
         let violated = match requirement {
+            ReaderConstraint::ActivationRequires {
+                candidate,
+                required_candidate,
+            } => active.contains(candidate) && !active.contains(required_candidate),
             ReaderConstraint::MinimumQueryReaders {
                 candidate,
                 query_outputs,
@@ -1418,6 +1450,10 @@ mod tests {
                 .reader_constraints
                 .iter()
                 .any(|requirement| match requirement {
+                    ReaderConstraint::ActivationRequires {
+                        candidate,
+                        required_candidate,
+                    } => marks[candidate.0] == 2 && marks[required_candidate.0] != 2,
                     ReaderConstraint::MinimumQueryReaders {
                         candidate,
                         query_outputs,

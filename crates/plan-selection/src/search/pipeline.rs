@@ -25,6 +25,10 @@ use asap_physical_asap_optimization::PhysicalCandidate;
 pub use crate::search::candidate_evaluation::run_stage2_and_stage3;
 use crate::search::legacy::stage1_to_stage3::legacy_search;
 
+/// A selected execution plan and the logical roots from which it was built.
+pub(crate) type PlanSearchResult =
+    Result<(Selection, PhysicalCandidate, Vec<QueryRoot>), SelectionError>;
+
 /// One whole-workload CandidateLogicalASAPDAG: `choice[t]` picks target
 /// `t`'s candidate, or its fused computation's
 /// (`targets[t].computation_for(choice[t])`), of the Pass 1 inventory. `roots` are the
@@ -181,22 +185,24 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
     search: Stage1ToStage3Search,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
     // Legacy routes do not pay for memo identity they will never use.
-    let uses_memo = !search.exhaustive
-        && match search.search {
-            SearchAlgorithm::Legacy => false,
-            SearchAlgorithm::MemoBruteForce | SearchAlgorithm::CandidateConnections => true,
-            SearchAlgorithm::MemoMilp => matches!(
-                models.plan_selection.cost_model,
-                CostModel::UsageOverTime(_)
-            ),
-        };
+    // Charge initial memo construction and Pass 1 to the shared budget.
+    let generation_started = std::time::Instant::now();
+    let uses_memo = search.search == SearchAlgorithm::CandidateConnections
+        || (!search.exhaustive
+            && match search.search {
+                SearchAlgorithm::Legacy => false,
+                SearchAlgorithm::MemoBruteForce | SearchAlgorithm::CandidateConnections => true,
+                SearchAlgorithm::MemoMilp => matches!(
+                    models.plan_selection.cost_model,
+                    CostModel::UsageOverTime(_)
+                ),
+            });
     if uses_memo {
         for (_, root) in &roots {
             root.validate_structure()?;
         }
     }
     let initial = uses_memo.then(|| LogicalMemo::from_roots(&roots));
-    let generation_started = std::time::Instant::now();
     let per_computation = match &initial {
         Some(memo) => generate_per_computation_candidates_with_memo(roots, memo)?,
         None => generate_per_computation_candidates(roots)?,
@@ -242,6 +248,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     if search.search == SearchAlgorithm::CandidateConnections {
         let pruned = per_computation.without_unsupported_summaries(models.deployment_capabilities);
         let initial = initial.unwrap_or_else(|| LogicalMemo::from_roots(&pruned.roots));
+        let mut archive = crate::search::milp::candidate_route::CandidateArchive::default();
         let found = crate::search::milp::candidate_route::candidate_connection_search(
             initial,
             &pruned,
@@ -250,14 +257,19 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
             models,
             search,
             local_candidate_generation_ms,
+            &mut archive,
         );
-        return memo_run(
+        let mut run = memo_run(
             pruned,
             found,
             entries,
             data,
             SearchAlgorithm::CandidateConnections,
         );
+        run.stage1_logical_asap_optimization = archive.logical;
+        run.stage2_physical_asap_optimization = archive.physical;
+        run.stage2_pruned = archive.pruned;
+        return run;
     }
     let routed_to_legacy = match (search.exhaustive, search.search) {
         (_, SearchAlgorithm::Legacy) => None,
@@ -316,7 +328,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
 /// and its logical roots, or why none is valid.
 fn memo_run<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
-    found: crate::search::milp::model::MemoSearchResult,
+    found: crate::search::pipeline::PlanSearchResult,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     algorithm: SearchAlgorithm,

@@ -33,7 +33,7 @@ pub(super) struct CandidateRejectionSummary {
 }
 
 impl CandidateRejectionSummary {
-    fn record(&mut self, category: String, reason: &str) {
+    pub(super) fn record(&mut self, category: String, reason: &str) {
         *self.counts.entry(category.clone()).or_default() += 1;
         let example = format!(
             "{category}: {}",
@@ -46,6 +46,7 @@ impl CandidateRejectionSummary {
 }
 
 pub(super) struct CandidatePlanningResult {
+    pub independent_components: usize,
     pub search: CandidateSearchResult,
     pub rejections: CandidateRejectionSummary,
     /// Same convention as PlanSelector::finish: Selection.plan is the validated
@@ -55,8 +56,8 @@ pub(super) struct CandidatePlanningResult {
 
 /// Usage and provisioned-price objectives use the complete evaluator cost,
 /// including held memory, raw retention and request overhead where applicable.
-/// ClusterCapacity is intentionally unsupported: its Pareto/lexicographic
-/// objective cannot be replaced by a scalar cost silently.
+/// Cluster objectives use candidate_objectives and the original selector
+/// archive; their Pareto/lexicographic policy is not a scalar price.
 pub(super) fn optimize_configured_candidates(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
@@ -77,6 +78,17 @@ pub(super) fn optimize_configured_candidates(
     // Reject invalid settings/deployment even if the search budget is zero.
     PlanSelector::new(context.entries, context.data, context.models, false)
         .map_err(|e| e.to_string())?;
+    if context
+        .models
+        .plan_selection
+        .frozen_calibration_factor
+        .is_some_and(|factor| factor != context.calibration.factor())
+    {
+        return Err(
+            "candidate cost bounds and evaluator must use the same frozen calibration factor"
+                .into(),
+        );
+    }
     if !context.calibration.factor().is_finite() || context.calibration.factor() <= 0.0 {
         return Err("candidate search requires a finite positive frozen calibration".into());
     }
@@ -127,6 +139,7 @@ pub(super) fn optimize_configured_candidates(
         _ => return Err("search incumbent and validated physical plan disagree".into()),
     }
     Ok(CandidatePlanningResult {
+        independent_components: 1,
         search,
         rejections,
         best: best.map(|(_, _, selection, physical)| (selection, physical)),
@@ -136,7 +149,7 @@ pub(super) fn optimize_configured_candidates(
 /// Prefer contracts that can survive downstream value computations. These are
 /// proposal priorities, not feasibility rules: recomposition and evaluation
 /// still decide the selected graph's actual accuracy.
-fn accuracy_baseline_weights(
+pub(super) fn accuracy_baseline_weights(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<Vec<f64>, String> {
@@ -190,6 +203,14 @@ fn accuracy_baseline_weights(
     }
     // Bound the numerical range; these tiers are intentionally heuristic.
     let preference = (graph.candidates.len() as f64 + 1.0).min(1000.0);
+    // Certified node work also guides the first feasible proposal. Otherwise
+    // counting nodes alone favors one oversized shared state over cheaper local
+    // states. This changes only proposal priorities, never certified bounds.
+    let maximum_cost = graph
+        .candidates
+        .iter()
+        .map(|candidate| candidate.local_cost)
+        .fold(0.0_f64, f64::max);
     configured
         .inventory
         .templates
@@ -222,19 +243,47 @@ fn accuracy_baseline_weights(
                 // selected input contracts are recomposed; do not penalize that.
                 0.0
             };
-            Ok(1.0 + penalty)
+            let cost_priority = if maximum_cost > 0.0 {
+                preference * graph.candidates[id].local_cost / maximum_cost
+            } else {
+                0.0
+            };
+            Ok(1.0 + penalty + cost_priority)
         })
         .collect()
 }
 
-fn evaluate_configured_candidate(
+pub(super) enum MaterializationOutcome {
+    Implemented(PhysicalCandidate),
+    RejectedAssignment(String),
+}
+
+pub(super) fn materialize_configured_candidate(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
     selected: &SelectedCandidateGraph,
     evaluation_number: usize,
     rejections: &mut CandidateRejectionSummary,
-    rejected_queries: &mut Vec<RejectedQuerySubgraph>,
-) -> Result<Option<(Selection, PhysicalCandidate)>, String> {
+) -> Result<Option<PhysicalCandidate>, String> {
+    match materialize_configured_candidate_with_diagnostics(
+        configured,
+        context,
+        selected,
+        evaluation_number,
+        rejections,
+    )? {
+        MaterializationOutcome::Implemented(physical) => Ok(Some(physical)),
+        MaterializationOutcome::RejectedAssignment(_) => Ok(None),
+    }
+}
+
+pub(super) fn materialize_configured_candidate_with_diagnostics(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    selected: &SelectedCandidateGraph,
+    evaluation_number: usize,
+    rejections: &mut CandidateRejectionSummary,
+) -> Result<MaterializationOutcome, String> {
     let mut modes = vec![None; configured.configurations.len()];
     for id in &selected.selected_candidates {
         modes[id.0] = Some(configured.configurations[id.0].materialization);
@@ -253,7 +302,7 @@ fn evaluate_configured_candidate(
         Ok(realized) => realized,
         Err(PhysicalCandidateError::RejectedAssignment(reason)) => {
             rejections.record("materialization_assignment".into(), &reason);
-            return Ok(None);
+            return Ok(MaterializationOutcome::RejectedAssignment(reason));
         }
         Err(error) => return Err(error.to_string()),
     };
@@ -268,13 +317,36 @@ fn evaluate_configured_candidate(
             ));
         }
     }
+    // Stage 2 leaves IDs to its caller. A nonempty, stable proposal label keeps
+    // selected-plan references and viewer cost lookups consistent.
+    realized.physical.id = format!("joint-plan-{evaluation_number}");
+    realized.physical.from_logical = format!("joint-logical-{evaluation_number}");
+    Ok(MaterializationOutcome::Implemented(realized.physical))
+}
+
+pub(super) fn reconstruct_configured_candidate(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    selected: &SelectedCandidateGraph,
+    evaluation_number: usize,
+    rejections: &mut CandidateRejectionSummary,
+    rejected_queries: &mut Vec<RejectedQuerySubgraph>,
+) -> Result<Option<PhysicalCandidate>, String> {
+    let Some(physical) = materialize_configured_candidate(
+        configured,
+        context,
+        selected,
+        evaluation_number,
+        rejections,
+    )?
+    else {
+        return Ok(None);
+    };
     // Reuse the legacy evaluator's size-independent proof after its normal
     // resizing step. Other consumers can change sizes, but cannot repair this
     // certified failure of the same complete query dependency subgraph.
     let targets = crate::accuracy_targets(context.entries);
-    if let Ok(sized) =
-        crate::sized_for_failure_probability(&realized.physical, &targets, context.data)
-    {
+    if let Ok(sized) = crate::sized_for_failure_probability(&physical, &targets, context.data) {
         let mut output_index = 0;
         for (query, root) in sized.roots.iter().enumerate() {
             let mut outputs = Vec::new();
@@ -310,15 +382,32 @@ fn evaluate_configured_candidate(
             return Ok(None);
         }
     }
-    // Stage 2 leaves IDs to its caller. A nonempty, stable proposal label keeps
-    // selected-plan references and viewer cost lookups consistent.
-    realized.physical.id = format!("joint-plan-{evaluation_number}");
+    Ok(Some(physical))
+}
+
+pub(super) fn evaluate_configured_candidate(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    selected: &SelectedCandidateGraph,
+    evaluation_number: usize,
+    rejections: &mut CandidateRejectionSummary,
+    rejected_queries: &mut Vec<RejectedQuerySubgraph>,
+) -> Result<Option<(Selection, PhysicalCandidate)>, String> {
+    let Some(physical) = reconstruct_configured_candidate(
+        configured,
+        context,
+        selected,
+        evaluation_number,
+        rejections,
+        rejected_queries,
+    )?
+    else {
+        return Ok(None);
+    };
     let mut selector = PlanSelector::new(context.entries, context.data, context.models, false)
         .map_err(|e| e.to_string())?;
     selector.set_calibration(context.calibration);
-    selector
-        .offer(&realized.physical)
-        .map_err(|e| e.to_string())?;
+    selector.offer(&physical).map_err(|e| e.to_string())?;
     match selector.finish() {
         Ok(result) => Ok(Some(result)),
         Err(SelectionError::NoValidCandidate(rejected)) => {
@@ -464,6 +553,110 @@ mod tests {
         )
     }
 
+    // One logical group can serve a repeated reader through panes and an
+    // unpredictable reader locally; only selected pane consumers need eligibility.
+    #[test]
+    fn nongridded_reader_does_not_veto_another_readers_ingestion_panes() {
+        use super::super::candidate_connections::select_candidates;
+        use asap_types::ir::properties::ExecutionTiming;
+        let (_, original, mut entries, data) = fixture();
+        let roots = vec![original[0].clone(), original[0].clone()];
+        let identified: Vec<_> = roots.iter().cloned().enumerate().collect();
+        let initial = LogicalMemo::from_roots(&identified);
+        let output = MemoGroupId(
+            initial
+                .groups
+                .iter()
+                .position(|group| group.roots_of.contains(&0))
+                .unwrap() as u32,
+        );
+        let generated = generate_per_computation_candidates(identified).unwrap();
+        let mut memo = try_populate_pass1(initial, &generated).unwrap();
+        entries[0].recurrence =
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000)));
+        entries[1].recurrence = QueryRecurrence::Unknown;
+        entries[1].predictability = Predictability::Unknown;
+        asap_logical_asap_optimization::memo::window_candidates::add_local_window_composition(
+            &mut memo, &entries,
+        );
+        let source = build_candidate_inventory(&memo, &[output, output], |_| Ok(0.0)).unwrap();
+        let models = PlanningModels::builtin();
+        let mut configured = enumerate_candidate_configurations(
+            &source,
+            &[0, 1],
+            &entries,
+            &data,
+            models.deployment_capabilities,
+        )
+        .unwrap();
+        let has_panes: Vec<_> = configured
+            .inventory
+            .templates
+            .iter()
+            .map(|node| {
+                OperatorNode::reachable(node.as_ref().unwrap())
+                    .iter()
+                    .any(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+            })
+            .collect();
+        configured.inventory.graph.query_roots[0]
+            .compatible_candidates
+            .retain(|id| has_panes[id.0]);
+        configured.inventory.graph.query_roots[1]
+            .compatible_candidates
+            .retain(|id| !has_panes[id.0]);
+        assert!(!configured.inventory.graph.query_roots[0]
+            .compatible_candidates
+            .is_empty());
+        let allowed: Vec<_> = configured
+            .inventory
+            .templates
+            .iter()
+            .enumerate()
+            .map(|(id, node)| {
+                !matches!(
+                    node.as_ref().unwrap().asap(),
+                    Some(ASAPOp::PaneChain { .. })
+                ) || configured.configurations[id].timing == ExecutionTiming::IngestionTime
+            })
+            .collect();
+        for candidate in &mut configured.inventory.graph.candidates {
+            for input in &mut candidate.producer_requirements {
+                input.compatible_producers.retain(|id| allowed[id.0]);
+            }
+        }
+        let selected = select_candidates(&configured.inventory.graph)
+            .unwrap()
+            .expect("repeated reader still has an ingestion pane plan");
+        let context = CandidatePlanningContext {
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models,
+            calibration: CalibrationFit::default(),
+        };
+        let evaluated = evaluate_configured_candidate(
+            &configured,
+            &context,
+            &selected,
+            1,
+            &mut CandidateRejectionSummary::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(evaluated.is_some());
+        configured.inventory.graph.query_roots[1].compatible_candidates =
+            configured.inventory.graph.query_roots[0]
+                .compatible_candidates
+                .clone();
+        assert!(
+            select_candidates(&configured.inventory.graph)
+                .unwrap()
+                .is_none(),
+            "unpredictable reader cannot bind to ingestion-only panes"
+        );
+    }
+
     // Rank-only quantiles cannot feed value arithmetic, and approximate values
     // cannot establish an exact top-k ranking; contract-aware priorities find a
     // validated seed without changing the feasible candidate catalog.
@@ -504,7 +697,9 @@ mod tests {
                 entry
             })
             .collect();
-        crate::search::memo::rules::windows::add_local_window_composition(&mut memo, &entries);
+        asap_logical_asap_optimization::memo::window_candidates::add_local_window_composition(
+            &mut memo, &entries,
+        );
         let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(0.0)).unwrap();
         let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
@@ -617,6 +812,26 @@ mod tests {
         );
         assert_eq!(result.search.lower_bound, 0.0);
         assert_ne!(result.search.status, CandidateSearchStatus::Optimal);
+    }
+
+    // A shared state can cost more than two smaller states; proposal priorities
+    // must account for certified work without changing the solver's cost model.
+    #[test]
+    fn accuracy_baseline_accounts_for_state_cost() {
+        let (mut configured, roots, entries, data) = fixture();
+        let context = CandidatePlanningContext {
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models: PlanningModels::builtin(),
+            calibration: CalibrationFit::default(),
+        };
+        let original = accuracy_baseline_weights(&configured, &context).unwrap();
+        configured.inventory.graph.candidates[0].local_cost = 100.0;
+        let priced = accuracy_baseline_weights(&configured, &context).unwrap();
+        assert!(priced[0] > original[0] + 2.0);
+        assert_eq!(priced[1..], original[1..]);
+        assert_eq!(configured.inventory.graph.candidates[0].local_cost, 100.0);
     }
 
     // Explicit rank requirements remain valid baseline priorities, rather than
@@ -852,7 +1067,7 @@ mod tests {
 
     // A cluster objective must not silently become scalar price optimization.
     #[test]
-    fn cluster_capacity_objectives_are_explicitly_unsupported() {
+    fn scalar_price_search_does_not_scalarize_cluster_objectives() {
         let (configured, roots, entries, data) = fixture();
         let settings = crate::PlanSelectionSettings {
             cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {

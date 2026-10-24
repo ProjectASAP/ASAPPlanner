@@ -557,7 +557,9 @@ mod tests {
                 entry
             })
             .collect();
-        crate::search::memo::rules::windows::add_local_window_composition(&mut memo, &entries);
+        asap_logical_asap_optimization::memo::window_candidates::add_local_window_composition(
+            &mut memo, &entries,
+        );
         let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(0.0)).unwrap();
         let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
@@ -600,9 +602,14 @@ mod tests {
                 1.0
             };
         }
-        let selected = select_candidates(&configured.inventory.graph)
-            .unwrap()
-            .unwrap();
+        let selected = super::super::candidate_connections::solve_candidate_proposal(
+            &configured.inventory.graph,
+            &[],
+            None,
+        )
+        .unwrap()
+        .unwrap()
+        .selected;
         let chains: Vec<_> = selected
             .selected_candidates
             .iter()
@@ -681,6 +688,336 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // Producer-level rollup and ranking candidates survive concrete selection,
+    // Stage 2, end-to-end accuracy checks and the actual billing evaluator.
+    #[test]
+    fn producer_reuse_rules_produce_validated_shared_plans() {
+        use super::super::candidate_physical::materialize_selected_candidates;
+        use asap_logical_asap_optimization::test_support::entry_with;
+        use asap_types::workload::{
+            DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
+        };
+        for (queries, kind) in [
+            (["avg(m)", "sum(m)"], "partial"),
+            (["sum by (job) (m)", "sum by (job, instance) (m)"], "rollup"),
+            (
+                [
+                    "topk by (job) (3, sum_over_time(m[1m]))",
+                    "topk by (job) (5, sum_over_time(m[1m]))",
+                ],
+                "ranking",
+            ),
+            (["quantile(0.9, m)", "quantile by (job) (0.9, m)"], "sketch"),
+        ] {
+            let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+            let roots: Vec<_> = queries
+                .into_iter()
+                .enumerate()
+                .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+                .collect();
+            let initial = LogicalMemo::from_roots(&roots);
+            let outputs: Vec<_> = (0..2)
+                .map(|query| {
+                    MemoGroupId(
+                        initial
+                            .groups
+                            .iter()
+                            .position(|group| group.roots_of.contains(&query))
+                            .unwrap() as u32,
+                    )
+                })
+                .collect();
+            let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+            let memo = expand_concrete_summary_state_groups(
+                try_populate_pass1(initial, &generated).unwrap(),
+            )
+            .unwrap()
+            .memo;
+            let mut inventory = build_candidate_inventory(&memo, &outputs, |node| {
+                // Structural selection forces the reuse being tested. Actual
+                // prices are obtained only from PlanSelector below.
+                if node.guarantee.as_ref().is_some_and(|g| {
+                    !g.is_exact()
+                        && g.spec.accuracy_metric
+                            == asap_types::ir::properties::AccuracyMetric::Rank
+                }) {
+                    return Ok(100_000.0);
+                }
+                Ok(match node.asap() {
+                    Some(ASAPOp::SummaryAgg { child, .. })
+                        if !matches!(
+                            child.asap(),
+                            Some(ASAPOp::FinalizeExactAccumulator { .. })
+                        ) =>
+                    {
+                        1000.0
+                    }
+                    _ if matches!(node.non_asap(), Some(NonASAPOp::Sort { .. })) => 1000.0,
+                    _ => 1.0,
+                })
+            })
+            .unwrap();
+            if matches!(kind, "ranking" | "sketch") {
+                for (output, group) in inventory.graph.query_roots.iter_mut().zip(&outputs) {
+                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_logical_asap_optimization::memo::candidates::CandidateOrigin::TopKReuse } else { asap_logical_asap_optimization::memo::candidates::CandidateOrigin::SharedBuild }));
+                    assert!(
+                        !output.compatible_candidates.is_empty(),
+                        "{kind} reader generated"
+                    );
+                }
+            }
+            let selected = select_candidates(&inventory.graph).unwrap().expect(kind);
+            let chosen: Vec<_> = selected
+                .selected_candidates
+                .iter()
+                .map(|id| inventory.templates[id.0].as_ref().unwrap())
+                .collect();
+            if kind == "ranking" {
+                assert_eq!(
+                    chosen
+                        .iter()
+                        .filter(|node| matches!(node.non_asap(), Some(NonASAPOp::Sort { .. })))
+                        .count(),
+                    1
+                );
+            } else {
+                assert_eq!(chosen.iter().filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {child, ..}) if !matches!(child.asap(), Some(ASAPOp::FinalizeExactAccumulator {..})))).count(), if kind == "partial" { 2 } else { 1 }, "{kind}");
+            }
+            let entries: Vec<_> = (0..2)
+                .map(|_| {
+                    entry_with(
+                        target.clone(),
+                        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                            RepetitionInterval(60_000),
+                        )),
+                    )
+                })
+                .collect();
+            let mut modes = vec![None; inventory.graph.candidates.len()];
+            for id in &selected.selected_candidates {
+                modes[id.0] = Some(Materialization::NotMaterialized);
+            }
+            let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
+            let mut data = DataWorkload {
+                arrival: asap_types::workload::DataArrival::Ingesting {
+                    rows_per_second: 1000.0,
+                },
+                ..DataWorkload::default()
+            };
+            data.sources.entry("m".into()).or_default().series_count = Some(10);
+            data.sources
+                .entry("m".into())
+                .or_default()
+                .values_non_negative = true;
+            let mut realized = materialize_selected_candidates(
+                &inventory,
+                &selected,
+                &modes,
+                &roots,
+                &entries,
+                &data,
+                crate::PlanningModels::builtin().deployment_capabilities,
+            )
+            .unwrap();
+            realized.physical.id = format!("shared-{kind}");
+            let mut evaluator =
+                crate::PlanSelector::new(&entries, &data, crate::PlanningModels::builtin(), false)
+                    .unwrap();
+            evaluator.offer(&realized.physical).unwrap();
+            let (selection, physical) = evaluator
+                .finish()
+                .unwrap_or_else(|error| panic!("{kind}: {error:?}"));
+            physical.dag.validate().unwrap();
+            assert!(selection.costs[&selection.selected]
+                .cost_per_second
+                .unwrap()
+                .is_finite());
+        }
+    }
+
+    // A fused two-sketch computation chooses each readout's capacity separately:
+    // one or both states can serve external queries without a configuration product.
+    #[test]
+    fn factored_summary_results_choose_independent_capacities_and_sharing() {
+        use asap_logical_asap_optimization::memo::candidates::CandidateOrigin;
+        use asap_logical_asap_optimization::test_support::entry_with;
+        use asap_types::ir::schema::sketch::SketchParams;
+        use asap_types::workload::{
+            DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
+        };
+        for share_both in [false, true] {
+            let mut queries = vec![
+                (
+                    "quantile_over_time(0.5, a[5m]) * quantile_over_time(0.99, b[5m])",
+                    0.03,
+                ),
+                ("quantile_over_time(0.95, a[5m])", 0.005),
+            ];
+            if share_both {
+                queries.push(("quantile_over_time(0.9, b[5m])", 0.008));
+            }
+            let targets: Vec<_> = queries
+                .iter()
+                .map(|(_, error)| AccuracyTarget::max_error(*error).failure_probability(0.001))
+                .collect();
+            let roots: Vec<_> = queries
+                .iter()
+                .enumerate()
+                .map(|(id, (query, _))| {
+                    (
+                        id,
+                        QueryRoot::Operator(lower_promql(query, targets[id].clone())),
+                    )
+                })
+                .collect();
+            let initial = LogicalMemo::from_roots(&roots);
+            let outputs: Vec<_> = (0..roots.len())
+                .map(|query| {
+                    MemoGroupId(
+                        initial
+                            .groups
+                            .iter()
+                            .position(|group| group.roots_of.contains(&query))
+                            .unwrap() as u32,
+                    )
+                })
+                .collect();
+            let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+            let mut memo = try_populate_pass1(initial, &generated).unwrap();
+            let owner = outputs[0].0 as usize;
+            let mut fused = memo.candidates[owner][0].clone();
+            let original_inputs = fused.children.clone();
+            assert_eq!(original_inputs.len(), 2);
+            let mut replacements = HashMap::new();
+            let mut raw_inputs = Vec::new();
+            for input in &original_inputs {
+                let selected = memo.candidates[input.0 as usize].iter().filter(|candidate| OperatorNode::reachable(&candidate.node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))).max_by_key(|candidate| candidate.budget_share).unwrap();
+                replacements.insert(
+                    Rc::as_ptr(&memo.groups[input.0 as usize].node),
+                    Rc::clone(&selected.node),
+                );
+                for raw in &selected.children {
+                    if !raw_inputs.contains(raw) {
+                        raw_inputs.push(*raw);
+                    }
+                }
+            }
+            fused.node = Rc::new(
+                fused
+                    .node
+                    .with_new_children(|child| {
+                        replacements
+                            .get(&Rc::as_ptr(child))
+                            .cloned()
+                            .unwrap_or_else(|| Rc::clone(child))
+                    })
+                    .unwrap(),
+            );
+            fused.children = raw_inputs;
+            fused.implements.extend(original_inputs);
+            fused.budget_share = 2;
+            memo.candidates[owner].push(fused);
+            let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
+            let mut inventory = build_candidate_inventory(&memo, &outputs, |node| {
+                Ok(if matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })) {
+                    1000.0
+                } else {
+                    1.0
+                })
+            })
+            .unwrap();
+            for (query, (output, group)) in inventory
+                .graph
+                .query_roots
+                .iter_mut()
+                .zip(&outputs)
+                .enumerate()
+            {
+                output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| {
+                    let candidate = &memo.candidates[group.0 as usize][index];
+                    if query == 0 { candidate.origin == CandidateOrigin::SummaryResult } else {
+                        candidate.origin == CandidateOrigin::SharedBuild && OperatorNode::reachable(&candidate.node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))
+                    }
+                }));
+                assert!(
+                    !output.compatible_candidates.is_empty(),
+                    "factored/shared output {query}"
+                );
+            }
+            let selected = select_candidates(&inventory.graph).unwrap().unwrap();
+            let alphas: Vec<_> = selected
+                .selected_candidates
+                .iter()
+                .filter_map(
+                    |id| match inventory.templates[id.0].as_ref().unwrap().asap() {
+                        Some(ASAPOp::SummaryAgg {
+                            family: FieldDataType::Sketch(kind, _),
+                            ..
+                        }) => match kind.params() {
+                            SketchParams::DDSketch { alpha } => Some(*alpha),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                )
+                .collect();
+            assert_eq!(
+                alphas.len(),
+                2,
+                "two independent sources, shared when requested"
+            );
+            assert_ne!(alphas[0], alphas[1], "capacities selected independently");
+            let mut modes = vec![None; inventory.graph.candidates.len()];
+            for id in &selected.selected_candidates {
+                modes[id.0] = Some(Materialization::NotMaterialized);
+            }
+            let entries: Vec<_> = targets
+                .iter()
+                .map(|target| {
+                    entry_with(
+                        target.clone(),
+                        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                            RepetitionInterval(60_000),
+                        )),
+                    )
+                })
+                .collect();
+            let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
+            let mut data = DataWorkload {
+                arrival: asap_types::workload::DataArrival::Ingesting {
+                    rows_per_second: 1000.0,
+                },
+                ..DataWorkload::default()
+            };
+            for source in ["a", "b"] {
+                let facts = data.sources.entry(source.into()).or_default();
+                facts.series_count = Some(10);
+                facts.values_non_negative = true;
+            }
+            let mut realized = super::super::candidate_physical::materialize_selected_candidates(
+                &inventory,
+                &selected,
+                &modes,
+                &roots,
+                &entries,
+                &data,
+                crate::PlanningModels::builtin().deployment_capabilities,
+            )
+            .unwrap();
+            realized.physical.id = format!("independent-capacities-{share_both}");
+            let mut evaluator =
+                crate::PlanSelector::new(&entries, &data, crate::PlanningModels::builtin(), false)
+                    .unwrap();
+            evaluator.offer(&realized.physical).unwrap();
+            let (selection, physical) = evaluator.finish().unwrap();
+            physical.dag.validate().unwrap();
+            assert!(selection.costs[&selection.selected]
+                .cost_per_second
+                .unwrap()
+                .is_finite());
+        }
     }
 
     // Exact top-k's executable Sort/Limit/Project nodes are selected and charged
