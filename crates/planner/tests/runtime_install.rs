@@ -2146,7 +2146,11 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
 
 /// [`p99_avg_workload`]'s query with `outer` in place of `avg`, planned
 /// for a deployment that keeps no raw data samples.
-async fn plan_p99(outer: &str, values_non_negative: bool) -> InstallablePlan {
+async fn plan_p99(
+    outer: &str,
+    values_non_negative: bool,
+    ignore_accuracy: bool,
+) -> InstallablePlan {
     let mut json = serde_json::to_value(p99_avg_workload(values_non_negative)).unwrap();
     json["query_workload"]["repeating_queries"][0]["query"] =
         format!("{outer} by (region, service, job) (quantile_over_time(0.99, data[100s]))").into();
@@ -2155,10 +2159,24 @@ async fn plan_p99(outer: &str, values_non_negative: bool) -> InstallablePlan {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
+    let settings = PlanSelectionSettings {
+        ignore_accuracy_guarantees: ignore_accuracy,
+        ..PlanSelectionSettings::default()
+    };
+    let only_dds = SketchPlansOnly(SketchAlgorithm::DDSketch);
+    let models = PlanningModels::builtin()
+        .with_deployment_capabilities(&capabilities)
+        .with_plan_selection(&settings);
+    let models = if ignore_accuracy {
+        // This is a DDS kernel fixture, not a comparison of sketch families.
+        models.with_executor_compile_check(&only_dds)
+    } else {
+        models
+    };
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
-        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+        models,
     ))
     .await
     .expect("a valid plan")
@@ -2265,7 +2283,7 @@ fn assert_p99s_within_alpha(
 /// of the exact average of PromQL's interpolated p99s.
 #[tokio::test]
 async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
-    let plan = plan_p99("avg", true).await;
+    let plan = plan_p99("avg", true, false).await;
     assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
     let (samples, per_group) = data_samples(8, 4, 20_000, |s, step| {
         (s + 1) as f64 * [0.0, 0.0, 3.0, 5.0][step as usize]
@@ -2282,13 +2300,25 @@ async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
 
 /// Signed samples (negative, zero and positive) are summarized by the
 /// selected DDSketch panes, through their negative store and zero bucket:
-/// `max` of the per-series p99s carries the relative bound whatever the
-/// samples' sign, and every answer equals the query-time reference's and is
+/// Signed interpolation has no general relative guarantee, so this kernel
+/// fixture explicitly bypasses accuracy admission. Every answer equals the
+/// query-time reference's and is
 /// within 0.05 of the exact value, including series whose samples are all
 /// negative.
 #[tokio::test]
 async fn a_ddsketch_over_signed_samples_runs_within_alpha() {
-    let plan = plan_p99("max", false).await;
+    let plan = plan_p99("max", false, true).await;
+    assert!(
+        !stored_definitions(&plan, "DDSketch").is_empty(),
+        "exercise signed DDS state"
+    );
+    assert_eq!(
+        plan.selection
+            .as_ref()
+            .unwrap()
+            .queries_accepted_without_guarantee,
+        vec![0]
+    );
     assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
     let max = |p99s: &[f64]| p99s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     // Series 0..4 cross zero; series 4..8 are all negative.
@@ -2609,14 +2639,14 @@ fn heap_topk_workload(query: &str, metric: &str, facts: &str) -> PlanningWorkloa
     .unwrap()
 }
 
-/// Stage 3's executor check for a deployment that runs only top-k plans
-/// with a heap of this algorithm: any other plan is refused, and such a
-/// plan must compile with the Planner's executor
+/// Stage 3's executor check for a deployment requiring this sketch
+/// algorithm. Other plans are refused, and an accepted plan must compile
+/// with the Planner's executor
 /// ([`PlannerExecutorCompileCheck`]). It forces the cheapest such plan that
 /// compiles.
-struct HeapPlansOnly(SketchAlgorithm);
+struct SketchPlansOnly(SketchAlgorithm);
 
-impl ExecutorCompileCheck for HeapPlansOnly {
+impl ExecutorCompileCheck for SketchPlansOnly {
     fn compiles(&self, roots: &[QueryRoot]) -> Result<(), String> {
         self.compiles_before(roots, None)
             .map_err(|error| error.to_string())
@@ -2631,7 +2661,7 @@ impl ExecutorCompileCheck for HeapPlansOnly {
         if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
             return Err(ExecutorCompileError::DeadlineExceeded);
         }
-        let heap = roots
+        let supported_sketch = roots
             .iter()
             .filter_map(|root| match root {
                 QueryRoot::Operator(node) => Some(node),
@@ -2643,9 +2673,9 @@ impl ExecutorCompileCheck for HeapPlansOnly {
                     | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
                     if *kind.algorithm() == self.0)
             });
-        if !heap {
+        if !supported_sketch {
             return Err(ExecutorCompileError::Rejected(format!(
-                "this deployment runs only {:?} top-k plans",
+                "this deployment requires a {:?} sketch",
                 self.0
             )));
         }
@@ -2655,7 +2685,7 @@ impl ExecutorCompileCheck for HeapPlansOnly {
 
 /// `workload` planned with accuracy guarantees ignored (a top-k estimate
 /// has none) on a deployment that keeps no raw samples; with `heap`, Stage
-/// 3 keeps only plans with a heap of that algorithm ([`HeapPlansOnly`]).
+/// 3 keeps only plans with a heap of that algorithm ([`SketchPlansOnly`]).
 async fn plan_ignoring_guarantees(
     workload: &PlanningWorkload,
     heap: Option<SketchAlgorithm>,
@@ -2671,7 +2701,7 @@ async fn plan_ignoring_guarantees(
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
         .with_plan_selection(&settings);
-    let check = heap.map(HeapPlansOnly);
+    let check = heap.map(SketchPlansOnly);
     let models = match &check {
         Some(check) => models.with_executor_compile_check(check),
         None => models,
