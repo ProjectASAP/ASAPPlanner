@@ -203,10 +203,18 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
     let name = |expr: &SummaryInputExpr| match expr {
         SummaryInputExpr::Column(ColumnRef::Named(name)) => name.clone(),
+        SummaryInputExpr::Column(ColumnRef::Qualified { table, name }) => {
+            assert_eq!(table, "flows");
+            name.clone()
+        }
         // The ranked value when it is the child's one sample value.
         SummaryInputExpr::Column(ColumnRef::SampleValue) => "<sample value>".into(),
         SummaryInputExpr::Tuple(items) => match items.as_slice() {
             [SummaryInputExpr::Column(ColumnRef::Named(name))] => name.clone(),
+            [SummaryInputExpr::Column(ColumnRef::Qualified { table, name })] => {
+                assert_eq!(table, "flows");
+                name.clone()
+            }
             other => panic!("one item column: {other:?}"),
         },
         other => panic!("a named column: {other:?}"),

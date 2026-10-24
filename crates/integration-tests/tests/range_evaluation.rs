@@ -26,6 +26,72 @@ const LAST_HOUR_BY_MINUTE: RangeEvaluation = RangeEvaluation {
     span_ms: 3_600_000,
 };
 
+/// Price explicitly named computations under the same models as production.
+/// This fixture controls its pane width; a timed MILP archive is not a catalog
+/// of every legal materialization or a stable source of P1/P2 identifiers.
+fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabilities) -> Run {
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_types::ir::schema::SketchAlgorithm;
+    let roots = lower_promql(workload);
+    let inventory =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    assert_eq!(inventory.targets.len(), 1);
+    let compose = |choice| {
+        compose_logical_candidate(&inventory, &[choice])
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect::<Vec<_>>()
+    };
+    let mut candidates = vec![compose(0)];
+    if let Some(choice) = inventory.targets[0]
+        .choices
+        .candidates
+        .iter()
+        .position(|candidate| {
+            matches!(
+                candidate,
+                ComputationCandidate::Summary(SketchAlgorithm::Kll)
+            )
+        })
+    {
+        candidates.push(compose(choice));
+    }
+    let build = candidates.last().unwrap();
+    let grids = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.evaluation_grid_ms())
+        .collect::<Vec<_>>();
+    let panes = pane_candidates(build, &grids);
+    assert_eq!(panes.len(), 1, "one explicit pane computation");
+    candidates.push(
+        window_composition_pass2_candidates(build, &panes)
+            .unwrap()
+            .remove(0)
+            .roots
+            .unwrap(),
+    );
+    let settings = asap_plan_selection::PlanSelectionSettings::default();
+    run_explicit_candidates(
+        workload,
+        roots,
+        candidates,
+        asap_plan_selection::PlanningModels::builtin()
+            .with_plan_selection(&settings)
+            .with_deployment_capabilities(deployment),
+    )
+}
+
+fn run_explicit(workload: &PlanningWorkload) -> Run {
+    run_explicit_for(workload, &DeploymentCapabilities::default())
+}
+
 /// Pattern B (#509 Example 3: `quantile_over_time(0.99, latency_ms[5m])`
 /// every minute over 1M series) with each request answered as `range`.
 fn pattern_b_with(range: Option<RangeEvaluation>) -> PlanningWorkload {
@@ -126,8 +192,8 @@ fn with_chain(run: &Run, wanted: Materialization) -> String {
 #[test]
 fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
     let deployment = keeping_query_time_results();
-    let none = run_promql_for(&pattern_b_with(None), &deployment);
-    let range = run_promql_for(&pattern_b_with(Some(LAST_HOUR_BY_MINUTE)), &deployment);
+    let none = run_explicit_for(&pattern_b_with(None), &deployment);
+    let range = run_explicit_for(&pattern_b_with(Some(LAST_HOUR_BY_MINUTE)), &deployment);
     assert_eq!(LAST_HOUR_BY_MINUTE.evaluations_per_request(), 61);
     for (id, before, after) in [
         ("P1", 2.457_600_019_2, 149.913_601_171_2),
@@ -160,23 +226,24 @@ fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
     assert_eq!(range.selection.selected, "P2");
 }
 
-/// (b) Refreshing every minute at 30-second steps, Stage 1 offers panes of
+/// (b) For this explicit fixture, refreshing every minute at 30-second steps
+/// supplies panes of
 /// `gcd(5 min, 1 min, 30 s) = 30 s`, on the step grid, and Stage 2 keeps
-/// them; without the range, the panes are 1 min wide. Stage 2 never offers
-/// a chain whose width does not divide the step.
+/// them; without the range, the fixture uses 1 min panes. Both configurations
+/// must divide the evaluation step; production also offers finer legal widths.
 #[test]
-fn stage2_physical_asap_optimization_offers_only_step_aligned_pane_widths() {
+fn explicit_pane_candidates_follow_the_evaluation_step_grid() {
     let step_30s = RangeEvaluation {
         step_ms: 30_000,
         span_ms: 3_600_000,
     };
-    let range = run_promql(&exact_panel("max_over_time(m[5m])", 60_000, Some(step_30s)));
+    let range = run_explicit(&exact_panel("max_over_time(m[5m])", 60_000, Some(step_30s)));
     let widths: Vec<u64> = pane_chains(&range).into_iter().map(|(_, w, _)| w).collect();
     assert!(!widths.is_empty(), "panes are offered");
     assert!(widths.iter().all(|&w| w == 30_000), "{widths:?}");
     assert!(range.pruned.is_empty(), "{:?}", range.pruned);
 
-    let none = run_promql(&exact_panel("max_over_time(m[5m])", 60_000, None));
+    let none = run_explicit(&exact_panel("max_over_time(m[5m])", 60_000, None));
     let widths: Vec<u64> = pane_chains(&none).into_iter().map(|(_, w, _)| w).collect();
     assert!(
         !widths.is_empty() && widths.iter().all(|&w| w == 60_000),
@@ -192,7 +259,7 @@ fn stage2_physical_asap_optimization_offers_only_step_aligned_pane_widths() {
 fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
     let deployment = keeping_query_time_results();
     let query = "max_over_time(m[5m])";
-    let range = run_promql_for(
+    let range = run_explicit_for(
         &exact_panel(query, 60_000, Some(LAST_HOUR_BY_MINUTE)),
         &deployment,
     );
@@ -211,9 +278,9 @@ fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
 
     // Pattern B without a range selects the whole-window KLL, which keeps
     // nothing; B1 reports its window when it is the plan (no raw data).
-    let none = run_promql(&pattern_b_with(None));
+    let none = run_explicit(&pattern_b_with(None));
     assert!(none.selection.pane_retention_ms.is_empty());
-    let b1 = run_promql_for(
+    let b1 = run_explicit_for(
         &pattern_b_with(None),
         &DeploymentCapabilities {
             raw_data_retained: false,
@@ -231,7 +298,7 @@ fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
 #[test]
 fn no_range_evaluation_leaves_every_price_unchanged() {
     let deployment = keeping_query_time_results();
-    let none = run_promql_for(&pattern_b_with(None), &deployment);
+    let none = run_explicit_for(&pattern_b_with(None), &deployment);
     assert!(close(cost(&none, "P2"), 2.362_500_025_2));
     assert!(close(cost(&none, "P3"), 3.611_233_350_8));
     assert!(close(cost(&none, "P3-m2"), 436.587_770_004_24));
@@ -239,7 +306,7 @@ fn no_range_evaluation_leaves_every_price_unchanged() {
         none.selection.costs["P3-m1"].usage.average_memory_bytes,
         5_232_101_733.337_067
     );
-    let one_step = run_promql_for(
+    let one_step = run_explicit_for(
         &pattern_b_with(Some(RangeEvaluation {
             step_ms: 60_000,
             span_ms: 0,
@@ -263,8 +330,8 @@ fn no_range_evaluation_leaves_every_price_unchanged() {
 fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
     let query = "max_over_time(m[5m])";
     let deployment = keeping_query_time_results();
-    let none = run_promql_for(&exact_panel(query, 60_000, None), &deployment);
-    let range = run_promql_for(
+    let none = run_explicit_for(&exact_panel(query, 60_000, None), &deployment);
+    let range = run_explicit_for(
         &exact_panel(query, 60_000, Some(LAST_HOUR_BY_MINUTE)),
         &deployment,
     );
@@ -297,7 +364,7 @@ fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
         .unwrap();
     assert_eq!(p1.cause, RejectionCause::Costlier);
 
-    let without_retention = run_promql(&exact_panel(query, 60_000, Some(LAST_HOUR_BY_MINUTE)));
+    let without_retention = run_explicit(&exact_panel(query, 60_000, Some(LAST_HOUR_BY_MINUTE)));
     assert_eq!(without_retention.selection.selected, ingestion);
 }
 
@@ -313,11 +380,11 @@ fn an_offset_chain_is_retained_and_priced_for_its_offset() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let plain = run_promql_for(
+    let plain = run_explicit_for(
         &exact_panel("max_over_time(m[60m])", 600_000, None),
         &no_raw_data,
     );
-    let offset = run_promql_for(
+    let offset = run_explicit_for(
         &exact_panel("max_over_time(m[60m] offset 10m)", 600_000, None),
         &no_raw_data,
     );

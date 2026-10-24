@@ -12,7 +12,9 @@ use asap_executor::physical_planner::{
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, SchemaRef, Value};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::{logical_candidates, selected_dag};
+use asap_integration_tests::planning::{
+    explicit_local_candidates, explicit_summary_candidate, selected_dag,
+};
 use asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy;
 use asap_types::ir::operator::maintained_population::PopulationInput;
 use asap_types::ir::operator::Source;
@@ -60,7 +62,7 @@ fn selected_with(query: &str, series_identity: bool, accuracy: AccuracyTarget) -
 fn sketch_candidate(query: &str) -> Rc<OperatorNode> {
     let accuracy = AccuracyTarget::max_error(0.01);
     let root = lower_promql(query, accuracy.clone()).unwrap();
-    logical_candidates(root, accuracy)
+    explicit_local_candidates(root)
         .into_iter()
         .find(|candidate| {
             OperatorNode::reachable(candidate).iter().any(|node| {
@@ -279,10 +281,12 @@ fn mixed_placement_answers_like_query_time() {
             })
             .collect()
     };
-    let root = logical_candidates(root, accuracy)
-        .into_iter()
-        .find(|candidate| sketches(candidate).len() == 2)
-        .expect("a candidate with two sketches");
+    let root = explicit_summary_candidate(root, asap_types::ir::schema::SketchAlgorithm::Kll);
+    assert_eq!(
+        sketches(&root).len(),
+        2,
+        "two explicitly selected KLL builds"
+    );
     let mut mixed = MaterializationAssignment::default();
     mixed.set(&sketches(&root)[0], AT_INGESTION);
     let mut answers = Vec::new();

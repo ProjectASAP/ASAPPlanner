@@ -10,7 +10,7 @@
 use std::rc::Rc;
 
 use asap_integration_tests::physical_export::{at_ingestion, physical_asap_dag, timed};
-use asap_integration_tests::planning::logical_candidates;
+use asap_integration_tests::planning::explicit_local_candidates;
 use asap_types::ir::operator::agg_intent::{default_quantile, AggIntent};
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -82,7 +82,7 @@ fn fine_quantile() -> Rc<OperatorNode> {
 /// ε = 0.01) whose outer aggregate stays exact over the inner summary
 /// evaluation: the read-time composition.
 fn composed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    logical_candidates(Rc::clone(root), AccuracyTarget::max_error(0.01))
+    explicit_local_candidates(Rc::clone(root))
         .into_iter()
         .find(|candidate| {
             !matches!(
@@ -187,7 +187,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
     for (inner, kind) in cases {
         let outer = agg(vec![], default_quantile(0.9), inner);
         // The KLL candidate over the inner exact accumulator.
-        let root = logical_candidates(Rc::clone(&outer), AccuracyTarget::max_error(0.01))
+        let root = explicit_local_candidates(Rc::clone(&outer))
             .into_iter()
             .map(|candidate| Rc::clone(below_projects(&candidate)))
             .find(|candidate| {

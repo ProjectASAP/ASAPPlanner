@@ -215,6 +215,60 @@ pub mod planning {
         }
     }
 
+    /// Exact computation and each explicit single-target rule application.
+    /// This fixture catalog is independent of the bounded MILP's visited plans.
+    pub fn explicit_local_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
+        use asap_logical_asap_optimization::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates,
+        };
+        let local =
+            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
+        for (target, options) in local.targets.iter().enumerate() {
+            for choice in 1..options.choice_count() {
+                let mut selected = vec![0; local.targets.len()];
+                selected[target] = choice;
+                choices.insert(selected);
+            }
+        }
+        choices
+            .into_iter()
+            .map(|choice| {
+                match compose_logical_candidate(&local, &choice)
+                    .expect("explicit local rule composes")
+                    .remove(0)
+                    .1
+                {
+                    QueryRoot::Operator(node) => node,
+                    QueryRoot::Scalar(_) => panic!("operator fixture"),
+                }
+            })
+            .collect()
+    }
+
+    /// One explicit plan using `family` wherever a local target supports it,
+    /// keeping all other computations exact. No workload Cartesian enumeration.
+    pub fn explicit_summary_candidate(
+        root: Rc<OperatorNode>,
+        family: asap_types::ir::schema::SketchAlgorithm,
+    ) -> Rc<OperatorNode> {
+        use asap_logical_asap_optimization::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        };
+        let local =
+            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let choices = local.targets.iter().map(|target| target.choices.candidates.iter()
+            .position(|candidate| matches!(candidate, ComputationCandidate::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
+        match compose_logical_candidate(&local, &choices)
+            .expect("explicit family choices compose")
+            .remove(0)
+            .1
+        {
+            QueryRoot::Operator(node) => node,
+            QueryRoot::Scalar(_) => panic!("operator fixture"),
+        }
+    }
+
     /// Every logical candidate (a composed CandidateLogicalASAPDAG) of the
     /// single query `root`, in enumeration order; a candidate that does not
     /// compose panics, so none is silently skipped.
