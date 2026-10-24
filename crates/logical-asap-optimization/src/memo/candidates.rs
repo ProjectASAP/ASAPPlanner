@@ -38,9 +38,11 @@ pub struct ImplementationCandidate {
     pub coupling_sites: Vec<CouplingSite>,
     /// The number of equal shares of its measures' accuracy budget its
     /// summaries are sized for: 1 for the whole budget, `n` when it is one
-    /// of `n` approximate inputs of a query (a ratio's operand). Valid in a
-    /// plan only when `n` is the largest number of approximate inputs among
-    /// the queries that read it.
+    /// of `n` approximate inputs of a query (a ratio's operand). This positive
+    /// generation parameter is already encoded in concrete sketch parameters;
+    /// it is not an equality constraint on the selected number of readers or
+    /// approximate inputs. Recompose and validate accuracy at query roots.
+    /// Larger allocations may be valid but costlier than necessary.
     pub budget_share: usize,
     /// Groups whose chosen implementation must be exact for this one to
     /// be valid (a rollup's finer group, a top-k reuse's input group); a

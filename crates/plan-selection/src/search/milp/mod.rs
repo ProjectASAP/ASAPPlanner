@@ -11,7 +11,12 @@ pub(crate) mod model;
 pub(crate) mod report;
 
 // Candidate-connection core being integrated into the staged memo pipeline.
+pub(crate) mod candidate_configurations;
 pub(crate) mod candidate_connections;
+pub(crate) mod candidate_demand;
 
 pub(crate) mod candidate_inventory;
+pub(crate) mod candidate_physical;
+pub(crate) mod candidate_planner;
 pub(crate) mod candidate_reconstruction;
+pub(crate) mod candidate_search;

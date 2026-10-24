@@ -146,3 +146,13 @@ The first implementation change should establish the stage/memo ownership bounda
 - Pending: Pass 1 rule generation directly into memo groups, shared-state contracts, arbitrary candidate connections, complete cost-model migration, a strict planning-time budget, and deletion of legacy search/fallback. The baseline now tries at most 16 local memo assignments and three materialization policies per query, without calling the legacy route or materializing all combinations. A strict wall-clock budget across generation and evaluators remains pending.
 
 The current first draft preserves legacy runtime behavior while preparing its removal. It must not be described as completion of the full implementation plan.
+
+## Execution-context integration progress
+
+The follow-up implementation adds selected-output reach constraints, distinct-query reader counts, and a finite configuration inventory with query/ingestion timing and supported summary materializations. It evaluates eligibility for selected readers rather than intersecting all potential consumers. Non-summary highest-shared materialization and implementation rewrites that change candidate identity remain unsupported by this bridge.
+
+Execution-rate accounting is shared with the existing evaluator. A selected-graph demand reference preserves materialized consumer identities, per-request retained-state rates, scalar output references, and ingestion/query timing boundaries. Concrete positive accuracy-budget configurations are admitted; root guarantee recomposition and Stage 3 validation decide whether their composition is accurate enough.
+
+A bounded refinement loop now reconstructs configurations through Stage 2 and prices them with `PlanSelector` under usage and provisioned-price objectives, with a frozen calibration fit. It retains a validated incumbent and reports its bound, gap, and stopping reason. Exact observed full-assignment cost cuts include absent as well as selected decisions; only proven rejected assignments are excluded. Internal or unsupported reconstruction failures remain diagnostics.
+
+This path is still opt-in internally. Its initial zero lower bounds and full-assignment cuts are a correctness foundation, not a scalability claim. Remaining work includes finer contextual bounds/cuts, cluster lexicographic/Pareto objectives, complete rule and physical-implementation coverage, production routing, baseline/budget integration, benchmark evidence, and legacy deletion.

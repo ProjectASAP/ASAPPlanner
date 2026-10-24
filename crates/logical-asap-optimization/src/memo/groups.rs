@@ -22,11 +22,11 @@
 //! into `n` equal shares, so a summary's size depends on its readers: each
 //! sketch candidate is offered once per share `1..=n`, `n` the most
 //! approximate inputs a query reaching the group can have
-//! ([`ImplementationCandidate::budget_share`]). A plan is valid with the
-//! share composition gives: the most approximate inputs among the queries
-//! that read the summary, 1 when such a query's value carries no
-//! guarantee. A smaller share fails the reader's accuracy check, a larger
-//! one costs more.
+//! ([`ImplementationCandidate::budget_share`]). This records the sizing
+//! configuration used during generation; the concrete sketch parameters carry
+//! the resulting error contract. The connection planner may select a conservative
+//! larger configuration, and validates the recomposed query-root guarantee.
+//! The existing group-choice reference search retains its own sizing policy.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};

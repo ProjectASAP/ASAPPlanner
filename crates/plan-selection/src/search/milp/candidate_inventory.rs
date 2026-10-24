@@ -1,7 +1,7 @@
 //! Opt-in bridge from logical candidate memo to immediate candidate connections.
 //!
 //! The caller supplies node-local costs for one fixed accounting context. These
-//! are not runtime cost estimates. Consumer-dependent demand, accuracy budgets,
+//! are not runtime cost estimates. Consumer-dependent demand, composed accuracy validation,
 //! physical materialization assignments, and legacy coupling constraints remain
 //! unsupported and are never silently erased by this adapter. This is a logical
 //! inventory bridge for solver experiments, not Stage 2 physical enumeration.
@@ -84,8 +84,8 @@ pub(super) fn build_candidate_inventory(
                     "legacy shared-decision or implementation constraints",
                 ));
             }
-            if candidate.budget_share != 1 {
-                return Err(unsupported("composed accuracy budget shares"));
+            if candidate.budget_share == 0 {
+                return Err(unsupported("zero accuracy budget share"));
             }
             if !candidate.materializations.is_empty() {
                 return Err(unsupported("materialization eligibility restrictions"));
@@ -254,13 +254,8 @@ fn compatible_output(
     expected: &OperatorNode,
     producer: &OperatorNode,
 ) -> Result<bool, CandidateInventoryError> {
-    let serialize = |node: &OperatorNode| {
-        serde_json::to_string(&node.schema)
-            .map_err(|error| CandidateInventoryError::InvalidMemo(error.to_string()))
-    };
-    Ok(expected.result_kind == producer.result_kind
-        && expected.schema == producer.schema
-        && serialize(expected)? == serialize(producer)?)
+    super::candidate_reconstruction::output_contract_satisfied(expected, producer)
+        .map_err(CandidateInventoryError::InvalidMemo)
 }
 
 #[cfg(test)]
@@ -445,13 +440,13 @@ mod tests {
 
     // Unsupported decisions must fail adaptation, rather than disappear.
     #[test]
-    fn rejects_accuracy_shares_materialization_restrictions_and_invalid_costs() {
+    fn rejects_zero_accuracy_share_materialization_restrictions_and_invalid_costs() {
         let (mut memo, outputs) = quantile_memo();
-        memo.candidates[0][0].budget_share = 2;
+        memo.candidates[0][0].budget_share = 0;
         assert!(matches!(
             build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)),
             Err(CandidateInventoryError::Unsupported {
-                reason: "composed accuracy budget shares",
+                reason: "zero accuracy budget share",
                 ..
             })
         ));
@@ -471,5 +466,117 @@ mod tests {
             build_candidate_inventory(&memo, &outputs, |_| Ok(f64::NAN)),
             Err(CandidateInventoryError::Cost(_))
         ));
+    }
+    // Budget shares are concrete sizes: composed root accuracy, not the share
+    // label, decides feasibility. Oversizing one remaining estimate stays legal.
+    #[test]
+    fn ratio_accuracy_is_validated_after_selecting_concrete_budget_shares() {
+        use crate::{CalibrationFit, PlanSelector, PlanningModels, SelectionError};
+        use asap_logical_asap_optimization::accuracy::satisfies;
+        use asap_logical_asap_optimization::per_computation_candidates::root_guarantee;
+        use asap_logical_asap_optimization::test_support::entry_with;
+        use asap_physical_asap_optimization::optimize_physical_asap_chosen;
+        use asap_types::ir::properties::AccuracyMetric;
+        use asap_types::workload::{
+            DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
+            SourceFacts,
+        };
+
+        let target = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
+        let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
+        let roots = vec![(0, QueryRoot::Operator(lower_promql(query, target.clone())))];
+        let logical = LogicalMemo::from_roots(&roots);
+        let output = MemoGroupId(
+            logical
+                .groups
+                .iter()
+                .position(|group| group.roots_of.contains(&0))
+                .unwrap() as u32,
+        );
+        let generated = generate_per_computation_candidates(roots).unwrap();
+        let original = try_populate_pass1(logical, &generated).unwrap();
+        assert!(original
+            .candidates
+            .iter()
+            .flatten()
+            .any(|candidate| candidate.budget_share == 2));
+        // The complete generated inventory must no longer fail merely because
+        // it includes composed-budget sizes alongside whole-budget sizes.
+        build_candidate_inventory(&original, &[output], |_| Ok(0.0)).unwrap();
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1000.0,
+            },
+            sources: [(
+                "m".into(),
+                SourceFacts {
+                    series_count: Some(1),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let entries = [entry_with(
+            target.clone(),
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000))),
+        )];
+        let models = PlanningModels::builtin();
+        for (share, one_exact, valid) in [(1, false, false), (2, false, true), (2, true, true)] {
+            let mut memo = original.clone();
+            let mut made_exact = false;
+            let mut approximate_groups = 0;
+            for candidates in &mut memo.candidates {
+                let sized: Vec<_> = candidates.iter().filter(|candidate| candidate.budget_share == share
+                    && OperatorNode::reachable(&candidate.node).iter().any(|node|
+                        matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind.algorithm() == SketchAlgorithm::DDSketch)))
+                    .cloned().collect();
+                if sized.is_empty() {
+                    continue;
+                }
+                approximate_groups += 1;
+                if one_exact && !made_exact {
+                    candidates.retain(|candidate| !candidate.node.contains_asap());
+                    assert!(!candidates.is_empty());
+                    made_exact = true;
+                } else {
+                    *candidates = sized;
+                }
+            }
+            assert_eq!(approximate_groups, 2);
+            let inventory = build_candidate_inventory(&memo, &[output], |_| Ok(1.0)).unwrap();
+            let selected = select_candidates(&inventory.graph).unwrap().unwrap();
+            let outputs =
+                reconstruct_candidate_outputs(&inventory.graph, &selected, &inventory.templates)
+                    .unwrap();
+            let roots = vec![QueryRoot::Operator(Rc::clone(&outputs[0]))];
+            let guarantee =
+                root_guarantee(&roots[0]).expect("relative ratio has a composed guarantee");
+            assert_eq!(
+                satisfies(&guarantee, &target),
+                valid,
+                "share={share}, one_exact={one_exact}, {guarantee:?}"
+            );
+            let physical = optimize_physical_asap_chosen(
+                "ratio-shares",
+                &roots,
+                &entries,
+                &data,
+                models.deployment_capabilities,
+                &mut |_, _, _| Materialization::NotMaterialized,
+            )
+            .unwrap()
+            .unwrap();
+            let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
+            selector.set_calibration(CalibrationFit::default());
+            selector.offer(&physical).unwrap();
+            match selector.finish() {
+                Ok(_) => assert!(valid, "undersized ratio must fail end-to-end accuracy"),
+                Err(SelectionError::NoValidCandidate(_)) => {
+                    assert!(!valid, "properly sized ratio must be accepted")
+                }
+                Err(error) => panic!("unexpected evaluation error: {error}"),
+            }
+        }
     }
 }

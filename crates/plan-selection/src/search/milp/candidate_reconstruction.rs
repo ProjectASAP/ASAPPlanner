@@ -2,6 +2,7 @@
 //!
 //! This decoder checks typed connections, not Stage 2 execution legality or
 //! query accuracy targets. The caller must run Stage 2 and the plan validator.
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
@@ -28,6 +29,24 @@ fn ordered_inputs(node: &OperatorNode) -> Vec<Rc<OperatorNode>> {
     inputs
 }
 
+/// Open schemas do not promise completeness; an equivalent derived output may
+/// strengthen that promise to closed. Every field, configuration parameter,
+/// time axis and key remains exact. Serialization includes sketch error/failure
+/// metadata deliberately omitted by some parameter PartialEq implementations.
+pub(super) fn output_contract_satisfied(
+    expected: &OperatorNode,
+    output: &OperatorNode,
+) -> Result<bool, String> {
+    let mut supplied = output.schema.clone();
+    if !expected.schema.closed {
+        supplied.closed = false;
+    }
+    Ok(expected.result_kind == output.result_kind
+        && expected.schema == supplied
+        && serde_json::to_string(&expected.schema).map_err(|error| error.to_string())?
+            == serde_json::to_string(&supplied).map_err(|error| error.to_string())?)
+}
+
 /// Operator output references in `graph.query_roots` order. A caller with scalar
 /// roots must map these references back into its original scalar expressions
 /// (and preserve literal-only roots); an output reference is not a whole query.
@@ -38,6 +57,20 @@ pub(super) fn reconstruct_candidate_outputs(
     selected: &SelectedCandidateGraph,
     templates: &CandidateOperatorTemplates,
 ) -> Result<Vec<Rc<OperatorNode>>, String> {
+    Ok(reconstruct_selected_candidates(graph, selected, templates)?.outputs)
+}
+
+pub(super) struct ReconstructedCandidates {
+    pub outputs: Vec<Rc<OperatorNode>>,
+    /// Recomputed guarantees and the same globally unique candidate identity.
+    pub nodes_by_candidate: Vec<Option<Rc<OperatorNode>>>,
+}
+
+pub(super) fn reconstruct_selected_candidates(
+    graph: &CandidateDependencyGraph,
+    selected: &SelectedCandidateGraph,
+    templates: &CandidateOperatorTemplates,
+) -> Result<ReconstructedCandidates, String> {
     graph.validate().map_err(|e| e.to_string())?;
     validate_selected_graph(graph, selected)?;
     let count = graph.candidates.len();
@@ -74,13 +107,7 @@ pub(super) fn reconstruct_candidate_outputs(
         let mut producers = Vec::with_capacity(inputs[id].len());
         for (position, producer) in inputs[id].iter().enumerate() {
             let producer = rebuilt[producer.unwrap().0].as_ref().unwrap();
-            // Serialization includes sketch error/failure parameters whose
-            // PartialEq intentionally omits some sizing metadata.
-            if expected[position].result_kind != producer.result_kind
-                || expected[position].schema != producer.schema
-                || serde_json::to_value(&expected[position].schema).map_err(|e| e.to_string())?
-                    != serde_json::to_value(&producer.schema).map_err(|e| e.to_string())?
-            {
+            if !output_contract_satisfied(&expected[position], producer)? {
                 return Err(format!("candidate {id} input {position} has incompatible schema or state configuration"));
             }
             producers.push(Rc::clone(producer));
@@ -116,14 +143,86 @@ pub(super) fn reconstruct_candidate_outputs(
         )));
     }
     let roots = roots.into_iter().map(Option::unwrap).collect::<Vec<_>>();
-    recompose_guarantees(&roots)
+    let outputs = recompose_guarantees(&roots)
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|root| match root {
             QueryRoot::Operator(node) => Ok(node),
             QueryRoot::Scalar(_) => Err("unexpected scalar during operator reconstruction".into()),
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    let old_outputs = roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => Rc::clone(node),
+            QueryRoot::Scalar(_) => unreachable!("operator references were constructed above"),
+        })
+        .collect::<Vec<_>>();
+    let identities = paired_node_identities(&old_outputs, &outputs)?;
+    let nodes_by_candidate = rebuilt
+        .into_iter()
+        .map(|node| {
+            node.map(|node| {
+                identities
+                    .get(&Rc::as_ptr(&node))
+                    .cloned()
+                    .ok_or_else(|| "candidate lost during guarantee recomposition".to_string())
+            })
+            .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ReconstructedCandidates {
+        outputs,
+        nodes_by_candidate,
+    })
+}
+
+/// Match corresponding graph positions without structural interning. Reject
+/// splitting or merging identities, and rewrites that change immediate operators.
+pub(super) fn paired_node_identities(
+    before: &[Rc<OperatorNode>],
+    after: &[Rc<OperatorNode>],
+) -> Result<HashMap<*const OperatorNode, Rc<OperatorNode>>, String> {
+    if before.len() != after.len() {
+        return Err("output reference count changed".into());
+    }
+    let mut identities = HashMap::<*const OperatorNode, Rc<OperatorNode>>::new();
+    let mut reverse = HashMap::new();
+    let mut pending = before
+        .iter()
+        .cloned()
+        .zip(after.iter().cloned())
+        .collect::<Vec<_>>();
+    while let Some((old, new)) = pending.pop() {
+        if let Some(existing) = identities.get(&Rc::as_ptr(&old)) {
+            if !Rc::ptr_eq(existing, &new) {
+                return Err("selected candidate was split into multiple physical instances".into());
+            }
+            continue;
+        }
+        if reverse
+            .insert(Rc::as_ptr(&new), Rc::as_ptr(&old))
+            .is_some_and(|previous| previous != Rc::as_ptr(&old))
+        {
+            return Err("distinct selected candidates were merged".into());
+        }
+        let old_operator = old.operator.map_children(|_| ());
+        let new_operator = new.operator.map_children(|_| ());
+        if old_operator != new_operator
+            || serde_json::to_string(&old_operator).map_err(|e| e.to_string())?
+                != serde_json::to_string(&new_operator).map_err(|e| e.to_string())?
+        {
+            return Err("operator implementation changed; explicit physical candidate enumeration is required".into());
+        }
+        let old_children = ordered_inputs(&old);
+        let new_children = ordered_inputs(&new);
+        if old_children.len() != new_children.len() {
+            return Err("candidate input count changed".into());
+        }
+        pending.extend(old_children.into_iter().zip(new_children));
+        identities.insert(Rc::as_ptr(&old), new);
+    }
+    Ok(identities)
 }
 
 #[cfg(test)]
@@ -325,5 +424,31 @@ mod tests {
         assert_eq!(cols[1].alias.as_deref(), Some("constant"));
         assert_eq!(cols[1].expr, ScalarExpr::Literal(ScalarValue::Float64(7.0)));
         assert!(qualifier.is_none());
+    }
+    // Completeness may strengthen, but names, nullability, time and keys cannot drift.
+    #[test]
+    fn output_contract_allows_only_open_to_closed_refinement() {
+        let node = lower_promql(
+            "metric",
+            asap_types::ir::properties::AccuracyTarget::exact(),
+        );
+        let mut expected = (*node).clone();
+        expected.schema.closed = false;
+        let mut supplied = expected.clone();
+        supplied.schema.closed = true;
+        assert!(output_contract_satisfied(&expected, &supplied).unwrap());
+        assert!(!output_contract_satisfied(&supplied, &expected).unwrap());
+        let mut renamed = supplied.clone();
+        renamed.schema.fields[0].name.push_str("_changed");
+        assert!(!output_contract_satisfied(&expected, &renamed).unwrap());
+        let mut nullable = supplied.clone();
+        nullable.schema.fields[0].nullable = !nullable.schema.fields[0].nullable;
+        assert!(!output_contract_satisfied(&expected, &nullable).unwrap());
+        let mut timeless = supplied.clone();
+        timeless.schema.time_index = None;
+        assert!(!output_contract_satisfied(&expected, &timeless).unwrap());
+        let mut keyed = supplied.clone();
+        keyed.schema.unique_keys.push(vec![0]);
+        assert!(!output_contract_satisfied(&expected, &keyed).unwrap());
     }
 }

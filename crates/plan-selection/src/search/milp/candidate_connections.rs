@@ -51,11 +51,34 @@ pub(crate) struct ResourceBudget {
     pub candidate_usage: Vec<f64>,
 }
 
+/// Legality conditioned on selected downstream outputs, not potential consumers.
+/// References index `query_roots`; multiple references of one query stay distinct.
+#[derive(Debug, Clone)]
+pub(crate) enum ReaderConstraint {
+    /// Each bucket is one query's output references; together they partition
+    /// every output exactly once. Empty buckets represent literal-only queries.
+    MinimumQueryReaders {
+        candidate: PhysicalCandidateId,
+        query_outputs: Vec<Vec<usize>>,
+        minimum: usize,
+    },
+    AllowedOutputs {
+        candidate: PhysicalCandidateId,
+        outputs: Vec<usize>,
+    },
+    IncompatibleOutputs {
+        candidate: PhysicalCandidateId,
+        left: usize,
+        right: usize,
+    },
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CandidateDependencyGraph {
     pub candidates: Vec<PhysicalCandidate>,
     pub query_roots: Vec<QueryRootCandidates>,
     pub resource_budgets: Vec<ResourceBudget>,
+    pub reader_constraints: Vec<ReaderConstraint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +172,41 @@ impl CandidateDependencyGraph {
                 )));
             }
         }
+        for requirement in &self.reader_constraints {
+            let (candidate, outputs) = match requirement {
+                ReaderConstraint::MinimumQueryReaders {
+                    candidate,
+                    query_outputs,
+                    ..
+                } => {
+                    let outputs: Vec<_> = query_outputs.iter().flatten().copied().collect();
+                    let unique: HashSet<_> = outputs.iter().copied().collect();
+                    if outputs.len() != self.query_roots.len() || unique.len() != outputs.len() {
+                        return Err(CandidateSelectionError::InvalidGraph(
+                            "query reader buckets must partition every output exactly once".into(),
+                        ));
+                    }
+                    (*candidate, outputs)
+                }
+                ReaderConstraint::AllowedOutputs { candidate, outputs } => {
+                    (*candidate, outputs.clone())
+                }
+                ReaderConstraint::IncompatibleOutputs {
+                    candidate,
+                    left,
+                    right,
+                } => (*candidate, vec![*left, *right]),
+            };
+            if candidate.0 >= self.candidates.len()
+                || outputs
+                    .iter()
+                    .any(|&output| output >= self.query_roots.len())
+            {
+                return Err(CandidateSelectionError::InvalidGraph(
+                    "reader constraint references missing candidate or output".into(),
+                ));
+            }
+        }
         let mut total_cost = 0.0;
         for (index, candidate) in self.candidates.iter().enumerate() {
             if !candidate.local_cost.is_finite() || candidate.local_cost < 0.0 {
@@ -197,13 +255,68 @@ impl CandidateDependencyGraph {
 pub(crate) fn select_candidates(
     graph: &CandidateDependencyGraph,
 ) -> Result<Option<SelectedCandidateGraph>, CandidateSelectionError> {
+    Ok(solve_candidate_proposal(graph, &[], None)?.map(|proposal| proposal.selected))
+}
+
+/// One validated observation over every candidate, connection and output decision.
+/// `None` excludes an infeasible assignment; a cost supplies its exact objective.
+#[derive(Debug, Clone)]
+pub(super) struct ObservedAssignment {
+    pub selected: SelectedCandidateGraph,
+    pub exact_cost: Option<f64>,
+}
+
+#[derive(Debug)]
+pub(super) struct CandidateProposal {
+    pub selected: SelectedCandidateGraph,
+    /// Optimal relaxation objective, distinct from selected.modeled_cost (local sum).
+    pub model_lower_bound: f64,
+}
+
+/// Solve a lower-bound model refined only at observed complete assignments.
+/// A solver timeout is an error, never a proven optimum or infeasibility.
+pub(super) fn solve_candidate_proposal(
+    graph: &CandidateDependencyGraph,
+    observations: &[ObservedAssignment],
+    remaining_seconds: Option<f64>,
+) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
+    let started = std::time::Instant::now();
     graph.validate()?;
+    if remaining_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds <= 0.0) {
+        return Err(CandidateSelectionError::Solver(
+            "no positive solver time remains".into(),
+        ));
+    }
+    for observation in observations {
+        validate_selected_graph(graph, &observation.selected)
+            .map_err(CandidateSelectionError::InvalidGraph)?;
+        if observation
+            .exact_cost
+            .is_some_and(|cost| !cost.is_finite() || cost < observation.selected.modeled_cost)
+        {
+            return Err(CandidateSelectionError::InvalidGraph(
+                "observed cost must be finite and at least its certified local bound".into(),
+            ));
+        }
+    }
     if graph.query_roots.is_empty() {
-        return Ok(Some(SelectedCandidateGraph {
-            selected_candidates: Vec::new(),
-            connections: Vec::new(),
-            query_roots: Vec::new(),
-            modeled_cost: 0.0,
+        if observations
+            .iter()
+            .any(|observation| observation.exact_cost.is_none())
+        {
+            return Ok(None);
+        }
+        return Ok(Some(CandidateProposal {
+            selected: SelectedCandidateGraph {
+                selected_candidates: Vec::new(),
+                connections: Vec::new(),
+                query_roots: Vec::new(),
+                modeled_cost: 0.0,
+            },
+            model_lower_bound: observations
+                .iter()
+                .filter_map(|observation| observation.exact_cost)
+                .fold(0.0, f64::max),
         }));
     }
     if graph
@@ -274,6 +387,117 @@ pub(crate) fn select_candidates(
         }
         constraints.push(constraint!(root_selected == 1));
     }
+    if !graph.reader_constraints.is_empty() {
+        // Allocate only potentially reachable output/candidate pairs. Selected
+        // edges determine actual reach; incompatible potential readers do not
+        // rule out a candidate used by a compatible subset.
+        let mut reach = Vec::with_capacity(graph.query_roots.len());
+        for root in &graph.query_roots {
+            let mut potential = vec![false; count];
+            let mut pending = root.compatible_candidates.clone();
+            while let Some(candidate) = pending.pop() {
+                if !potential[candidate.0] {
+                    potential[candidate.0] = true;
+                    pending.extend(
+                        graph.candidates[candidate.0]
+                            .producer_requirements
+                            .iter()
+                            .flat_map(|input| input.compatible_producers.iter().copied()),
+                    );
+                }
+            }
+            reach.push(
+                potential
+                    .into_iter()
+                    .map(|possible| possible.then(|| variables.add(variable().binary())))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for (output, reachable) in reach.iter().enumerate() {
+            let mut demanded = vec![Expression::from(0.0); count];
+            for (root, selected) in &root_assignments {
+                if root.query_root == output {
+                    let target =
+                        reachable[root.candidate.0].expect("root is potentially reachable");
+                    constraints.push(constraint!(*selected <= target));
+                    demanded[root.candidate.0] += *selected;
+                }
+            }
+            for (edge, connected) in &connections {
+                if let Some(consumer_reached) = reachable[edge.consumer.0] {
+                    let producer_reached =
+                        reachable[edge.producer.0].expect("producer of reachable consumer");
+                    let used = variables.add(variable().binary());
+                    constraints.push(constraint!(used <= consumer_reached));
+                    constraints.push(constraint!(used <= *connected));
+                    constraints.push(constraint!(used >= consumer_reached + *connected - 1));
+                    constraints.push(constraint!(used <= producer_reached));
+                    demanded[edge.producer.0] += used;
+                }
+            }
+            for (candidate, variable) in reachable.iter().enumerate() {
+                if let Some(reached) = variable {
+                    constraints.push(constraint!(*reached <= demanded[candidate].clone()));
+                    constraints.push(constraint!(*reached <= candidate_selected[candidate]));
+                }
+            }
+        }
+        for requirement in &graph.reader_constraints {
+            match requirement {
+                ReaderConstraint::MinimumQueryReaders {
+                    candidate,
+                    query_outputs,
+                    minimum,
+                } => {
+                    if *minimum > query_outputs.len() {
+                        constraints.push(constraint!(candidate_selected[candidate.0] == 0));
+                        continue;
+                    }
+                    let mut readers = Expression::from(0.0);
+                    for outputs in query_outputs {
+                        let reached: Vec<_> = outputs
+                            .iter()
+                            .filter_map(|&output| reach[output][candidate.0])
+                            .collect();
+                        if reached.is_empty() {
+                            continue;
+                        }
+                        let query_reached = variables.add(variable().binary());
+                        let mut any_output = Expression::from(0.0);
+                        for output_reached in reached {
+                            constraints.push(constraint!(query_reached >= output_reached));
+                            any_output += output_reached;
+                        }
+                        constraints.push(constraint!(query_reached <= any_output));
+                        readers += query_reached;
+                    }
+                    constraints.push(constraint!(
+                        readers >= *minimum as f64 * candidate_selected[candidate.0]
+                    ));
+                }
+                ReaderConstraint::AllowedOutputs { candidate, outputs } => {
+                    for (output, reachable) in reach.iter().enumerate() {
+                        if !outputs.contains(&output) {
+                            if let Some(reached) = reachable[candidate.0] {
+                                constraints.push(constraint!(reached == 0));
+                            }
+                        }
+                    }
+                }
+                ReaderConstraint::IncompatibleOutputs {
+                    candidate,
+                    left,
+                    right,
+                } => {
+                    if let (Some(left), Some(right)) =
+                        (reach[*left][candidate.0], reach[*right][candidate.0])
+                    {
+                        constraints.push(constraint!(left + right <= 1));
+                    }
+                }
+            }
+        }
+    }
     for candidate in 0..count {
         constraints.push(constraint!(
             candidate_selected[candidate] <= support[candidate].clone()
@@ -302,23 +526,87 @@ pub(crate) fn select_candidates(
         .iter()
         .map(|c| c.local_cost)
         .fold(0.0, f64::max);
+    let maximum_cost = observations
+        .iter()
+        .filter_map(|observation| observation.exact_cost)
+        .fold(maximum_cost, f64::max);
     let divisor = if maximum_cost > 0.0 {
         maximum_cost
     } else {
         1.0
     };
-    let objective: Expression = graph
+    if graph
+        .candidates
+        .iter()
+        .map(|candidate| candidate.local_cost)
+        .chain(
+            observations
+                .iter()
+                .filter_map(|observation| observation.exact_cost),
+        )
+        .any(|cost| cost > 0.0 && cost / divisor < MINIMUM_RELATIVE_COEFFICIENT)
+    {
+        return Err(CandidateSelectionError::InvalidGraph(
+            "observed costs and local bounds exceed supported numerical range".into(),
+        ));
+    }
+    let local_bound: Expression = graph
         .candidates
         .iter()
         .enumerate()
         .map(|(index, candidate)| (candidate.local_cost / divisor) * candidate_selected[index])
         .sum();
-    let model = variables
-        .minimise(objective)
+    let total_cost = variables.add(variable().min(0.0));
+    constraints.push(constraint!(total_cost >= local_bound));
+    for observation in observations {
+        let mut mismatch = Expression::from(0.0);
+        for (id, &variable) in candidate_selected.iter().enumerate() {
+            if observation
+                .selected
+                .selected_candidates
+                .contains(&PhysicalCandidateId(id))
+            {
+                mismatch += 1.0 - variable;
+            } else {
+                mismatch += variable;
+            }
+        }
+        for (connection, variable) in &connections {
+            if observation.selected.connections.contains(connection) {
+                mismatch += 1.0 - *variable;
+            } else {
+                mismatch += *variable;
+            }
+        }
+        for (assignment, variable) in &root_assignments {
+            if observation.selected.query_roots.contains(assignment) {
+                mismatch += 1.0 - *variable;
+            } else {
+                mismatch += *variable;
+            }
+        }
+        match observation.exact_cost {
+            Some(cost) => constraints.push(constraint!(
+                total_cost >= (cost / divisor) * (1.0 - mismatch)
+            )),
+            None => constraints.push(constraint!(mismatch >= 1.0)),
+        }
+    }
+    let mut model = variables
+        .minimise(total_cost)
         .using(highs)
         .set_option("mip_rel_gap", 0.0)
         .set_option("mip_abs_gap", 0.0)
         .with_all(constraints);
+    if let Some(seconds) = remaining_seconds {
+        let remaining = seconds - started.elapsed().as_secs_f64();
+        if remaining <= 0.0 {
+            return Err(CandidateSelectionError::Solver(
+                "time budget exhausted constructing model".into(),
+            ));
+        }
+        model = model.set_option("time_limit", remaining);
+    }
     let solution = match model.solve() {
         Ok(solution) => solution,
         Err(ResolutionError::Infeasible) => return Ok(None),
@@ -355,7 +643,16 @@ pub(crate) fn select_candidates(
         modeled_cost,
     };
     validate_selected_graph(graph, &selected).map_err(CandidateSelectionError::Solver)?;
-    Ok(Some(selected))
+    let model_lower_bound = solution.value(total_cost) * divisor;
+    if !model_lower_bound.is_finite() || model_lower_bound < 0.0 {
+        return Err(CandidateSelectionError::Solver(
+            "invalid lower-bound objective".into(),
+        ));
+    }
+    Ok(Some(CandidateProposal {
+        selected,
+        model_lower_bound,
+    }))
 }
 
 /// Check the decoded integral graph instead of trusting rounded solver values.
@@ -460,6 +757,52 @@ pub(super) fn validate_selected_graph(
             pending.extend(producers[candidate.0].iter().flatten().copied());
         }
     }
+    // Reuse one traversal per output across all reader-compatibility checks.
+    let mut output_reach = Vec::new();
+    if !graph.reader_constraints.is_empty() {
+        output_reach = vec![HashSet::new(); graph.query_roots.len()];
+        for root in &selected.query_roots {
+            let reached = &mut output_reach[root.query_root];
+            let mut pending = vec![root.candidate];
+            while let Some(candidate) = pending.pop() {
+                if reached.insert(candidate) {
+                    pending.extend(producers[candidate.0].iter().flatten().copied());
+                }
+            }
+        }
+    }
+    let output_reaches =
+        |output: usize, target: PhysicalCandidateId| output_reach[output].contains(&target);
+    for requirement in &graph.reader_constraints {
+        let violated = match requirement {
+            ReaderConstraint::MinimumQueryReaders {
+                candidate,
+                query_outputs,
+                minimum,
+            } => {
+                active.contains(candidate)
+                    && query_outputs
+                        .iter()
+                        .filter(|outputs| {
+                            outputs
+                                .iter()
+                                .any(|&output| output_reaches(output, *candidate))
+                        })
+                        .count()
+                        < *minimum
+            }
+            ReaderConstraint::AllowedOutputs { candidate, outputs } => (0..graph.query_roots.len())
+                .any(|output| !outputs.contains(&output) && output_reaches(output, *candidate)),
+            ReaderConstraint::IncompatibleOutputs {
+                candidate,
+                left,
+                right,
+            } => output_reaches(*left, *candidate) && output_reaches(*right, *candidate),
+        };
+        if violated {
+            return Err("decoded selection violates selected-reader compatibility".into());
+        }
+    }
     if reachable != active {
         return Err(invalid());
     }
@@ -533,6 +876,108 @@ mod tests {
         ));
     }
 
+    // An incompatible potential reader must choose another state, not disable it for everyone.
+    #[test]
+    fn reader_legality_depends_on_selected_transitive_connections() {
+        let mut graph = dependency_graph(
+            vec![
+                candidate(0, 2.0, &[]),
+                candidate(0, 5.0, &[]),
+                candidate(1, 1.0, &[&[0, 1]]),
+                candidate(2, 1.0, &[&[0, 1]]),
+                candidate(3, 0.0, &[&[2]]),
+            ],
+            &[&[4], &[3]],
+        );
+        assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 4.0);
+        graph
+            .reader_constraints
+            .push(ReaderConstraint::AllowedOutputs {
+                candidate: PhysicalCandidateId(0),
+                outputs: vec![0],
+            });
+        assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 7.0);
+        graph.reader_constraints.clear();
+        graph
+            .reader_constraints
+            .push(ReaderConstraint::IncompatibleOutputs {
+                candidate: PhysicalCandidateId(0),
+                left: 0,
+                right: 1,
+            });
+        assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 7.0);
+        graph
+            .reader_constraints
+            .push(ReaderConstraint::IncompatibleOutputs {
+                candidate: PhysicalCandidateId(1),
+                left: 0,
+                right: 1,
+            });
+        assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 9.0);
+    }
+
+    // Scalar output references count as one query; separate queries can enable sharing.
+    #[test]
+    fn minimum_readers_count_queries_not_output_references() {
+        let mut graph = dependency_graph(
+            vec![candidate(0, 1.0, &[]), candidate(0, 5.0, &[])],
+            &[&[0, 1], &[0, 1]],
+        );
+        graph
+            .reader_constraints
+            .push(ReaderConstraint::MinimumQueryReaders {
+                candidate: PhysicalCandidateId(0),
+                query_outputs: vec![vec![0, 1], vec![]],
+                minimum: 2,
+            });
+        let one_query = compare_with_oracle(&graph).unwrap();
+        assert_eq!(one_query.selected_candidates, vec![PhysicalCandidateId(1)]);
+        // Decoding must reject the same selected cheap state under the one-query mapping.
+        graph.reader_constraints.clear();
+        let invalid_shared = select_candidates(&graph).unwrap().unwrap();
+        graph
+            .reader_constraints
+            .push(ReaderConstraint::MinimumQueryReaders {
+                candidate: PhysicalCandidateId(0),
+                query_outputs: vec![vec![0, 1]],
+                minimum: 2,
+            });
+        assert!(validate_selected_graph(&graph, &invalid_shared).is_err());
+        graph.reader_constraints[0] = ReaderConstraint::MinimumQueryReaders {
+            candidate: PhysicalCandidateId(0),
+            query_outputs: vec![vec![0], vec![1], vec![]],
+            minimum: 2,
+        };
+        assert_eq!(
+            compare_with_oracle(&graph).unwrap().selected_candidates,
+            vec![PhysicalCandidateId(0)]
+        );
+    }
+
+    // Missing, repeated, and invalid references cannot define a query partition.
+    #[test]
+    fn minimum_reader_buckets_must_partition_outputs() {
+        for query_outputs in [
+            vec![vec![0]],
+            vec![vec![0, 0]],
+            vec![vec![0, 2]],
+            vec![vec![0], vec![1, 1]],
+        ] {
+            let mut graph = dependency_graph(vec![candidate(0, 1.0, &[])], &[&[0], &[0]]);
+            graph
+                .reader_constraints
+                .push(ReaderConstraint::MinimumQueryReaders {
+                    candidate: PhysicalCandidateId(0),
+                    query_outputs,
+                    minimum: 2,
+                });
+            assert!(matches!(
+                select_candidates(&graph),
+                Err(CandidateSelectionError::InvalidGraph(_))
+            ));
+        }
+    }
+
     fn candidate(group: u32, cost: f64, inputs: &[&[usize]]) -> PhysicalCandidate {
         PhysicalCandidate {
             group: MemoGroupId(group),
@@ -557,6 +1002,7 @@ mod tests {
         CandidateDependencyGraph {
             candidates,
             resource_budgets: Vec::new(),
+            reader_constraints: Vec::new(),
             query_roots: roots
                 .iter()
                 .map(|choices| QueryRootCandidates {
@@ -669,6 +1115,46 @@ mod tests {
                     .sum::<f64>()
                     > budget.capacity
             }) {
+                continue;
+            }
+            let reaches = |output: usize, target: PhysicalCandidateId| {
+                let mut individual = vec![0; graph.candidates.len()];
+                for (_, root) in selected_roots.iter().filter(|(q, _)| *q == output) {
+                    if !visit(*root, graph, &dependencies, &mut individual) {
+                        return false;
+                    }
+                }
+                individual[target.0] == 2
+            };
+            if graph
+                .reader_constraints
+                .iter()
+                .any(|requirement| match requirement {
+                    ReaderConstraint::MinimumQueryReaders {
+                        candidate,
+                        query_outputs,
+                        minimum,
+                    } => {
+                        marks[candidate.0] == 2
+                            && query_outputs
+                                .iter()
+                                .filter(|outputs| {
+                                    outputs.iter().any(|&output| reaches(output, *candidate))
+                                })
+                                .count()
+                                < *minimum
+                    }
+                    ReaderConstraint::AllowedOutputs { candidate, outputs } => {
+                        (0..graph.query_roots.len())
+                            .any(|output| !outputs.contains(&output) && reaches(output, *candidate))
+                    }
+                    ReaderConstraint::IncompatibleOutputs {
+                        candidate,
+                        left,
+                        right,
+                    } => reaches(*left, *candidate) && reaches(*right, *candidate),
+                })
+            {
                 continue;
             }
             let cost = graph
