@@ -11,7 +11,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::{compile_physical_asap_dag, logical_candidates, selected_dag};
+use common::{compile_physical_asap_dag, computation_candidates, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::AccuracyTarget;
@@ -409,7 +409,7 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
 #[test]
 fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
     let mut executed = 0;
-    for root in logical_candidates(grouped_rate_root(), AccuracyTarget::exact()) {
+    for root in computation_candidates(grouped_rate_root()) {
         let dag = compile_physical_asap_dag(&root).unwrap();
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(

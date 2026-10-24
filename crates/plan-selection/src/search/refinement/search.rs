@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use crate::search::candidates::graph::{
-    CandidateDependencyGraph, CandidateSelectionError, RejectedQuerySubgraph,
+    CandidateDependencyGraph, CandidateSelectionError, PhysicalCandidateId, RejectedQuerySubgraph,
     SelectedCandidateGraph,
 };
 use crate::search::milp::model::{
@@ -84,7 +84,7 @@ pub(in crate::search) fn search_candidates(
     limits: CandidateSearchLimits,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
 ) -> Result<CandidateSearchResult, String> {
-    search_with_structural_baseline(graph, limits, false, None, |selected| {
+    search_with_structural_baseline(graph, limits, false, None, &[], |selected| {
         evaluate(selected).map(Into::into)
     })
 }
@@ -115,13 +115,31 @@ pub(in crate::search) fn search_candidates_with_weighted_baseline(
     })
 }
 
+#[cfg(test)]
 pub(in crate::search) fn search_candidates_with_feedback(
     graph: &CandidateDependencyGraph,
     limits: CandidateSearchLimits,
     weights: Option<&[f64]>,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
-    search_with_structural_baseline(graph, limits, true, weights, evaluate)
+    search_with_structural_baseline(graph, limits, true, weights, &[], evaluate)
+}
+
+pub(in crate::search) fn search_candidates_with_restricted_feedback(
+    graph: &CandidateDependencyGraph,
+    limits: CandidateSearchLimits,
+    weights: &[f64],
+    excluded_from_seed: &[PhysicalCandidateId],
+    evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
+) -> Result<CandidateSearchResult, String> {
+    search_with_structural_baseline(
+        graph,
+        limits,
+        true,
+        Some(weights),
+        excluded_from_seed,
+        evaluate,
+    )
 }
 
 fn search_with_structural_baseline(
@@ -129,6 +147,7 @@ fn search_with_structural_baseline(
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
+    excluded_from_seed: &[PhysicalCandidateId],
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_solver(
@@ -136,6 +155,7 @@ fn search_with_structural_baseline(
         limits,
         structural_baseline,
         baseline_weights,
+        excluded_from_seed,
         evaluate,
         solve_candidate_proposal_with_metrics,
     )
@@ -146,6 +166,7 @@ fn search_with_solver(
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
+    excluded_from_seed: &[PhysicalCandidateId],
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
     mut propose: impl FnMut(
         &CandidateDependencyGraph,
@@ -165,6 +186,12 @@ fn search_with_solver(
     if baseline_weights.is_some_and(|weights| weights.len() != graph.candidates.len()) {
         return Err("baseline weights must be indexed by candidate ID".into());
     }
+    if excluded_from_seed
+        .iter()
+        .any(|id| id.0 >= graph.candidates.len())
+    {
+        return Err("baseline exclusion must reference a generated candidate".into());
+    }
     let mut heuristic_graph =
         structural_baseline.then(|| {
             let mut heuristic = graph.clone();
@@ -175,7 +202,7 @@ fn search_with_solver(
             // budget on interchangeable execution bindings. The certified search
             // retains every copy, including when this restricted seed is infeasible.
             use crate::search::candidates::graph::ReaderConstraint;
-            let extra_copies: Vec<_> = heuristic
+            let mut extra_copies: Vec<_> = heuristic
                 .reader_constraints
                 .iter()
                 .filter_map(|constraint| match constraint {
@@ -183,6 +210,11 @@ fn search_with_solver(
                     _ => None,
                 })
                 .collect();
+            // Contract-risk exclusions affect the feasibility seed only. They
+            // are not accuracy proofs or cuts in the certified full graph.
+            extra_copies.extend_from_slice(excluded_from_seed);
+            extra_copies.sort_unstable();
+            extra_copies.dedup();
             // Remove disabled-copy edges before model construction, retaining
             // global IDs so selected proposals still decode in the full graph.
             let mut disabled = vec![false; heuristic.candidates.len()];
@@ -462,6 +494,7 @@ mod tests {
             limits(2),
             false,
             None,
+            &[],
             |selected| {
                 Ok(Some(if selected.selected_candidates[0].0 == 0 {
                     20.0
@@ -596,6 +629,7 @@ mod tests {
             limits(1),
             true,
             None,
+            &[],
             |selected| {
                 assert_eq!(selected.selected_candidates.len(), 2);
                 Ok(Some(2.0).into())
@@ -697,6 +731,28 @@ mod tests {
         assert!(result.incumbent.is_none());
         assert_eq!(result.certified_query_cuts, 0);
         assert_eq!(result.solve_metrics.solve_calls, 1);
+    }
+
+    // A risky cheap contract cannot displace the feasible seed, but remains in
+    // the complete graph for normal evaluation rather than being silently pruned.
+    #[test]
+    fn seed_contract_exclusion_does_not_remove_full_search_candidates() {
+        let mut visited = Vec::new();
+        let result = search_candidates_with_restricted_feedback(
+            &choices(&[0.0, 0.0]),
+            limits(2),
+            &[1.0, 1_000_000.0],
+            &[PhysicalCandidateId(0)],
+            |selected| {
+                let id = selected.query_roots[0].candidate.0;
+                visited.push(id);
+                Ok((id == 1).then_some(2.0).into())
+            },
+        )
+        .unwrap();
+        assert_eq!(visited, vec![1, 0]);
+        assert_eq!(result.incumbent.unwrap().actual_cost, 2.0);
+        assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
     }
 
     // A baseline validation that overruns the shared deadline still retains its plan.

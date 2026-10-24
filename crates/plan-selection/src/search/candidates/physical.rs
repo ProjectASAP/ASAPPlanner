@@ -181,7 +181,10 @@ fn restore_query_roots(
     }
     for (reference, output) in references.iter().zip(outputs) {
         if !output_contract_satisfied(reference, output)? {
-            return Err("selected output reference has incompatible result or schema".into());
+            return Err(format!(
+                "selected output reference has incompatible result or schema: expected {:?} {:?}, received {:?} {:?}",
+                reference.result_kind, reference.schema, output.result_kind, output.schema
+            ));
         }
     }
     let mut next = outputs.iter();
@@ -539,7 +542,8 @@ mod tests {
         assert!(!output_contract_satisfied(&expected, &supplied).unwrap());
         supplied = (*expected).clone();
         supplied.schema.unique_keys.push(vec![0]);
-        assert!(!output_contract_satisfied(&expected, &supplied).unwrap());
+        assert!(output_contract_satisfied(&expected, &supplied).unwrap());
+        assert!(!output_contract_satisfied(&supplied, &expected).unwrap());
         supplied = (*expected).clone();
         supplied.schema.fields[0].name.push_str("_different");
         assert!(!output_contract_satisfied(&expected, &supplied).unwrap());

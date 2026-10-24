@@ -44,8 +44,8 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    // The installable plan: the selected DAG and its stored outputs (six
-    // ten-minute KLL panes).
+    // The installable plan: the selected DAG and its stored KLL panes.
+    // Pane width is chosen by the optimizer.
     let plan = plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
@@ -65,17 +65,21 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         .unwrap();
     // The pane's window at this evaluation, `(start_ms, end_ms]`.
     let (start_ms, end_ms) = output.inputs.raw_data_sample_windows[0].bounds_ms(EVALUATION_MS);
-    // What the runtime received: series `a` and `b`, one sample every 10 s
-    // over the pane's ten minutes.
+    // Feed both series within the selected pane, whose width is an optimizer
+    // decision. Keep distinct millisecond timestamps even for very fine panes.
+    let width_ms = end_ms - start_ms;
+    assert!(width_ms > 0);
+    let samples_per_series = width_ms.min(60);
+    let expected_rows = (2 * samples_per_series) as usize;
     let samples: Vec<RawDataSample> = ["a", "b"]
         .iter()
         .flat_map(|instance| {
-            (1..=60).map(move |step| RawDataSample {
+            (1..=samples_per_series).map(move |step| RawDataSample {
                 labels: BTreeMap::from([
                     ("__name__".to_string(), "latency_ms".to_string()),
                     ("instance".to_string(), instance.to_string()),
                 ]),
-                timestamp_ms: start_ms + step * 10_000,
+                timestamp_ms: start_ms + step * width_ms / samples_per_series,
                 value: step as f64,
             })
         })
@@ -84,9 +88,9 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     let selector =
         RawDataSampleSelector::new(&plan.dag.dag, &output.inputs.raw_data_sample_windows[0])
             .unwrap();
-    // The pane's input: the 120 samples as Arrow columns.
+    // The pane's input: both series' samples as Arrow columns.
     let input: Batch = selector.window_batch(end_ms, &samples).unwrap();
-    assert_eq!(input.num_rows(), 120);
+    assert_eq!(input.num_rows(), expected_rows);
     // The series identity column: one u32 key per sample into a dictionary
     // holding each series' identity once.
     let identity_column = input
@@ -96,7 +100,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         .position(|field| field.name == PROMQL_SERIES_IDENTITY)
         .unwrap();
     let identities = input.column(identity_column).as_dictionary::<UInt32Type>();
-    assert_eq!(identities.keys().len(), 120);
+    assert_eq!(identities.keys().len(), expected_rows);
     assert_eq!(identities.values().len(), 2);
     // The sample values: a plain Float64 array.
     let value_column = input

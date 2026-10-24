@@ -33,9 +33,7 @@ fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
         &lower_promql("count by(job)(up)", target.clone()).unwrap(),
     )
     .unwrap();
-    assert!(logical_candidates(Rc::clone(&root), target.clone())
-        .iter()
-        .any(reads_hydra));
+    assert!(logical_candidates(Rc::clone(&root)).iter().any(reads_hydra));
     assert!(!reads_hydra(&selected_dag(root, target)));
 }
 
@@ -66,7 +64,7 @@ fn frequency_count_candidates_use_unit_weights() {
     for query in ["count_over_time(up[5m])", "count(up)"] {
         let accuracy = AccuracyTarget::max_error(0.02);
         let root = lower_promql(query, accuracy.clone()).unwrap();
-        let candidates = logical_candidates(root, accuracy);
+        let candidates = logical_candidates(root);
         let mut algorithms = Vec::new();
         for node in &candidates {
             let Some(summary_input) =
@@ -229,7 +227,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     use asap_types::ir::scalar::ColumnRef;
     let accuracy = AccuracyTarget::max_error(0.02);
     let root = lower_promql("count_over_time(up[5m])", accuracy.clone()).unwrap();
-    let candidates = logical_candidates(root, accuracy);
+    let candidates = logical_candidates(root);
     let dag = candidates
         .iter()
         .find_map(|node| {
@@ -298,5 +296,5 @@ fn aggregate_over_topk_candidates_compose() {
         accuracy.clone(),
     )
     .unwrap();
-    assert!(!logical_candidates(root, accuracy).is_empty());
+    assert!(!logical_candidates(root).is_empty());
 }

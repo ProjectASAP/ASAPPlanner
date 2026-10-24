@@ -30,8 +30,9 @@ fn ordered_inputs(node: &OperatorNode) -> Vec<Rc<OperatorNode>> {
 }
 
 /// Open schemas do not promise completeness; an equivalent derived output may
-/// strengthen that promise to closed. Every field, configuration parameter,
-/// time axis and key remains exact. Serialization includes sketch error/failure
+/// strengthen that promise to closed. Supplied uniqueness must imply every
+/// required key; additional proven keys are allowed. Every field, configuration
+/// parameter and time axis remains exact. Serialization includes sketch error/failure
 /// metadata deliberately omitted by some parameter PartialEq implementations.
 pub(in crate::search) fn output_contract_satisfied(
     expected: &OperatorNode,
@@ -41,6 +42,15 @@ pub(in crate::search) fn output_contract_satisfied(
     if !expected.schema.closed {
         supplied.closed = false;
     }
+    if !expected.schema.unique_keys.iter().all(|required| {
+        supplied
+            .unique_keys
+            .iter()
+            .any(|provided| provided.iter().all(|column| required.contains(column)))
+    }) {
+        return Ok(false);
+    }
+    supplied.unique_keys = expected.schema.unique_keys.clone();
     Ok(expected.result_kind == output.result_kind
         && expected.schema == supplied
         && serde_json::to_string(&expected.schema).map_err(|error| error.to_string())?
@@ -209,9 +219,11 @@ pub(in crate::search) fn paired_node_identities(
         }
         let old_operator = old.operator.map_children(|_| ());
         let new_operator = new.operator.map_children(|_| ());
-        if old_operator != new_operator
-            || serde_json::to_string(&old_operator).map_err(|e| e.to_string())?
-                != serde_json::to_string(&new_operator).map_err(|e| e.to_string())?
+        // Compare all serialized parameters, including sketch probability and
+        // non-finite scalar values. PartialEq rejects an unchanged NaN, while
+        // JSON erases the distinction between NaN and either infinity.
+        if rmp_serde::to_vec(&old_operator).map_err(|e| e.to_string())?
+            != rmp_serde::to_vec(&new_operator).map_err(|e| e.to_string())?
         {
             return Err("operator implementation changed; explicit physical candidate enumeration is required".into());
         }
@@ -235,6 +247,42 @@ mod tests {
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::memo::MemoGroupId;
     use asap_logical_asap_optimization::test_support::lower_promql;
+
+    // Physical identity is reflexive for NaN, without equating different
+    // non-finite quantile parameters that JSON would serialize as null.
+    #[test]
+    fn unchanged_nan_parameter_preserves_identity() {
+        let lower =
+            |query| lower_promql(query, asap_types::ir::properties::AccuracyTarget::exact());
+        let before = lower("quantile by(job)(NaN, data)");
+        let unchanged = lower("quantile by(job)(NaN, data)");
+        assert!(paired_node_identities(std::slice::from_ref(&before), &[unchanged]).is_ok());
+        let changed = lower("quantile by(job)(Inf, data)");
+        assert!(paired_node_identities(&[before], &[changed]).is_err());
+    }
+
+    // A producer may prove stronger uniqueness, but cannot drop a key that
+    // its consumer relies on when interpreting or combining rows.
+    #[test]
+    fn input_contract_accepts_only_sufficient_unique_keys() {
+        let root = lower_promql(
+            "sum by(job)(data)",
+            asap_types::ir::properties::AccuracyTarget::exact(),
+        );
+        let mut expected = (*root).clone();
+        let mut supplied = (*root).clone();
+        expected.schema.unique_keys = vec![vec![0, 1]];
+        supplied.schema.unique_keys = vec![vec![0]];
+        assert!(output_contract_satisfied(&expected, &supplied).unwrap());
+        expected.schema.unique_keys = vec![vec![0]];
+        supplied.schema.unique_keys = vec![vec![0, 1]];
+        assert!(!output_contract_satisfied(&expected, &supplied).unwrap());
+        supplied.schema.unique_keys.clear();
+        assert!(!output_contract_satisfied(&expected, &supplied).unwrap());
+        expected.schema.unique_keys.clear();
+        supplied.schema.unique_keys = vec![vec![0]];
+        assert!(output_contract_satisfied(&expected, &supplied).unwrap());
+    }
 
     fn catalog(root: Rc<OperatorNode>) -> (CandidateDependencyGraph, CandidateOperatorTemplates) {
         fn add(
@@ -427,7 +475,7 @@ mod tests {
         assert_eq!(cols[1].expr, ScalarExpr::Literal(ScalarValue::Float64(7.0)));
         assert!(qualifier.is_none());
     }
-    // Completeness may strengthen, but names, nullability, time and keys cannot drift.
+    // Completeness and uniqueness may strengthen; field and time semantics cannot drift.
     #[test]
     fn output_contract_allows_only_open_to_closed_refinement() {
         let node = lower_promql(
@@ -451,6 +499,7 @@ mod tests {
         assert!(!output_contract_satisfied(&expected, &timeless).unwrap());
         let mut keyed = supplied.clone();
         keyed.schema.unique_keys.push(vec![0]);
-        assert!(!output_contract_satisfied(&expected, &keyed).unwrap());
+        assert!(output_contract_satisfied(&expected, &keyed).unwrap());
+        assert!(!output_contract_satisfied(&keyed, &expected).unwrap());
     }
 }

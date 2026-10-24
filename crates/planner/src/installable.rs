@@ -1364,6 +1364,17 @@ fn pane_retention_of_expanded_panes_before(
     check_installation_deadline(deadline)?;
     let compiled = compile_physical_asap_workload_with_node_ids(&expansion.roots)?;
     check_installation_deadline(deadline)?;
+    // Index physical identity once. Looking up every expanded pane through
+    // the identity map's linear search makes this phase quadratic in panes.
+    let mut installed_ids_by_pointer = HashMap::with_capacity(compiled.dag.nodes.len());
+    for node in &compiled.dag.nodes {
+        check_installation_deadline(deadline)?;
+        if let Some(operator) = compiled.node_ids.operator_node(node.id) {
+            installed_ids_by_pointer.insert(Rc::as_ptr(operator), node.id);
+        }
+    }
+    let installed_id =
+        |node: &Rc<OperatorNode>| installed_ids_by_pointer.get(&Rc::as_ptr(node)).copied();
     let mut retention_ms_by_node = HashMap::new();
     for expanded in &expansion.chains {
         check_installation_deadline(deadline)?;
@@ -1374,14 +1385,14 @@ fn pane_retention_of_expanded_panes_before(
             continue;
         };
         for pane in &expanded.panes {
-            if let Some(node_id) = compiled.node_ids.node_id(pane) {
+            check_installation_deadline(deadline)?;
+            if let Some(node_id) = installed_id(pane) {
                 retention_ms_by_node.insert(node_id, *retention_ms);
             }
         }
     }
     // A chain runs as its panes; every other node as the node replacing it
     // (itself when nothing below it changed).
-    let installed_id = |node: &Rc<OperatorNode>| compiled.node_ids.node_id(node);
     let mut installed_node_ids = HashMap::new();
     for node in &selected.dag.nodes {
         check_installation_deadline(deadline)?;
@@ -1393,7 +1404,16 @@ fn pane_retention_of_expanded_panes_before(
             .iter()
             .find(|expanded| Rc::ptr_eq(&expanded.chain, input))
         {
-            Some(expanded) => expanded.panes.iter().filter_map(installed_id).collect(),
+            Some(expanded) => {
+                let mut ids = Vec::with_capacity(expanded.panes.len());
+                for pane in &expanded.panes {
+                    check_installation_deadline(deadline)?;
+                    if let Some(id) = installed_id(pane) {
+                        ids.push(id);
+                    }
+                }
+                ids
+            }
             None => {
                 let replacement = expansion
                     .expanded_nodes

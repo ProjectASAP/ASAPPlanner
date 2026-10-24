@@ -193,12 +193,41 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
             (selection, physical, logical)
         }
         (Ok(seed), Err(error)) => {
-            fallback_reason = Some(error.to_string());
+            // The outer report owns phase accounting; do not embed a stale
+            // standalone complete-phase report inside its fallback reason.
+            fallback_reason = Some(
+                error
+                    .to_string()
+                    .split(" Search report: ")
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
             let seed = validated_seed_after_stop(seed, error, &full_progress)?;
             seed_selected = true;
             seed
         }
-        (_, Err(error)) => return Err(error),
+        (_, Err(error)) => {
+            if full_progress.budget_stopped {
+                if let Some(mut report) = full_progress.report.take() {
+                    if let Some(seed) = &seed_report {
+                        add_phase_metrics(&mut report, seed);
+                    }
+                    report.seed_planning_ms = seed_elapsed.as_secs_f64() * 1_000.0;
+                    report.full_planning_ms = full_planning_ms;
+                    report.local_candidate_generation_ms = local_candidate_generation_ms;
+                    report.time_limit_ms = total_ms;
+                    report.max_refinements = search.max_evaluations.unwrap_or(128);
+                    report.full_catalog_completed = full_progress.catalog_completed;
+                    let metrics = serde_json::to_string(&report)
+                        .map_err(|error| SelectionError::Solver(error.to_string()))?;
+                    return Err(SelectionError::Solver(format!(
+                        "candidate-connections: planning budget ended before either seed or complete search found a validated incumbent. Search report: {metrics}"
+                    )));
+                }
+            }
+            return Err(error);
+        }
         (Err(_), Ok(full)) => full,
     };
     let fallback_with_full_report = fallback_reason.is_some() && full_progress.report.is_some();
@@ -209,19 +238,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         // A fallback before catalog completion has no full MILP metrics. Its
         // separate full_planning_ms records the interrupted generation effort.
         if fallback_reason.is_none() || fallback_with_full_report {
-            if let Some(seed) = seed_report {
-                report.memo_expansion_ms += seed.memo_expansion_ms;
-                report.inventory_construction_ms += seed.inventory_construction_ms;
-                report.search_and_validation_ms += seed.search_and_validation_ms;
-                report.model_construction_ms += seed.model_construction_ms;
-                report.solver_ms += seed.solver_ms;
-                report.validation_ms += seed.validation_ms;
-                report.solve_calls += seed.solve_calls;
-                report.refinements += seed.refinements;
-                report.peak_milp_variables =
-                    report.peak_milp_variables.max(seed.peak_milp_variables);
-                report.peak_milp_constraints =
-                    report.peak_milp_constraints.max(seed.peak_milp_constraints);
+            if let Some(seed) = &seed_report {
+                add_phase_metrics(report, seed);
             }
         }
         report.full_planning_ms = full_planning_ms;
@@ -257,6 +275,39 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     result.0.search.candidates_checked =
         (seed_progress.refinements + full_progress.refinements) as u64;
     Ok(result)
+}
+
+fn add_phase_metrics(
+    report: &mut crate::CandidateConnectionReport,
+    phase: &crate::CandidateConnectionReport,
+) {
+    report.memo_expansion_ms += phase.memo_expansion_ms;
+    report.inventory_construction_ms += phase.inventory_construction_ms;
+    report.search_and_validation_ms += phase.search_and_validation_ms;
+    report.model_construction_ms += phase.model_construction_ms;
+    report.solver_ms += phase.solver_ms;
+    report.validation_ms += phase.validation_ms;
+    report.early_query_pruning_ms += phase.early_query_pruning_ms;
+    report.solve_calls += phase.solve_calls;
+    report.refinements += phase.refinements;
+    report.certified_query_cuts += phase.certified_query_cuts;
+    report.peak_milp_variables = report.peak_milp_variables.max(phase.peak_milp_variables);
+    report.peak_milp_constraints = report
+        .peak_milp_constraints
+        .max(phase.peak_milp_constraints);
+    for (kind, count) in &phase.validation_rejection_counts {
+        *report
+            .validation_rejection_counts
+            .entry(kind.clone())
+            .or_default() += count;
+    }
+    for example in &phase.validation_rejection_examples {
+        if report.validation_rejection_examples.len() < 8
+            && !report.validation_rejection_examples.contains(example)
+        {
+            report.validation_rejection_examples.push(example.clone());
+        }
+    }
 }
 
 /// A timeout may retain a validated seed; an internal failure must remain visible.
@@ -467,7 +518,7 @@ fn search_domain<Id: Clone>(
             CandidateCalibration::CompleteCatalog => crate::CalibrationFit::default(),
         },
     };
-    crate::search::costing::lower_bounds::apply(&mut configured, &context)
+    let bound_metrics = crate::search::costing::lower_bounds::apply(&mut configured, &context)
         .map_err(|error| unsupported(&error))?;
     let inventory_construction_ms = started.elapsed().as_secs_f64() * 1000.0;
     progress.catalog_completed = true;
@@ -607,6 +658,7 @@ fn search_domain<Id: Clone>(
         CandidateSearchStatus::TimeLimit | CandidateSearchStatus::RefinementLimit
     );
     let report = crate::CandidateConnectionReport {
+        rounded_down_cost_bounds: bound_metrics.rounded_down_candidates,
         seed_planning_ms: 0.0,
         full_planning_ms: planning_started.elapsed().as_secs_f64() * 1_000.0,
         seed_selected: false,
@@ -883,6 +935,58 @@ mod tests {
                 .seed_planning_ms,
             0.0
         );
+    }
+
+    // A failed complete phase must not relabel seed work as initial generation.
+    #[test]
+    fn no_incumbent_report_preserves_seed_and_full_phase_accounting() {
+        struct StoppedCompiler;
+        impl crate::ExecutorCompileCheck for StoppedCompiler {
+            fn compiles(&self, _: &[QueryRoot]) -> Result<(), String> {
+                unreachable!()
+            }
+            fn compiles_before(
+                &self,
+                _: &[QueryRoot],
+                _: Option<std::time::Instant>,
+            ) -> Result<(), crate::ExecutorCompileError> {
+                Err(crate::ExecutorCompileError::DeadlineExceeded)
+            }
+        }
+        let (_, entries, data) = workload();
+        let roots = vec![(
+            0,
+            QueryRoot::Scalar(asap_types::ir::ScalarExpr::Literal(
+                asap_types::ir::scalar::ScalarValue::Float64(1.0),
+            )),
+        )];
+        let initial = LogicalMemo::from_roots(&roots);
+        let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let error = candidate_connection_search(
+            initial,
+            &CandidateSearchContext {
+                inventory: &inventory,
+                entries: &entries[..1],
+                data: &data,
+                models: PlanningModels {
+                    executor_compile_check: Some(&StoppedCompiler),
+                    ..PlanningModels::builtin()
+                },
+            },
+            Stage1ToStage3Search::default(),
+            Some(17.0),
+            &mut CandidateArchive::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        let report: serde_json::Value =
+            serde_json::from_str(error.split_once("Search report: ").unwrap().1).unwrap();
+        assert_eq!(report["local_candidate_generation_ms"], 17.0);
+        assert!(report["seed_planning_ms"].as_f64().unwrap() > 0.0);
+        assert!(report["full_planning_ms"].as_f64().unwrap() > 0.0);
+        assert_eq!(report["refinements"], 2);
+        assert_eq!(report["time_limit_ms"], 30_000);
+        assert_eq!(report["validation_rejection_counts"], serde_json::json!({}));
     }
 
     fn scalar_run(

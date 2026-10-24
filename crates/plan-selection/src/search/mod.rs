@@ -91,8 +91,7 @@ pub struct PlanningModels<'a> {
     pub executor_compile_check: Option<&'a dyn ExecutorCompileCheck>,
 }
 
-/// The deployment executor's compiler, asked by Stage 3 whether it compiles
-/// a candidate's plan, so selection and execution cannot drift.
+/// Compiler rejection and incomplete validation have different search semantics.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExecutorCompileError {
     #[error("{0}")]
@@ -107,6 +106,8 @@ impl From<String> for ExecutorCompileError {
     }
 }
 
+/// The deployment executor's compiler, asked by Stage 3 whether it compiles
+/// a candidate's plan, so selection and execution cannot drift.
 pub trait ExecutorCompileCheck {
     /// `Err` with the executor's reason when it cannot compile the plan of
     /// `roots`: one candidate's timed query roots, in workload order.

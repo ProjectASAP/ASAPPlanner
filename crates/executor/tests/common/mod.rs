@@ -24,23 +24,43 @@ pub fn selected_dag(
     accuracy: planner_types::ir::properties::AccuracyTarget,
 ) -> Rc<OperatorNode> {
     let run = run_stage1_to_stage3(root, accuracy);
-    let [QueryRoot::Operator(selected)] = run.selected_logical().expect("a plan is selected")
+    let [QueryRoot::Operator(selected)] = run
+        .selected_logical()
+        .unwrap_or_else(|| panic!("a plan is selected: {:?}", run.stage3_plan_selection))
     else {
         panic!("one operator root");
     };
     Rc::clone(selected)
 }
 
-/// Every logical candidate (a composed CandidateLogicalASAPDAG) of the single
-/// query `root` at `accuracy`, in enumeration order; a candidate that does not
-/// compose panics, so none is silently skipped.
-pub fn logical_candidates(
-    root: Rc<OperatorNode>,
-    accuracy: planner_types::ir::properties::AccuracyTarget,
-) -> Vec<Rc<OperatorNode>> {
-    require_composed_operator_candidates(
-        run_stage1_to_stage3(root, accuracy).stage1_logical_asap_optimization,
-    )
+/// Exercise each local implementation rule directly, keeping the other
+/// computations at their default choice. A bounded solver archive need not
+/// contain every algorithm that executor binding tests need to exercise.
+pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    let inventory = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
+        .expect("Pass 1 accepts the query");
+    let mut choices = vec![vec![0; inventory.targets.len()]];
+    for (index, target) in inventory.targets.iter().enumerate() {
+        for choice in 1..target.choice_count() {
+            let mut selected = vec![0; inventory.targets.len()];
+            selected[index] = choice;
+            choices.push(selected);
+        }
+    }
+    choices
+        .into_iter()
+        .map(|choice| {
+            let mut roots = compose_logical_candidate(&inventory, &choice)
+                .expect("a generated computation candidate composes");
+            match roots.remove(0).1 {
+                QueryRoot::Operator(root) => root,
+                QueryRoot::Scalar(_) => panic!("one operator root"),
+            }
+        })
+        .collect()
 }
 
 /// Fail on rejected composition rather than silently skipping a candidate.
@@ -87,7 +107,7 @@ fn run_stage1_to_stage3(
         }],
         &data,
         asap_plan_selection::PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
+        asap_plan_selection::Stage1ToStage3Search::default(),
     )
     .expect("Pass 1 accepts the query")
 }

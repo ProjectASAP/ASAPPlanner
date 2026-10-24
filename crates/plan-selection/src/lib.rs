@@ -1024,6 +1024,9 @@ pub struct SearchReport {
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateConnectionReport {
+    /// Conservative zero bounds used to stay within the solver coefficient range.
+    #[serde(default)]
+    pub rounded_down_cost_bounds: usize,
     /// Time spent obtaining a validated incumbent from the seed width domain.
     #[serde(default)]
     pub seed_planning_ms: f64,
@@ -8276,7 +8279,15 @@ mod tests {
         assert!(!ids.is_empty());
         assert!(ids.iter().all(|id| with.costs.contains_key(id)));
         let unknown = with_series(None);
-        let (_, without) = run(query, &target, &unknown, PlanningModels::builtin());
+        // Evaluate the same physical candidates: IDs from independent timed
+        // searches do not identify the same implementation or connections.
+        let without = select_plan(
+            &candidates,
+            &[entry_with(target, QueryRecurrence::Unknown)],
+            &unknown,
+            PlanningModels::builtin(),
+        )
+        .unwrap();
         assert!(ids.iter().all(|id| !without.costs.contains_key(id)));
     }
 

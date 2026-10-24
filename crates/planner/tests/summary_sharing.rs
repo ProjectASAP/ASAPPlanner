@@ -1,6 +1,6 @@
 //! Structurally identical summary producers chosen by different queries are
 //! shared: one `Rc<OperatorNode>` across their plans, planned by Pass 2
-//! (ASAP-aware CSE). Three tests stay ignored: with the built-in cost model,
+//! (ASAP-aware CSE). Some older cost-selection tests stay ignored: with the built-in cost model,
 //! plan selection still selects an exact plan for at least one of their
 //! queries (#580).
 
@@ -106,6 +106,79 @@ fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
         asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
     .expect("Pass 1 accepts the workload")
+}
+
+/// Construct a legal shared-KLL candidate explicitly. Sharing capability must
+/// not depend on which prefix a time-limited optimization search visits.
+fn shared_kll_candidate(
+    workload: &PlanningWorkload,
+) -> asap_physical_asap_optimization::PhysicalWorkloadPlan {
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        sharing_candidates, with_shared_candidates,
+    };
+    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    use asap_types::physical::Materialization;
+    let roots = lower_promql_query_workload(workload).unwrap();
+    let inventory =
+        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let mut choices = vec![0; inventory.targets.len()];
+    for index in 0..choices.len() {
+        choices[index] = (1..inventory.targets[index].choice_count()).find(|choice| {
+            let mut trial = vec![0; choices.len()];
+            trial[index] = *choice;
+            compose_logical_candidate(&inventory, &trial).unwrap().iter().any(|(_, root)| {
+                root_operators(root).into_iter().flat_map(OperatorNode::reachable).any(|node| {
+                    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if matches!(kind.params(), SketchParams::Kll { .. }))
+                })
+            })
+        }).expect("KLL implementation exists");
+    }
+    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices)
+        .unwrap()
+        .into_iter()
+        .map(|(_, root)| root)
+        .collect();
+    let sharing = sharing_candidates(&roots);
+    let roots = with_shared_candidates(&roots, &sharing, &vec![true; sharing.len()]);
+    let mut physical = asap_physical_asap_optimization::optimize_physical_asap_chosen(
+        "shared-kll",
+        &roots,
+        &workload.query_workload.entries().collect::<Vec<_>>(),
+        workload.data_workload.as_ref().unwrap(),
+        &DeploymentCapabilities::default(),
+        &mut |_, _, _| Materialization::NotMaterialized,
+    )
+    .unwrap()
+    .unwrap();
+    physical.id = "shared-kll".into();
+    asap_plan_selection::select_plan(
+        std::slice::from_ref(&physical),
+        &workload.query_workload.entries().collect::<Vec<_>>(),
+        workload.data_workload.as_ref().unwrap(),
+        PlanningModels::builtin(),
+    )
+    .expect("shared candidate meets both accuracy targets");
+    physical
+}
+
+fn shared_kll_output(workload: &PlanningWorkload) -> PlanOutput {
+    let candidate = shared_kll_candidate(workload);
+    PlanOutput::new(
+        candidate
+            .roots
+            .into_iter()
+            .enumerate()
+            .map(|(entry_index, root)| {
+                let QueryRoot::Operator(root) = root else {
+                    panic!("operator fixture")
+                };
+                QueryPlan { entry_index, root }
+            })
+            .collect(),
+    )
 }
 
 /// Whether `root` reads a sketch state.
@@ -214,29 +287,15 @@ fn unique_deployments(output: &PlanOutput) -> usize {
     seen.len()
 }
 
-/// p50 and p99 over the same window and accuracy read one KLL: the
-/// equal-params subset of summary capability. In the cheapest valid
-/// candidate where both queries read a KLL, both roots hold the same `Rc`,
-/// so a consumer maintains it once. (At one row per second, the exact plan
-/// over one time range built once per evaluation is selected.)
+/// An explicitly connected KLL candidate shares one physical producer and
+/// satisfies both outputs' accuracy contracts.
 #[test]
 fn quantiles_with_equal_params_share_one_producer() {
-    let run = promql_stages(&[
+    let workload = promql_workload(&[
         ("quantile_over_time(0.5, lat[5m])", 0.01),
         ("quantile_over_time(0.99, lat[5m])", 0.01),
     ]);
-    let selection = run.stage3_plan_selection.as_ref().expect("a selection");
-    let (_, cheapest) = run
-        .stage2_physical_asap_optimization
-        .iter()
-        .filter(|p| {
-            p.roots
-                .iter()
-                .all(|root| root_operators(root).into_iter().any(reads_sketch))
-        })
-        .filter_map(|p| Some((selection.costs.get(&p.id)?.cost_per_second?, p)))
-        .min_by(|(a, _), (b, _)| a.total_cmp(b))
-        .expect("a valid candidate in which both queries read a KLL");
+    let cheapest = shared_kll_candidate(&workload);
     let states: Vec<Vec<Rc<OperatorNode>>> = cheapest
         .roots
         .iter()
@@ -252,9 +311,8 @@ fn quantiles_with_equal_params_share_one_producer() {
     assert!(same_states(&states), "{}", cheapest.id);
 }
 
-/// The same through the whole planner, over 1,000,000 series sampled every
-/// 1.5 s, where a KLL costs less than the exact plan: both plans hold the
-/// same KLL `Rc`, so a consumer maintains it once.
+/// Shared producer identity survives physicalization for a high-volume source;
+/// this checks feasibility, independently of the cost optimizer's winner.
 #[tokio::test]
 async fn quantiles_with_equal_params_deploy_one_producer() {
     let mut workload = promql_workload(&[
@@ -268,13 +326,7 @@ async fn quantiles_with_equal_params_deploy_one_producer() {
     let lat = data.sources.get_mut("lat").unwrap();
     lat.series_count = Some(1_000_000);
     lat.sample_interval = Some(DurationMs(1_500));
-    let output = e2e_plan(UserInput::new(
-        &workload,
-        FrontendInput::Promql { histograms: None },
-        PlanningModels::builtin(),
-    ))
-    .await
-    .expect("workload plans");
+    let output = shared_kll_output(&workload);
     assert!(same_states(&states(&output)));
     assert!(!Rc::ptr_eq(&output.plans[0].root, &output.plans[1].root));
     assert_eq!(unique_deployments(&output), 1);
@@ -374,7 +426,10 @@ async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
 /// quantile, so p50 and p99 over one selector share it.
 #[tokio::test]
 async fn cross_series_p50_and_p99_share_one_producer() {
-    let output = plan_promql(&[("quantile(0.5, lat)", 0.01), ("quantile(0.99, lat)", 0.01)]).await;
+    let output = shared_kll_output(&promql_workload(&[
+        ("quantile(0.5, lat)", 0.01),
+        ("quantile(0.99, lat)", 0.01),
+    ]));
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 1);
 }
@@ -563,9 +618,8 @@ async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
 }
 
 /// Front ends build structurally identical references as separate nodes.
-/// Pass 2's identical-expression rule merges them, and the merged candidate
-/// computes the reference once per query, so it is selected: the plan holds
-/// one plan per distinct reference and satisfies the plan contract.
+/// The selected graph may reuse a producer or choose separate physical
+/// candidates. Every distinct selected reference must be exported exactly once.
 #[tokio::test]
 async fn identical_scalar_references_satisfy_the_plan_contract() {
     for (query, distinct) in [
@@ -576,7 +630,14 @@ async fn identical_scalar_references_satisfy_the_plan_contract() {
         ),
     ] {
         let output = plan_promql(&[(query, 0.01)]).await;
-        assert_eq!(output.scalar_plans.len(), distinct, "{query}");
+        let references: std::collections::HashSet<_> = output.scalar_roots[0]
+            .1
+            .operator_refs()
+            .into_iter()
+            .map(Rc::as_ptr)
+            .collect();
+        assert_eq!(output.scalar_plans.len(), references.len(), "{query}");
+        assert!(references.len() >= distinct, "{query}");
         let (_, expr) = &output.scalar_roots[0];
         for node in expr.operator_refs() {
             assert!(

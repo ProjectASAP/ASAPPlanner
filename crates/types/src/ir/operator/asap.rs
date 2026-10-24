@@ -945,6 +945,16 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
         }
         _ => return None,
     };
+    // A column/tuple item is completely represented by these output columns.
+    // An open PromQL label-set item may also contain unlisted labels, so its
+    // visible columns alone cannot certify uniqueness.
+    let complete_item_identity = matches!(
+        input.item.as_ref()?,
+        SummaryInputExpr::Column(_) | SummaryInputExpr::Tuple(_)
+    ) || child.schema.closed
+        || columns.iter().any(|&index| {
+            child.schema.fields[index].name == crate::ir::schema::PROMQL_SERIES_IDENTITY
+        });
     let mut fields: Vec<Field> = state
         .schema
         .fields
@@ -960,11 +970,17 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
             fields.push(child.schema.fields[index].clone());
         }
     }
+    // One row per (partition, item), not one row per partition. Preserve this
+    // key through the ranked-row projection used by the logical TopK result.
+    let unique_keys = if complete_item_identity && !fields.is_empty() {
+        vec![(0..fields.len()).collect()]
+    } else {
+        Vec::new()
+    };
     fields.push(Field::plain("topk", DataType::Float64, false));
-    // One row per item: the partition columns alone no longer identify a row.
     Some(Schema {
         fields,
-        unique_keys: Vec::new(),
+        unique_keys,
         ..state.schema.clone()
     })
 }

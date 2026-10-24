@@ -13,7 +13,7 @@ use crate::search::candidates::physical::{
     materialize_selected_candidates, PhysicalCandidateError,
 };
 use crate::search::refinement::search::{
-    search_candidates_with_feedback, CandidateEvaluation, CandidateSearchLimits,
+    search_candidates_with_restricted_feedback, CandidateEvaluation, CandidateSearchLimits,
     CandidateSearchResult,
 };
 use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
@@ -115,14 +115,15 @@ pub(in crate::search) fn optimize_configured_candidates(
     let mut evaluation_number = 0;
     let mut rejections = CandidateRejectionSummary::default();
     let weighting_started = std::time::Instant::now();
-    let weights = accuracy_baseline_weights(configured, context)?;
-    let search = search_candidates_with_feedback(
+    let (weights, exclusions) = accuracy_baseline(configured, context)?;
+    let search = search_candidates_with_restricted_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
             wall_time: limits.wall_time.saturating_sub(weighting_started.elapsed()),
             ..limits
         },
-        Some(&weights),
+        &weights,
+        &exclusions,
         |selected| {
             evaluation_number += 1;
             let mut rejected_queries = Vec::new();
@@ -182,6 +183,19 @@ pub(in crate::search) fn accuracy_baseline_weights(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<Vec<f64>, String> {
+    accuracy_baseline(configured, context).map(|(weights, _)| weights)
+}
+
+fn accuracy_baseline(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+) -> Result<
+    (
+        Vec<f64>,
+        Vec<crate::search::candidates::graph::PhysicalCandidateId>,
+    ),
+    String,
+> {
     use asap_types::ir::properties::AccuracyMetric;
     use asap_types::ir::schema::FieldDataType;
     use asap_types::ir::ASAPOp;
@@ -230,11 +244,34 @@ pub(in crate::search) fn accuracy_baseline_weights(
             );
         }
     }
+    // Scan-widening projections preserve a logical source schema, but cannot
+    // appear below the executor's raw TimeRange boundary. Keep original raw
+    // source bindings for the feasibility seed; the full graph still contains
+    // the useful projected candidates for other consumers.
+    let raw_source_groups: std::collections::HashSet<_> = configured
+        .inventory
+        .group_candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(group, candidates)| {
+            candidates
+                .iter()
+                .any(|id| {
+                    configured.inventory.templates[id.0]
+                        .as_ref()
+                        .is_some_and(|node| raw_scan_with_shifts(node))
+                })
+                .then_some(asap_logical_asap_optimization::memo::MemoGroupId(
+                    group as u32,
+                ))
+        })
+        .collect();
     // Bound the numerical range; these tiers are intentionally heuristic.
     let preference = (graph.candidates.len() as f64 + 1.0).min(1000.0);
-    // A missing certificate means unknown cost, not free retained state.
-    // Proposal-only pane memory estimates keep oversized states from winning
-    // merely because one possible supplier prevents a certified local price.
+    // A missing certificate means unknown cost, not free computation. Advisory
+    // query-time work and retained-state estimates guide proposals only; the
+    // candidate graph retains its original certified lower-bound coefficients.
+    let estimated_costs = crate::search::costing::proposals::estimate_costs(configured, context);
     let proposal_costs: Vec<_> = graph
         .candidates
         .iter()
@@ -243,27 +280,36 @@ pub(in crate::search) fn accuracy_baseline_weights(
             configured.inventory.templates[id]
                 .as_ref()
                 .map_or(candidate.local_cost, |node| {
-                    candidate.local_cost.max(retained_pane_priority_cost(
-                        node,
-                        configured.configurations[id],
-                        context,
-                    ))
+                    candidate
+                        .local_cost
+                        .max(estimated_costs[id])
+                        .max(retained_pane_priority_cost(
+                            node,
+                            configured.configurations[id],
+                            context,
+                        ))
                 })
         })
         .collect();
-    // Normalize against state costs rather than tiny extraction costs: the
-    // latter can saturate every meaningful state choice at the same weight.
+    // Feasibility seeds compare retained states; cost-only seeds compare query
+    // work. Large unrelated pane residency must not make CPU savings smaller
+    // than the structural node-count tie-break when accuracy is ignored.
     let mut positive_costs: Vec<_> = proposal_costs
         .iter()
         .enumerate()
         .filter_map(|(id, &cost)| {
             (cost > 0.0
-                && matches!(
-                    configured.inventory.templates[id]
-                        .as_ref()
-                        .and_then(|node| node.asap()),
-                    Some(ASAPOp::PaneChain { .. })
-                ))
+                && if context.models.plan_selection.ignore_accuracy_guarantees {
+                    configured.configurations[id].timing
+                        == asap_types::ir::properties::ExecutionTiming::QueryTime
+                } else {
+                    matches!(
+                        configured.inventory.templates[id]
+                            .as_ref()
+                            .and_then(|node| node.asap()),
+                        Some(ASAPOp::PaneChain { .. })
+                    )
+                })
             .then_some(cost)
         })
         .collect();
@@ -275,7 +321,7 @@ pub(in crate::search) fn accuracy_baseline_weights(
         .get(positive_costs.len().saturating_sub(1) / 2)
         .copied()
         .unwrap_or(0.0);
-    configured
+    let priorities = configured
         .inventory
         .templates
         .iter()
@@ -284,7 +330,11 @@ pub(in crate::search) fn accuracy_baseline_weights(
             let node = template
                 .as_ref()
                 .ok_or("baseline candidate has no operator template")?;
-            let penalty = if let Some(family) = node.asap().and_then(ASAPOp::produced_state) {
+            let penalty = if context.models.plan_selection.ignore_accuracy_guarantees {
+                // The configured policy accepts approximate outputs without a
+                // guarantee; preferring exact contracts would hide cheaper builds.
+                0.0
+            } else if let Some(family) = node.asap().and_then(ASAPOp::produced_state) {
                 if matches!(family, FieldDataType::ExactAggregate(..)) {
                     0.0
                 } else {
@@ -324,9 +374,68 @@ pub(in crate::search) fn accuracy_baseline_weights(
             } else {
                 0.0
             };
-            Ok(1.0 + penalty + cost_priority)
+            let contract_risk = !context.models.plan_selection.ignore_accuracy_guarantees
+                && (node.guarantee.as_ref().is_some_and(|guarantee| {
+                    !guarantee.is_exact()
+                        && guarantee.spec.accuracy_metric == AccuracyMetric::Rank
+                        && !rank_requested[id]
+                }) || (node.guarantee.is_none()
+                    && matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. }))));
+            // Highest-shared-node eligibility depends on chosen consumers.
+            // Start with explicit build/pane materialization; optional shared
+            // non-summary materializations remain in the complete search.
+            let contextual_materialization =
+                !context.models.plan_selection.ignore_accuracy_guarantees
+                    && configured.configurations[id].materialization
+                        != asap_types::physical::Materialization::NotMaterialized
+                    && !matches!(
+                        node.asap(),
+                        Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                    );
+            let projected_raw_source = raw_source_groups.contains(&graph.candidates[id].group)
+                && matches!(
+                    node.non_asap(),
+                    Some(asap_types::ir::NonASAPOp::Project { .. })
+                );
+            // Unpriced pane pipelines are not free. Prefer candidates whose
+            // local query work can be priced for the initial proposal; the
+            // complete search retains every legal pane and its certified bound.
+            let unknown_work_priority = if context.models.plan_selection.ignore_accuracy_guarantees
+                && configured.configurations[id].timing
+                    == asap_types::ir::properties::ExecutionTiming::QueryTime
+                && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                && proposal_costs[id] == 0.0
+            {
+                preference * preference
+            } else {
+                0.0
+            };
+            Ok((
+                1.0 + penalty + cost_priority + unknown_work_priority,
+                contract_risk || contextual_materialization || projected_raw_source,
+            ))
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    let exclusions = priorities
+        .iter()
+        .enumerate()
+        .filter_map(|(id, (_, excluded))| {
+            excluded.then_some(crate::search::candidates::graph::PhysicalCandidateId(id))
+        })
+        .collect();
+    Ok((
+        priorities.into_iter().map(|(weight, _)| weight).collect(),
+        exclusions,
+    ))
+}
+
+fn raw_scan_with_shifts(node: &asap_types::ir::OperatorNode) -> bool {
+    match node.non_asap() {
+        Some(asap_types::ir::NonASAPOp::Scan { .. }) => true,
+        Some(asap_types::ir::NonASAPOp::TimeShift { child, .. }) => raw_scan_with_shifts(child),
+        // Projection after an already formed range is a different, legal case.
+        _ => false,
+    }
 }
 
 // A heuristic memory charge, never a lower bound or an evaluator replacement.
@@ -985,6 +1094,152 @@ mod tests {
         assert_ne!(result.search.status, CandidateSearchStatus::Optimal);
     }
 
+    // A projected raw-source supplier would put Project below TimeRange at
+    // installation. Projection above a range remains a legal seed candidate.
+    #[test]
+    fn feasibility_seed_distinguishes_raw_source_and_range_projections() {
+        use crate::search::candidates::graph::{PhysicalCandidateId, ProducerRequirement};
+        use asap_types::ir::{NonASAPOp, Operator, ProjectItem, ScalarExpr};
+        let (mut configured, roots, entries, data) = fixture();
+        let find = |is_range: bool| {
+            configured
+                .inventory
+                .group_candidates
+                .iter()
+                .flatten()
+                .copied()
+                .find(|id| {
+                    let node = configured.inventory.templates[id.0].as_ref().unwrap();
+                    configured.configurations[id.0].materialization
+                        == Materialization::NotMaterialized
+                        && matches!(
+                            (is_range, node.non_asap()),
+                            (false, Some(NonASAPOp::Scan { .. }))
+                                | (true, Some(NonASAPOp::TimeRange { .. }))
+                        )
+                })
+                .expect("fixture exposes source and range groups")
+        };
+        let source = find(false);
+        let range = find(true);
+        let mut projected = Vec::new();
+        for supplier in [source, range] {
+            let child = configured.inventory.templates[supplier.0]
+                .as_ref()
+                .unwrap()
+                .clone();
+            let template = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+                cols: child
+                    .schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(column, field)| ProjectItem {
+                        alias: Some(field.name.clone()),
+                        expr: ScalarExpr::Column(column),
+                    })
+                    .collect(),
+                qualifier: None,
+                child,
+            }))
+            .unwrap();
+            let id = PhysicalCandidateId(configured.configurations.len());
+            let mut candidate = configured.inventory.graph.candidates[supplier.0].clone();
+            candidate.producer_requirements = vec![ProducerRequirement {
+                compatible_producers: vec![supplier],
+            }];
+            configured.inventory.group_candidates[candidate.group.0 as usize].push(id);
+            configured.inventory.graph.candidates.push(candidate);
+            configured.inventory.templates.push(Some(template));
+            configured
+                .configurations
+                .push(configured.configurations[supplier.0]);
+            projected.push(id);
+        }
+        let context = CandidatePlanningContext {
+            deadline: None,
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models: PlanningModels::builtin(),
+            calibration: CalibrationFit::default(),
+        };
+        let (_, excluded) = accuracy_baseline(&configured, &context).unwrap();
+        assert!(excluded.contains(&projected[0]));
+        assert!(!excluded.contains(&projected[1]));
+        assert!(!excluded.contains(&source));
+        let ignored = crate::PlanSelectionSettings {
+            ignore_accuracy_guarantees: true,
+            ..Default::default()
+        };
+        let (_, ignored_excluded) = accuracy_baseline(
+            &configured,
+            &CandidatePlanningContext {
+                models: PlanningModels::builtin().with_plan_selection(&ignored),
+                ..context
+            },
+        )
+        .unwrap();
+        assert!(!ignored_excluded.contains(&projected[0]));
+        assert_eq!(
+            configured.inventory.group_candidates
+                [configured.inventory.graph.candidates[source.0].group.0 as usize]
+                .last(),
+            Some(&projected[0]),
+            "seed policy does not remove the projected candidate from the inventory"
+        );
+    }
+
+    // Ignoring accuracy guarantees removes exact/sketch preference penalties;
+    // costs and final evaluation still determine which implementation is kept.
+    #[test]
+    fn ignored_accuracy_does_not_penalize_summary_candidates() {
+        let (configured, roots, entries, data) = fixture();
+        let settings = crate::PlanSelectionSettings {
+            ignore_accuracy_guarantees: true,
+            ..Default::default()
+        };
+        let context = CandidatePlanningContext {
+            deadline: None,
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models: PlanningModels::builtin().with_plan_selection(&settings),
+            calibration: CalibrationFit::default(),
+        };
+        let id = configured
+            .inventory
+            .templates
+            .iter()
+            .position(|node| {
+                matches!(
+                    node.as_ref().and_then(|node| node.asap()),
+                    Some(ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(..),
+                        ..
+                    })
+                )
+            })
+            .expect("fixture includes a summary build");
+        let (ignored, excluded) = accuracy_baseline(&configured, &context).unwrap();
+        assert!(
+            excluded.is_empty(),
+            "ignored-policy cost seeds retain all materialization choices"
+        );
+        let enforced = accuracy_baseline_weights(
+            &configured,
+            &CandidatePlanningContext {
+                models: PlanningModels::builtin(),
+                ..context
+            },
+        )
+        .unwrap();
+        assert!(
+            ignored[id] < enforced[id],
+            "ignored guarantees must not retain an exactness penalty"
+        );
+    }
+
     // A shared state can cost more than two smaller states; proposal priorities
     // must account for certified work without changing the solver's cost model.
     #[test]
@@ -1129,7 +1384,7 @@ mod tests {
         use asap_types::ir::properties::AccuracyMetric;
         let (configured, roots, mut entries, data) = fixture();
         let weights = |entries: &[QueryWorkloadEntry]| {
-            accuracy_baseline_weights(
+            accuracy_baseline(
                 &configured,
                 &CandidatePlanningContext {
                     deadline: None,
@@ -1142,11 +1397,11 @@ mod tests {
             )
             .unwrap()
         };
-        let value_weights = weights(&entries);
+        let (value_weights, value_exclusions) = weights(&entries);
         for entry in &mut entries {
             entry.requirements.accuracy.accuracy_metric = Some(AccuracyMetric::Rank);
         }
-        let rank_weights = weights(&entries);
+        let (rank_weights, rank_exclusions) = weights(&entries);
         let rank_nodes: Vec<_> = configured
             .inventory
             .templates
@@ -1170,6 +1425,13 @@ mod tests {
             })
             .collect();
         assert!(!rank_nodes.is_empty());
+        assert!(rank_nodes
+            .iter()
+            .all(|id| value_exclusions.iter().any(|excluded| excluded.0 == *id)));
+        assert!(rank_nodes
+            .iter()
+            .all(|id| rank_exclusions.iter().all(|excluded| excluded.0 != *id)));
+
         assert!(rank_nodes
             .iter()
             .all(|&id| rank_weights[id] < value_weights[id]));

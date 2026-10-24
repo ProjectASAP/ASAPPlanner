@@ -15,6 +15,7 @@ use crate::{price_node, CostModel, PricedNode, ProducerOutput, StateFamily};
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::search) struct LowerBoundMetrics {
     pub priced_candidates: usize,
+    pub rounded_down_candidates: usize,
     pub ingestion_scans: usize,
     pub ingestion_pane_chains: usize,
     pub query_readers: usize,
@@ -227,6 +228,11 @@ pub(in crate::search) fn apply(
             }
         }
     }
+    // The solver's coefficient range is narrower than the full pane domain.
+    // Zero is still a certified lower bound for omitted tiny local charges;
+    // the evaluator continues to charge their complete actual cost.
+    metrics.rounded_down_candidates = round_down_small_bounds(&mut costs);
+    metrics.priced_candidates -= metrics.rounded_down_candidates;
     for (candidate, cost) in configured.inventory.graph.candidates.iter_mut().zip(costs) {
         candidate.local_cost = cost;
     }
@@ -236,6 +242,20 @@ pub(in crate::search) fn apply(
         .validate()
         .map_err(|e| e.to_string())?;
     Ok(metrics)
+}
+
+fn round_down_small_bounds(costs: &mut [f64]) -> usize {
+    let largest = costs.iter().copied().fold(0.0_f64, f64::max);
+    let mut removed = 0;
+    for cost in costs {
+        if *cost > 0.0
+            && *cost / largest < crate::search::candidates::graph::MINIMUM_RELATIVE_COEFFICIENT
+        {
+            *cost = 0.0;
+            removed += 1;
+        }
+    }
+    removed
 }
 
 // Potential source-widening choices may cycle although every selected execution
@@ -562,6 +582,21 @@ fn certified_price<'a>(
 
 #[cfg(test)]
 mod tests {
+    // Fine panes may widen the bound range; round down only the relaxation,
+    // preserving a valid lower bound and the core solver's numeric contract.
+    #[test]
+    fn tiny_certificates_are_rounded_down_without_inflating_other_costs() {
+        let original = [0.0, 1e-12, 1e-9, 1.0];
+        let mut costs = original;
+        assert_eq!(super::round_down_small_bounds(&mut costs), 1);
+        assert_eq!(costs, [0.0, 0.0, 1e-9, 1.0]);
+        assert!(costs
+            .iter()
+            .zip(original)
+            .all(|(bound, actual)| *bound <= actual));
+        assert_eq!(super::round_down_small_bounds(&mut [0.0, 0.0]), 0);
+    }
+
     use super::*;
     use crate::search::candidates::configurations::CandidateConfiguration;
     use crate::search::candidates::graph::{

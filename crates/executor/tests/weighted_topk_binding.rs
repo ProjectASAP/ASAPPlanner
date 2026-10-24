@@ -6,7 +6,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::{compile_physical_asap_dag, logical_candidates};
+use common::{compile_physical_asap_dag, computation_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::{AccuracyTarget, *};
@@ -36,7 +36,7 @@ fn heap_candidate(
     root: Rc<planner_types::ir::OperatorNode>,
     algorithm: &SketchAlgorithm,
 ) -> Rc<planner_types::ir::OperatorNode> {
-    logical_candidates(root, AccuracyTarget::max_error(0.1))
+    computation_candidates(root)
         .into_iter()
         .find(|candidate| builds(&compile_physical_asap_dag(candidate).unwrap(), algorithm))
         .unwrap_or_else(|| panic!("missing {algorithm:?} candidate"))

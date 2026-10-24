@@ -11,9 +11,9 @@
 //! A Pass 1 target's aggregate group gets one candidate per combination of
 //! its measures' Pass 1 candidates: the aggregate alone composed by
 //! [`crate::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
-//! exact. Its private nodes are the composed nodes above the first node
+//! exact. Its local nodes are the composed nodes above the first node
 //! equal to one of the group's descendant groups, which are its children.
-//! The private nodes read each child group through its node (the same
+//! The local nodes read each child group through its node (the same
 //! `Rc`), and the candidate outputs the group's schema, so a parent reads
 //! it in the group's place (a query's top-k root, which no parent reads,
 //! may output the ranked value beside the key).
@@ -26,11 +26,8 @@
 //! configuration used during generation; the concrete sketch parameters carry
 //! the resulting error contract. The connection planner may select a conservative
 //! larger configuration, and validates the recomposed query-root guarantee.
-//! The existing group-choice reference search retains its own sizing policy.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use super::LogicalMemo;
@@ -416,13 +413,14 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
     })
 }
 
-/// Structural hashes of nodes: the operator over its children's hashes,
+/// Interned structural identities: the operator over its children's identities,
 /// without the schema, guarantee, timing and materialization composition
 /// derives. Memoized per node (the memo keeps each node alive, so its
 /// address is not reused).
 #[derive(Default)]
 pub struct NodeKeys {
     memo: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
+    operators: HashMap<Vec<u8>, u64>,
 }
 
 impl NodeKeys {
@@ -436,11 +434,13 @@ impl NodeKeys {
             .map(|child| (Rc::as_ptr(child), self.key(child)))
             .collect();
         let operator = node.operator.map_children(|c| children[&Rc::as_ptr(c)]);
-        let mut hasher = DefaultHasher::new();
-        serde_json::to_string(&operator)
-            .unwrap_or_default()
-            .hash(&mut hasher);
-        let key = hasher.finish();
+        // MessagePack preserves non-finite floats and signed zero. HashMap
+        // compares the complete byte key, so a hash collision cannot merge
+        // different computations. Cloned/recomposed NaN literals retain identity.
+        let encoded =
+            rmp_serde::to_vec(&operator).expect("an IR operator over child IDs must serialize");
+        let next = self.operators.len() as u64;
+        let key = *self.operators.entry(encoded).or_insert(next);
         self.memo.insert(Rc::as_ptr(node), (Rc::clone(node), key));
         key
     }
@@ -448,8 +448,8 @@ impl NodeKeys {
 
 impl CandidateMemo {
     /// The groups, each after every group it or one of its candidates
-    /// reads, the lower index first among those ready: the order the
-    /// dynamic program visits them, whatever order transformations appended
+    /// reads, the lower index first among those ready: a dependency order for
+    /// candidate traversal, whatever order transformations appended
     /// groups in. `None` when those reads form a cycle.
     pub fn topological_order(&self) -> Option<Vec<MemoGroupId>> {
         let count = self.groups.len();
@@ -494,6 +494,38 @@ impl CandidateMemo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structural_keys_preserve_nonfinite_and_signed_zero_literals() {
+        let input = crate::test_support::lower_promql(
+            "m",
+            asap_types::ir::properties::AccuracyTarget::exact(),
+        );
+        let literal = |value| {
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+                asap_types::ir::NonASAPOp::Project {
+                    cols: vec![asap_types::ir::ProjectItem {
+                        alias: Some("value".into()),
+                        expr: asap_types::ir::ScalarExpr::literal_f64(value),
+                    }],
+                    qualifier: None,
+                    child: Rc::clone(&input),
+                },
+            ))
+            .unwrap()
+        };
+        let mut keys = NodeKeys::default();
+        for (left, right) in [
+            (f64::NAN, f64::INFINITY),
+            (f64::INFINITY, f64::NEG_INFINITY),
+            (0.0, -0.0),
+        ] {
+            assert_ne!(keys.key(&literal(left)), keys.key(&literal(right)));
+        }
+        assert_eq!(keys.key(&literal(1.0)), keys.key(&literal(1.0)));
+        let node = literal(f64::NAN);
+        assert_eq!(keys.key(&node), keys.key(&literal(f64::NAN)));
+    }
 
     fn populate_pass1<Id: Clone>(
         initial: LogicalMemo,

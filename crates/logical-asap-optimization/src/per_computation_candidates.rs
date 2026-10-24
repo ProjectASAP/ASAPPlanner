@@ -5845,7 +5845,20 @@ mod tests {
             .iter()
             .any(|field| field.name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY));
         for (_, root) in composed_with(&inventory, topk) {
-            assert_eq!(&root.schema, expected);
+            assert_eq!(root.schema.fields, expected.fields);
+            assert_eq!(root.schema.time_index, expected.time_index);
+            assert_eq!(root.schema.closed, expected.closed);
+            // A physical heap may prove an additional partition/item key.
+            // Every required uniqueness fact must still follow from its keys.
+            for required in &expected.unique_keys {
+                assert!(
+                    root.schema.unique_keys.iter().any(|supplied| {
+                        supplied.iter().all(|column| required.contains(column))
+                    }),
+                    "required key {required:?} is not implied by {:?}",
+                    root.schema.unique_keys
+                );
+            }
         }
         let (_, state) = fused_heap(&inventory, SketchAlgorithm::CountSketchWithHeap);
         assert!(matches!(
