@@ -481,7 +481,21 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
 /// The library archives bounded same-engine evaluations and reports its budget.
 #[test]
 fn planning_stages_archive_evaluated_candidates() {
-    let workload = example1();
+    // Archive accounting does not require a large sketch/pane search. Use two
+    // exact source reads so every enumerated proposal has an accuracy contract.
+    let mut workload = example1();
+    let metric = workload
+        .data_workload
+        .as_ref()
+        .unwrap()
+        .sources
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    for query in workload.query_workload.repeating_queries.as_mut().unwrap() {
+        query.query = asap_types::workload::Query(metric.clone());
+    }
     let run =
         run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), Some(26)).unwrap();
     assert!(!run.stage1_logical_asap_optimization.is_empty());
