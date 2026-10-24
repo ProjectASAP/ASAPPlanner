@@ -483,6 +483,13 @@ impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
     }
 }
 
+fn map_executor_compile_error(error: asap_executor::Error, context: &str) -> ExecutorCompileError {
+    match error {
+        asap_executor::Error::CompilationDeadlineExceeded => ExecutorCompileError::DeadlineExceeded,
+        error => ExecutorCompileError::Rejected(format!("{context}: {error}")),
+    }
+}
+
 fn check_compile_deadline(deadline: Option<Instant>) -> Result<(), ExecutorCompileError> {
     if deadline.is_some_and(|limit| Instant::now() >= limit) {
         Err(ExecutorCompileError::DeadlineExceeded)
@@ -509,7 +516,7 @@ impl InstallablePlan {
 
     fn check_compiles_before(&self, deadline: Option<Instant>) -> Result<(), ExecutorCompileError> {
         check_compile_deadline(deadline)?;
-        use asap_executor::physical_planner::{compile, scan_contract, InputContract};
+        use asap_executor::physical_planner::{compile_before, scan_contract, InputContract};
         use std::collections::BTreeMap;
         let dag = &self.dag.dag;
         let indexed = IndexedDag::new(dag);
@@ -547,8 +554,8 @@ impl InstallablePlan {
             };
             #[cfg(test)]
             tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
-            compile(below, inputs, &[output.node_id as u64])
-                .map_err(|error| format!("stored output {}: {error}", output.node_id))?;
+            compile_before(below, inputs, &[output.node_id as u64], deadline)
+                .map_err(|error| map_executor_compile_error(error, "stored output"))?;
         }
         // The query run reads the stored outputs it reaches from the roots
         // without passing another, the query-time windows, and the table
@@ -589,7 +596,8 @@ impl InstallablePlan {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         inputs.extend(scans);
         let roots: Vec<u64> = roots.into_iter().map(|id| id as u64).collect();
-        compile(dag, inputs, &roots).map_err(|error| format!("query run: {error}"))?;
+        compile_before(dag, inputs, &roots, deadline)
+            .map_err(|error| map_executor_compile_error(error, "query run"))?;
         check_compile_deadline(deadline)
     }
 
@@ -1116,7 +1124,7 @@ fn runtime_inputs_of_before(
             }
         })?;
         coverage_by_node.insert(id, coverage.clone());
-        executor_builds(id, &inputs, &indexed, !whole_plan_checked)?;
+        executor_builds(id, &inputs, &indexed, !whole_plan_checked, deadline)?;
         whole_plan_checked = true;
         let reach_ms = reach_ms_of(&inputs, &reach_ms_by_node);
         let span_ms = match inputs.stored_outputs.is_empty() {
@@ -1266,8 +1274,9 @@ fn executor_builds(
     inputs: &StoredOutputInputs,
     indexed: &IndexedDag<'_>,
     in_whole_plan: bool,
+    deadline: Option<Instant>,
 ) -> Result<(), InstallablePlanError> {
-    use asap_executor::physical_planner::{compile, InputContract};
+    use asap_executor::physical_planner::{compile_before, InputContract};
     // The build reads only the nodes below it: compile them, or the whole
     // plan once, for the executor's checks of the whole plan.
     let sub_dag;
@@ -1290,11 +1299,16 @@ fn executor_builds(
             (id as u64, InputContract::bounded(schema))
         })
         .collect();
-    compile(below, bound, &[node as u64])
+    compile_before(below, bound, &[node as u64], deadline)
         .map(|_| ())
-        .map_err(|error| InstallablePlanError::StoredOutputNotExecutable {
-            node_id: node,
-            reason: error.to_string(),
+        .map_err(|error| match error {
+            asap_executor::Error::CompilationDeadlineExceeded => {
+                InstallablePlanError::DeadlineExceeded
+            }
+            error => InstallablePlanError::StoredOutputNotExecutable {
+                node_id: node,
+                reason: error.to_string(),
+            },
         })
 }
 
@@ -1497,6 +1511,13 @@ mod tests {
     /// An expired validation budget is not evidence that an operator is unsupported.
     #[test]
     fn executor_validation_timeout_is_distinct_from_rejection() {
+        assert_eq!(
+            map_executor_compile_error(
+                asap_executor::Error::CompilationDeadlineExceeded,
+                "query run"
+            ),
+            ExecutorCompileError::DeadlineExceeded,
+        );
         assert_eq!(
             PlannerExecutorCompileCheck.compiles_before(&[], Some(Instant::now())),
             Err(ExecutorCompileError::DeadlineExceeded)

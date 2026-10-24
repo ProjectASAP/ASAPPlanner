@@ -36,7 +36,7 @@ pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 10;
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeRole {
     Input,
     Left,
@@ -394,24 +394,37 @@ impl PhysicalASAPDAG {
         // Each node's incoming edges are exactly its operator's inputs, with
         // the role of each input's position, so a swapped `Left`/`Right`
         // cannot reorder the inputs of a binary operator.
-        let mut expected: HashMap<PhysicalASAPNodeId, Vec<(PhysicalASAPNodeId, EdgeRole)>> = self
+        // Count input occurrences instead of scanning a vector for each edge.
+        // Pane merges can have tens of thousands of distinct inputs; linear
+        // searches made validation quadratic in that fan-in. Multiplicities
+        // still matter when the same producer occupies several input slots.
+        let mut expected: HashMap<_, HashMap<_, usize>> = self
             .nodes
             .iter()
-            .map(|node| (node.id, edge_roles(&node.payload)))
+            .map(|node| {
+                let mut counts = HashMap::new();
+                for input in edge_roles(&node.payload) {
+                    *counts.entry(input).or_insert(0) += 1;
+                }
+                (node.id, counts)
+            })
             .collect();
         for edge in &self.edges {
             let inputs = expected.get_mut(&edge.consumer).ok_or(
                 PhysicalASAPDAGValidationError::MissingEdgeEndpoint(edge.consumer),
             )?;
-            let position = inputs
-                .iter()
-                .position(|input| *input == (edge.producer, edge.role))
+            let count = inputs
+                .get_mut(&(edge.producer, edge.role))
+                .filter(|count| **count > 0)
                 .ok_or(PhysicalASAPDAGValidationError::EdgeRoleMismatch {
                     consumer: edge.consumer,
                 })?;
-            inputs.swap_remove(position);
+            *count -= 1;
         }
-        if let Some((consumer, _)) = expected.iter().find(|(_, inputs)| !inputs.is_empty()) {
+        if let Some((consumer, _)) = expected
+            .iter()
+            .find(|(_, inputs)| inputs.values().any(|count| *count != 0))
+        {
             return Err(PhysicalASAPDAGValidationError::EdgeRoleMismatch {
                 consumer: *consumer,
             });

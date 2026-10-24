@@ -72,7 +72,29 @@ pub fn compile(
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
-    compile_internal(dag, inputs, roots)
+    compile_before(dag, inputs, roots, None)
+}
+
+/// Compile with cooperative cancellation between planning operations. The
+/// ordinary runtime compiler delegates here without a deadline.
+pub fn compile_before(
+    dag: &PhysicalASAPDAG,
+    inputs: BTreeMap<NodeId, InputContract>,
+    roots: &[NodeId],
+    deadline: Option<std::time::Instant>,
+) -> Result<CompiledPhysicalDAG, Error> {
+    check_compile_deadline(deadline)?;
+    let compiled = compile_internal(dag, inputs, roots, deadline)?;
+    check_compile_deadline(deadline)?;
+    Ok(compiled)
+}
+
+fn check_compile_deadline(deadline: Option<std::time::Instant>) -> Result<(), Error> {
+    if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+        Err(Error::CompilationDeadlineExceeded)
+    } else {
+        Ok(())
+    }
 }
 
 /// Convenience for callers that already resolved inputs. Lowering still uses
@@ -164,8 +186,9 @@ fn compile_internal(
     dag: &PhysicalASAPDAG,
     mut sources: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
+    deadline: Option<std::time::Instant>,
 ) -> Result<CompiledPhysicalDAG, Error> {
-    preflight_depth(dag)?;
+    preflight_depth(dag, deadline)?;
     // A pane chain stands for its panes; the deployment binds each pane's
     // raw input, so it runs only once expanded.
     if let Some(node) = dag
@@ -183,7 +206,7 @@ fn compile_internal(
     if let Some(node) = dag.nodes.iter().find(|n| n.id as u64 > u64::from(u32::MAX)) {
         return Err(invalid(format!("Planner node ID {} exceeds u32", node.id)));
     }
-    let restored = logical::restore(dag)?;
+    let restored = logical::restore_before(dag, deadline)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
         .nodes
@@ -205,6 +228,7 @@ fn compile_internal(
         )
     });
     for edge in edges {
+        check_compile_deadline(deadline)?;
         dependencies
             .entry(edge.consumer as u64)
             .or_default()
@@ -217,6 +241,7 @@ fn compile_internal(
     let mut seen = BTreeSet::new();
     let mut pending = roots.iter().map(|&id| (id, false)).collect::<Vec<_>>();
     while let Some((id, expanded)) = pending.pop() {
+        check_compile_deadline(deadline)?;
         if expanded {
             ordered.push(id);
             continue;
@@ -236,6 +261,7 @@ fn compile_internal(
     }
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
+        check_compile_deadline(deadline)?;
         let node = nodes[&id];
         let auxiliary = helper_id(id, 0)?;
         let output = Arc::new(node.output_schema.clone());
@@ -1512,7 +1538,10 @@ impl PhysicalOperator<Batch, SchemaRef> for CheckedSource<'_> {
 }
 
 // Bound recursion before invoking the upstream recursive provenance validator.
-fn preflight_depth(dag: &PhysicalASAPDAG) -> Result<(), Error> {
+fn preflight_depth(
+    dag: &PhysicalASAPDAG,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), Error> {
     let mut remaining = dag
         .nodes
         .iter()
@@ -1523,6 +1552,7 @@ fn preflight_depth(dag: &PhysicalASAPDAG) -> Result<(), Error> {
     }
     let mut consumers = BTreeMap::<_, Vec<_>>::new();
     for edge in &dag.edges {
+        check_compile_deadline(deadline)?;
         if !remaining.contains_key(&edge.producer) {
             return Err(invalid("missing Planner edge producer"));
         }
@@ -1542,6 +1572,7 @@ fn preflight_depth(dag: &PhysicalASAPDAG) -> Result<(), Error> {
     let mut depths = BTreeMap::new();
     let mut visited = 0;
     while let Some(id) = ready.pop_front() {
+        check_compile_deadline(deadline)?;
         visited += 1;
         let depth = *depths.get(&id).unwrap_or(&1usize);
         if depth > 128 {
@@ -1618,4 +1649,66 @@ fn local_scalar(expr: &ScalarExpr<PhysicalASAPNodeId>) -> Result<ScalarExpr, Err
         ));
     }
     Ok(expr.map_operator_refs(&mut |_| unreachable!("no operator references")))
+}
+
+#[cfg(test)]
+mod compilation_deadline_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn empty_dag() -> PhysicalASAPDAG {
+        PhysicalASAPDAG {
+            nodes: vec![],
+            edges: vec![],
+            roots: vec![],
+            scalar_roots: vec![],
+        }
+    }
+
+    #[test]
+    fn expired_compilation_is_distinct_from_invalid_graph() {
+        let dag = empty_dag();
+        assert!(matches!(
+            compile_before(&dag, BTreeMap::new(), &[], Some(Instant::now())),
+            Err(Error::CompilationDeadlineExceeded)
+        ));
+        let unbounded = compile(&dag, BTreeMap::new(), &[]).err();
+        assert!(matches!(unbounded, Some(Error::Invalid(_))));
+        assert_eq!(
+            unbounded,
+            compile_before(
+                &dag,
+                BTreeMap::new(),
+                &[],
+                Some(Instant::now() + Duration::from_secs(1)),
+            )
+            .err()
+        );
+    }
+
+    #[test]
+    fn large_compilation_observes_deadline_during_preflight() {
+        use planner_types::ir::properties::ExecutionDataState;
+        use planner_types::physical::Materialization;
+        let schema = planner_types::ir::schema::Schema::new(vec![]);
+        let mut dag = empty_dag();
+        dag.nodes = (0..100_000)
+            .map(|id| PhysicalASAPDAGNode {
+                id,
+                payload: Payload::NonASAP(NonASAPOp::Values {
+                    schema: schema.clone(),
+                    rows: vec![],
+                }),
+                output_state: ExecutionDataState::QUERY_ROWS,
+                materialization: Materialization::NotMaterialized,
+                output_schema: schema.clone(),
+                guarantee: None,
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_millis(1);
+        assert!(matches!(
+            compile_before(&dag, BTreeMap::new(), &[], Some(deadline)),
+            Err(Error::CompilationDeadlineExceeded)
+        ));
+    }
 }

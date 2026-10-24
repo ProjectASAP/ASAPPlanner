@@ -513,3 +513,75 @@ fn a_raw_data_sample_window_ends_its_offset_before_the_evaluation() {
     assert_eq!(window.bounds_ms(3_600_000), (2_700_000, 3_300_000));
     assert_eq!(window.reach_ms(), 900_000);
 }
+
+/// High-fan-in merge/concat validation is independent of wire edge order and
+/// preserves repeated input occurrences, rather than treating edges as a set.
+#[test]
+fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
+    use asap_types::ir::physical_export::{
+        EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge,
+        PhysicalASAPDAGNode, WindowEdgeCompatibility,
+    };
+    use asap_types::ir::properties::ExecutionDataState;
+    let schema = Schema::new(vec![Field::plain("value", DataType::Float64, false)]);
+    let count = 20_000;
+    let mut nodes: Vec<_> = (0..count)
+        .map(|id| PhysicalASAPDAGNode {
+            id,
+            payload: Operator::NonASAP(NonASAPOp::Scan {
+                source: Source::Table {
+                    table_ref: format!("source-{id}"),
+                },
+                predicates: vec![],
+                schema: schema.clone(),
+            }),
+            output_state: ExecutionDataState::QUERY_ROWS,
+            materialization: Materialization::NotMaterialized,
+            output_schema: schema.clone(),
+            guarantee: None,
+        })
+        .collect();
+    let inputs: Vec<_> = (0..count).chain([0, 0]).collect();
+    nodes.push(PhysicalASAPDAGNode {
+        id: count,
+        payload: Operator::NonASAP(NonASAPOp::Concat {
+            children: inputs.clone(),
+            discriminator_unique_key: None,
+        }),
+        output_state: ExecutionDataState::QUERY_ROWS,
+        materialization: Materialization::NotMaterialized,
+        output_schema: schema.clone(),
+        guarantee: None,
+    });
+    let mut dag = PhysicalASAPDAG {
+        nodes,
+        roots: vec![count],
+        scalar_roots: vec![],
+        edges: inputs
+            .into_iter()
+            .map(|producer| PhysicalASAPDAGEdge {
+                producer,
+                consumer: count,
+                role: EdgeRole::Input,
+                intermediate_schema: schema.clone(),
+                data_state: ExecutionDataState::QUERY_ROWS,
+                grouping: GroupingEdgeCompatibility::NotApplicable,
+                window: WindowEdgeCompatibility::NotApplicable,
+            })
+            .collect(),
+    };
+    dag.edges.reverse();
+    dag.validate()
+        .expect("reordered input multiset remains valid");
+    let missing = dag.edges.pop().unwrap();
+    assert!(matches!(
+        dag.validate(),
+        Err(PhysicalASAPDAGValidationError::EdgeRoleMismatch { .. })
+    ));
+    dag.edges.push(missing);
+    dag.edges.push(dag.edges[0].clone());
+    assert!(matches!(
+        dag.validate(),
+        Err(PhysicalASAPDAGValidationError::EdgeRoleMismatch { .. })
+    ));
+}
