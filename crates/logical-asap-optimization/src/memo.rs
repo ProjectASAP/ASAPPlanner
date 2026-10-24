@@ -8,6 +8,8 @@
 pub mod candidates;
 /// Pass 2 summary-capability expansion and consistent producer/reader resizing.
 pub mod shared_builds;
+/// Concrete summary-state groups for the connection-based planner migration.
+pub mod state_groups;
 mod groups;
 
 use std::collections::{HashMap, HashSet};
