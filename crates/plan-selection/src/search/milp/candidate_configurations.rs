@@ -10,7 +10,7 @@ use std::rc::Rc;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_physical_asap_optimization::summary_materialization_eligibility;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{ASAPOp, OperatorNode};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::physical::{Materialization, Medium};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -174,6 +174,14 @@ pub(super) fn enumerate_candidate_configurations(
                 Materialization::NotMaterialized,
                 ExecutionTiming::IngestionTime,
             ));
+        }
+        // This is the same deployment restriction enforced by PlanSelector's
+        // raw_data_violation. Encode it before solving instead of excluding
+        // each complete plan that uses an unavailable query-time raw scan.
+        if !deployment.raw_data_retained
+            && matches!(node.operator, Operator::NonASAP(NonASAPOp::Scan { .. }))
+        {
+            modes.retain(|(_, timing)| *timing == ExecutionTiming::IngestionTime);
         }
         for (materialization, timing) in modes {
             let id = PhysicalCandidateId(result.configurations.len());
@@ -509,6 +517,42 @@ mod tests {
             .iter()
             .flat_map(|root| &root.compatible_candidates)
             .all(|id| expanded.configurations[id.0].timing == ExecutionTiming::QueryTime));
+    }
+
+    // A deployment without raw retention cannot execute a query-time scan;
+    // reject those configurations before spending refinement rounds on them.
+    #[test]
+    fn no_raw_retention_excludes_query_time_scan_configurations() {
+        let (source, entries, data) = fixture();
+        let expanded = enumerate_candidate_configurations(
+            &source,
+            &[0, 1],
+            &entries,
+            &data,
+            &DeploymentCapabilities {
+                raw_data_retained: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let scans = expanded
+            .configurations
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| {
+                matches!(
+                    expanded.inventory.templates[*id].as_ref().unwrap().operator,
+                    asap_types::ir::Operator::NonASAP(asap_types::ir::NonASAPOp::Scan { .. })
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!scans.is_empty());
+        assert!(scans
+            .iter()
+            .all(|(_, config)| config.timing == ExecutionTiming::IngestionTime));
+        assert!(select_candidates(&expanded.inventory.graph)
+            .unwrap()
+            .is_some());
     }
 
     // Two references belonging to one scalar query cannot justify shared-query materialization.
