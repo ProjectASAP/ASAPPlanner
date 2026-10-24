@@ -2,7 +2,25 @@
 
 Developer evaluation, 2026-10-24. These are exploratory optimizer measurements and modeled execution costs, not measured query-runtime performance. Single debug-build runs on a shared host do not establish a speedup.
 
-## In-progress migration regressions (not final acceptance)
+## Current production-path validation
+
+The frozen production binary through `9fff8acf` passed all **30 ASAPQuery workloads (270 query outputs)** with accuracy enforcement and no selected-plan installation-metadata errors. The runner also rejects nonfinite costs, invalid cost certificates, and lower bounds above the validated incumbent. [Portable results](joint-candidate-workload-validation.json) record binary identity, per-workload costs, phase timings, model sizes, solver status, and peak RSS.
+
+| Workload family | Passed | Median wall s | Maximum wall s | Modeled cost/s range |
+| --- | ---: | ---: | ---: | ---: |
+| Base | 10/10 | 31.74 | 36.42 | 1.55398e-06–2.95801e-06 |
+| 5× cardinality | 10/10 | 31.89 | 36.59 | 7.77085e-06–1.4791e-05 |
+| 3× window length | 10/10 | 33.38 | 39.64 | 4.48036e-06–8.67297e-06 |
+
+Overall median planning wall time was **32.37 s**, maximum **39.64 s**, and maximum planner RSS **2.57 GiB**. Each run requested a cooperative 30-second budget; single calls and cleanup can overrun that allowance. Twelve runs retained a validated seed after the full phase reached its limit; eighteen reported a time limit. **None proved optimality.** The full finite pane-width domain remains available, but bounded generation/search need not finish exploring it.
+
+The report separates local candidate generation, memo expansion, inventory/model construction, cumulative MILP solving, validation time and refinement count. Phase totals overlap with their constituent timers and must not be added again. Costs and accuracy are checked by the configured evaluators; these runs do not measure error or execution speed against a supplied live stream. Debug builds, two concurrent workloads, and other tests on the same host make these diagnostic measurements, not a controlled speedup claim. Historical checkpoints below used different binaries/budgets and remain explicitly separate.
+
+The separate nine-example viewer suite also passed, including SQL rollup and the composed DDS range query (174.52 s total, concurrency two). Zero-budget and refinement-budget reports passed their focused checks. These examples supplement the thirty random mixed workloads.
+
+To reproduce the thirty-workload collection, build `stage_pipeline`, freeze that executable, then run `python3 tools/validate_joint_workloads.py OUTPUT_DIRECTORY FROZEN_EXECUTABLE`. The runner uses the unchanged viewer manifests, enforced guarantees, Fargate prices, and a 90-second external deadline. Full regression and exact-head CI are separate release gates; successful workload coverage alone does not establish release readiness.
+
+## Historical migration regressions (not final acceptance)
 
 The expanded sharing/scope catalog and subsequent complete pane-width domain introduced regressions. These are retained in `joint-candidate-migration-checkpoints.json`; they are not successful speedup measurements. All rows use seed-862, a requested 30-second planning budget, accuracy enforcement, the Fargate price preset, and no retained raw data. They are successive working-tree snapshots, not a controlled benchmark of the final implementation.
 
@@ -13,7 +31,7 @@ The expanded sharing/scope catalog and subsequent complete pane-width domain int
 | First-copy seed, compact adjacency | 464 | 3092 | 1 | Validated incumbent, time limit | 2.3389329896881045e-06 |
 | Complete width domain and cyclic-input cost certificate | 5785 | 147279 | 0 | No incumbent | — |
 
-The oversized shared exact-Sum chain was correctly priced by the final evaluator, but recursive certification over cyclic potential inputs initially gave it a zero local lower bound. The local-interface certificate restores that bound. Complete width enumeration then enlarged the generated graph enough to exhaust the budget before validation. Pending acceptance therefore includes duplicate-generation removal, cooperative generation deadlines, a validated pre-expansion seed, and smaller reader-flow models. None of these failed runs establishes optimality or functional completion.
+The oversized shared exact-Sum chain was correctly priced by the final evaluator, but recursive certification over cyclic potential inputs initially gave it a zero local lower bound. The local-interface certificate restores that bound. Complete width enumeration then enlarged the generated graph enough to exhaust the budget before validation. These failures motivated duplicate-generation removal, cooperative generation deadlines, a validated pre-expansion seed, and smaller reader-flow models. None of these failed runs establishes optimality or functional completion.
 
 ## Workloads and settings
 
@@ -23,7 +41,7 @@ All runs retain the viewer's settings: raw data and query-time results are not r
 
 The external wall deadline is 120 seconds per run. Memo-MILP receives a 120-second internal budget; candidate-connections receives 30 seconds and the route's 128-refinement cap. These differing internal budgets are intentional diagnostic settings, not an equal-budget comparison. The budget is checked between solver/evaluator calls, so a final call can overshoot it. A killed process does not provide a completed plan, even if an internal incumbent existed. An exit code of zero is not sufficient: the devtool can serialize a selection error with `selected: null`.
 
-## Latest migration checkpoint: sharing, accuracy pruning and cost bounds
+## Historical checkpoint: sharing, accuracy pruning and cost bounds
 
 At `c196e423`, compatible scan-label projections can share one pane state; certified query-closure cuts remove size-independent accuracy failures, and conservative ingestion Scan/DDSketch pane costs supply nonzero lower bounds. The same three unchanged nine-query manifests all produced plans accepted by the accuracy evaluator.
 
@@ -94,11 +112,11 @@ Accuracy acceptance is the planner's analytical/evidence validation, not an empi
 
 Missing phase timings are unavailable in that binary/report, not zero. Candidate-generation time is not interchangeable with total CLI wall time.
 
-## Coverage interpretation
+## Coverage interpretation of the historical restricted catalog
 
 The first full-workload attempt stopped on fused-computation metadata; this is an adapter coverage limitation. The unchanged quantile subset also requires a window implementation absent from the initial restricted catalog: each query reads a 100-second window every second, while raw data is not retained. Stage 2 only permits whole-window ingestion states when the evaluation interval is a multiple of the window width (`ingestion_eligibility` in `physical-asap-optimization`). These queries therefore need supported pane-chain candidates. A Pass-1/shared-summary catalog without pane expansion cannot supply them. Rejecting that restricted catalog does not mean the workload is infeasible: the existing broader searches produce pane-based plans.
 
-The final measured catalog includes local panes and shared identical summary/pane states, preserves canonical input boundaries and their annotations, and seeds search with bounded contract-aware candidate choices. This seed favors numeric-value accuracy contracts for value requirements instead of rank-only summaries. It produces a validated incumbent for all three full workloads in these runs; subsequent complete-assignment refinement still spends most validations rejecting outputs without usable accuracy guarantees. Cross-width/horizon pane reuse, rollup, scan widening, and top-k reuse expansion are not included. Refer to the observed-results table for the final executable's measurements. A time-limit incumbent is validated but is not a proven optimum; no incumbent means no plan was produced within the configured search budget.
+The restricted catalog measured at that checkpoint includes local panes and shared identical summary/pane states, preserves canonical input boundaries and their annotations, and seeds search with bounded contract-aware candidate choices. This seed favors numeric-value accuracy contracts for value requirements instead of rank-only summaries. It produces a validated incumbent for all three full workloads in these runs; subsequent complete-assignment refinement still spends most validations rejecting outputs without usable accuracy guarantees. Cross-width/horizon pane reuse, rollup, scan widening, and top-k reuse expansion are not included. Refer to the observed-results table for the final executable's measurements. A time-limit incumbent is validated but is not a proven optimum; no incumbent means no plan was produced within the configured search budget.
 
 Historical artifacts preserve the progression: local panes alone produced a valid subset plan at 4.140868130764761e-6/s; adding identical pane sharing before the final boundary-metadata fix found 2.7716514014591154e-6/s within 30 seconds. Both exceeded the legacy subset's 1.3836280530907367e-6/s. These diagnostics motivated coverage work; neither is evidence of an execution-cost improvement over the existing planner. Full-assignment evaluator refinement with zero certified local cost bounds remains expensive and provides a weak optimization bound.
 

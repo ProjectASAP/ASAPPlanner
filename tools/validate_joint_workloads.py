@@ -9,6 +9,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -59,7 +60,7 @@ def run(entry):
         exit_code = subprocess.run(command, stdout=f, stderr=subprocess.STDOUT, cwd=repo).returncode
     result = {'workload': name, 'exit_code': exit_code, 'wall_seconds': time.monotonic() - start, 'artifact': plan_path.name}
     timing_output = timing.read_text() if timing.exists() else ''
-    rss_match = re.search('Maximum resident set size \\(kbytes\\): (\\d+)', timing_output)
+    rss_match = re.search(r'Maximum resident set size \(kbytes\): (\d+)', timing_output)
     result['peak_planner_rss_kib'] = int(rss_match.group(1)) if rss_match else None
     if plan_path.exists():
         document = json.loads(plan_path.read_text())
@@ -84,9 +85,19 @@ def run(entry):
         result['artifact_sha256'] = hashlib.sha256(plan_path.read_bytes()).hexdigest()
     workload = json.loads((repo / 'tools/dag-viewer' / entry['workload']).read_text())['query_workload']
     result['expected_queries'] = len(workload.get('query_batch') or []) + len(workload.get('repeating_queries') or [])
+    modeled_cost = result.get('modeled_cost_per_second')
+    bound = result.get('search', {}).get('lower_bound')
+    result['cost_certificate_valid'] = bool(
+        isinstance(modeled_cost, (int, float)) and math.isfinite(modeled_cost) and modeled_cost >= 0
+        and result.get('search', {}).get('status') != 'invalid_cost_certificate'
+        and (bound is None or (
+            isinstance(bound, (int, float)) and math.isfinite(bound)
+            and bound <= modeled_cost + 1e-8 * max(abs(modeled_cost), 1e-12)
+        ))
+    )
     result['passed'] = bool(
         exit_code == 0 and result.get('selected')
-        and result.get('guarantees_enforced')
+        and result.get('guarantees_enforced') and result['cost_certificate_valid']
         and result.get('accepted_queries') == result['expected_queries']
         and not result.get('error') and not result.get('stored_outputs_error')
     )

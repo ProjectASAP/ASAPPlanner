@@ -428,7 +428,7 @@ Consumer-dependent freshness, invalidation, and lifetime checks may involve seve
 
 #### Every query meets its accuracy target
 
-For each query `q`, the configured accuracy contract specifies an error metric and target, and, when probabilistic, a failure-probability target. A plan is feasible only if its composed output error and failure probability satisfy those targets. These are end-to-end checks, not a sum of arbitrary local sketch errors.
+For each query `q`, the configured accuracy contract specifies an error metric and target, and, when probabilistic, a failure-probability target. A plan is feasible only if its composed output error and failure probability satisfy those targets. These are end-to-end checks, not a sum of arbitrary local sketch errors. Primitive contracts also carry their data-domain conditions. For example, an interior DDSketch quantile using interpolation cannot assume a relative-error bound across zero; a supported nonnegative-source proof can discharge that condition. Bind declared data facts before recovering dependent arithmetic guarantees, and leave unproved contracts unknown.
 
 When proven composition rules exist, encode their bounds directly. Otherwise use the exact finite-assignment exclusion below for each plan whose validated accuracy fails. For example, if a selected P99 estimator and its small KLL producer violate the target regardless of all other choices, the following focused cut is sound:
 
@@ -505,6 +505,8 @@ Both estimators connect to the same selected build candidate, so its cost appear
 Candidate generation maintains a worklist of new expressions and applicable rules. Interning prevents duplicate derivations, while compatibility checks eliminate unsupported connections. Generation is relative to a finite inventory of rules, configurations, and execution scopes. If exploration stops before closure or imposes a cap, the reported optimality claim must reflect that restriction.
 
 Let `n` be the number of physical candidates, `m` the number of compatible producer–consumer connections, and `r` the number of compatible query-output connections. The base formulation has `n + m + r` binary variables, plus ordering and any cost-model auxiliaries. This counts the model size, not its solution time. Even a restricted producer-selection case contains set cover: producers cover subsets of outputs and have activation costs. Removing interchangeable instance slots reduces redundant representation but does not remove this combinatorial difficulty.
+
+Cost normalization must preserve small, meaningful differences relative to solver tolerances. An unused expensive candidate must not scale every feasible objective toward zero. Check the supported coefficient range and reject a claimed lower bound that exceeds an independently validated incumbent; retain the feasible plan but report the certificate as invalid.
 
 Search reductions must preserve joint choices. A candidate that costs more alone may enable useful sharing, so local cost dominance is insufficient. Independent components can be solved separately only when dependencies, sharing, and global constraints also separate. Generation caching and sparse compatibility edges reduce overhead without requiring enumeration of complete workload plans.
 
