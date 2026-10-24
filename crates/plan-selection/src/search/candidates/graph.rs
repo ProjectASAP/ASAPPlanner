@@ -105,8 +105,8 @@ pub(crate) enum CandidateSelectionError {
     Solver(String),
 }
 
-// The core normalizes its largest local cost to one. Smaller positive
-// coefficients must stay representable by HiGHS; rejecting a wider range is an
+// Positive costs must fit within the supported ratio before scaling the
+// smallest to unit magnitude; rejecting a wider range is an
 // explicit model restriction, not proof of infeasibility or a completeness claim.
 // Resource rows use the same conservative positive coefficient range.
 pub(crate) const MINIMUM_RELATIVE_COEFFICIENT: f64 = 1e-9;

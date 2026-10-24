@@ -272,9 +272,35 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
                     });
         }
     }
+    if let (Some(report), Some(cost)) = (
+        result.0.search.candidate_connections.as_mut(),
+        result.0.search.incumbent_cost,
+    ) {
+        invalidate_contradictory_bound(report, cost);
+    }
     result.0.search.candidates_checked =
         (seed_progress.refinements + full_progress.refinements) as u64;
     Ok(result)
+}
+
+/// An independently validated plan is a witness against a larger global lower
+/// bound. Keep the executable plan, but expose the inconsistent certificate
+/// instead of silently clamping it or claiming optimality.
+fn invalidate_contradictory_bound(report: &mut crate::CandidateConnectionReport, cost: f64) {
+    if report
+        .lower_bound
+        .is_some_and(|bound| crate::cheaper(cost, bound))
+    {
+        report.status = "invalid_cost_certificate".into();
+        report.seed_fallback_reason = Some(format!(
+            "full-domain lower bound {:?} exceeds independently validated cost {cost}",
+            report.lower_bound,
+        ));
+        report.lower_bound = None;
+        report.relative_gap = None;
+        report.catalog_exhausted = Some(false);
+        report.evaluation_complete = Some(false);
+    }
 }
 
 fn add_phase_metrics(
@@ -785,6 +811,24 @@ mod tests {
         assert!(error
             .to_string()
             .contains("planning budget exhausted after local candidate generation"));
+    }
+
+    #[test]
+    fn contradictory_bound_is_reported_as_invalid_not_clamped() {
+        let mut report = crate::CandidateConnectionReport {
+            status: "optimal".into(),
+            lower_bound: Some(8.533333870933332e-6),
+            relative_gap: Some(0.0),
+            ..Default::default()
+        };
+        invalidate_contradictory_bound(&mut report, 8.400000806399998e-6);
+        assert_eq!(report.status, "invalid_cost_certificate");
+        assert_eq!(report.lower_bound, None);
+        assert_eq!(report.relative_gap, None);
+        assert!(report
+            .seed_fallback_reason
+            .unwrap()
+            .contains("exceeds independently validated"));
     }
 
     // Only an explicitly identified budget stop can use an already validated plan.

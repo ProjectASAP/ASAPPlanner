@@ -111,6 +111,7 @@ fn assert_valid(run: &Stage1ToStage3Run<usize>, queries: usize) {
         .as_ref()
         .expect("joint planning reports its finite catalog");
     assert!(report.refinements <= report.max_refinements);
+    assert_ne!(report.status, "invalid_cost_certificate", "{report:?}");
     for value in [
         report.model_construction_ms,
         report.solver_ms,
@@ -125,7 +126,10 @@ fn assert_valid(run: &Stage1ToStage3Run<usize>, queries: usize) {
         report.lower_bound,
         selection.costs[&selection.selected].cost_per_second,
     ) {
-        assert!(bound <= cost + 1e-8 * cost.abs().max(1e-12));
+        assert!(
+            bound <= cost + 1e-8 * cost.abs().max(1e-12),
+            "reported bound {bound} exceeds validated cost {cost}: {report:?}"
+        );
     }
 }
 

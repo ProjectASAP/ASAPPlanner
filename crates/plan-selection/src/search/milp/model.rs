@@ -527,11 +527,22 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
         .iter()
         .filter_map(|observation| observation.exact_cost)
         .fold(maximum_cost, f64::max);
-    let divisor = if maximum_cost > 0.0 {
-        maximum_cost
-    } else {
-        1.0
-    };
+    // Keep the smallest meaningful monetary coefficient at unit scale.
+    // Scaling by the largest (possibly unused, very expensive) candidate can
+    // push every feasible objective below the solver's absolute tolerance and
+    // turn an incumbent into a spurious optimum despite zero MIP gap settings.
+    let divisor = graph
+        .candidates
+        .iter()
+        .map(|candidate| candidate.local_cost)
+        .chain(
+            observations
+                .iter()
+                .filter_map(|observation| observation.exact_cost),
+        )
+        .filter(|cost| *cost > 0.0)
+        .reduce(f64::min)
+        .unwrap_or(1.0);
     if graph
         .candidates
         .iter()
@@ -541,7 +552,7 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
                 .iter()
                 .filter_map(|observation| observation.exact_cost),
         )
-        .any(|cost| cost > 0.0 && cost / divisor < MINIMUM_RELATIVE_COEFFICIENT)
+        .any(|cost| cost > 0.0 && cost / maximum_cost < MINIMUM_RELATIVE_COEFFICIENT)
     {
         return Err(CandidateSelectionError::InvalidGraph(
             "observed costs and local bounds exceed supported numerical range".into(),
@@ -1028,6 +1039,60 @@ mod tests {
         assert_eq!(witness.query_roots.len(), 2);
         assert_eq!(witness.connections.len(), 1);
         witness.validate(&selected).unwrap();
+    }
+
+    /// An unused ingestion configuration must not scale away improvements in
+    /// cheap query-time sharing. The unobserved materialized reader still has
+    /// zero certified cost and must be explored before declaring the known
+    /// unmaterialized plan optimal, independently of currency units.
+    #[test]
+    fn expensive_unused_candidate_cannot_hide_cheap_sharing_improvement() {
+        for currency_scale in [1e-6, 1.0, 1e6] {
+            let graph = dependency_graph(
+                vec![
+                    candidate(0, 0.0, &[]),
+                    candidate(1, 0.0, &[&[0]]),
+                    candidate(1, 0.0, &[&[0]]),
+                    candidate(1, 16.800072 * currency_scale, &[]),
+                ],
+                &[&[1, 2, 3], &[1, 2, 3]],
+            );
+            let observed = SelectedCandidateGraph {
+                selected_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+                connections: vec![
+                    crate::search::candidates::graph::ProducerConsumerConnection {
+                        consumer: PhysicalCandidateId(1),
+                        requirement: 0,
+                        producer: PhysicalCandidateId(0),
+                    },
+                ],
+                query_roots: (0..2)
+                    .map(
+                        |query_root| crate::search::candidates::graph::QueryRootAssignment {
+                            query_root,
+                            candidate: PhysicalCandidateId(1),
+                        },
+                    )
+                    .collect(),
+                modeled_cost: 0.0,
+            };
+            let proposal = solve_candidate_proposal(
+                &graph,
+                &[ObservedAssignment {
+                    selected: observed,
+                    exact_cost: Some(8.533333870933332e-6 * currency_scale),
+                    rejected_queries: vec![],
+                }],
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(proposal.model_lower_bound, Some(0.0));
+            assert!(proposal
+                .selected
+                .selected_candidates
+                .contains(&PhysicalCandidateId(2)));
+        }
     }
 
     // The start includes ranks and all per-output AND/OR auxiliaries, including
