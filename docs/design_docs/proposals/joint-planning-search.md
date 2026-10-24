@@ -159,7 +159,9 @@ The cost of a shared plan is obtained from its selected execution nodes, not by 
 
 A node may execute repeatedly. Its materialization, consumer schedules, and lifetime determine how frequently its work is performed and how long its state occupies resources. A constant candidate cost is appropriate only when this context is fixed. All terms use a common horizon or consistent rates, so ingestion work and evaluation work can be compared.
 
-Some charges belong to a resource shared beyond one computation. If two consumers need 5m and 15m of the same raw source, the required retention horizon is 15m, not 20m. Such retention is charged once per source and excludes intermediate state already owned by a candidate. Configured query-request overhead is accounted for separately.
+Some charges belong to a resource shared beyond one computation. If two consumers need 5m and 15m of the same raw source, the required retention horizon is 15m, not 20m. Represent this shared storage as a state group `G_raw[d]` for source `d` and a particular storage scope, with candidates such as `Retain5m` and `Retain15m`. The group describes access to retained raw data; each candidate advertises its coverage, and each consumer connects only to a candidate covering its required horizon. Both consumers can use `Retain15m`, whose storage cost is charged once through candidate selection. Reads and intermediate KLL state retain their own cost owners.
+
+Fixed request overhead does not affect plan selection. If query `q` executes `N_q` times over the accounting horizon with fixed per-request cost `h_q`, add `Σ_q N_q × h_q` to the reported total after optimization. Its resource usage still counts against applicable budgets. Any overhead that changes with implementation or connections belongs in the corresponding decision-dependent cost model instead.
 
 The following cases make the accounting concrete. Let `B` be the cost of one whole-window KLL build, `M` one pane merge, and `E95` and `E99` the extraction costs. These are illustrative work charges; retained and temporary resources are accounted for separately over the same horizon.
 
@@ -172,8 +174,8 @@ The following cases make the accounting concrete. Let `B` be the cost of one who
 | Ingestion-maintained panes | One pane chain feeds a shared query-time merge and both estimators. | Ingestion updates and pane retention are charged once for the chain. Add `n × (M + E95 + E99)` for `n` common evaluations, plus query-local merge memory. |
 | State retained across evaluations | An eligible pane-chain candidate uses `MatAtQueryKeptAcrossEvaluations(Memory)`. | Charge initial construction, required refresh/update work, retained memory/storage over its lifetime, and evaluation work. Reuse does not eliminate freshness maintenance; generate this case only when supported. |
 | Multiple selected candidates in one group | Some consumers use a small KLL state and others a separate large state. | Charge each selected state's build/update and retention, then each consumer's local work. Equal group identity does not collapse two physical candidates into one charge. |
-| Shared raw-data retention | Two consumers need 5m and 15m of the same raw source and compatible retention scope. | Charge source storage for the 15m horizon once, with reads charged according to actual work. Do not add 5m and 15m or include intermediate KLL state in this charge. |
-| Per-request overhead | Two requests share computation but still require separate response handling. | Charge configured request overhead for each request. Compute sharing does not remove request-specific work. |
+| Shared raw-data retention | Two consumers need 5m and 15m of the same raw source and compatible retention scope. | Both consumers connect to `Retain15m` in `G_raw[d]`. Charge that candidate once; reads and intermediate KLL state have separate owners. |
+| Per-request overhead | Two requests share computation but still require separate response handling. | Report fixed overhead as `Σ_q N_q × h_q`; omit this constant from the optimization objective but retain its applicable resource usage. Decision-dependent overhead stays in the optimization model. |
 
 Memory-time and capacity answer different questions. A state occupying `m` bytes for duration `t` contributes `m × t` to memory-time. A capacity limit instead considers simultaneous residency, including temporary allocations; it cannot be inferred from memory-time alone.
 
@@ -185,67 +187,97 @@ The selection problem combines supplier activation with input assignment. Ordina
 
 ### 5.1 Variables
 
-#### Sets and notation
+#### Candidates and Dependency Connections
 
-| Symbol | Meaning |
-| --- | --- |
-| `G` | Result and state groups. |
-| `C_g` | Finite physical candidates belonging to group `g`. |
-| `E(c)` | Required input positions of candidate `c`. |
-| `S(c,e)` | Compatible supplier candidates for input `e` of candidate `c`. |
-| `T` | Required query-output references. |
-| `S(t)` | Candidates compatible with output reference `t`. |
-
-Candidate IDs are globally unique; `C` is the union of all `C_g`. Input positions stay distinct even when they request the same group. For a P95 estimator, the `state` input's suppliers are compatible candidates from `G_KLL`. A query may have several output references.
+The optimizer needs to know which computations are available, which inputs each computation requires, and which query outputs must be produced. These are the nodes, dependencies, and roots of the candidate dependency graph. For the running example, suppose both KLL capacities can serve P95, but only the larger capacity meets P99's accuracy requirement:
 
 ```text
-x[c]       ∈ {0,1}   select physical candidate c
-b[c,e,d]   ∈ {0,1}   input e of c uses supplier candidate d
-r[t,c]     ∈ {0,1}   query-output reference t uses candidate c
+Groups and their candidates:
+    G_KLL: {small-build, large-build}
+    G95:   {exact-P95, estimate-P95}
+    G99:   {exact-P99, estimate-P99}
+
+Allowed state-input connections (source → consumer):
+    small-build ────────→ estimate-P95
+    large-build ────────→ estimate-P95
+    large-build ────────→ estimate-P99
+
+Query roots:
+    Q1 ← exact-P95 or estimate-P95
+    Q2 ← exact-P99 or estimate-P99
 ```
 
-Connection variables exist only for compatible pairs. Capacity and materialization belong to candidate configuration, so selection needs no separate copy or instance variables.
+The builds and exact candidates also require raw-input dependencies, omitted from this diagram. The graph records possible connections; it does not select them. Choosing both estimators and connecting them to `large-build` produces one shared build in the selected execution DAG. The candidate dependency graph may contain cycles among possible choices; the selected execution DAG must be acyclic.
+
+| Name | Meaning | Example |
+| --- | --- | --- |
+| `Groups` | Logical result and state groups. | `{G_KLL, G95, G99, ...}` |
+| `Candidates(g)` | Finite physical candidates in group `g`. | `Candidates(G95) = {exact-P95, estimate-P95}` |
+| `Inputs(c)` | Inputs that candidate `c` must receive. | `Inputs(estimate-P95) = {state}` |
+| `CompatibleSources(c,input)` | Candidates allowed to supply that input. | `CompatibleSources(estimate-P99,state) = {large-build}` |
+| `QueryRoots` | Required query outputs. | `{Q1, Q2}` |
+| `RootCandidates(q)` | Candidates allowed to provide query root `q`. | `RootCandidates(Q1) = {exact-P95, estimate-P95}` |
+
+Candidate IDs are globally unique; `Candidates` denotes their union across groups. Input positions remain distinct: a join needs both `left` and `right`, even if both refer to the same group. For this formulation, each query has one explicit output root. If its output combines several computations, a finalization candidate has those computations as required inputs; covering the root therefore covers all of them.
+
+Three binary variables select nodes, dependency connections, and query-root assignments:
+
+```text
+x[c]              ∈ {0,1}   select candidate c
+b[c,input,d]      ∈ {0,1}   connect source candidate d to input of c
+r[q,c]            ∈ {0,1}   use candidate c to provide query root q
+```
+
+Connection variables exist only for compatible sources. Capacity and materialization belong to candidate configuration, so selection needs no separate copy or instance variables.
 
 #### Objective
 
 ```text
 min Σ_c local_cost[c] × x[c]
-    + shared_resource_cost
-    + query_overhead
 ```
 
-The first term charges each selected candidate for its local work, excluding suppliers. The remaining terms explicitly model shared resources such as source retention and configured request charges; either is zero when absent. Where selected consumers change cost, additional expressions model that dependence rather than treating it as a constant.
+Each selected candidate owns its local work and state, excluding suppliers. This includes shared-resource candidates such as `Retain15m`, so no separate shared-resource charge is needed. Fixed request overhead is omitted from the objective because it is constant for the workload; Section 4 describes its inclusion in reported total cost. Where selected consumers or connections change cost, additional expressions model that dependence rather than treating it as a constant.
 
 ### 5.2 Constraints
 
 #### Cover every query output
 
 ```text
-Σ_{c ∈ S(t)} r[t,c] = 1                     for each output reference t
-r[t,c] ≤ x[c]
+Σ_{c ∈ RootCandidates(q)} r[q,c] = 1        for each q ∈ QueryRoots
+r[q,c] ≤ x[c]
 ```
 
 #### Supply every selected candidate's inputs
 
 ```text
-Σ_{d ∈ S(c,e)} b[c,e,d] = x[c]              for each required input (c,e)
-b[c,e,d] ≤ x[d]
+Σ_{d ∈ CompatibleSources(c,input)} b[c,input,d] = x[c]
+b[c,input,d] ≤ x[d]                        for each input ∈ Inputs(c)
 ```
 
-Several consumers may connect to the same supplier. There is **no** constraint `Σ_{c ∈ C_g} x[c] ≤ 1`: multiple candidates in one group may be needed.
+Several consumers may connect to the same supplier. There is **no general** constraint `Σ_{c ∈ Candidates(g)} x[c] ≤ 1`: multiple candidates in one group may be needed.
+
+#### Shared raw-retention configuration
+
+For one raw-storage scope, retention candidates configure the same stored copy, so they are mutually exclusive:
+
+```text
+Σ_{c ∈ Candidates(G_raw[d])} x[c] ≤ 1
+```
+
+This is a resource-specific constraint, not a restriction on every group. For a consumer needing 15m, its compatible suppliers include `Retain15m` and any generated longer-retention candidates, but exclude `Retain5m`. The input constraints above require a selected compatible supplier. A second consumer needing 5m can connect to the same `Retain15m`; storage is therefore charged once. Separate stored copies require distinct storage scopes and are charged separately.
 
 #### Keep only connected, acyclic computation
 
 ```text
-x[d] ≤ Σ_t r[t,d] + Σ_{c,e} b[c,e,d]
+x[d] ≤ Σ_q r[q,d] + Σ_{c,input} b[c,input,d]
 ```
 
 Only defined connections appear in these sums. Every selected candidate must serve a query output or another selected candidate. Together with acyclicity, this excludes unused computation.
 
-If candidate generation does not already guarantee acyclicity, introduce `0 ≤ order[c] ≤ N−1`, where `N = |C|`:
+If candidate generation does not already guarantee acyclicity, introduce `0 ≤ order[c] ≤ N−1`, where `N = |Candidates|`:
 
 ```text
-order[d] + 1 ≤ order[c] + N × (1 − b[c,e,d])
+order[d] + 1 ≤ order[c] + N × (1 − b[c,input,d])
 ```
 
 #### Enforce requirements
@@ -255,10 +287,10 @@ Candidate and connection compatibility eliminate unsupported operators, illegal 
 For additive resource usage with fixed execution context, capacity constraints take the form:
 
 ```text
-Σ_c usage[k,c] × x[c] + shared_usage[k] ≤ capacity[k]
+Σ_c usage[k,c] × x[c] ≤ capacity[k] − fixed_usage[k]
 ```
 
-Peak usage and temporary allocations need lifetime and concurrency accounting when a simple sum is inappropriate. These extensions preserve the same ownership rule: suppliers and shared resources are not charged again through each consumer.
+Here candidate usage includes shared raw-retention candidates. `fixed_usage[k]` is usage fixed by the workload and independent of plan selection, such as fixed request handling, measured in the same units and accounting context; it is zero when absent. Peak usage and temporary allocations need lifetime and concurrency accounting when a simple sum is inappropriate. These extensions preserve the same ownership rule: suppliers and shared resources are not charged again through each consumer.
 
 Only exposed candidate outputs can supply consumers. A fused `topk(sum(...))` candidate does not automatically supply another query's full `sum(...)`; that result needs a separate candidate unless explicitly exposed.
 
