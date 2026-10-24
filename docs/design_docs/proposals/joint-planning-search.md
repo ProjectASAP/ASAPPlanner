@@ -516,4 +516,19 @@ Planning performance and the selected plan's execution performance are separate 
 | Many window, capacity, and materialization configurations are available. | Both candidate generation and solving can grow substantially. | Benefits depend on the workload and which configurations are actually useful. |
 | Accuracy and latency rely mainly on post-solve checks. | Repeated validation and refinement can make planning time highly variable. | Benefits depend on the feasible plans remaining after validation. |
 
-Benchmark these cases separately, recording generation, model-construction, solve, and validation time, refinement rounds, peak planner memory, and validated execution cost. A richer candidate space can improve the modeled optimum while increasing planning overhead; under a fixed solver time limit, it does not guarantee a better returned plan.
+### Benchmark metrics
+
+Benchmark each workload case separately and report:
+
+| Metric | What to measure |
+| --- | --- |
+| Candidate generation time | Time spent building memo groups, applying rules, and generating legal physical candidates and compatible connections. |
+| Model construction time | Time spent creating MILP variables, coefficients, and constraints, including rebuilding or extending the model during refinement. |
+| MILP solve time | Time inside the solver, accumulated across all refinement rounds. |
+| Validation/refinement rounds | Number of plans validated and refinement rounds triggered; also report validation time separately from solve time. |
+| Peak planner memory | Peak memory used during planning, including candidate generation, model construction, solver execution, and validation. |
+| Validated execution cost | Cost of the returned feasible plan under the configured evaluator and common accounting horizon; distinguish this estimate from measured runtime cost. |
+
+Report total planning wall time alongside these metrics, using consistent timing boundaries to avoid double counting.
+
+ A richer candidate space can improve the modeled optimum while increasing planning overhead; under a fixed solver time limit, it does not guarantee a better returned plan.
