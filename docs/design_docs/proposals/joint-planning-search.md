@@ -514,6 +514,16 @@ For example, P95 and P99 can share one KLL producer. Once its configuration, mat
 
 Use DP to compress only regions with a proven sufficient boundary. A local result stores its boundary contract, incremental cost, resource/accuracy/latency profile, and enough information to reconstruct the selected candidates and connections. If global budgets can distinguish local plans, retain their Pareto frontier rather than only the cheapest one. Dominance comparisons require equivalent external sharing interfaces and no weaker guarantees; a cheaper plan with fewer reuse opportunities does not dominate another plan.
 
+DP can reduce the candidates and connections passed to MILP without reducing the candidates initially generated. These are distinct mechanisms:
+
+| Mechanism | What it reduces |
+| --- | --- |
+| Memo interning and rule-generation caching | Duplicate candidate derivation and repeated exploration. |
+| DP caching under identical boundary conditions | Repeated solution of the same local optimization subproblem. |
+| DP with safe dominance pruning and region compression | Local choices and internal connections that the MILP must explicitly select. |
+
+For example, a local region may have 20 implementations with equivalent external interfaces, sharing opportunities, and guarantees. If there are no remaining resource or other external tradeoffs, DP can retain its cheapest implementation as one representative local plan. The MILP then selects that plan through its boundary rather than selecting its internal implementation. If one plan costs 3 and uses 8 GB while another costs 5 and uses 2 GB, both may be needed under a global memory budget. Likewise, a locally more expensive candidate cannot be removed if it offers a distinct sharing opportunity. DP alone does not guarantee a smaller candidate inventory: compression comes from proving that discarded choices cannot improve any relevant external decision.
+
 The proposed workflow is:
 
 ```text
@@ -550,7 +560,7 @@ Decomposition preserves the finite-model optimum only if every relevant boundary
 
 DP does not remove the worst-case combinatorial difficulty. Boundary states can grow exponentially with the number of shared producers, consumer subsets, and demand patterns. The useful case is a large amount of local computation connected through a small boundary. Dense sharing may offer little compression, and frontier construction itself may cost more than it saves.
 
-Implement strict independent-component splitting and acyclic, unshared local DP first. Extend to shared-boundary DP only where measurements justify the larger state space. This is a proposed acceleration of the same candidate-selection problem, not a requirement to use LBBD or a claim that DP compression is already implemented.
+Complete and validate the current MILP implementation before implementing DP compression; use the uncompressed MILP as a correctness baseline. For subsequent DP work, implement strict independent-component splitting and acyclic, unshared local DP first. Extend to shared-boundary DP only where measurements justify the larger state space. This is a proposed acceleration of the same candidate-selection problem, not a requirement to use LBBD or a claim that DP compression is already implemented.
 
 ### Reconstruction and validation
 
