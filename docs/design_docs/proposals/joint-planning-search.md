@@ -232,26 +232,42 @@ r[q,c]                                    ∈ {0,1}   candidate c provides query
 
 Connection variables exist only for compatible producer–consumer requirements. Capacity and materialization belong to candidate configuration, so selection needs no separate copy or instance variables.
 
-If the candidate dependency graph may contain cycles, the model also introduces an auxiliary variable for every candidate:
+#### Auxiliary variables: `order`, `run`, and `need`
+
+These are solver variables, not functions to be evaluated before optimization. Square brackets identify which candidate, connection, or evaluation event a variable belongs to. Their indices are:
+
+| Index or parameter | Definition |
+| --- | --- |
+| `c`, `producer`, `consumer` | Globally unique physical candidate IDs in `Candidates`. |
+| `requirement` | One dependency in `ProducerRequirements(consumer)`, such as `KLL-state` or a join's `left` input. |
+| `N` | The number of physical candidates, `|Candidates|`. |
+| `Ticks` | A finite set of evaluation events over the accounting horizon. |
+| `t` | One event in `Ticks`; it identifies an evaluation context, not a solver-chosen start time. |
+| `evaluates[q,t]` | A fixed binary parameter: 1 if query `q` evaluates at event `t`, otherwise 0. |
+
+A shared event requires compatible evaluation contexts, not merely equal wall-clock timestamps. The variables have the following meanings:
+
+| Variable | Domain and indexing | Definition |
+| --- | --- | --- |
+| `order[c]` | Continuous, `0 ≤ order[c] ≤ N−1`, for each candidate `c`. | A topological rank used to require each selected producer to precede its consumers in the dependency graph. It is not execution time, latency, or a runtime schedule. |
+| `run[c,t]` | Binary, for each candidate `c` and event `t`. | 1 exactly when the selected graph requires candidate `c` to execute for event `t`; 0 otherwise. This records execution demand, not measured runtime activity. |
+| `need[producer,consumer,requirement,t]` | Binary, for each compatible producer–consumer requirement and event `t`. | 1 exactly when that connection is selected **and** the consumer executes for event `t`; 0 otherwise. It records demand along one connection. |
+
+For example, let `build` be a KLL producer, and `P95` and `P99` its estimator candidates. At evaluation event `t5`, suppose both estimators execute and both use `build` for their `KLL-state` requirement:
 
 ```text
-N = |Candidates|
-order[c] ∈ [0, N−1]     continuous topological rank of candidate c
+x[build] = 1                         build belongs to the selected plan
+run[P95,t5] = run[P99,t5] = 1         both estimators execute for this event
+need[build,P95,KLL-state,t5] = 1      the P95 connection demands the build
+need[build,P99,KLL-state,t5] = 1      the P99 connection also demands it
+run[build,t5] = 1                    one shared build execution, not two
 ```
 
-`order[c]` witnesses dependency order in the selected execution DAG; it is not a start time, latency, or runtime schedule. Ranks need not be unique or integral. Unselected candidates' ranks have no execution meaning. These variables can be omitted when the candidate dependency graph is already acyclic.
+At another event with no query or consumer demand, `run[build,t] = 0` even though `x[build] = 1`. Thus `x` selects a plan node, `need` records per-connection demand, and `run` combines demand into one execution per compatible event. The constraints in Section 5.2 enforce these definitions, including the logical AND defining `need`.
 
-#### Execution-demand variables
+For the subgraph `build → P95` and `build → P99`, valid ranks are `order[build] = 0` and `order[P95] = order[P99] = 1`. Ranks need not be unique or integral. They have no execution meaning for unselected candidates. `order` variables can be omitted if the candidate dependency graph is already acyclic; otherwise the ordering constraints in Section 5.2 exclude selected cycles.
 
-For query-time recomputation on a fixed evaluation schedule, let `Ticks` be the finite evaluation events in the accounting horizon and `evaluates[q,t]` a known binary parameter indicating whether query `q` evaluates at event `t`. A shared event means compatible evaluation context, not merely equal wall-clock timestamps. Introduce:
-
-```text
-run[c,t] ∈ {0,1}                          candidate c executes at event t
-need[producer,consumer,requirement,t] ∈ {0,1}
-                                         the connected consumer needs this producer at t
-```
-
-This demand model assumes every required producer executes at the same event as its consumer, with one execution reusable by all compatible consumers at that event. It applies to query-time recomputation with legal within-evaluation sharing. Ingestion maintenance and retained state need their own update/freshness/lifetime constraints; the model below must not be applied to them unchanged.
+The `run`/`need` model assumes query-time recomputation on a fixed evaluation schedule: each required producer executes for the same event as its consumer, and compatible consumers can reuse that execution. The event is a logical evaluation, not a claim that all operators start simultaneously. Ingestion maintenance and retained state need their own update/freshness/lifetime constraints; this model must not be applied to them unchanged.
 
 #### Objective
 
