@@ -93,7 +93,7 @@ pub(crate) enum CandidateSelectionError {
 // coefficients must stay representable by HiGHS; rejecting a wider range is an
 // explicit model restriction, not proof of infeasibility or a completeness claim.
 // Resource rows use the same conservative positive coefficient range.
-const MINIMUM_RELATIVE_COST: f64 = 1e-9;
+const MINIMUM_RELATIVE_COEFFICIENT: f64 = 1e-9;
 
 impl CandidateDependencyGraph {
     pub(super) fn validate(&self) -> Result<(), CandidateSelectionError> {
@@ -142,10 +142,10 @@ impl CandidateDependencyGraph {
                     .candidate_usage
                     .iter()
                     .chain(std::iter::once(&budget.capacity))
-                    .any(|value| *value > 0.0 && *value / scale < MINIMUM_RELATIVE_COST)
+                    .any(|value| *value > 0.0 && *value / scale < MINIMUM_RELATIVE_COEFFICIENT)
             {
                 return Err(CandidateSelectionError::InvalidGraph(format!(
-                    "resource budget {:?} exceeds the supported positive coefficient range ({MINIMUM_RELATIVE_COST}); rescale or reformulate the resource model", budget.name
+                    "resource budget {:?} exceeds the supported positive coefficient range ({MINIMUM_RELATIVE_COEFFICIENT}); restrict or reformulate the resource model", budget.name
                 )));
             }
         }
@@ -177,11 +177,11 @@ impl CandidateDependencyGraph {
         if maximum_cost > 0.0
             && self.candidates.iter().any(|candidate| {
                 candidate.local_cost > 0.0
-                    && candidate.local_cost / maximum_cost < MINIMUM_RELATIVE_COST
+                    && candidate.local_cost / maximum_cost < MINIMUM_RELATIVE_COEFFICIENT
             })
         {
             return Err(CandidateSelectionError::InvalidGraph(format!(
-                "positive local costs must be at least {MINIMUM_RELATIVE_COST} of the largest cost; wider ranges require a different numerical policy"
+                "positive local costs must be at least {MINIMUM_RELATIVE_COEFFICIENT} of the largest cost; wider ranges require a different numerical policy"
             )));
         }
         for (index, root) in self.query_roots.iter().enumerate() {

@@ -86,13 +86,17 @@ pub(super) fn reconstruct_candidate_outputs(
             producers.push(Rc::clone(producer));
         }
         let mut position = 0;
-        let operator = template.operator.map_children(|_| {
-            let producer = Rc::clone(&producers[position]);
-            position += 1;
-            producer
-        });
+        // Re-derive structural metadata over the selected inputs, preserving
+        // only explicit naming overrides. Logical rewrite templates can retain
+        // pre-rewrite keys/nullability; copying their entire schema is invalid.
         let node = Rc::new(
-            OperatorNode::with_schema(operator, template.schema.clone())
+            template
+                .with_new_children(|_| {
+                    let producer = Rc::clone(&producers[position]);
+                    position += 1;
+                    producer
+                })
+                .map_err(|e| format!("candidate {id}: {e}"))?
                 .with_guarantee(template.guarantee.clone()),
         );
         node.validate_structure()

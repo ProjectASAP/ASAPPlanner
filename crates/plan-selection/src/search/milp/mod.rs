@@ -14,3 +14,4 @@ pub(crate) mod report;
 pub(crate) mod candidate_connections;
 
 pub(crate) mod candidate_reconstruction;
+pub(crate) mod candidate_inventory;
