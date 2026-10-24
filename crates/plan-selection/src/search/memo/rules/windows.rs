@@ -116,7 +116,7 @@ pub(crate) fn combinable<'a>(
 /// Reuse existing pane rules without introducing implicit shared-chain sites.
 /// Connection-based selection binds these local candidates through normal inputs.
 pub(crate) fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
-    for (group, candidate) in local_pane_candidates(memo, entries) {
+    for (group, candidate) in local_pane_candidates(memo, entries, true) {
         push_new(memo, group, candidate);
     }
 }
@@ -124,6 +124,7 @@ pub(crate) fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWork
 fn local_pane_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
+    preserve_group_boundaries: bool,
 ) -> Vec<(usize, ImplementationCandidate)> {
     let group_of = group_of_node(&memo.groups);
     let mut own: Vec<(usize, ImplementationCandidate)> = Vec::new();
@@ -138,6 +139,17 @@ fn local_pane_candidates(
             ) {
                 continue;
             }
+            let canonical_scans = OperatorNode::reachable(&candidate.node)
+                .into_iter()
+                .filter(|node| {
+                    preserve_group_boundaries
+                        && matches!(
+                            node.non_asap(),
+                            Some(asap_types::ir::NonASAPOp::Scan { .. })
+                        )
+                        && group_of.contains_key(&Rc::as_ptr(node))
+                })
+                .collect::<Vec<_>>();
             let roots = [QueryRoot::Operator(Rc::clone(&candidate.node))];
             let panes = pane_candidates(&roots, &[Some(grid)]);
             if panes.is_empty() {
@@ -153,14 +165,29 @@ fn local_pane_candidates(
                 let [QueryRoot::Operator(node)] = &rewritten[..] else {
                     continue;
                 };
+                // Guarantee recomposition can clone unchanged source scans.
+                // Restore only an unambiguous original scan with the same full
+                // source/schema/execution contract; scans have intrinsic exact
+                // semantics. Otherwise the pane's canonical input disappears.
+                let mut restored = HashMap::new();
+                for rewritten in OperatorNode::reachable(node) {
+                    let mut matches = canonical_scans.iter().filter(|original| {
+                        original.operator == rewritten.operator
+                            && original.schema == rewritten.schema
+                            && original.result_kind == rewritten.result_kind
+                            && original.timing == rewritten.timing
+                            && original.materialization == rewritten.materialization
+                    });
+                    if let Some(original) = matches.next() {
+                        if matches.next().is_none() {
+                            restored.insert(Rc::as_ptr(&rewritten), original);
+                        }
+                    }
+                }
+                let node = restore_scan_boundaries(node, &restored, &mut HashMap::new());
                 own.push((
                     g,
-                    rewritten_candidate(
-                        &group_of,
-                        candidate,
-                        Rc::clone(node),
-                        CandidateOrigin::Panes,
-                    ),
+                    rewritten_candidate(&group_of, candidate, node, CandidateOrigin::Panes),
                 ));
             }
         }
@@ -168,8 +195,44 @@ fn local_pane_candidates(
     own
 }
 
+// Input identity is the only change here. Unlike a semantic rewrite, this
+// preserves every ancestor's schema, error contract and execution annotations.
+fn restore_scan_boundaries(
+    node: &Rc<OperatorNode>,
+    restored: &HashMap<*const OperatorNode, &Rc<OperatorNode>>,
+    done: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+) -> Rc<OperatorNode> {
+    if let Some(scan) = restored.get(&Rc::as_ptr(node)) {
+        return Rc::clone(scan);
+    }
+    if let Some(previous) = done.get(&Rc::as_ptr(node)) {
+        return Rc::clone(previous);
+    }
+    let mut changed = false;
+    let operator = node.operator.map_children(|child| {
+        let rebuilt = restore_scan_boundaries(child, restored, done);
+        changed |= !Rc::ptr_eq(child, &rebuilt);
+        rebuilt
+    });
+    let rebuilt = if changed {
+        Rc::new(
+            OperatorNode::with_schema(operator, node.schema.clone())
+                .with_guarantee(node.guarantee.clone())
+                .with_timing(node.timing)
+                .with_materialization(node.materialization),
+        )
+    } else {
+        Rc::clone(node)
+    };
+    done.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
+    rebuilt
+}
+
 pub(crate) fn add_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
-    let own = local_pane_candidates(memo, entries);
+    // The retiring selector owns rewritten scans privately and can split their
+    // execution contexts there. Canonical boundary bindings belong to the new
+    // connection graph, which represents those contexts explicitly.
+    let own = local_pane_candidates(memo, entries, false);
     // The chain keys each group builds.
     let mut builders: HashMap<u64, BTreeSet<usize>> = HashMap::new();
     for (g, candidate) in &own {

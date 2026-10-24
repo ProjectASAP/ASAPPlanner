@@ -1,6 +1,6 @@
 //! Opt-in concrete summary-state groups for the candidate-connection planner.
 //!
-//! This does not change the production selection path. Only simple Pass 1 builds
+//! This does not change the production selection path. Only simple Pass 1 builds and local pane chains
 //! directly over canonical input groups are expanded. Capacity, guarantee,
 //! update/filter semantics, and materialization annotations must match exactly;
 //! larger-capacity substitution and private preprocessing are not inferred.
@@ -49,11 +49,12 @@ pub fn expand_concrete_summary_state_groups(
     mut memo: CandidateMemo,
 ) -> Result<StateGroupExpansion, StateGroupExpansionError> {
     validate_references(&memo)?;
-    if memo
-        .groups
-        .iter()
-        .any(|group| matches!(group.node.asap(), Some(ASAPOp::SummaryAgg { .. })))
-    {
+    if memo.groups.iter().any(|group| {
+        matches!(
+            group.node.asap(),
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+        )
+    }) {
         return Err(StateGroupExpansionError::AlreadyExpanded);
     }
     if memo.topological_order().is_none() {
@@ -234,8 +235,10 @@ fn simple_build(
     memo: &CandidateMemo,
     candidate: &ImplementationCandidate,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
-    if candidate.origin != CandidateOrigin::Pass1
-        || candidate.implements.len() != 1
+    if !matches!(
+        candidate.origin,
+        CandidateOrigin::Pass1 | CandidateOrigin::Panes
+    ) || candidate.implements.len() != 1
         || !candidate.coupling_sites.is_empty()
         || !candidate.requires_sites.is_empty()
         || !candidate.requires_exact_children.is_empty()
@@ -257,7 +260,10 @@ fn simple_build(
         if boundaries.contains_key(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
             continue;
         }
-        if matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })) {
+        if matches!(
+            node.asap(),
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+        ) {
             if build.is_some() {
                 return None;
             }
@@ -491,6 +497,121 @@ mod tests {
             assert_eq!(expanded.memo.groups.len(), count);
             assert_eq!(expanded.added_reader_candidates, 0);
         }
+    }
+
+    fn with_local_panes(mut memo: CandidateMemo, grids: &[u64]) -> CandidateMemo {
+        use crate::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
+
+        let boundaries: HashMap<_, _> = memo
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(id, group)| (Rc::as_ptr(&group.node), MemoGroupId(id as u32)))
+            .collect();
+        for group in 0..memo.groups.len() {
+            let grid = grids[memo.groups[group].queries[0]];
+            for candidate in memo.candidates[group].clone() {
+                let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.node))];
+                let panes = pane_candidates(&roots, &[Some(grid)]);
+                if panes.len() != 1 {
+                    continue;
+                }
+                let rewritten = window_composition_pass2_candidates(&roots, &panes)
+                    .unwrap()
+                    .remove(0)
+                    .roots
+                    .unwrap();
+                let QueryRoot::Operator(node) = &rewritten[0] else {
+                    unreachable!()
+                };
+                // Pane rewriting recomposes guarantees; restore the original
+                // canonical scan boundary rather than making it a private input.
+                let input = panes[0].build.children()[0].children()[0].clone();
+                let chain = OperatorNode::reachable(node)
+                    .into_iter()
+                    .find(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+                    .unwrap();
+                let node = replace_node(node, chain.children()[0], &input);
+                let mut pane = candidate;
+                pane.node = Rc::clone(&node);
+                pane.children = boundary_groups(&node, &boundaries);
+                pane.origin = CandidateOrigin::Panes;
+                memo.candidates[group].push(pane);
+            }
+        }
+        memo
+    }
+
+    // Real pane rewrites expose one identical chain to distinct quantile readers.
+    #[test]
+    fn identical_local_pane_chains_share_state_without_removing_local_choices() {
+        let original = with_local_panes(
+            workload(&[
+                ("quantile_over_time(0.95, latency[5m])", 0.01),
+                ("quantile_over_time(0.99, latency[5m])", 0.01),
+            ]),
+            &[60_000, 60_000],
+        );
+        let local_panes = original
+            .candidates
+            .iter()
+            .flatten()
+            .filter(|candidate| candidate.origin == CandidateOrigin::Panes)
+            .count();
+        assert!(local_panes >= 2);
+        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let chains: Vec<_> = expanded
+            .state_groups
+            .iter()
+            .filter(|id| {
+                matches!(
+                    expanded.memo.groups[id.0 as usize].node.asap(),
+                    Some(ASAPOp::PaneChain { .. })
+                )
+            })
+            .collect();
+        assert!(!chains.is_empty());
+        for id in chains {
+            let group = &expanded.memo.groups[id.0 as usize];
+            assert_eq!(group.queries, vec![0, 1]);
+            assert_eq!(group.parents.len(), 2);
+            assert!(group.children.iter().all(|input| group
+                .node
+                .children()
+                .iter()
+                .any(|node| Rc::ptr_eq(node, &expanded.memo.groups[input.0 as usize].node))));
+        }
+        assert_eq!(
+            expanded
+                .memo
+                .candidates
+                .iter()
+                .flatten()
+                .filter(|candidate| candidate.origin == CandidateOrigin::Panes)
+                .count(),
+            local_panes
+        );
+        assert!(matches!(
+            expand_concrete_summary_state_groups(expanded.memo),
+            Err(StateGroupExpansionError::AlreadyExpanded)
+        ));
+    }
+
+    // Different pane widths and retention counts remain different state contracts.
+    #[test]
+    fn different_local_pane_configurations_do_not_share_state() {
+        let memo = with_local_panes(
+            workload(&[
+                ("quantile_over_time(0.95, latency[5m])", 0.01),
+                ("quantile_over_time(0.99, latency[5m])", 0.01),
+            ]),
+            &[60_000, 30_000],
+        );
+        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        assert!(expanded.state_groups.iter().all(|id| !matches!(
+            expanded.memo.groups[id.0 as usize].node.asap(),
+            Some(ASAPOp::PaneChain { .. })
+        )));
     }
 
     // Public expansion rejects malformed IDs before indexing dependency arrays.

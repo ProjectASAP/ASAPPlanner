@@ -29,7 +29,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     use std::time::{Duration, Instant};
     let unsupported = |reason: &str| {
         SelectionError::Solver(format!(
-        "candidate-connections: {reason}; this route currently supports Pass 1, local panes, and concrete shared summaries. Use memo-milp or legacy for the existing broader rule catalog."
+        "candidate-connections: {reason}; this route currently supports Pass 1, local panes, and concrete shared summary/pane states. Use memo-milp or legacy for the existing broader rule catalog."
     ))
     };
     if search.exhaustive || search.keep_every_candidate {
@@ -132,7 +132,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         CandidateSearchStatus::NumericalStall => "numerical_stall".into(),
     };
     let report = crate::CandidateConnectionReport {
-        catalog_scope: "Pass 1 + local pane composition + concrete equal-configuration shared summaries; cross-group shared pane chains, rollup, scan-widening and top-k-reuse rule expansion is not included".into(),
+        catalog_scope: "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included".into(),
         status, groups, logical_candidates, immediate_candidates,
         physical_configurations: configured.configurations.len(),
         compatible_connections: configured.inventory.graph.candidates.iter().flat_map(|candidate| &candidate.producer_requirements).map(|input| input.compatible_producers.len()).sum(),
@@ -146,11 +146,22 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         solve_calls: result.search.solve_metrics.solve_calls,
         peak_milp_variables: result.search.solve_metrics.peak_variables,
         peak_milp_constraints: result.search.solve_metrics.peak_constraints,
+        validation_rejection_counts: result.rejections.counts,
+        validation_rejection_examples: result.rejections.examples,
     };
     let Some((mut selection, physical)) = result.best else {
         let metrics =
             serde_json::to_string(&report).map_err(|error| unsupported(&error.to_string()))?;
-        return Err(unsupported(&format!("search ended without a validated incumbent; increase the time budget or use an existing route. Search report: {metrics}")));
+        let reason = match result.search.status {
+            CandidateSearchStatus::Infeasible => {
+                "generated candidate catalog is infeasible under the configured model"
+            }
+            CandidateSearchStatus::TimeLimit | CandidateSearchStatus::RefinementLimit => {
+                "planning budget ended before a validated incumbent was found"
+            }
+            _ => "search stopped without a validated incumbent; inspect the termination diagnostic",
+        };
+        return Err(unsupported(&format!("{reason}. Search report: {metrics}")));
     };
     let selected = &result
         .search
@@ -274,6 +285,34 @@ mod tests {
         assert_eq!(report.output_references, 2);
         run.stage3_selected.unwrap().dag.validate().unwrap();
         assert!(run.stage1_selected.is_some());
+    }
+
+    // Pane rewriting must preserve canonical inputs so equal chains can share state.
+    #[test]
+    fn local_pane_rules_expose_identical_chains_to_state_groups() {
+        use asap_logical_asap_optimization::memo::candidates::try_populate_pass1;
+        use asap_logical_asap_optimization::memo::state_groups::expand_concrete_summary_state_groups;
+        use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+        let (roots, mut entries, _) = workload();
+        for entry in &mut entries {
+            entry.recurrence =
+                QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(1_000)));
+        }
+        let initial = LogicalMemo::from_roots(&roots);
+        let generated = generate_per_computation_candidates(roots).unwrap();
+        let mut memo = try_populate_pass1(initial, &generated).unwrap();
+        crate::search::memo::rules::windows::add_local_window_composition(&mut memo, &entries);
+        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        assert!(
+            expanded.state_groups.iter().any(|group| {
+                let state = &expanded.memo.groups[group.0 as usize];
+                matches!(
+                    state.node.asap(),
+                    Some(asap_types::ir::ASAPOp::PaneChain { .. })
+                ) && state.queries == vec![0, 1]
+            }),
+            "identical panes must expose a common state producer"
+        );
     }
 
     // Sliding evaluations without retained raw data need a maintained pane chain.

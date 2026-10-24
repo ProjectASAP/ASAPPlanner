@@ -1091,6 +1091,11 @@ pub struct CandidateConnectionReport {
     pub solve_calls: usize,
     pub peak_milp_variables: usize,
     pub peak_milp_constraints: usize,
+    #[serde(default)]
+    pub validation_rejection_counts: BTreeMap<String, usize>,
+    /// Up to eight representative failures, with bounded reason lengths.
+    #[serde(default)]
+    pub validation_rejection_examples: Vec<String>,
 }
 
 /// The selected plan over the memo (joint-planning-search design, "How the

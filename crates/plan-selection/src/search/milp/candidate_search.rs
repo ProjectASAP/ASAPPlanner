@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use super::candidate_connections::{
-    solve_candidate_proposal_with_metrics, CandidateDependencyGraph, CandidateSolveMetrics,
-    ObservedAssignment, SelectedCandidateGraph,
+    solve_candidate_proposal_with_metrics, CandidateDependencyGraph, CandidateSelectionError,
+    CandidateSolveMetrics, ObservedAssignment, SelectedCandidateGraph,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -53,9 +53,42 @@ pub(super) struct CandidateSearchResult {
 /// deterministic for an assignment. Local graph costs are certified lower bounds,
 /// not estimates. A violated certification is an error, never silently repaired.
 /// Time bounds are cooperative: a blocking evaluator cannot be preempted here.
+#[cfg(test)]
 pub(super) fn search_candidates(
     graph: &CandidateDependencyGraph,
     limits: CandidateSearchLimits,
+    evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
+) -> Result<CandidateSearchResult, String> {
+    search_with_structural_baseline(graph, limits, false, None, evaluate)
+}
+
+/// Seed the same certified-cost search with a bounded minimum-active-node plan.
+/// This structural objective favors shared producers, but is not a cost estimate
+/// or lower bound. Its proposals undergo the same evaluator and exact cuts.
+#[cfg(test)]
+pub(super) fn search_candidates_with_baseline(
+    graph: &CandidateDependencyGraph,
+    limits: CandidateSearchLimits,
+    evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
+) -> Result<CandidateSearchResult, String> {
+    search_candidates_with_weighted_baseline(graph, limits, None, evaluate)
+}
+
+/// Optional weights order baseline proposals only; they never modify cost bounds.
+pub(super) fn search_candidates_with_weighted_baseline(
+    graph: &CandidateDependencyGraph,
+    limits: CandidateSearchLimits,
+    weights: Option<&[f64]>,
+    evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
+) -> Result<CandidateSearchResult, String> {
+    search_with_structural_baseline(graph, limits, true, weights, evaluate)
+}
+
+fn search_with_structural_baseline(
+    graph: &CandidateDependencyGraph,
+    limits: CandidateSearchLimits,
+    structural_baseline: bool,
+    baseline_weights: Option<&[f64]>,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
 ) -> Result<CandidateSearchResult, String> {
     graph.validate().map_err(|error| error.to_string())?;
@@ -66,6 +99,23 @@ pub(super) fn search_candidates(
     let mut refinements = 0;
     let mut solve_metrics = CandidateSolveMetrics::default();
     let mut validation_seconds = 0.0;
+    if baseline_weights.is_some_and(|weights| weights.len() != graph.candidates.len()) {
+        return Err("baseline weights must be indexed by candidate ID".into());
+    }
+    let mut heuristic_graph = structural_baseline.then(|| {
+        let mut heuristic = graph.clone();
+        for (id, candidate) in heuristic.candidates.iter_mut().enumerate() {
+            candidate.local_cost = baseline_weights.map_or(1.0, |weights| weights[id]);
+        }
+        heuristic
+    });
+    if let Some(heuristic) = &heuristic_graph {
+        heuristic.validate().map_err(|error| error.to_string())?;
+    }
+    // At most three validations and one fifth of the shared wall budget,
+    // capped at two seconds; stop the baseline once it supplies an incumbent.
+    let baseline_budget = (limits.wall_time / 5).min(Duration::from_secs(2));
+    let mut baseline_attempts = 0;
     let status = loop {
         let remaining = limits.wall_time.saturating_sub(started.elapsed());
         if remaining.is_zero() {
@@ -74,18 +124,66 @@ pub(super) fn search_candidates(
         if refinements >= limits.max_refinements {
             break CandidateSearchStatus::RefinementLimit;
         }
-        let proposal = match solve_candidate_proposal_with_metrics(
-            graph,
-            &observations,
-            Some(remaining.as_secs_f64()),
+        let use_baseline = heuristic_graph.is_some()
+            && incumbent.is_none()
+            && baseline_attempts < 3
+            && started.elapsed() < baseline_budget;
+        let (proposal_graph, proposal_observations, solve_budget) = if use_baseline {
+            baseline_attempts += 1;
+            // A structural proposal is never repriced by monetary observations.
+            // Tried assignments are skipped here only; their validated costs
+            // remain in the certified model used after this heuristic phase.
+            let skipped = observations
+                .iter()
+                .map(|observation: &ObservedAssignment| {
+                    let mut selected = observation.selected.clone();
+                    selected.modeled_cost = selected
+                        .selected_candidates
+                        .iter()
+                        .map(|id| {
+                            heuristic_graph
+                                .as_ref()
+                                .expect("baseline graph exists")
+                                .candidates[id.0]
+                                .local_cost
+                        })
+                        .sum();
+                    ObservedAssignment {
+                        selected,
+                        exact_cost: None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            (
+                heuristic_graph.as_ref().expect("baseline graph exists"),
+                skipped,
+                remaining.min(baseline_budget.saturating_sub(started.elapsed())),
+            )
+        } else {
+            (graph, observations.clone(), remaining)
+        };
+        let mut proposal = match solve_candidate_proposal_with_metrics(
+            proposal_graph,
+            &proposal_observations,
+            Some(solve_budget.as_secs_f64()),
             &mut solve_metrics,
         ) {
             Ok(Some(proposal)) => proposal,
+            Ok(None) if use_baseline => {
+                heuristic_graph = None;
+                continue;
+            }
             Ok(None) => {
                 if incumbent.is_some() {
                     return Err("refined model excluded a validated feasible assignment".into());
                 }
                 break CandidateSearchStatus::Infeasible;
+            }
+            Err(CandidateSelectionError::Solver(_))
+                if use_baseline && started.elapsed() >= baseline_budget =>
+            {
+                heuristic_graph = None;
+                continue;
             }
             Err(error) => {
                 break if started.elapsed() >= limits.wall_time {
@@ -95,7 +193,16 @@ pub(super) fn search_candidates(
                 };
             }
         };
-        lower_bound = lower_bound.max(proposal.model_lower_bound);
+        if use_baseline {
+            proposal.selected.modeled_cost = proposal
+                .selected
+                .selected_candidates
+                .iter()
+                .map(|id| graph.candidates[id.0].local_cost)
+                .sum();
+        } else {
+            lower_bound = lower_bound.max(proposal.model_lower_bound);
+        }
         if let Some(best) = &incumbent {
             if closes_gap(lower_bound, best.actual_cost) {
                 break CandidateSearchStatus::Optimal;
@@ -226,6 +333,115 @@ mod tests {
             max_refinements,
             wall_time: Duration::from_secs(10),
         }
+    }
+
+    // Structural node counts must never be reported as monetary lower bounds.
+    #[test]
+    fn structural_seed_uses_original_bound_and_favors_shared_nodes() {
+        let mut graph = choices(&[0.25, 0.25, 0.25]);
+        graph.query_roots = vec![
+            QueryRootCandidates {
+                compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(2)],
+            },
+            QueryRootCandidates {
+                compatible_candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)],
+            },
+        ];
+        let result = search_candidates_with_baseline(&graph, limits(1), |selected| {
+            assert_eq!(selected.selected_candidates, vec![PhysicalCandidateId(2)]);
+            assert_eq!(selected.modeled_cost, 0.25);
+            Ok(Some(0.5))
+        })
+        .unwrap();
+        assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
+        assert_eq!(result.lower_bound, 0.0);
+        assert_eq!(result.relative_gap, Some(1.0));
+        assert_eq!(result.incumbent.unwrap().actual_cost, 0.5);
+        assert_eq!(result.refinements, 1);
+        assert_eq!(result.solve_metrics.solve_calls, 1);
+    }
+
+    // A supplied baseline preference changes proposal order, never the cost model.
+    #[test]
+    fn weighted_seed_changes_order_without_becoming_a_bound() {
+        let graph = choices(&[0.1, 0.2]);
+        let result = search_candidates_with_weighted_baseline(
+            &graph,
+            limits(1),
+            Some(&[100.0, 1.0]),
+            |selected| {
+                assert_eq!(selected.query_roots[0].candidate, PhysicalCandidateId(1));
+                assert_eq!(selected.modeled_cost, 0.2);
+                Ok(Some(0.25))
+            },
+        )
+        .unwrap();
+        assert_eq!(result.lower_bound, 0.0);
+        assert_eq!(result.relative_gap, Some(1.0));
+        assert_eq!(result.incumbent.unwrap().actual_cost, 0.25);
+        assert_eq!(graph.candidates[0].local_cost, 0.1);
+        assert!(search_candidates_with_weighted_baseline(
+            &graph,
+            limits(1),
+            Some(&[f64::NAN, 1.0]),
+            |_| panic!("invalid weights must not be evaluated")
+        )
+        .is_err());
+    }
+
+    // The same certified bound check applies to the initial structural proposal.
+    #[test]
+    fn structural_seed_cannot_violate_original_cost_bound() {
+        let error = search_candidates_with_baseline(&choices(&[2.0]), limits(1), |selected| {
+            assert_eq!(selected.modeled_cost, 2.0);
+            Ok(Some(1.0))
+        })
+        .unwrap_err();
+        assert!(error.contains("certified local bound"));
+    }
+
+    // Infeasible heuristic proposals are excluded only after actual validation.
+    #[test]
+    fn structural_seed_rejections_continue_and_internal_errors_stop() {
+        let mut calls = 0;
+        let result = search_candidates_with_baseline(&choices(&[0.0; 2]), limits(2), |_| {
+            calls += 1;
+            Ok((calls == 2).then_some(0.5))
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(result.incumbent.is_some());
+        assert_eq!(result.lower_bound, 0.0);
+        let stopped = search_candidates_with_baseline(&choices(&[0.0; 2]), limits(3), |_| {
+            Err("broken identity map".into())
+        })
+        .unwrap();
+        assert_eq!(stopped.refinements, 1);
+        assert!(matches!(
+            stopped.status,
+            CandidateSearchStatus::EvaluatorStopped(_)
+        ));
+    }
+
+    // A baseline validation that overruns the shared deadline still retains its plan.
+    #[test]
+    fn structural_seed_timeout_preserves_validated_incumbent() {
+        let result = search_candidates_with_baseline(
+            &choices(&[0.0]),
+            CandidateSearchLimits {
+                max_refinements: 10,
+                wall_time: Duration::from_secs(1),
+            },
+            |_| {
+                std::thread::sleep(Duration::from_millis(1100));
+                Ok(Some(0.5))
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, CandidateSearchStatus::TimeLimit);
+        assert_eq!(result.refinements, 1);
+        assert_eq!(result.incumbent.unwrap().actual_cost, 0.5);
+        assert_eq!(result.lower_bound, 0.0);
     }
 
     // Actual evaluation can reverse the ordering suggested by certified local bounds.
