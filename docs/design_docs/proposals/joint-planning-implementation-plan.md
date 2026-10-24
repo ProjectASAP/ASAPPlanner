@@ -1,6 +1,6 @@
 # Joint Planning Implementation Plan
 
-**Status:** Source migration implemented; final acceptance is in progress. The working branch has one candidate-connection production route. The legacy planner, old memo selector, algorithm fallback, and temporary comparison entry points have been removed. This does not establish release readiness: full regression, CI, and workload cost/planning-performance acceptance remain required.
+**Status:** Source migration implemented. The working branch has one candidate-connection production route. The legacy planner, old memo selector, algorithm fallback, and temporary comparison entry points have been removed. Validation evidence is recorded in the [workload report](../../develop_docs/joint-candidate-workload-evaluation.md); current release readiness is tracked by [PR #934 checks](https://github.com/ProjectASAP/ASAPPlanner/pull/934/checks). Source deletion alone does not establish release readiness.
 
 ## Outcome and scope
 

@@ -20,6 +20,14 @@ The separate nine-example viewer suite also passed, including SQL rollup and the
 
 To reproduce the thirty-workload collection, build `stage_pipeline`, freeze that executable, then run `python3 tools/validate_joint_workloads.py OUTPUT_DIRECTORY FROZEN_EXECUTABLE`. The runner uses the unchanged viewer manifests, enforced guarantees, Fargate prices, and a 90-second external deadline. Full regression and exact-head CI are separate release gates; successful workload coverage alone does not establish release readiness.
 
+## Regression coverage
+
+The final Rust source/test tree passed all workspace tests in CI at `2c0b27ed`: **2,175 passed, zero failed, 30 existing ignored**. That run subsequently found three viewer assertions using the retired search name. The viewer-only fix at `c35fe3fb` also reads component counts from the current candidate-connection report and retains historical-document compatibility.
+
+With the real CLI enabled through `CARGO_TARGET_DIR`, the complete viewer Python suite passes **102/102 with zero skips**, and Node tests pass **14/14**. The earlier 13 local skips were live-CLI tests without a configured executable path; they are now exercised. Full PromQL-only planner testing passes **64 tests with two existing ignored**, and its build check passes. The MetricsQL external-consumer check passes; the Rust 1.99.1 baseline verifier confirms the documented 21 upstream library and three documentation-test failures without new failures.
+
+These are the results of the individual checks, not a claim that a pending workflow has finished. [PR checks](https://github.com/ProjectASAP/ASAPPlanner/pull/934/checks) record the current end-to-end CI status. Subsequent viewer/documentation-only changes do not alter the frozen planner binary used for the thirty-workload measurements.
+
 ## Historical migration regressions (not final acceptance)
 
 The expanded sharing/scope catalog and subsequent complete pane-width domain introduced regressions. These are retained in `joint-candidate-migration-checkpoints.json`; they are not successful speedup measurements. All rows use seed-862, a requested 30-second planning budget, accuracy enforcement, the Fargate price preset, and no retained raw data. They are successive working-tree snapshots, not a controlled benchmark of the final implementation.
