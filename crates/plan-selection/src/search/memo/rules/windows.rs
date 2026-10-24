@@ -29,7 +29,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::accuracy::estimators::size_for_all_readers;
 use asap_logical_asap_optimization::asap_aware_cse::{
     may_change_rollup_candidate, pane_candidates, rollup_candidate_for, rollup_candidates,
     rollup_pass2_candidates, topk_reuse_candidates, window_composition_pass2_candidates,
@@ -39,7 +38,6 @@ use asap_logical_asap_optimization::asap_aware_cse::{
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::flat::flatten;
 use asap_types::ir::properties::AccuracyGuarantee;
-use asap_types::ir::schema::sketch::SketchKind;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
@@ -348,68 +346,25 @@ pub(crate) fn chain_thresholds(memo: &Memo, site: &CouplingSite) -> Vec<ChainThr
             }
         }
     }
-    let mut grids: BTreeSet<u64> = readers.iter().map(|r| r.pane_width_ms).collect();
-    loop {
-        let more: Vec<u64> = grids
+    asap_logical_asap_optimization::memo::state_configurations::pane_configurations(
+        &readers
             .iter()
-            .flat_map(|&a| grids.iter().map(move |&b| greatest_common_divisor(a, b)))
-            .filter(|w| !grids.contains(w))
-            .collect();
-        if more.is_empty() {
-            break;
-        }
-        grids.extend(more);
-    }
-    let mut thresholds = Vec::new();
-    for &pane_width_ms in &grids {
-        let eligible: Vec<&ChainReader> = readers
-            .iter()
-            .filter(|r| r.pane_width_ms.is_multiple_of(pane_width_ms))
-            .collect();
-        let windows: BTreeSet<u64> = eligible.iter().map(|r| r.window_ms).collect();
-        // The sizes: the readers' own, closed under the shared size.
-        let mut sizes: Vec<FieldDataType> = Vec::new();
-        for reader in &eligible {
-            if !sizes.contains(&reader.family) {
-                sizes.push(reader.family.clone());
-            }
-        }
-        let mut i = 0;
-        while i < sizes.len() {
-            for j in 0..i {
-                if let Some(joined) = shared_size(&sizes[i], &sizes[j]) {
-                    if !sizes.contains(&joined) {
-                        sizes.push(joined);
-                    }
+            .map(|reader| {
+                asap_logical_asap_optimization::memo::state_configurations::PaneRequirement {
+                    pane_width_ms: reader.pane_width_ms,
+                    window_ms: reader.window_ms,
+                    family: reader.family.clone(),
                 }
-            }
-            i += 1;
-        }
-        for &longest_window_ms in &windows {
-            for family in &sizes {
-                let threshold = ChainThreshold {
-                    pane_width_ms,
-                    longest_window_ms,
-                    family: family.clone(),
-                };
-                let admitted: Vec<&&ChainReader> = eligible
-                    .iter()
-                    .filter(|r| may_read(&threshold, r))
-                    .collect();
-                let window = admitted.iter().map(|r| r.window_ms).max();
-                let size = admitted.iter().try_fold(None::<FieldDataType>, |acc, r| {
-                    Some(Some(match acc {
-                        None => r.family.clone(),
-                        Some(acc) => shared_size(&acc, &r.family)?,
-                    }))
-                });
-                if window == Some(longest_window_ms) && size == Some(Some(family.clone())) {
-                    thresholds.push(threshold);
-                }
-            }
-        }
-    }
-    thresholds
+            })
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .map(|configuration| ChainThreshold {
+        pane_width_ms: configuration.pane_width_ms,
+        longest_window_ms: configuration.longest_window_ms,
+        family: configuration.family,
+    })
+    .collect()
 }
 
 /// Whether `reader` may read a chain at `threshold`: its panes are
@@ -1522,19 +1477,7 @@ fn group_grid_ms(group: &MemoGroup, entries: &[QueryWorkloadEntry]) -> Option<u6
 /// exact accumulator; a sketch of their algorithm sized for both; `None`
 /// when they cannot be one build.
 fn shared_size(a: &FieldDataType, b: &FieldDataType) -> Option<FieldDataType> {
-    match (a, b) {
-        (FieldDataType::Sketch(a, grouping), FieldDataType::Sketch(b, grouping_b))
-            if a.algorithm() == b.algorithm() && grouping == grouping_b =>
-        {
-            let params = size_for_all_readers(&[a.params(), b.params()])?;
-            Some(FieldDataType::Sketch(
-                SketchKind::new(a.algorithm().clone(), params),
-                grouping.clone(),
-            ))
-        }
-        (FieldDataType::Sketch(..), _) | (_, FieldDataType::Sketch(..)) => None,
-        _ => (a == b).then(|| a.clone()),
-    }
+    asap_logical_asap_optimization::memo::state_configurations::shared_size(a, b)
 }
 
 /// `family` without its size: a sketch's algorithm and grouping, or the

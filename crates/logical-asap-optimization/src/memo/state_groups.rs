@@ -1,9 +1,9 @@
 //! Opt-in concrete summary-state groups for the candidate-connection planner.
 //!
-//! This does not change the production selection path. Only simple Pass 1 builds and local pane chains
-//! directly over canonical input groups are expanded. Capacity, guarantee,
-//! update/filter semantics, and materialization annotations must match exactly;
-//! larger-capacity substitution and private preprocessing are not inferred.
+//! Simple summary builds and pane chains directly over canonical input groups
+//! gain finite compatible sizes and pane horizons before exact state interning.
+//! Concrete state identity includes capacity, guarantee, update/filter semantics,
+//! and materialization. Private preprocessing is not inferred.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -36,6 +36,8 @@ pub enum StateGroupExpansionError {
     InvalidReaderBoundary,
     #[error("scan-label candidate expansion: {0}")]
     ScanLabelWidening(String),
+    #[error("state configuration expansion: {0}")]
+    StateConfiguration(String),
 }
 
 struct BuildReaders {
@@ -63,6 +65,7 @@ pub fn expand_concrete_summary_state_groups(
         return Err(StateGroupExpansionError::CyclicDependencies);
     }
     super::scan_label_candidates::add_scan_label_candidates(&mut memo)?;
+    super::state_configuration_candidates::add_state_configuration_candidates(&mut memo)?;
     let mut builds: Vec<BuildReaders> = Vec::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for (index, candidate) in candidates.iter().enumerate() {
@@ -327,7 +330,7 @@ fn same_concrete_build(left: &OperatorNode, right: &OperatorNode) -> bool {
 // TimeRange lacks a unique row key and therefore is not generally memo-interned.
 // Equal ranges over the same canonical input nevertheless feed identical data
 // into a summary build, as the existing ASAP-aware summary reuse rule allows.
-fn same_range_input(left: &OperatorNode, right: &OperatorNode) -> bool {
+pub(super) fn same_range_input(left: &OperatorNode, right: &OperatorNode) -> bool {
     let (
         Some(NonASAPOp::TimeRange {
             child: left_child, ..
@@ -488,26 +491,39 @@ mod tests {
         ));
     }
 
-    // Capacity and source predicates are part of the concrete producer identity.
+    // A stricter concrete configuration can serve both readers; local sizes remain.
     #[test]
-    fn distinct_sizes_and_filters_do_not_share_concrete_builds() {
-        for queries in [
-            [
-                ("quantile_over_time(0.95, latency[5m])", 0.01),
-                ("quantile_over_time(0.99, latency[5m])", 0.02),
-            ],
-            [
-                ("quantile_over_time(0.95, latency{job=\"a\"}[5m])", 0.01),
-                ("quantile_over_time(0.99, latency{job=\"b\"}[5m])", 0.01),
-            ],
-        ] {
-            let original = workload(&queries);
-            let count = original.groups.len();
-            let expanded = expand_concrete_summary_state_groups(original).unwrap();
-            assert!(expanded.state_groups.is_empty());
-            assert_eq!(expanded.memo.groups.len(), count);
-            assert_eq!(expanded.added_reader_candidates, 0);
+    fn distinct_sizes_gain_compatible_shared_configurations() {
+        let original = workload(&[
+            ("quantile_over_time(0.95, latency[5m])", 0.01),
+            ("quantile_over_time(0.99, latency[5m])", 0.02),
+        ]);
+        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        assert!(!expanded.state_groups.is_empty());
+        for (group, candidates) in original.candidates.iter().enumerate() {
+            for candidate in candidates {
+                assert!(expanded.memo.candidates[group]
+                    .iter()
+                    .any(|after| Rc::ptr_eq(&candidate.node, &after.node)));
+            }
         }
+        assert!(expanded
+            .state_groups
+            .iter()
+            .all(|id| expanded.memo.groups[id.0 as usize].queries == vec![0, 1]));
+    }
+
+    // Resizing never makes different source predicates compatible.
+    #[test]
+    fn distinct_filters_do_not_share_concrete_builds() {
+        let original = workload(&[
+            ("quantile_over_time(0.95, latency{job=\"a\"}[5m])", 0.01),
+            ("quantile_over_time(0.99, latency{job=\"b\"}[5m])", 0.02),
+        ]);
+        let count = original.groups.len();
+        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        assert!(expanded.state_groups.is_empty());
+        assert_eq!(expanded.memo.groups.len(), count);
     }
 
     fn with_local_panes(mut memo: CandidateMemo, grids: &[u64]) -> CandidateMemo {
@@ -782,21 +798,52 @@ mod tests {
         ));
     }
 
-    // Different pane widths and retention counts remain different state contracts.
+    // A finer grid and longer horizon serves a shorter reader through newest_panes.
     #[test]
-    fn different_local_pane_configurations_do_not_share_state() {
-        let memo = with_local_panes(
+    fn different_pane_grids_and_horizons_gain_explicit_newest_pane_readers() {
+        let original = with_local_panes(
             workload(&[
                 ("quantile_over_time(0.95, latency[5m])", 0.01),
-                ("quantile_over_time(0.99, latency[5m])", 0.01),
+                ("quantile_over_time(0.99, latency[15m])", 0.02),
             ]),
             &[60_000, 30_000],
         );
-        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
-        assert!(expanded.state_groups.iter().all(|id| !matches!(
-            expanded.memo.groups[id.0 as usize].node.asap(),
-            Some(ASAPOp::PaneChain { .. })
-        )));
+        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let state = expanded
+            .state_groups
+            .iter()
+            .find(|id| {
+                matches!(
+                    expanded.memo.groups[id.0 as usize].node.asap(),
+                    Some(ASAPOp::PaneChain {
+                        pane_width_ms: 30_000,
+                        pane_count: 30,
+                        ..
+                    })
+                )
+            })
+            .expect("shared fine grid covering fifteen minutes");
+        assert_eq!(expanded.memo.groups[state.0 as usize].queries, vec![0, 1]);
+        assert!(expanded.memo.candidates.iter().flatten().any(|reader| {
+            reader.children.contains(state)
+                && OperatorNode::reachable(&reader.node).iter().any(|node| {
+                    matches!(
+                        node.asap(),
+                        Some(ASAPOp::SummaryMerge {
+                            newest_panes: Some(10),
+                            ..
+                        })
+                    )
+                })
+        }));
+        for (group, candidates) in original.candidates.iter().enumerate() {
+            assert!(candidates
+                .iter()
+                .all(|before| expanded.memo.candidates[group]
+                    .iter()
+                    .any(|after| Rc::ptr_eq(&before.node, &after.node))));
+        }
+        assert!(expanded.memo.topological_order().is_some());
     }
 
     // Public expansion rejects malformed IDs before indexing dependency arrays.

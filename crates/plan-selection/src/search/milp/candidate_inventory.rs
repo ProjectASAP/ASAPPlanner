@@ -478,6 +478,38 @@ mod tests {
     // Stage 2, while each query receives only its original output columns.
     #[test]
     fn widened_label_readers_materialize_one_shared_pane_chain() {
+        check_shared_pane_plan(
+            [
+                "avg by (job) (quantile_over_time(0.95, latency[5m]))",
+                "avg by (region) (quantile_over_time(0.99, latency[5m]))",
+            ],
+            [0.05, 0.05],
+            &["job", "region"],
+            None,
+        );
+    }
+
+    // Different capacities and windows can share a larger chain while the short
+    // query reads only its newest panes; Stage 2, accuracy and pricing all validate.
+    #[test]
+    fn different_capacity_and_horizon_readers_share_one_validated_pane_chain() {
+        check_shared_pane_plan(
+            [
+                "avg by (job) (quantile_over_time(0.95, latency[5m]))",
+                "avg by (job) (quantile_over_time(0.99, latency[15m]))",
+            ],
+            [0.03, 0.05],
+            &["job"],
+            Some(300),
+        );
+    }
+
+    fn check_shared_pane_plan(
+        queries: [&str; 2],
+        errors: [f64; 2],
+        labels: &[&str],
+        newest: Option<u32>,
+    ) {
         use super::super::candidate_configurations::enumerate_candidate_configurations;
         use super::super::candidate_physical::materialize_selected_candidates;
         use asap_logical_asap_optimization::test_support::entry_with;
@@ -485,15 +517,20 @@ mod tests {
             DataArrival, DataWorkload, Predictability, QueryRecurrence, RepeatedDemand,
             RepetitionInterval, SourceFacts,
         };
-        let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
-        let roots: Vec<_> = [
-            "avg by (job) (quantile_over_time(0.95, latency[5m]))",
-            "avg by (region) (quantile_over_time(0.99, latency[5m]))",
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
-        .collect();
+        let targets: Vec<_> = errors
+            .into_iter()
+            .map(|error| AccuracyTarget::max_error(error).failure_probability(0.3))
+            .collect();
+        let roots: Vec<_> = queries
+            .into_iter()
+            .enumerate()
+            .map(|(id, query)| {
+                (
+                    id,
+                    QueryRoot::Operator(lower_promql(query, targets[id].clone())),
+                )
+            })
+            .collect();
         let initial = LogicalMemo::from_roots(&roots);
         let outputs: Vec<_> = (0..roots.len())
             .map(|query| {
@@ -509,9 +546,9 @@ mod tests {
         let generated = generate_per_computation_candidates(roots.clone()).unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
         let entries: Vec<_> = (0..roots.len())
-            .map(|_| {
+            .map(|query| {
                 let mut entry = entry_with(
-                    target.clone(),
+                    targets[query].clone(),
                     QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
                         1000,
                     ))),
@@ -547,7 +584,14 @@ mod tests {
                 .unwrap();
         // Synthetic activation objective exposes reuse; it is not runtime pricing.
         for (id, candidate) in configured.inventory.graph.candidates.iter_mut().enumerate() {
-            candidate.local_cost = if matches!(
+            let node = configured.inventory.templates[id].as_ref().unwrap();
+            candidate.local_cost = if node.guarantee.as_ref().is_some_and(|guarantee| {
+                !guarantee.is_exact()
+                    && guarantee.spec.accuracy_metric
+                        == asap_types::ir::properties::AccuracyMetric::Rank
+            }) {
+                100_000.0
+            } else if matches!(
                 configured.inventory.templates[id].as_ref().unwrap().asap(),
                 Some(ASAPOp::PaneChain { .. })
             ) {
@@ -576,7 +620,7 @@ mod tests {
         let chain = configured.inventory.templates[chains[0].0]
             .as_ref()
             .unwrap();
-        assert!(["job", "region"].iter().all(|name| chain
+        assert!(labels.iter().all(|name| chain
             .schema
             .fields
             .iter()
@@ -586,7 +630,7 @@ mod tests {
             modes[id.0] = Some(configured.configurations[id.0].materialization);
         }
         let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
-        let physical = materialize_selected_candidates(
+        let mut physical = materialize_selected_candidates(
             &configured.inventory,
             &selected,
             &modes,
@@ -597,33 +641,30 @@ mod tests {
         )
         .unwrap();
         physical.physical.dag.validate().unwrap();
-        assert!(physical.nodes_by_candidate[chains[0].0].is_some());
-        // The deployment search must also validate composed accuracy and actual
-        // evaluator pricing; the synthetic activation objective is discarded.
-        for candidate in &mut configured.inventory.graph.candidates {
-            candidate.local_cost = 0.0;
+        if let Some(newest) = newest {
+            assert!(physical.physical.dag.nodes.iter().any(|node| matches!(
+                node.payload, asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {newest_panes: Some(count), ..}) if count == newest
+            )));
         }
-        let planned = super::super::candidate_planner::optimize_configured_candidates(
-            &configured,
-            &super::super::candidate_planner::CandidatePlanningContext {
-                original_roots: &roots,
-                entries: &entries,
-                data: &data,
-                models: crate::PlanningModels {
-                    deployment_capabilities: &deployment,
-                    ..crate::PlanningModels::builtin()
-                },
-                calibration: crate::CalibrationFit::default(),
+
+        assert!(physical.nodes_by_candidate[chains[0].0].is_some());
+        // Validate this exact selected shared graph. Bounded search incumbents
+        // need not choose it, and synthetic activation prices are never bills.
+        physical.physical.id = "shared-pane-regression".into();
+        let mut evaluator = crate::PlanSelector::new(
+            &entries,
+            &data,
+            crate::PlanningModels {
+                deployment_capabilities: &deployment,
+                ..crate::PlanningModels::builtin()
             },
-            super::super::candidate_search::CandidateSearchLimits {
-                max_refinements: 3,
-                wall_time: std::time::Duration::from_secs(10),
-            },
+            false,
         )
         .unwrap();
-        let (selection, physical) = planned
-            .best
-            .expect("widened pane plan must pass accuracy and cost validation");
+        evaluator.offer(&physical.physical).unwrap();
+        let (selection, physical) = evaluator
+            .finish()
+            .expect("shared pane graph must pass accuracy and cost validation");
         assert!(selection.costs[&selection.selected]
             .cost_per_second
             .unwrap()

@@ -10,6 +10,9 @@ mod groups;
 mod scan_label_candidates;
 /// Pass 2 summary-capability expansion and consistent producer/reader resizing.
 pub mod shared_builds;
+mod state_configuration_candidates;
+/// Shared finite state configuration enumeration.
+pub mod state_configurations;
 /// Concrete summary-state groups for the connection-based planner migration.
 pub mod state_groups;
 

@@ -105,6 +105,11 @@ pub fn size_thresholds(memo: &Memo, site: &CouplingSite) -> Vec<SizeThreshold> {
         .filter(|c| c.origin == CandidateOrigin::SharedBuild && c.coupling_sites.contains(site))
         .filter_map(|c| reader_build(c).map(|(_, params)| params))
         .collect();
+    size_thresholds_for(requirements)
+}
+
+/// Finite shared-size joins, independent of memo sites and selection.
+pub(super) fn size_thresholds_for(requirements: Vec<Option<SketchParams>>) -> Vec<SizeThreshold> {
     if requirements.iter().any(Option::is_none) {
         // Exact accumulators: one build, no size.
         return vec![SizeThreshold { params: None }];
@@ -214,7 +219,7 @@ pub fn resized_at_threshold(
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
 /// rebuilt over them, keeping their own schema and guarantee.
-fn with_child_nodes(
+pub(super) fn with_child_nodes(
     original: &Rc<OperatorNode>,
     resized: &Rc<OperatorNode>,
     child_nodes: &HashSet<*const OperatorNode>,
