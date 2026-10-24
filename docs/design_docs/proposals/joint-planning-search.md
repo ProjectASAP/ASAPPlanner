@@ -234,40 +234,40 @@ Connection variables exist only for compatible producer–consumer requirements.
 
 #### Auxiliary variables: `order`, `run`, and `need`
 
-These are solver variables, not functions to be evaluated before optimization. Square brackets identify which candidate, connection, or evaluation event a variable belongs to. Their indices are:
+These are solver variables, not functions to be evaluated before optimization. Square brackets identify which candidate, connection, or query evaluation event a variable belongs to. Their indices are:
 
 | Index or parameter | Definition |
 | --- | --- |
 | `c`, `producer`, `consumer` | Globally unique physical candidate IDs in `Candidates`. |
 | `requirement` | One dependency in `ProducerRequirements(consumer)`, such as `KLL-state` or a join's `left` input. |
 | `N` | The number of physical candidates, `|Candidates|`. |
-| `Ticks` | A finite set of evaluation events over the accounting horizon. |
-| `t` | One event in `Ticks`; it identifies an evaluation context, not a solver-chosen start time. |
-| `evaluates[q,t]` | A fixed binary parameter: 1 if query `q` evaluates at event `t`, otherwise 0. |
+| `Ticks` | A finite set of query evaluation events over the accounting horizon. |
+| `t` | One query evaluation event in `Ticks`; it identifies an evaluation context, not a solver-chosen start time. |
+| `evaluates[q,t]` | A fixed binary parameter: 1 if query `q` evaluates at query evaluation event `t`, otherwise 0. |
 
-A shared event requires compatible evaluation contexts, not merely equal wall-clock timestamps. The variables have the following meanings:
+A shared query evaluation event requires compatible evaluation contexts, not merely equal wall-clock timestamps. The variables have the following meanings:
 
 | Variable | Domain and indexing | Definition |
 | --- | --- | --- |
 | `order[c]` | Continuous, `0 ≤ order[c] ≤ N−1`, for each candidate `c`. | A topological rank used to require each selected producer to precede its consumers in the dependency graph. It is not execution time, latency, or a runtime schedule. |
-| `run[c,t]` | Binary, for each candidate `c` and event `t`. | 1 exactly when the selected graph requires candidate `c` to execute for event `t`; 0 otherwise. This records execution demand, not measured runtime activity. |
-| `need[producer,consumer,requirement,t]` | Binary, for each compatible producer–consumer requirement and event `t`. | 1 exactly when that connection is selected **and** the consumer executes for event `t`; 0 otherwise. It records demand along one connection. |
+| `run[c,t]` | Binary, for each candidate `c` and query evaluation event `t`. | 1 exactly when the selected graph requires candidate `c` to execute for query evaluation event `t`; 0 otherwise. This records execution demand, not measured runtime activity. |
+| `need[producer,consumer,requirement,t]` | Binary, for each compatible producer–consumer requirement and query evaluation event `t`. | 1 exactly when that connection is selected **and** the consumer executes for query evaluation event `t`; 0 otherwise. It records demand along one connection. |
 
-For example, let `build` be a KLL producer, and `P95` and `P99` its estimator candidates. At evaluation event `t5`, suppose both estimators execute and both use `build` for their `KLL-state` requirement:
+For example, let `build` be a KLL producer, and `P95` and `P99` its estimator candidates. At query evaluation event `t5`, suppose both estimators execute and both use `build` for their `KLL-state` requirement:
 
 ```text
 x[build] = 1                         build belongs to the selected plan
-run[P95,t5] = run[P99,t5] = 1         both estimators execute for this event
+run[P95,t5] = run[P99,t5] = 1         both estimators execute for this query evaluation event
 need[build,P95,KLL-state,t5] = 1      the P95 connection demands the build
 need[build,P99,KLL-state,t5] = 1      the P99 connection also demands it
 run[build,t5] = 1                    one shared build execution, not two
 ```
 
-At another event with no query or consumer demand, `run[build,t] = 0` even though `x[build] = 1`. Thus `x` selects a plan node, `need` records per-connection demand, and `run` combines demand into one execution per compatible event. The constraints in Section 5.2 enforce these definitions, including the logical AND defining `need`.
+At another query evaluation event with no query or consumer demand, `run[build,t] = 0` even though `x[build] = 1`. Thus `x` selects a plan node, `need` records per-connection demand, and `run` combines demand into one execution per compatible query evaluation event. The constraints in Section 5.2 enforce these definitions, including the logical AND defining `need`.
 
 For the subgraph `build → P95` and `build → P99`, valid ranks are `order[build] = 0` and `order[P95] = order[P99] = 1`. Ranks need not be unique or integral. They have no execution meaning for unselected candidates. `order` variables can be omitted if the candidate dependency graph is already acyclic; otherwise the ordering constraints in Section 5.2 exclude selected cycles.
 
-The `run`/`need` model assumes query-time recomputation on a fixed evaluation schedule: each required producer executes for the same event as its consumer, and compatible consumers can reuse that execution. The event is a logical evaluation, not a claim that all operators start simultaneously. Ingestion maintenance and retained state need their own update/freshness/lifetime constraints; this model must not be applied to them unchanged.
+The `run`/`need` model assumes query-time recomputation on a fixed evaluation schedule: each required producer executes for the same query evaluation event as its consumer, and compatible consumers can reuse that execution. The query evaluation event is a logical evaluation, not a claim that all operators start simultaneously. Ingestion maintenance and retained state need their own update/freshness/lifetime constraints; this model must not be applied to them unchanged.
 
 #### Objective
 
@@ -312,7 +312,7 @@ The equality applies to every `requirement ∈ ProducerRequirements(consumer)`: 
 
 #### Derive execution demand from selected connections
 
-For every compatible connection and event `t`, linearize the conjunction of a selected connection and a running consumer:
+For every compatible connection and query evaluation event `t`, linearize the conjunction of a selected connection and a running consumer:
 
 ```text
 need[producer,consumer,requirement,t] ≤ connect[producer,consumer,requirement]
@@ -321,7 +321,7 @@ need[producer,consumer,requirement,t] ≥ connect[producer,consumer,requirement]
                                           + run[consumer,t] − 1
 ```
 
-A candidate runs if a query root or a connected, running consumer demands it. For every candidate `c` and event `t`:
+A candidate runs if a query root or a connected, running consumer demands it. For every candidate `c` and query evaluation event `t`:
 
 ```text
 run[c,t] ≤ x[c]
@@ -331,7 +331,7 @@ run[c,t] ≤ Σ_q evaluates[q,t] × r[q,c]
            + Σ_{consumer,requirement} need[c,consumer,requirement,t]
 ```
 
-Only defined assignments and connections appear in the sums; an empty sum is zero. `evaluates` is a fixed parameter, so these expressions are linear. Together with acyclicity, the constraints propagate demand from query roots through every required producer and prevent unsupported execution. Multiple consumers demanding the same candidate at one event still produce a single `run[c,t] = 1`.
+Only defined assignments and connections appear in the sums; an empty sum is zero. `evaluates` is a fixed parameter, so these expressions are linear. Together with acyclicity, the constraints propagate demand from query roots through every required producer and prevent unsupported execution. Multiple consumers demanding the same candidate at one query evaluation event still produce a single `run[c,t] = 1`.
 
 For example, Q1 evaluates every minute and Q2 every five minutes on the same grid. Over 60 minute ticks, assuming compatible evaluations and fresh query-time builds:
 
