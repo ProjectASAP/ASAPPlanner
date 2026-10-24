@@ -515,6 +515,21 @@ impl NonASAPOp {
                 filters,
                 ..
             } => {
+                if let [AggIntent::TopK { k, .. }] = measures.as_slice() {
+                    let name = output_names
+                        .first()
+                        .filter(|name| !name.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("topk_{k}"));
+                    let cols =
+                        crate::ir::schema::topk::ranked_row_projection(child, reduction, &name)?;
+                    return NonASAPOp::Project {
+                        cols,
+                        qualifier: None,
+                        child: child.clone(),
+                    }
+                    .output_schema();
+                }
                 let mut output =
                     aggregate_output_schema(&child.schema, reduction, measures, output_names)?;
                 let offset = reduction.group_keys().map_or(0, |keys| keys.len());

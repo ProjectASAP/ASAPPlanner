@@ -918,15 +918,31 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
     else {
         return None;
     };
+    let resolve = |column: &crate::ir::scalar::ColumnRef| {
+        crate::ir::scalar::resolve_column_ref(column, &child.schema).ok()
+    };
     let columns = match input.item.as_ref()? {
-        SummaryInputExpr::Column(column) => vec![column],
+        SummaryInputExpr::Column(column) => vec![resolve(column)?],
         SummaryInputExpr::Tuple(items) => items
             .iter()
             .map(|item| match item {
-                SummaryInputExpr::Column(column) => Some(column),
+                SummaryInputExpr::Column(column) => resolve(column),
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?,
+        SummaryInputExpr::EntityIdentity(crate::ir::schema::EntityIdentity::PromqlLabelSet {
+            excluding,
+        }) => {
+            let excluded: Vec<_> = excluding.iter().filter_map(resolve).collect();
+            let value = resolve(&crate::ir::scalar::ColumnRef::SampleValue);
+            (0..child.schema.fields.len())
+                .filter(|index| {
+                    Some(*index) != child.schema.time_index
+                        && Some(*index) != value
+                        && !excluded.contains(index)
+                })
+                .collect()
+        }
         _ => return None,
     };
     let mut fields: Vec<Field> = state
@@ -936,9 +952,13 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
         .filter(|field| field.is_plain())
         .cloned()
         .collect();
-    for column in columns {
-        let index = crate::ir::scalar::resolve_column_ref(column, &child.schema).ok()?;
-        fields.push(child.schema.fields[index].clone());
+    for index in columns {
+        if !fields
+            .iter()
+            .any(|field| field.name == child.schema.fields[index].name)
+        {
+            fields.push(child.schema.fields[index].clone());
+        }
     }
     fields.push(Field::plain("topk", DataType::Float64, false));
     // One row per item: the partition columns alone no longer identify a row.

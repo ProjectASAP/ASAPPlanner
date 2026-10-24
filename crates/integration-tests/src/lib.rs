@@ -222,8 +222,16 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        run_stage1_to_stage3(root, accuracy)
-            .stage1_logical_asap_optimization
+        require_composed_operator_candidates(
+            run_stage1_to_stage3(root, accuracy).stage1_logical_asap_optimization,
+        )
+    }
+
+    /// Fail on rejected composition rather than silently skipping a candidate.
+    pub fn require_composed_operator_candidates(
+        candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
+    ) -> Vec<Rc<OperatorNode>> {
+        candidates
             .into_iter()
             .filter_map(|candidate| {
                 match candidate

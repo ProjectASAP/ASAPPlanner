@@ -273,19 +273,30 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     }
 }
 
-/// A candidate that does not compose fails `logical_candidates` instead of
-/// being skipped, so an assertion over every candidate cannot pass on none.
-/// An aggregate over a top-k output does not compose yet (#672).
-/// This test relies on that bug: when #672 is fixed, the query composes and
-/// this test must switch to another candidate that does not compose.
+// The assertion helper must fail on an injected composition error; its coverage
+// must not depend on a real planner bug remaining unfixed.
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
+    use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
+    support::require_composed_operator_candidates(vec![
+        asap_plan_selection::search::LogicalCandidate {
+            id: "invalid-composition".into(),
+            choice: Vec::new(),
+            roots: Err(PerComputationCandidateError::InvalidChoice),
+            pass2: None,
+        },
+    ]);
+}
+
+// Ranked-row schemas let an aggregate consume TopK's numeric output (#672).
+#[test]
+fn aggregate_over_topk_candidates_compose() {
     let accuracy = AccuracyTarget::max_error(0.01);
     let root = lower_promql(
         "sum by (job) (topk by (job, instance) (1, rate(m[5m])))",
         accuracy.clone(),
     )
     .unwrap();
-    logical_candidates(root, accuracy);
+    assert!(!logical_candidates(root, accuracy).is_empty());
 }

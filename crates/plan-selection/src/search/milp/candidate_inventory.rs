@@ -4,7 +4,9 @@
 //! are not runtime cost estimates. Consumer-dependent demand, composed accuracy validation,
 //! physical materialization assignments, and legacy coupling constraints remain
 //! unsupported and are never silently erased by this adapter. This is a logical
-//! inventory bridge for solver experiments, not Stage 2 physical enumeration.
+//! inventory bridge for solver experiments. Private exact operators are lowered
+//! before decomposition, but complete Stage 2 configuration validation remains
+//! required.
 //! A cost callback cannot certify execution legality: callers must run Stage 2
 //! and validate the reconstructed plan before execution.
 use std::collections::{HashMap, HashSet};
@@ -39,6 +41,14 @@ pub(super) enum CandidateInventoryError {
         candidate: usize,
         reason: &'static str,
     },
+    #[error(
+        "physical operator implementation for candidate {candidate} in group {group}: {reason}"
+    )]
+    PhysicalImplementation {
+        group: usize,
+        candidate: usize,
+        reason: String,
+    },
     #[error("node-local fixed-context cost: {0}")]
     Cost(String),
 }
@@ -72,9 +82,25 @@ pub(super) fn build_candidate_inventory(
                 candidate: index,
                 reason,
             };
-            if candidate.implements != [MemoGroupId(group as u32)] {
-                return Err(unsupported("fused or differently owned computation"));
+            if candidate.implements.first() != Some(&MemoGroupId(group as u32)) {
+                return Err(unsupported("candidate output belongs to a different group"));
             }
+            let implemented: HashSet<_> = candidate.implements.iter().copied().collect();
+            if implemented.len() != candidate.implements.len()
+                || implemented
+                    .iter()
+                    .any(|id| id.0 as usize >= memo.groups.len())
+            {
+                return Err(invalid(
+                    "candidate names duplicate or missing absorbed groups",
+                ));
+            }
+            // Only the first group is this candidate's output contract. Further
+            // groups describe absorbed computations inside its private subtree,
+            // not additional results it can supply. Private-node decomposition
+            // charges that work; independent consumers of an absorbed group
+            // still select one of that group's own candidates. Reverse support
+            // leaves unused absorbed groups inactive without exclusion rules.
             if !candidate.coupling_sites.is_empty()
                 || !candidate.requires_sites.is_empty()
                 || !candidate.requires_exact_children.is_empty()
@@ -97,9 +123,31 @@ pub(super) fn build_candidate_inventory(
             {
                 return Err(invalid("candidate references missing input group"));
             }
+            let inputs = candidate
+                .children
+                .iter()
+                .map(|child| Rc::clone(&memo.groups[child.0 as usize].node))
+                .collect::<Vec<_>>();
+            if inputs
+                .iter()
+                .any(|input| Rc::ptr_eq(input, &candidate.node))
+            {
+                return Err(unsupported(
+                    "root aliases an input group without an operator",
+                ));
+            }
+            let implemented = asap_physical_asap_optimization::implement_candidate_operators(
+                &candidate.node,
+                &inputs,
+            )
+            .map_err(|error| CandidateInventoryError::PhysicalImplementation {
+                group,
+                candidate: index,
+                reason: error.to_string(),
+            })?;
             let id = PhysicalCandidateId(inventory.graph.candidates.len());
             inventory.group_candidates[group].push(id);
-            inventory.templates.push(Some(Rc::clone(&candidate.node)));
+            inventory.templates.push(Some(implemented));
             inventory.graph.candidates.push(PhysicalCandidate {
                 group: MemoGroupId(group as u32),
                 local_cost: 0.0,
@@ -136,7 +184,11 @@ pub(super) fn build_candidate_inventory(
                 node_local_cost: &mut node_local_cost,
             };
             let root_id = builder.inventory.group_candidates[group][index];
-            builder.add(&candidate.node, Some(root_id))?;
+            let implemented = builder.inventory.templates[root_id.0]
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| invalid("missing implemented root template"))?;
+            builder.add(&implemented, Some(root_id))?;
             if candidate
                 .children
                 .iter()
@@ -420,6 +472,189 @@ mod tests {
         .expect("reconstructed logical connections admit a legal Stage 2 plan");
         physical.dag.validate().unwrap();
         assert_eq!(physical.roots.len(), 2);
+    }
+
+    // Exact top-k's executable Sort/Limit/Project nodes are selected and charged
+    // explicitly, so final Stage 2 does not introduce unmodeled identities.
+    #[test]
+    fn exact_topk_is_lowered_before_decomposition_and_survives_stage2() {
+        use super::super::candidate_physical::materialize_selected_candidates;
+        use asap_logical_asap_optimization::test_support::entry_with;
+        use asap_types::ir::operator::AggIntent;
+        use asap_types::workload::{
+            DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
+        };
+        let query = "topk by (job) (3, sum_over_time(m[1m]))";
+        let root = lower_promql(query, AccuracyTarget::exact());
+        // Top-k returns several ranked rows per partition, with numeric values.
+        assert_eq!(root.schema.fields[1].name, "topk_3");
+        assert_eq!(
+            root.schema.fields[1].dtype,
+            asap_types::ir::schema::FieldDataType::Plain(asap_types::ir::schema::DataType::Float64)
+        );
+        assert!(root.schema.unique_keys.is_empty());
+        let roots = vec![(0, QueryRoot::Operator(Rc::clone(&root)))];
+        let initial = LogicalMemo::from_roots(&roots);
+        let output = initial.group_for_node(&root).unwrap();
+        let original_input = Rc::clone(
+            &initial.groups[initial.groups[output.0 as usize].children[0].0 as usize].node,
+        );
+        let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+        let memo = try_populate_pass1(initial, &generated).unwrap();
+        let mut priced_operators = Vec::new();
+        let inventory = build_candidate_inventory(&memo, &[output], |node| {
+            priced_operators.push(node.operator.kind_name());
+            Ok(1.0)
+        })
+        .unwrap();
+        assert!(priced_operators.contains(&"Sort"));
+        assert!(priced_operators.contains(&"Limit"));
+        let exact_root = inventory.group_candidates[output.0 as usize][0];
+        let root_template = inventory.templates[exact_root.0].as_ref().unwrap();
+        assert!(
+            OperatorNode::reachable(root_template)
+                .iter()
+                .any(|node| Rc::ptr_eq(node, &original_input)),
+            "lowering preserves canonical input boundary"
+        );
+        assert!(inventory.templates.iter().flatten().all(|node| !matches!(node.non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if measures.iter().any(|measure| matches!(measure, AggIntent::TopK { .. })))));
+        let selected = select_candidates(&inventory.graph).unwrap().unwrap();
+        let mut modes = vec![None; inventory.graph.candidates.len()];
+        for id in &selected.selected_candidates {
+            modes[id.0] = Some(Materialization::NotMaterialized);
+        }
+        let entries = vec![entry_with(
+            AccuracyTarget::exact(),
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000))),
+        )];
+        let physical = materialize_selected_candidates(
+            &inventory,
+            &selected,
+            &modes,
+            &roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>(),
+            &entries,
+            &DataWorkload::default(),
+            crate::PlanningModels::builtin().deployment_capabilities,
+        )
+        .unwrap();
+        physical.physical.dag.validate().unwrap();
+        assert_eq!(
+            physical.nodes_by_candidate.iter().flatten().count(),
+            selected.selected_candidates.len()
+        );
+        assert_eq!(
+            selected.modeled_cost,
+            selected.selected_candidates.len() as f64
+        );
+    }
+
+    fn nested_sum_memo(external_reader: bool) -> (CandidateMemo, Vec<MemoGroupId>) {
+        let mut queries = vec!["sum by (region) (sum by (region, job) (m))"];
+        if external_reader {
+            queries.push("sum by (region, job) (m)");
+        }
+        let roots = queries
+            .iter()
+            .enumerate()
+            .map(|(query, text)| {
+                (
+                    query,
+                    QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let initial = LogicalMemo::from_roots(&roots);
+        let outputs = (0..queries.len())
+            .map(|query| {
+                MemoGroupId(
+                    initial
+                        .groups
+                        .iter()
+                        .position(|group| group.roots_of.contains(&query))
+                        .unwrap() as u32,
+                )
+            })
+            .collect();
+        let generated = generate_per_computation_candidates(roots).unwrap();
+        (try_populate_pass1(initial, &generated).unwrap(), outputs)
+    }
+
+    // Fusion owns its private work but does not publish another logical result.
+    #[test]
+    fn fused_nested_sum_activates_only_its_actual_input_groups() {
+        let (memo, outputs) = nested_sum_memo(false);
+        let owner = outputs[0].0 as usize;
+        let fused_index = memo.candidates[owner]
+            .iter()
+            .position(|candidate| candidate.implements.len() > 1)
+            .expect("nested sum has an absorbed computation");
+        let absorbed = memo.candidates[owner][fused_index].implements[1];
+        let mut inventory = build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)).unwrap();
+        let fused = inventory.group_candidates[owner][fused_index];
+        assert!(!inventory.group_candidates[absorbed.0 as usize].contains(&fused));
+        assert!(
+            inventory.graph.query_roots[0]
+                .compatible_candidates
+                .contains(&fused),
+            "fused output satisfies its owning group's contract"
+        );
+        inventory.graph.query_roots[0].compatible_candidates = vec![fused];
+        let selected = select_candidates(&inventory.graph).unwrap().unwrap();
+        assert!(inventory.group_candidates[absorbed.0 as usize]
+            .iter()
+            .all(|id| !selected.selected_candidates.contains(id)));
+        let rebuilt =
+            reconstruct_candidate_outputs(&inventory.graph, &selected, &inventory.templates)
+                .unwrap();
+        rebuilt[0].validate_structure().unwrap();
+        assert_eq!(
+            OperatorNode::reachable(&rebuilt[0])
+                .iter()
+                .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
+                .count(),
+            1
+        );
+    }
+
+    // A separately requested inner result is computed independently of fusion.
+    #[test]
+    fn fused_nested_sum_preserves_an_external_inner_query() {
+        let (memo, outputs) = nested_sum_memo(true);
+        let owner = outputs[0].0 as usize;
+        let inner = outputs[1];
+        assert_eq!(memo.groups[owner].children, vec![inner]);
+        let fused_index = memo.candidates[owner]
+            .iter()
+            .position(|candidate| {
+                candidate.node.contains_asap() && !candidate.children.contains(&inner)
+            })
+            .expect("fusion can privately recompute the shared inner work");
+        let mut inventory = build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)).unwrap();
+        let fused = inventory.group_candidates[owner][fused_index];
+        inventory.graph.query_roots[0].compatible_candidates = vec![fused];
+        assert!(!inventory.graph.query_roots[1]
+            .compatible_candidates
+            .contains(&fused));
+        let selected = select_candidates(&inventory.graph).unwrap().unwrap();
+        assert!(inventory.group_candidates[inner.0 as usize]
+            .iter()
+            .any(|id| selected.selected_candidates.contains(id)));
+        let rebuilt =
+            reconstruct_candidate_outputs(&inventory.graph, &selected, &inventory.templates)
+                .unwrap();
+        assert_eq!(rebuilt.len(), 2);
+        for root in &rebuilt {
+            root.validate_structure().unwrap();
+        }
+        assert!(!Rc::ptr_eq(&rebuilt[0], &rebuilt[1]));
+        assert_eq!(
+            rebuilt[0].schema.fields.len(),
+            memo.groups[owner].node.schema.fields.len()
+        );
+        assert_eq!(
+            rebuilt[1].schema.fields.len(),
+            memo.groups[inner.0 as usize].node.schema.fields.len()
+        );
     }
 
     // A boundary-only alias has no immediate operator for the decoder to rebuild.

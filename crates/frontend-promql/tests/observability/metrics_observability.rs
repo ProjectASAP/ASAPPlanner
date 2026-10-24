@@ -147,10 +147,9 @@ fn benchmark_corpora_are_total_and_keep_their_coverage() {
 /// aggregates over a `topk` output, which the frontend declares as
 /// `[keys.., topk_k]` with a `Utf8` placeholder and no value column, so the
 /// outer `sum`'s accumulator has no value to read (and the plain plan would
-/// sum a string). They compose once the top-k output carries the ranked
-/// value (#672).
+/// sum a string). The ranked-row TopK contract now exposes its numeric value
+/// and retained identity columns (#672).
 #[test]
-#[ignore = "an aggregate over a top-k output needs the top-k value column (#672)"]
 fn kubernetes_mixin_aggregates_over_topk_compose() {
     for query in [
         r#"sum without (id, metrics_path, name, image, endpoint, job, node) ( topk by (cluster, namespace, pod, container, instance) (1, increase( container_cpu_cfs_throttled_periods_total{container!="", job="cadvisor", } [5m]) ) ) / on (cluster, namespace, pod, container, instance) group_left sum without (id, metrics_path, name, image, endpoint, job, node) ( topk by (cluster, namespace, pod, container, instance) (1, increase( container_cpu_cfs_periods_total{job="cadvisor", } [5m]) ) ) > ( 25 / 100 )"#,

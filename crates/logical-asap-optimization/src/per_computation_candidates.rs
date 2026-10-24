@@ -1082,10 +1082,12 @@ fn whole_expression_input(
             ..
         })
     );
+    let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
     if per_series && realized.child.schema.has_promql_series_identity() {
-        input.item = Some(SummaryInputExpr::Column(ColumnRef::Named(
-            asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
-        )));
+        input.item = Some(asap_types::ir::schema::topk::series_identity_item(
+            &realized.child.schema,
+            partitions.group_keys().map_or(&[][..], |keys| keys.keys()),
+        ));
     } else if realized.child.schema.closed
         && (matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
             || !reads_only_time_series(&realized.child))
@@ -1096,7 +1098,6 @@ fn whole_expression_input(
         // result.)
         return None;
     }
-    let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
     Some((realized.child, input, partitions))
 }
 
@@ -3027,40 +3028,36 @@ fn ranked_as_topk(
     target: &OperatorNode,
     estimate: Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
-    let (ranked, keys) = target
-        .schema
-        .fields
-        .split_last()
-        .expect("an aggregate outputs its measure");
+    let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
+        return Err(PerComputationCandidateError::Unsupported(
+            "top-k target is not an aggregate",
+        ));
+    };
+    let ranked_index = reduction.group_keys().map_or(0, |keys| keys.len());
     let fields = &estimate.schema.fields;
     let estimated = fields.len() - 1;
-    let column = |index: usize, name: &str| ProjectItem {
-        alias: Some(name.to_string()),
-        expr: ScalarExpr::Column(index),
-    };
-    // Each key by name among the estimate's partition and item columns.
-    let key_columns = keys
+    let cols = target
+        .schema
+        .fields
         .iter()
-        .map(|key| {
-            fields[..estimated]
-                .iter()
-                .position(|field| field.name == key.name)
-                .ok_or(PerComputationCandidateError::Unsupported(
-                    "top-k estimate without a partition column",
-                ))
+        .enumerate()
+        .map(|(index, field)| {
+            let source = if index == ranked_index {
+                estimated
+            } else {
+                fields[..estimated]
+                    .iter()
+                    .position(|input| input.name == field.name)
+                    .ok_or(PerComputationCandidateError::Unsupported(
+                        "top-k estimate without a ranked-row identity column",
+                    ))?
+            };
+            Ok(ProjectItem {
+                alias: Some(field.name.clone()),
+                expr: ScalarExpr::Column(source),
+            })
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let cols = key_columns
-        .iter()
-        .zip(keys)
-        .map(|(&index, key)| column(index, &key.name))
-        .chain(std::iter::once(column(estimated, &ranked.name)))
-        .chain(
-            (0..estimated)
-                .filter(|index| !key_columns.contains(index))
-                .map(|index| column(index, &fields[index].name)),
-        )
-        .collect();
+        .collect::<Result<Vec<_>, PerComputationCandidateError>>()?;
     Ok(OperatorNode::new_shared(Operator::NonASAP(
         NonASAPOp::Project {
             cols,
@@ -3604,12 +3601,7 @@ fn summary_update(
                 .flat_map(|keys| keys.iter().copied())
                 .collect();
             let item = if child.has_promql_series_identity() {
-                // Rows that carry the full series identity rank it as a
-                // column, the item form the runtime builds keyed summaries
-                // from.
-                SummaryInputExpr::Column(ColumnRef::Named(
-                    asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
-                ))
+                asap_types::ir::schema::topk::series_identity_item(child, &groups)
             } else if child.closed {
                 // A closed child (an aggregate's output, say) lists every
                 // column: the item is its columns outside the partition and
@@ -5789,6 +5781,27 @@ mod tests {
                 SummaryInputExpr::Column(ColumnRef::SampleValue)
             );
         }
+    }
+
+    // Identity realization must preserve named labels and every top-k candidate's output contract.
+    #[test]
+    fn topk_keeps_known_labels_beside_series_identity() {
+        let inventory = inventory("topk by (service) (5, sum_over_time(m{instance=\"a\"}[1m]))");
+        let topk = topk_target(&inventory);
+        let expected = &inventory.targets[topk].aggregate.schema;
+        assert!(expected.fields.iter().any(|field| field.name == "instance"));
+        assert!(expected
+            .fields
+            .iter()
+            .any(|field| field.name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY));
+        for (_, root) in composed_with(&inventory, topk) {
+            assert_eq!(&root.schema, expected);
+        }
+        let (_, state) = fused_heap(&inventory, SketchAlgorithm::CountSketchWithHeap);
+        assert!(matches!(
+            heap_update(&state).item,
+            Some(SummaryInputExpr::Tuple(_))
+        ));
     }
 
     /// A KLL quantile over an exact sum accumulator composes per node, the sum adding no error.

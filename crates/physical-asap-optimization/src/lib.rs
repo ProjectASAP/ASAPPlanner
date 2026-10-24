@@ -108,13 +108,11 @@ use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPNodeId,
 };
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
-use asap_types::ir::scalar::column_resolution::resolve_column_ref;
-use asap_types::ir::scalar::expr_ir::ColumnRef;
-use asap_types::ir::schema::{DataType, ExactKind, FieldDataType};
+use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
     apply_materialization_timings, is_filtered_build, split_shared_by_timing, ASAPOp,
-    MaterializationAssignment, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot,
-    ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
+    MaterializationAssignment, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
+    SchemaDerivationError, SortKey, TimingMemo,
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
@@ -167,6 +165,8 @@ impl PhysicalCandidate {
 
 #[derive(Debug, Error)]
 pub enum PhysicalASAPOptimizationError {
+    #[error("invalid operator implementation boundary: {0}")]
+    ImplementationBoundary(&'static str),
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
     #[error(transparent)]
@@ -1095,6 +1095,39 @@ fn map_roots(
         .collect()
 }
 
+/// Lower the private operators of one candidate while preserving its already
+/// canonical input-group nodes. This reuses the complete-plan implementation
+/// rules (currently exact top-k -> Project/Limit/Sort), without assigning timing
+/// or materialization and without recursively implementing another group's input.
+/// Returned new operators must be enumerated and priced before plan selection.
+pub fn implement_candidate_operators(
+    root: &Rc<OperatorNode>,
+    inputs: &[Rc<OperatorNode>],
+) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
+    if inputs.iter().any(|input| Rc::ptr_eq(input, root)) {
+        return Err(PhysicalASAPOptimizationError::ImplementationBoundary(
+            "candidate root cannot also be an input",
+        ));
+    }
+    let reachable = OperatorNode::reachable(root)
+        .into_iter()
+        .map(|node| Rc::as_ptr(&node))
+        .collect::<HashSet<_>>();
+    if inputs
+        .iter()
+        .any(|input| !reachable.contains(&Rc::as_ptr(input)))
+    {
+        return Err(PhysicalASAPOptimizationError::ImplementationBoundary(
+            "input is absent from candidate subtree",
+        ));
+    }
+    let mut implementations = inputs
+        .iter()
+        .map(|input| (Rc::as_ptr(input), Rc::clone(input)))
+        .collect();
+    implement(root, &mut implementations)
+}
+
 /// Each node's implementation.
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
@@ -1176,56 +1209,13 @@ fn implement_topk(
         }))?
         .with_guarantee(node.guarantee.clone()),
     );
-    let (ranked, key_fields) = node
-        .schema
-        .fields
-        .split_last()
-        .expect("an aggregate outputs its measure");
-    let mut cols = key_fields
-        .iter()
-        .map(|field| {
-            let column = resolve_column_ref(&ColumnRef::Named(field.name.clone()), &child.schema)
-                .map_err(|e| unsupported(&format!("group key {}: {e}", field.name)))?;
-            Ok(ProjectItem {
-                alias: Some(field.name.clone()),
-                expr: ScalarExpr::Column(column),
-            })
-        })
-        .collect::<Result<Vec<_>, PhysicalASAPOptimizationError>>()?;
-    cols.push(ProjectItem {
-        alias: Some(ranked.name.clone()),
-        expr: ScalarExpr::Column(value),
-    });
-    // PromQL `topk` answers whole input series: rows that carry the series
-    // identity keep it, after the logical columns, so each answer has the
-    // chosen series' full label set and readers of `[keys.., topk_k]` still
-    // find those columns where they were.
-    if let Ok(identity) = resolve_column_ref(
-        &ColumnRef::Named(asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into()),
-        &child.schema,
-    ) {
-        cols.push(ProjectItem {
-            alias: Some(asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into()),
-            expr: ScalarExpr::Column(identity),
-        });
-    } else {
-        // Otherwise each answer keeps the columns naming its ranked item
-        // that the logical columns do not: over PromQL rows without the
-        // identity (e.g. those of `sum by (job)`) their string labels, so
-        // `topk(k, sum by (job) (...))` answers each job; over a SQL
-        // aggregate its other group keys, so `ORDER BY COUNT(*) DESC LIMIT
-        // k` over `GROUP BY host` answers each host.
-        let promql = reads_only_time_series(&child);
-        for (index, field) in child.schema.fields.iter().enumerate() {
-            let names_item = !promql || field.dtype == FieldDataType::Plain(DataType::Utf8);
-            if names_item && index != value && !key_fields.iter().any(|k| k.name == field.name) {
-                cols.push(ProjectItem {
-                    alias: Some(field.name.clone()),
-                    expr: ScalarExpr::Column(index),
-                });
-            }
-        }
-    }
+    let output_name = node.schema.fields[keys.len()].name.clone();
+    let cols = asap_types::ir::schema::topk::ranked_row_projection(
+        &child,
+        &Reduction::Reduce(keys.clone()),
+        &output_name,
+    )
+    .map_err(|error| unsupported(&format!("ranked rows: {error}")))?;
     Ok(Rc::new(
         OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
             cols,
@@ -1265,6 +1255,62 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::ASAPOp;
+
+    // Candidate-local implementation must leave another group's canonical root untouched.
+    #[test]
+    fn candidate_operator_lowering_preserves_input_boundaries() {
+        let root = lower_promql(
+            "topk by (job) (3, sum_over_time(m[1m]))",
+            AccuracyTarget::exact(),
+        );
+        let boundary = Rc::clone(root.children()[0]);
+        let lowered =
+            implement_candidate_operators(&root, std::slice::from_ref(&boundary)).unwrap();
+        assert_eq!(lowered.schema, root.schema);
+        let nodes = OperatorNode::reachable(&lowered);
+        assert!(nodes.iter().any(|node| node.operator.kind_name() == "Sort"));
+        assert!(nodes
+            .iter()
+            .any(|node| node.operator.kind_name() == "Limit"));
+        assert!(nodes.iter().any(|node| Rc::ptr_eq(node, &boundary)));
+        assert!(matches!(
+            implement_candidate_operators(&root, std::slice::from_ref(&root)),
+            Err(PhysicalASAPOptimizationError::ImplementationBoundary(_))
+        ));
+    }
+
+    // Logical and exact ranked rows retain the full series identity contract.
+    #[test]
+    fn topk_logical_contract_preserves_series_identity() {
+        let template = lower_promql("topk(3, sum_over_time(m[1m]))", AccuracyTarget::exact());
+        let source = asap_logical_asap_optimization::test_support::metric_scan(&[
+            "job",
+            "instance",
+            asap_types::ir::schema::PROMQL_SERIES_IDENTITY,
+        ]);
+        let root = Rc::new(template.with_new_children(|_| Rc::clone(&source)).unwrap());
+        let boundary = Rc::clone(root.children()[0]);
+        let lowered = implement_candidate_operators(&root, &[boundary]).unwrap();
+        assert_eq!(lowered.schema, root.schema);
+        assert_eq!(
+            names(&root),
+            [
+                "topk_3",
+                "job",
+                "instance",
+                asap_types::ir::schema::PROMQL_SERIES_IDENTITY
+            ]
+        );
+        assert!(root
+            .schema
+            .fields
+            .iter()
+            .any(|field| field.name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY));
+        assert_eq!(
+            root.schema.fields[0].dtype,
+            asap_types::ir::schema::FieldDataType::Plain(asap_types::ir::schema::DataType::Float64)
+        );
+    }
 
     /// The all-`NotMaterialized` candidate, with no workload declared.
     fn first_candidate(roots: &[QueryRoot]) -> PhysicalCandidate {

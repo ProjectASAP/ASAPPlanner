@@ -18,6 +18,7 @@ pub mod error;
 pub mod family_capability;
 pub mod schema_support;
 pub mod sketch;
+pub mod topk;
 
 pub use aggregate_schema::aggregate_output_schema;
 pub use family_capability::{
