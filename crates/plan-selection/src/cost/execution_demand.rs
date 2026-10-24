@@ -8,24 +8,10 @@
 //! to price once per request, as `computations` does.
 
 use super::analytical::AnalyticalCostError;
-use crate::PlanSelectionSettings;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::physical::Materialization;
-use asap_types::workload::{QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand};
+use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-
-/// Evaluations per second of a node computed once for the queries of
-/// `entries` together, as a node they share at query time is
-/// ([`computations`]).
-pub(crate) fn shared_evaluation_rate(
-    entries: &[&QueryWorkloadEntry],
-    settings: &PlanSelectionSettings,
-) -> Result<f64, AnalyticalCostError> {
-    evaluation_rate(
-        entries.iter().map(|e| (&e.recurrence, e.range_evaluation)),
-        settings.non_repeating_query_horizon_seconds,
-    )
-}
 
 /// Evaluations per second of a node computed once for `queries` together,
 /// each a recurrence with its range evaluation: a request with a range

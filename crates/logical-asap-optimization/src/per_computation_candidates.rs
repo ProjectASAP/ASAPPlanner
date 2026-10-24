@@ -2961,7 +2961,7 @@ fn with_names_of(
     // A top-k's ranked rows may carry their item columns after the
     // aggregate's ([`ranked_as_topk`]).
     if names(&output).starts_with(&names(target)) {
-        return Ok(output);
+        return Ok(with_aggregate_qualifiers(target, output));
     }
     if output.schema.fields.len() != target.schema.fields.len() {
         return Err(PerComputationCandidateError::Unsupported(
@@ -2976,13 +2976,34 @@ fn with_names_of(
             expr: ScalarExpr::Column(column),
         })
         .collect();
-    Ok(OperatorNode::new_shared(Operator::NonASAP(
-        NonASAPOp::Project {
+    Ok(with_aggregate_qualifiers(
+        target,
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
             cols,
             qualifier: None,
             child: output,
-        },
-    ))?)
+        }))?,
+    ))
+}
+
+/// An equivalent aggregate replacement must retain SQL field identity. These
+/// explicit qualifiers survive child rebinding; types and keys remain derived
+/// from executable operators rather than copied from the requested output.
+fn with_aggregate_qualifiers(target: &OperatorNode, output: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    if output
+        .schema
+        .fields
+        .iter()
+        .zip(&target.schema.fields)
+        .all(|(field, expected)| field.table == expected.table)
+    {
+        return output;
+    }
+    let mut output = output.as_ref().clone();
+    for (field, expected) in output.schema.fields.iter_mut().zip(&target.schema.fields) {
+        field.table = expected.table.clone();
+    }
+    Rc::new(output)
 }
 
 /// A whole-expression top-k for `target` ([`whole_expression_input`]): one
@@ -3685,6 +3706,35 @@ fn statistic(intent: &AggIntent) -> Result<SketchStatistic, PerComputationCandid
 
 #[cfg(test)]
 mod tests {
+    /// Aggregate replacement qualifiers survive both renaming and later input rebinding.
+    #[test]
+    fn aggregate_replacement_preserves_sql_field_identity() {
+        let original =
+            crate::test_support::lower_promql("sum by (job) (m)", AccuracyTarget::exact());
+        let mut target = original.as_ref().clone();
+        target.schema.fields[0].table = Some("metrics".into());
+        let projected = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+            cols: target
+                .schema
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(column, field)| ProjectItem {
+                    alias: Some(field.name.clone()),
+                    expr: ScalarExpr::Column(column),
+                })
+                .collect(),
+            qualifier: None,
+            child: original,
+        }))
+        .unwrap();
+        assert_eq!(projected.schema.fields[0].table, None);
+        let replaced = with_names_of(&target, projected).unwrap();
+        assert_eq!(replaced.schema, target.schema);
+        let rebound = replaced.with_new_children(Rc::clone).unwrap();
+        assert_eq!(rebound.schema, target.schema);
+    }
+
     use super::*;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::StatisticKind;

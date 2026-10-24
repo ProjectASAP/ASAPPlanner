@@ -130,7 +130,7 @@ use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilit
 /// CandidateLogicalASAPDAG (Stage 1 output). It holds planning data only;
 /// display labels are derived from it by the devtools.
 #[derive(Debug, Clone)]
-pub struct PhysicalCandidate {
+pub struct PhysicalWorkloadPlan {
     /// `P<n>` (nothing materialized) or `P<n>-m<k>`, set by the caller.
     pub id: String,
     /// The id of the logical candidate it implements.
@@ -153,7 +153,7 @@ pub struct PhysicalCandidate {
     pub assignment: Vec<Materialization>,
 }
 
-impl PhysicalCandidate {
+impl PhysicalWorkloadPlan {
     /// Whether any node is materialized: a summary build, or a shared
     /// non-summary node built once per evaluation.
     pub fn materializes_any(&self) -> bool {
@@ -322,7 +322,7 @@ fn summary_reader_eligibility(
 
 /// One summary build, or one highest shared non-summary node, Stage 2 may
 /// store, with its materialization options.
-/// It is not a whole-workload plan like [`PhysicalCandidate`]: it is Stage
+/// It is not a whole-workload plan like [`PhysicalWorkloadPlan`]: it is Stage
 /// 2's enumeration bookkeeping, and the physical candidates are the
 /// combinations of the materialization candidates' options. For example,
 /// over one metric:
@@ -348,7 +348,7 @@ fn summary_reader_eligibility(
 /// ingestion time over one that is not; Stage 3 prices each.
 /// `at_ingestion` records why ingestion is ruled out when it is (e.g.
 /// `Filtered`, `NotRepeated`). Each physical candidate carries the
-/// resulting assignment ([`PhysicalCandidate::materialization`]).
+/// resulting assignment ([`PhysicalWorkloadPlan::materialization`]).
 #[derive(Debug, Clone)]
 pub(crate) struct MaterializationCandidate {
     /// The build in the implemented DAG.
@@ -440,7 +440,7 @@ pub fn optimize_physical_asap(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
-) -> Result<Vec<PhysicalCandidate>, PhysicalASAPOptimizationError> {
+) -> Result<Vec<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
@@ -466,7 +466,7 @@ pub fn optimize_physical_asap_without_query_time_raw_scans(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
-) -> Result<(Vec<(usize, PhysicalCandidate)>, usize), PhysicalASAPOptimizationError> {
+) -> Result<(Vec<(usize, PhysicalWorkloadPlan)>, usize), PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
@@ -545,7 +545,7 @@ fn reads_raw_at_query_time(
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
 /// assignment: the physical candidate [`optimize_physical_asap`] lists for
 /// it. `choose(readers)` gives the option for each materialization
-/// candidate in the order of [`PhysicalCandidate::assignment`], `readers`
+/// candidate in the order of [`PhysicalWorkloadPlan::assignment`], `readers`
 /// being the queries that read it. `None` when
 /// a chosen option is not one of the build's, or the assignment
 /// materializes a build at ingestion time above one at query time.
@@ -556,7 +556,7 @@ pub fn optimize_physical_asap_assigned(
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
     choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
-) -> Result<Option<PhysicalCandidate>, PhysicalASAPOptimizationError> {
+) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
@@ -597,7 +597,7 @@ pub fn optimize_physical_asap_chosen(
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
     choose: &mut ChooseMaterialization<'_>,
-) -> Result<Option<PhysicalCandidate>, PhysicalASAPOptimizationError> {
+) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let logical_of: HashMap<*const OperatorNode, *const OperatorNode> = memo
@@ -633,7 +633,7 @@ fn assigned_candidate(
     implemented: &[QueryRoot],
     mat_candidates: &[MaterializationCandidate],
     assignment: Vec<Materialization>,
-) -> Result<PhysicalCandidate, PhysicalASAPOptimizationError> {
+) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
     let materialized: Vec<_> = mat_candidates
         .iter()
         .zip(&assignment)
@@ -673,7 +673,7 @@ fn assigned_candidate(
         })
         .map(|n| (n.id, n.materialization))
         .collect();
-    Ok(PhysicalCandidate {
+    Ok(PhysicalWorkloadPlan {
         id: String::new(),
         from_logical: from_logical.to_string(),
         roots: timed,
@@ -1313,7 +1313,7 @@ mod tests {
     }
 
     /// The all-`NotMaterialized` candidate, with no workload declared.
-    fn first_candidate(roots: &[QueryRoot]) -> PhysicalCandidate {
+    fn first_candidate(roots: &[QueryRoot]) -> PhysicalWorkloadPlan {
         optimize_physical_asap(
             "L1",
             roots,
@@ -1325,7 +1325,7 @@ mod tests {
         .remove(0)
     }
 
-    fn operator_root(candidate: &PhysicalCandidate, i: usize) -> Rc<OperatorNode> {
+    fn operator_root(candidate: &PhysicalWorkloadPlan, i: usize) -> Rc<OperatorNode> {
         match &candidate.roots[i] {
             QueryRoot::Operator(node) => node.clone(),
             QueryRoot::Scalar(_) => panic!("operator root"),
@@ -1639,7 +1639,7 @@ mod tests {
     const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
 
     /// The options `candidate` chose other than `NotMaterialized`, by node.
-    fn materialized(candidate: &PhysicalCandidate) -> Vec<Materialization> {
+    fn materialized(candidate: &PhysicalWorkloadPlan) -> Vec<Materialization> {
         candidate
             .materialization
             .values()
@@ -1777,7 +1777,7 @@ mod tests {
     }
 
     /// The distinct nodes of `kind` the candidate's roots read.
-    fn node_of(candidate: &PhysicalCandidate, kind: &str) -> Vec<Rc<OperatorNode>> {
+    fn node_of(candidate: &PhysicalWorkloadPlan, kind: &str) -> Vec<Rc<OperatorNode>> {
         let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
         for root in candidate.roots.iter().flat_map(root_operators) {
             for node in OperatorNode::reachable(root) {
@@ -2321,7 +2321,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(candidates.len(), 3);
-        let scans = |c: &PhysicalCandidate| {
+        let scans = |c: &PhysicalWorkloadPlan| {
             let mut scans: Vec<_> = c
                 .dag
                 .nodes

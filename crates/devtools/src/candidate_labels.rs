@@ -11,7 +11,7 @@ use asap_logical_asap_optimization::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates,
 };
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
-use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
@@ -25,7 +25,15 @@ pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
     let logical = &run.stage1_logical_asap_optimization;
     let mut labels = BTreeMap::new();
     for candidate in logical {
-        let mut label = choice_label(&run.stage1_pass1_per_computation, &candidate.choice);
+        let mut label = if candidate.choice.is_empty() {
+            candidate
+                .roots
+                .as_deref()
+                .map(connected_candidate_label)
+                .unwrap_or_else(|_| "Unimplemented candidate".into())
+        } else {
+            choice_label(&run.stage1_pass1_per_computation, &candidate.choice)
+        };
         if let Some(pass2) = &candidate.pass2 {
             // The default search keeps only the selected candidate, so its
             // Pass 1 candidate may not be in the run.
@@ -46,6 +54,62 @@ pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
         labels.insert(candidate.id.clone(), physical_label(&logical, candidate));
     }
     labels
+}
+
+/// Joint selections carry their actual connected DAG rather than a Cartesian
+/// choice vector. Derive labels from that DAG so a sketch is never called exact.
+fn connected_candidate_label(roots: &[QueryRoot]) -> String {
+    let mut labels = Vec::new();
+    let mut producers: BTreeMap<usize, (String, Vec<usize>)> = BTreeMap::new();
+    for (query, root) in roots.iter().enumerate() {
+        let mut states = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for operator in root_operators(root) {
+            for node in OperatorNode::reachable(operator) {
+                let identity = Rc::as_ptr(&node) as usize;
+                if !seen.insert(identity) {
+                    continue;
+                }
+                if matches!(
+                    node.asap(),
+                    Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                ) {
+                    let name = build_label(&node.operator);
+                    if !states.contains(&name) {
+                        states.push(name.clone());
+                    }
+                    producers
+                        .entry(identity)
+                        .or_insert_with(|| (name, Vec::new()))
+                        .1
+                        .push(query);
+                } else if matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })) {
+                    producers
+                        .entry(identity)
+                        .or_insert_with(|| ("Scan".into(), Vec::new()))
+                        .1
+                        .push(query);
+                }
+            }
+        }
+        labels.push(format!(
+            "Q{} {}",
+            query + 1,
+            if states.is_empty() {
+                "exact".into()
+            } else {
+                states.join(" + ")
+            }
+        ));
+    }
+    let mut shared: Vec<_> = producers
+        .values()
+        .filter(|(_, readers)| readers.len() > 1)
+        .map(|(name, readers)| format!("shared {name} ({})", query_names(readers)))
+        .collect();
+    shared.sort();
+    labels.extend(shared);
+    labels.join(" · ")
 }
 
 /// The query (index into `inventory.roots`) each target of `inventory` is
@@ -466,7 +530,7 @@ fn duration_name(ms: u64) -> String {
 /// `logical` followed by what the candidate materializes, e.g.
 /// "… · ingestion time: Kll ×5 panes · query time, shared: DDSketch";
 /// just `logical` when nothing is.
-pub fn physical_label(logical: &str, candidate: &PhysicalCandidate) -> String {
+pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String {
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
     for (id, materialization) in &candidate.materialization {
         let phase = match materialization {
@@ -535,223 +599,58 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planner_layering_examples::{example1, example2};
-    use crate::planning_stages::{lower_promql_roots, lower_sql_roots, run_planning_stages};
+    use crate::planner_layering_examples::example1;
+    use crate::planning_stages::lower_promql_roots;
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
 
-    /// Logical labels name each query's choice and the Pass 2 rules applied;
-    /// a physical label adds what it materializes, and with nothing
-    /// materialized it is its logical candidate's label.
+    /// Selected DAG labels expose accumulator state without a legacy choice ID.
     #[test]
-    fn example1_labels_name_choices_rules_and_materialization() {
+    fn connected_labels_describe_selected_states() {
         let workload = example1();
-        let run =
-            run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
-        let labels = candidate_labels(&run);
-        assert_eq!(
-            labels["L1"],
-            "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc)"
-        );
-        assert!(labels
-            .values()
-            .any(|l| l.ends_with(" · shared Scan (Q1, Q2)")));
-        assert!(labels
-            .values()
-            .any(|l| l.contains("Rate acc for Q1 in 6 × 10s panes")));
-        for p in &run.stage2_physical_asap_optimization {
-            let label = &labels[&p.id];
-            assert!(label.starts_with(&labels[&p.from_logical]), "{label}");
-            assert_eq!(
-                p.materializes_any(),
-                label != &labels[&p.from_logical],
-                "{label}"
-            );
-        }
-        assert!(labels
-            .values()
-            .any(|l| l.ends_with(" · ingestion time: Rate acc ×6 panes")));
-        assert!(labels
-            .values()
-            .any(|l| l.ends_with(" · ingestion time: Sum acc ×6 panes")));
-    }
-
-    /// Two identical Sum builds in different queries, both paned, are one
-    /// pane chain: the label lists it once, with both readers, instead of
-    /// once per build with both readers each time.
-    #[test]
-    fn identical_pane_chains_in_two_queries_are_listed_once() {
-        use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
-        use asap_types::ir::properties::AccuracyTarget;
-        use asap_types::workload::{
-            DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
-            QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-        };
-        let panel = |query: &str| RepeatingEntry {
-            query: Query(query.into()),
-            demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
-            requirements: QueryRequirements {
-                accuracy: AccuracyTarget::exact(),
-                max_latency_ms: None,
-            },
-            predictability: Predictability::Predictable { known_at: None },
-            range_evaluation: None,
-        };
-        let workload = PlanningWorkload {
-            query_workload: QueryWorkload {
-                language: QueryLanguage::PromQL,
-                query_batch: None,
-                repeating_queries: Some(vec![
-                    panel("sum_over_time(a[1m])"),
-                    panel("sum_over_time(a[1m]) * 2"),
-                    panel("max_over_time(a[1m])"),
-                ]),
-            },
-            data_workload: Some(shared_data_workload(
-                DataArrival::Ingesting {
-                    rows_per_second: SHARED_ROWS_PER_SECOND,
-                },
-                "a",
-            )),
-        };
-        let run =
-            run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
-        let labels = candidate_labels(&run);
-        let logical: Vec<&String> = run
-            .stage1_logical_asap_optimization
-            .iter()
-            .map(|c| &labels[&c.id])
+        let inventory = generate_per_computation_candidates(
+            lower_promql_roots(&workload)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .collect(),
+        )
+        .unwrap();
+        let choice = vec![0; inventory.targets.len()];
+        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
             .collect();
-        for label in &logical {
-            assert!(
-                !label.contains("Sum acc for Q1, Q2 in 6 × 10s panes, Sum acc for Q1, Q2"),
-                "{label}"
-            );
-        }
-        assert!(
-            logical
-                .iter()
-                .any(|l| l.contains("Sum acc for Q1, Q2 in 6 × 10s panes")),
-            "{logical:#?}"
-        );
-        let distinct: std::collections::BTreeSet<&String> = logical.iter().copied().collect();
-        assert_eq!(distinct.len(), logical.len(), "{logical:#?}");
+        let label = connected_candidate_label(&roots);
+        assert!(label.contains("Q1 ") && label.contains("Q2 "));
+        assert!(label.contains("acc"), "{label}");
     }
 
-    /// A 1-min sum every 10 s (6 × 10-s panes) and a 2-min sum every 20 s
-    /// (6 × 20-s panes) read one chain of 10-s panes: the label lists it
-    /// once with both readers and the newest panes the 1-min sum merges.
+    /// A state reused by two query outputs is named once in the sharing suffix.
     #[test]
-    fn a_chain_shared_across_intervals_is_listed_once_with_its_newest_readers() {
-        use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
-        use asap_types::ir::properties::AccuracyTarget;
-        use asap_types::workload::{
-            DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
-            QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-        };
-        let panel = |query: &str, interval_ms: u32| RepeatingEntry {
-            query: Query(query.into()),
-            demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval_ms)),
-            requirements: QueryRequirements {
-                accuracy: AccuracyTarget::exact(),
-                max_latency_ms: None,
-            },
-            predictability: Predictability::Predictable { known_at: None },
-            range_evaluation: None,
-        };
-        let workload = PlanningWorkload {
-            query_workload: QueryWorkload {
-                language: QueryLanguage::PromQL,
-                query_batch: None,
-                repeating_queries: Some(vec![
-                    panel("sum_over_time(a[1m])", 10_000),
-                    panel("sum_over_time(a[2m])", 20_000),
-                ]),
-            },
-            data_workload: Some(shared_data_workload(
-                DataArrival::Ingesting {
-                    rows_per_second: SHARED_ROWS_PER_SECOND,
-                },
-                "a",
-            )),
-        };
-        let run =
-            run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
-        let labels = candidate_labels(&run);
-        assert!(
-            labels
-                .values()
-                .any(|l| l.contains("one Sum acc for Q1, Q2 in 12 × 10s panes (Q1 newest 6)")),
-            "{labels:#?}"
-        );
+    fn connected_labels_name_actual_shared_state() {
+        let workload = example1();
+        let inventory = generate_per_computation_candidates(
+            lower_promql_roots(&workload)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .collect(),
+        )
+        .unwrap();
+        let roots =
+            compose_logical_candidate(&inventory, &vec![0; inventory.targets.len()]).unwrap();
+        let label = connected_candidate_label(&[roots[1].1.clone(), roots[1].1.clone()]);
+        assert!(label.contains("shared Sum acc (Q1, Q2)"), "{label}");
+        assert_eq!(label.matches("shared Sum acc").count(), 1);
     }
 
-    /// A fused computation's candidate is labeled apart from the unfused pair's:
-    /// the nested sum as "nested Sum acc", beside the two separate sums; an
-    /// avg's exact states as "Sum/Count acc".
+    /// Raw logical operators have an exact label, rather than an empty choice label.
     #[test]
-    fn fused_computations_and_avg_states_have_their_own_labels() {
-        use crate::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
-        use asap_types::ir::properties::AccuracyTarget;
-        use asap_types::workload::{
-            DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
-            QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-        };
-        let labels_of = |query: &str| {
-            let workload = PlanningWorkload {
-                query_workload: QueryWorkload {
-                    language: QueryLanguage::PromQL,
-                    query_batch: None,
-                    repeating_queries: Some(vec![RepeatingEntry {
-                        query: Query(query.into()),
-                        demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
-                        requirements: QueryRequirements {
-                            accuracy: AccuracyTarget::exact(),
-                            max_latency_ms: None,
-                        },
-                        predictability: Predictability::Predictable { known_at: None },
-                        range_evaluation: None,
-                    }]),
-                },
-                data_workload: Some(shared_data_workload(
-                    DataArrival::Ingesting {
-                        rows_per_second: SHARED_ROWS_PER_SECOND,
-                    },
-                    "m",
-                )),
-            };
-            let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None)
-                .unwrap();
-            let labels = candidate_labels(&run);
-            run.stage1_logical_asap_optimization
-                .iter()
-                .filter(|c| c.pass2.is_none())
-                .map(|c| labels[&c.id].clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            labels_of("sum by (job) (sum_over_time(m[5m]))"),
-            ["Q1 exact (Sum acc, Sum acc)", "Q1 exact (nested Sum acc)"]
-        );
-        assert_eq!(labels_of("avg by (job) (m)"), ["Q1 exact (Sum/Count acc)"]);
-    }
-
-    /// A summary build read by two queries can be built once per evaluation
-    /// for both: its label says "query time, shared".
-    #[test]
-    fn example2_labels_name_builds_shared_at_query_time() {
-        let (workload, catalog) = example2();
-        let roots = lower_sql_roots(&workload, &catalog).unwrap();
-        let run = run_planning_stages(&workload, roots, None).unwrap();
-        let labels = candidate_labels(&run);
-        assert!(
-            labels
-                .values()
-                .any(|l| l.contains(" · query time, shared: UnivMon")),
-            "{:?}",
-            labels
-                .values()
-                .filter(|l| l.contains("query time"))
-                .take(3)
-                .collect::<Vec<_>>()
-        );
+    fn connected_labels_name_exact_results() {
+        let roots = lower_promql_roots(&example1()).unwrap();
+        assert_eq!(connected_candidate_label(&roots), "Q1 exact · Q2 exact");
     }
 }

@@ -705,7 +705,10 @@ impl NonASAPOp {
                 s
             }
             Join {
-                kind, left, right, ..
+                kind,
+                pred,
+                left,
+                right,
             } => {
                 let l = &left.schema;
                 let r = &right.schema;
@@ -736,7 +739,11 @@ impl NonASAPOp {
                 Schema {
                     fields,
                     time_index,
-                    unique_keys: Vec::new(),
+                    unique_keys: if *kind == JoinKind::Inner {
+                        inner_join_unique_keys(&pred.0, l, r)
+                    } else {
+                        Vec::new()
+                    },
                     closed: l.closed && r.closed,
                 }
             }
@@ -1102,6 +1109,109 @@ impl NonASAPOp {
 
 /// A evaluation-shaped category for a value-level operator over `kind`: state
 /// never flows through an ordinary operator unchanged in category.
+/// Each input retains its keys only when the equality predicates constrain
+/// the other input to at most one matching row. In particular this preserves
+/// grouped sum/count keys through the SQL-average implementation.
+fn inner_join_unique_keys(
+    predicate: &ScalarExpr,
+    left: &Schema,
+    right: &Schema,
+) -> Vec<Vec<ColumnId>> {
+    use crate::ir::scalar::CompareOpKind;
+    fn columns(expr: &ScalarExpr) -> Option<(ColumnId, ColumnId)> {
+        if let ScalarExpr::Compare {
+            left,
+            op: CompareOpKind::Eq,
+            right,
+            ..
+        } = expr
+        {
+            if let (ScalarExpr::Column(a), ScalarExpr::Column(b)) = (left.as_ref(), right.as_ref())
+            {
+                return Some((*a, *b));
+            }
+        }
+        None
+    }
+    fn equality(expr: &ScalarExpr) -> Option<(ColumnId, ColumnId)> {
+        if let Some(pair) = columns(expr) {
+            return Some(pair);
+        }
+        // Grouped nullable keys use `a=b OR (a IS NULL AND b IS NULL)`.
+        if let ScalarExpr::BoolOr(terms) = expr {
+            if terms.len() == 2 {
+                for (equal, nulls) in [(&terms[0], &terms[1]), (&terms[1], &terms[0])] {
+                    let Some((a, b)) = columns(equal) else {
+                        continue;
+                    };
+                    if let ScalarExpr::BoolAnd(nulls) = nulls {
+                        let null_columns: Option<Vec<_>> = nulls
+                            .iter()
+                            .map(|term| match term {
+                                ScalarExpr::IsNull(column) => match column.as_ref() {
+                                    ScalarExpr::Column(column) => Some(*column),
+                                    _ => None,
+                                },
+                                _ => None,
+                            })
+                            .collect();
+                        if let Some(columns) = null_columns {
+                            if columns.len() == 2 && columns.contains(&a) && columns.contains(&b) {
+                                return Some((a, b));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    fn collect(expr: &ScalarExpr, pairs: &mut Vec<(ColumnId, ColumnId)>) {
+        if let ScalarExpr::BoolAnd(terms) = expr {
+            for term in terms {
+                collect(term, pairs);
+            }
+        } else if let Some(pair) = equality(expr) {
+            pairs.push(pair);
+        }
+    }
+    let width = left.fields.len();
+    let mut equalities = Vec::new();
+    collect(predicate, &mut equalities);
+    let pairs: Vec<_> = equalities
+        .into_iter()
+        .filter_map(|(a, b)| {
+            let (a, b) = if a < width { (a, b) } else { (b, a) };
+            if a < width && b >= width && b < width + right.fields.len() {
+                Some((a, b - width))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let constrained_left: Vec<_> = pairs.iter().map(|(left, _)| *left).collect();
+    let constrained_right: Vec<_> = pairs.iter().map(|(_, right)| *right).collect();
+    let is_unique = |schema: &Schema, columns: &[ColumnId]| {
+        schema
+            .unique_keys
+            .iter()
+            .any(|key| !key.is_empty() && key.iter().all(|column| columns.contains(column)))
+    };
+    let mut keys = Vec::new();
+    if is_unique(right, &constrained_right) {
+        keys.extend(left.unique_keys.clone());
+    }
+    if is_unique(left, &constrained_left) {
+        keys.extend(
+            right
+                .unique_keys
+                .iter()
+                .map(|key| key.iter().map(|column| column + width).collect()),
+        );
+    }
+    keys
+}
+
 fn readable(kind: OperatorResultKind) -> OperatorResultKind {
     match kind {
         OperatorResultKind::State => OperatorResultKind::Relation,
@@ -1563,6 +1673,84 @@ mod tests {
             )),
             right: node(scan(vec![col("b", DataType::Utf8, false)], None, vec![])),
         }
+    }
+
+    /// Joining two unique grouped states preserves either side's grouping key;
+    /// a non-unique supplier must not acquire the same no-fanout certificate.
+    #[test]
+    fn grouped_state_join_preserves_only_proven_unique_keys() {
+        let left = node(scan(
+            vec![col("key", DataType::Int64, true)],
+            None,
+            vec![vec![0]],
+        ));
+        let right = node(scan(
+            vec![col("key", DataType::Int64, true)],
+            None,
+            vec![vec![0]],
+        ));
+        let equal = ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(0)),
+            op: CompareOpKind::Eq,
+            right: Box::new(ScalarExpr::Column(1)),
+            semantics: ExprSemantics::Sql,
+        };
+        let null_safe = ScalarExpr::BoolOr(vec![
+            equal.clone(),
+            ScalarExpr::BoolAnd(vec![
+                ScalarExpr::IsNull(Box::new(ScalarExpr::Column(0))),
+                ScalarExpr::IsNull(Box::new(ScalarExpr::Column(1))),
+            ]),
+        ]);
+        let joined = NonASAPOp::Join {
+            kind: JoinKind::Inner,
+            pred: Predicate(ScalarExpr::BoolAnd(vec![null_safe])),
+            left: left.clone(),
+            right,
+        };
+        assert_eq!(
+            joined.output_schema().unwrap().unique_keys,
+            vec![vec![0], vec![1]]
+        );
+        let duplicates = node(scan(vec![col("key", DataType::Int64, true)], None, vec![]));
+        let fanout = NonASAPOp::Join {
+            kind: JoinKind::Inner,
+            pred: Predicate(equal),
+            left,
+            right: duplicates,
+        };
+        assert!(fanout.output_schema().unwrap().unique_keys.is_empty());
+    }
+
+    /// A partial composite key or a disjunctive non-equality escape can fan out.
+    #[test]
+    fn join_key_proof_requires_complete_unconditional_equality() {
+        let schema = Schema {
+            fields: vec![
+                col("a", DataType::Int64, true),
+                col("b", DataType::Int64, true),
+            ],
+            time_index: None,
+            unique_keys: vec![vec![0, 1]],
+            closed: true,
+        };
+        let equal = |left, right| ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(left)),
+            op: CompareOpKind::Eq,
+            right: Box::new(ScalarExpr::Column(right)),
+            semantics: ExprSemantics::Sql,
+        };
+        assert!(inner_join_unique_keys(&equal(0, 2), &schema, &schema).is_empty());
+        let complete = ScalarExpr::BoolAnd(vec![equal(0, 2), equal(1, 3)]);
+        assert_eq!(
+            inner_join_unique_keys(&complete, &schema, &schema),
+            vec![vec![0, 1], vec![2, 3]]
+        );
+        let escape = ScalarExpr::BoolOr(vec![
+            complete,
+            ScalarExpr::Literal(ScalarValue::Boolean(true)),
+        ]);
+        assert!(inner_join_unique_keys(&escape, &schema, &schema).is_empty());
     }
 
     #[test]

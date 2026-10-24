@@ -1,39 +1,111 @@
 //! Local pane candidates generated from compatible reader grids. Selected
 //! connections, not the union of potential consumers, determine eligibility.
 use super::candidates::{CandidateMemo as Memo, CandidateOrigin, ImplementationCandidate};
+#[cfg(test)]
+use super::state_configurations::pane_width_divisors;
+use super::state_configurations::{pane_width_domain_before, PaneWidthDomain};
+use super::{check_generation_deadline, CandidateGenerationTimeout};
 use super::{MemoGroup, MemoGroupId as GroupId};
 use crate::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use asap_types::workload::QueryWorkloadEntry;
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 /// Offer each supported reader-grid configuration. Stage 2 checks the actual
 /// chosen consumers, including ingestion alignment and range evaluation steps.
 pub fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
-    for (group, candidate) in local_pane_candidates(memo, entries, true) {
-        push_new(memo, group, candidate);
-    }
+    add_local_window_composition_in_domain(memo, entries, PaneWidthDomain::Complete);
 }
 
-/// Compatibility hook for the retiring selector: false retains its all-reader
-/// grid and private scan boundaries. The connection planner uses true.
+pub fn add_local_window_composition_in_domain(
+    memo: &mut Memo,
+    entries: &[QueryWorkloadEntry],
+    domain: PaneWidthDomain,
+) {
+    try_add_local_window_composition_in_domain(memo, entries, domain, None)
+        .expect("generation without a deadline cannot time out");
+}
+
+/// On timeout the caller must discard this memo, which may contain partial work.
+pub fn try_add_local_window_composition_in_domain(
+    memo: &mut Memo,
+    entries: &[QueryWorkloadEntry],
+    domain: PaneWidthDomain,
+    deadline: Option<Instant>,
+) -> Result<(), CandidateGenerationTimeout> {
+    check_generation_deadline(deadline)?;
+    // Flatten each existing/generated graph once. Repeatedly flattening the
+    // growing candidate list makes a complete pane-width domain quadratic.
+    let mut known: HashMap<(usize, String), Vec<usize>> = HashMap::new();
+    for (group, candidates) in memo.candidates.iter().enumerate() {
+        check_generation_deadline(deadline)?;
+        for (index, candidate) in candidates.iter().enumerate() {
+            check_generation_deadline(deadline)?;
+            if let Ok(signature) = candidate_signature(candidate) {
+                known.entry((group, signature)).or_default().push(index);
+            }
+        }
+    }
+    for (group, candidate) in local_pane_candidates_before(memo, entries, domain, deadline)? {
+        check_generation_deadline(deadline)?;
+        let Ok(signature) = candidate_signature(&candidate) else {
+            memo.candidates[group].push(candidate);
+            continue;
+        };
+        let bucket = known.entry((group, signature)).or_default();
+        if !bucket.iter().any(|&index| {
+            let previous = &memo.candidates[group][index];
+            previous.origin == candidate.origin
+                && previous.children == candidate.children
+                && previous.implements == candidate.implements
+                && previous.budget_share == candidate.budget_share
+                && previous.node == candidate.node
+        }) {
+            bucket.push(memo.candidates[group].len());
+            memo.candidates[group].push(candidate);
+        }
+    }
+    check_generation_deadline(deadline)?;
+    Ok(())
+}
+
+/// Expand legal pane widths while preserving canonical memo inputs.
 pub fn local_pane_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
-    preserve_group_boundaries: bool,
 ) -> Vec<(usize, ImplementationCandidate)> {
+    local_pane_candidates_before(memo, entries, PaneWidthDomain::Complete, None)
+        .expect("generation without a deadline cannot time out")
+}
+
+fn local_pane_candidates_before(
+    memo: &Memo,
+    entries: &[QueryWorkloadEntry],
+    domain: PaneWidthDomain,
+    deadline: Option<Instant>,
+) -> Result<Vec<(usize, ImplementationCandidate)>, CandidateGenerationTimeout> {
+    check_generation_deadline(deadline)?;
     let group_of = group_of_node(&memo.groups);
     let mut own: Vec<(usize, ImplementationCandidate)> = Vec::new();
     for (g, group) in memo.groups.iter().enumerate() {
-        let grids = if preserve_group_boundaries {
-            compatible_reader_grids(group, entries)
-        } else {
-            group_grid_ms(group, entries).into_iter().collect()
-        };
+        check_generation_deadline(deadline)?;
+        let grids = pane_width_domain_before(
+            group
+                .queries
+                .iter()
+                .filter_map(|&query| entries.get(query)?.evaluation_grid_ms()),
+            domain,
+            deadline,
+        )?;
         for grid in grids {
+            check_generation_deadline(deadline)?;
             for candidate in &memo.candidates[g] {
+                check_generation_deadline(deadline)?;
                 if !matches!(
                     candidate.origin,
                     CandidateOrigin::Pass1 | CandidateOrigin::SharedBuild
@@ -43,12 +115,10 @@ pub fn local_pane_candidates(
                 let canonical_scans = OperatorNode::reachable(&candidate.node)
                     .into_iter()
                     .filter(|node| {
-                        preserve_group_boundaries
-                            && matches!(
-                                node.non_asap(),
-                                Some(asap_types::ir::NonASAPOp::Scan { .. })
-                            )
-                            && group_of.contains_key(&Rc::as_ptr(node))
+                        matches!(
+                            node.non_asap(),
+                            Some(asap_types::ir::NonASAPOp::Scan { .. })
+                        ) && group_of.contains_key(&Rc::as_ptr(node))
                     })
                     .collect::<Vec<_>>();
                 let roots = [QueryRoot::Operator(Rc::clone(&candidate.node))];
@@ -61,6 +131,7 @@ pub fn local_pane_candidates(
                     continue;
                 };
                 for pass2_candidate in pass2_candidates {
+                    check_generation_deadline(deadline)?;
                     let Ok(rewritten) = pass2_candidate.roots else {
                         continue;
                     };
@@ -73,6 +144,7 @@ pub fn local_pane_candidates(
                     // semantics. Otherwise the pane's canonical input disappears.
                     let mut restored = HashMap::new();
                     for rewritten in OperatorNode::reachable(node) {
+                        check_generation_deadline(deadline)?;
                         let mut matches = canonical_scans.iter().filter(|original| {
                             original.operator == rewritten.operator
                                 && original.schema == rewritten.schema
@@ -95,7 +167,8 @@ pub fn local_pane_candidates(
             }
         }
     }
-    own
+    check_generation_deadline(deadline)?;
+    Ok(own)
 }
 
 fn restore_scan_boundaries(
@@ -129,24 +202,18 @@ fn restore_scan_boundaries(
     rebuilt
 }
 
-// GCD closure offers grids for individual readers and compatible subsets.
-// A nongridded potential consumer must not veto a repeated reader's panes.
+// Union of complete divisor domains covers individual readers and every
+// compatible subset: common widths belong to each reader's divisor domain.
+// Nongridded potential consumers do not veto a repeated reader's panes.
+#[cfg(test)]
 fn compatible_reader_grids(group: &MemoGroup, entries: &[QueryWorkloadEntry]) -> Vec<u64> {
-    let mut grids = BTreeSet::new();
-    for grid in group
-        .queries
-        .iter()
-        .filter_map(|&query| entries.get(query)?.evaluation_grid_ms())
-        .filter(|grid| *grid > 0)
-    {
-        let added: Vec<_> = grids
+    super::state_configurations::pane_width_domain(
+        group
+            .queries
             .iter()
-            .map(|&known| greatest_common_divisor(known, grid))
-            .chain(std::iter::once(grid))
-            .collect();
-        grids.extend(added);
-    }
-    grids.into_iter().collect()
+            .filter_map(|&query| entries.get(query)?.evaluation_grid_ms()),
+        PaneWidthDomain::Complete,
+    )
 }
 
 fn group_of_node(groups: &[MemoGroup]) -> HashMap<*const OperatorNode, usize> {
@@ -174,12 +241,7 @@ fn rewritten_candidate(
         node,
         children,
         origin,
-        coupling_sites: from.coupling_sites.clone(),
-        materializations: from.materializations.clone(),
         budget_share: from.budget_share,
-        requires_exact_children: Vec::new(),
-        rollup_of: None,
-        requires_sites: Vec::new(),
     }
 }
 
@@ -214,26 +276,8 @@ fn child_groups(
     out
 }
 
-fn push_new(memo: &mut Memo, g: usize, candidate: ImplementationCandidate) {
-    let flat = |node: &Rc<OperatorNode>| flatten(&[QueryRoot::Operator(Rc::clone(node))]).0;
-    let new = flat(&candidate.node);
-    let known = memo.candidates[g].iter().any(|c| {
-        c.origin == candidate.origin
-            && c.coupling_sites == candidate.coupling_sites
-            && flat(&c.node) == new
-    });
-    if !known {
-        memo.candidates[g].push(candidate);
-    }
-}
-
-fn group_grid_ms(group: &MemoGroup, entries: &[QueryWorkloadEntry]) -> Option<u64> {
-    group
-        .queries
-        .iter()
-        .map(|&q| entries[q].evaluation_grid_ms())
-        .try_fold(0, |grid, query| Some(greatest_common_divisor(grid, query?)))
-        .filter(|&grid| grid > 0)
+fn candidate_signature(candidate: &ImplementationCandidate) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(&candidate.node))]).0)
 }
 
 #[cfg(test)]
@@ -244,6 +288,25 @@ mod tests {
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
+
+    // An expired generation budget reports an incomplete catalog explicitly;
+    // callers must never interpret it as an empty, fully explored candidate set.
+    #[test]
+    fn expired_window_generation_returns_timeout() {
+        let (mut memo, entries) = fixture(&[repeated(60_000)]);
+        let original_sizes: Vec<_> = memo.candidates.iter().map(Vec::len).collect();
+        assert!(try_add_local_window_composition_in_domain(
+            &mut memo,
+            &entries,
+            PaneWidthDomain::Complete,
+            Some(Instant::now())
+        )
+        .is_err());
+        assert_eq!(
+            memo.candidates.iter().map(Vec::len).collect::<Vec<_>>(),
+            original_sizes
+        );
+    }
 
     fn repeated(interval: u32) -> QueryRecurrence {
         QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(interval)))
@@ -271,8 +334,7 @@ mod tests {
     #[test]
     fn nongridded_potential_reader_preserves_local_pane_candidates() {
         let (memo, entries) = fixture(&[repeated(60_000), QueryRecurrence::Unknown]);
-        assert!(local_pane_candidates(&memo, &entries, false).is_empty());
-        let candidates = local_pane_candidates(&memo, &entries, true);
+        let candidates = local_pane_candidates(&memo, &entries);
         assert!(!candidates.is_empty());
         assert!(candidates
             .iter()
@@ -294,7 +356,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             compatible_reader_grids(group, &entries),
-            vec![60_000, 120_000, 180_000]
+            pane_width_divisors(120_000)
+                .into_iter()
+                .chain(pane_width_divisors(180_000))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
         );
     }
 }

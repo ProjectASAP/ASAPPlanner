@@ -2,6 +2,19 @@
 
 Developer evaluation, 2026-10-24. These are exploratory optimizer measurements and modeled execution costs, not measured query-runtime performance. Single debug-build runs on a shared host do not establish a speedup.
 
+## In-progress migration regressions (not final acceptance)
+
+The expanded sharing/scope catalog and subsequent complete pane-width domain introduced regressions. These are retained in `joint-candidate-migration-checkpoints.json`; they are not successful speedup measurements. All rows use seed-862, a requested 30-second planning budget, accuracy enforcement, the Fargate price preset, and no retained raw data. They are successive working-tree snapshots, not a controlled benchmark of the final implementation.
+
+| Checkpoint | Physical configurations | Compatible connections | Evaluations | Outcome | Modeled cost/s |
+|---|---:|---:|---:|---|---:|
+| Expanded scopes before seed restriction | 464 | 3092 | 0 | No incumbent | — |
+| First-copy seed, full adjacency | 464 | 3092 | 1 | No incumbent | — |
+| First-copy seed, compact adjacency | 464 | 3092 | 1 | Validated incumbent, time limit | 2.3389329896881045e-06 |
+| Complete width domain and cyclic-input cost certificate | 5785 | 147279 | 0 | No incumbent | — |
+
+The oversized shared exact-Sum chain was correctly priced by the final evaluator, but recursive certification over cyclic potential inputs initially gave it a zero local lower bound. The local-interface certificate restores that bound. Complete width enumeration then enlarged the generated graph enough to exhaust the budget before validation. Pending acceptance therefore includes duplicate-generation removal, cooperative generation deadlines, a validated pre-expansion seed, and smaller reader-flow models. None of these failed runs establishes optimality or functional completion.
+
 ## Workloads and settings
 
 The exact viewer manifests are `tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json`, `random-mixed-seed-862-x5/workload-01.json`, and `random-mixed-seed-862-long/workload-01.json`. Each contains nine original PromQL queries. The x5 manifest increases metric cardinality from 10,000 to 50,000 series and total ingestion from 200,000 to 1,000,000 rows/s. The long manifest retains the original cardinality and triples window lengths. These are three representative manifests from the viewer's thirty-workload ASAPQuery collection.
@@ -105,7 +118,7 @@ CARGO_BUILD_JOBS=4 cargo build -p asap-devtools --bin stage_pipeline
   --out run.json
 ```
 
-For the existing baseline, use `--search legacy` and omit `--milp-time-limit-s`. For the existing memo formulation, use `--search memo-milp --milp-time-limit-s 120`.
+The historical baseline binaries accepted `--search legacy` and `--search memo-milp`. These flags are removed from the current implementation; reproduce historical comparisons only with the recorded revision/binary, not the current CLI.
 
 Local artifacts: `/tmp/asap-workload-benchmark-20261024/`. Saved executables reside in `/mydata/asap-workload-benchmark-20261024-binaries/`, linked from the artifact directory; final runs use `stage_pipeline-contract-baseline`. This directory contains original result JSON, timing/RSS logs, stderr, exact command arrays, runner scripts, the unchanged subset manifest, summary JSON, and saved baseline binaries. `before-coverage-pruning/`, `before-shared-panes/`, and `before-metadata-preserving-boundaries/` preserve earlier restricted-route runs; those runs motivated further coverage/pruning work and must not be presented as successful workload coverage.
 

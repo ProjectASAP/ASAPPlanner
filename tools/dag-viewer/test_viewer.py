@@ -806,7 +806,7 @@ class PageTests(unittest.TestCase):
                     self.assertEqual(example.get(field), workload_set.get(field), field)
 
     def test_memo_examples_name_a_search_and_their_own_workload(self):
-        """Each memo-search example is planned with `--search memo-milp`
+        """Each memo-search example is planned with `--search candidate-connections`
         from a file under memo-examples/, and server.py passes the search."""
         examples = [e for e in json.loads((HERE / "examples.json").read_text()) if "search" in e]
         self.assertEqual(len(examples), 6)
@@ -815,7 +815,7 @@ class PageTests(unittest.TestCase):
                 self.assertTrue(example["workload"].startswith("memo-examples/"))
                 self.assertTrue((HERE / example["workload"]).exists())
                 args = server.example_args(example, "out.json")
-                self.assertEqual(args[args.index("--search") + 1], "memo-milp")
+                self.assertEqual(args[args.index("--search") + 1], "candidate-connections")
         with self.assertRaises(ValueError):
             server.example_args(dict(examples[0], search="fastest"), "out.json")
 

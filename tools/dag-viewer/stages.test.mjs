@@ -192,3 +192,17 @@ test('Stage 2 nodes carry their timing as a class the lane colors', () => {
   // The label keeps the timing in words.
   assert.ok(nodesOf(elements).filter((n) => n.classes === 'queryTime').every((n) => n.data.label.includes('⏱ query time')));
 });
+
+// Current reports retain nullable bounds and cannot certify a timeout incumbent.
+test('candidate search report exposes objective and partial status', () => {
+  const document = { search: 'candidate-connections', workload: { queries: [] },
+    stage3_plan_selection: { search: { candidates_checked: 3, incumbent_cost: 2,
+      candidate_connections: { status: 'time_limit', objective: 'cluster_capacity',
+        calibration_scope: 'frozen', lower_bound: null, relative_gap: null,
+        refinements: 3, solver_ms: 4 } } } };
+  const view = call('memoSearchView', document);
+  assert.equal(view.summary.certified, false);
+  assert.equal(view.summary.lowerBound, null);
+  assert.equal(view.summary.objective, 'cluster_capacity');
+  assert.match(call('searchText', document), /candidate-connection search/);
+});

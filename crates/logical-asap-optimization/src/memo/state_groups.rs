@@ -3,10 +3,12 @@
 //! Simple summary builds and pane chains directly over canonical input groups
 //! gain finite compatible sizes and pane horizons before exact state interning.
 //! Concrete state identity includes capacity, guarantee, update/filter semantics,
-//! and materialization. Private preprocessing is not inferred.
+//! and materialization. Supported private projections/filters gain explicit input groups.
 
+use super::check_generation_deadline;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
@@ -22,6 +24,8 @@ pub struct StateGroupExpansion {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateGroupExpansionError {
+    #[error(transparent)]
+    DeadlineExceeded(#[from] super::CandidateGenerationTimeout),
     #[error("memo group and candidate vectors have different lengths")]
     MismatchedGroups,
     #[error("memo contains an out-of-range group reference")]
@@ -52,8 +56,37 @@ struct BuildReaders {
 /// The input must precede explicit state-group expansion. Unsupported candidate
 /// shapes are retained unchanged, rather than guessed into a shared interface.
 pub fn expand_concrete_summary_state_groups(
-    mut memo: CandidateMemo,
+    memo: CandidateMemo,
 ) -> Result<StateGroupExpansion, StateGroupExpansionError> {
+    expand_concrete_summary_state_groups_in_domain(
+        memo,
+        super::state_configurations::PaneWidthDomain::Complete,
+    )
+}
+
+pub fn expand_concrete_summary_state_groups_in_domain(
+    memo: CandidateMemo,
+    domain: super::state_configurations::PaneWidthDomain,
+) -> Result<StateGroupExpansion, StateGroupExpansionError> {
+    expand_concrete_summary_state_groups_before(memo, domain, None)
+}
+
+/// An interrupted catalog is discarded, never returned as a complete search space.
+pub fn expand_concrete_summary_state_groups_before(
+    memo: CandidateMemo,
+    domain: super::state_configurations::PaneWidthDomain,
+    deadline: Option<Instant>,
+) -> Result<StateGroupExpansion, StateGroupExpansionError> {
+    expand_with_state_index(memo, domain, deadline, true)
+}
+
+fn expand_with_state_index(
+    mut memo: CandidateMemo,
+    domain: super::state_configurations::PaneWidthDomain,
+    deadline: Option<Instant>,
+    indexed: bool,
+) -> Result<StateGroupExpansion, StateGroupExpansionError> {
+    check_generation_deadline(deadline)?;
     validate_references(&memo)?;
     if memo.groups.iter().any(|group| {
         matches!(
@@ -66,22 +99,39 @@ pub fn expand_concrete_summary_state_groups(
     if memo.topological_order().is_none() {
         return Err(StateGroupExpansionError::CyclicDependencies);
     }
-    super::scan_label_candidates::add_scan_label_candidates(&mut memo)?;
-    super::topk_candidates::add_topk_candidates(&mut memo)?;
-    super::rollup_candidates::add_rollup_candidates(&mut memo)?;
-    super::rollup_candidates::add_window_rollup_candidates(&mut memo)?;
-    super::summary_result_candidates::factor_summary_results(&mut memo)?;
-    super::state_configuration_candidates::add_state_configuration_candidates(&mut memo)?;
+    super::rules::scan_labels::add_scan_label_candidates(&mut memo, deadline)?;
+    super::rules::summary_inputs::factor_summary_inputs(&mut memo, deadline)?;
+    super::rules::topk::add_topk_candidates(&mut memo, deadline)?;
+    super::rules::rollup::add_rollup_candidates(&mut memo, deadline)?;
+    super::rules::rollup::add_window_rollup_candidates(&mut memo, deadline)?;
+    super::rules::summary_results::factor_summary_results(&mut memo, deadline)?;
+    super::rules::state_configurations::add_state_configuration_candidates_in_domain(
+        &mut memo, domain, deadline,
+    )?;
     let mut builds: Vec<BuildReaders> = Vec::new();
+    let mut build_index: HashMap<Option<BuildFingerprint>, Vec<usize>> = HashMap::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
+        check_generation_deadline(deadline)?;
         for (index, candidate) in candidates.iter().enumerate() {
+            check_generation_deadline(deadline)?;
             for (build, children) in direct_input_builds(&memo, candidate) {
-                if let Some(existing) = builds
-                    .iter_mut()
-                    .find(|entry| same_concrete_build(&entry.build, &build))
-                {
-                    existing.readers.push((group, index, build));
+                check_generation_deadline(deadline)?;
+                let fingerprint = build_fingerprint(&build);
+                let bucket = build_index.entry(fingerprint).or_default();
+                let matching = if indexed {
+                    bucket
+                        .iter()
+                        .copied()
+                        .find(|&index| same_concrete_build(&builds[index].build, &build))
                 } else {
+                    builds
+                        .iter()
+                        .position(|entry| same_concrete_build(&entry.build, &build))
+                };
+                if let Some(build_index) = matching {
+                    builds[build_index].readers.push((group, index, build));
+                } else {
+                    bucket.push(builds.len());
                     builds.push(BuildReaders {
                         build: Rc::clone(&build),
                         children,
@@ -95,6 +145,7 @@ pub fn expand_concrete_summary_state_groups(
     let mut replacements: BTreeMap<(usize, usize), HashMap<*const OperatorNode, Rc<OperatorNode>>> =
         BTreeMap::new();
     for build in builds {
+        check_generation_deadline(deadline)?;
         // Repeated private builds within one result are reusable too. The
         // reader list records concrete build occurrences, not just owners.
         if build.readers.len() < 2 {
@@ -123,14 +174,10 @@ pub fn expand_concrete_summary_state_groups(
             node: Rc::clone(&build.build),
             children: build.children,
             origin: CandidateOrigin::SharedBuild,
-            coupling_sites: Vec::new(),
             budget_share: 1,
-            requires_exact_children: Vec::new(),
-            rollup_of: None,
-            materializations: Vec::new(),
-            requires_sites: Vec::new(),
         }]);
         for (group, index, own_build) in build.readers {
+            check_generation_deadline(deadline)?;
             replacements
                 .entry((group, index))
                 .or_default()
@@ -140,6 +187,7 @@ pub fn expand_concrete_summary_state_groups(
     }
     let mut added_reader_candidates = 0;
     for ((group, index), replacements) in replacements {
+        check_generation_deadline(deadline)?;
         // Factor every available producer boundary together. A producer used by
         // only one selected reader is still legal; no state-subset enumeration
         // is required. Retain the original entirely local implementation too.
@@ -153,7 +201,7 @@ pub fn expand_concrete_summary_state_groups(
             .chain(&state_groups)
             .map(|id| (Rc::as_ptr(&memo.groups[id.0 as usize].node), *id))
             .collect();
-        reader.node = super::reuse_candidates::replace(&reader.node, &replacements);
+        reader.node = super::rules::reuse::replace(&reader.node, &replacements);
         reader.children = boundary_groups(&reader.node, &boundaries);
         reader.origin = CandidateOrigin::SharedBuild;
         memo.candidates[group].push(reader);
@@ -161,9 +209,11 @@ pub fn expand_concrete_summary_state_groups(
     }
     // Parents describe every possible group/candidate dependency, not a selected plan.
     for group in &mut memo.groups {
+        check_generation_deadline(deadline)?;
         group.parents.clear();
     }
     for group in 0..memo.groups.len() {
+        check_generation_deadline(deadline)?;
         let dependencies: HashSet<_> = memo.groups[group]
             .children
             .iter()
@@ -175,6 +225,7 @@ pub fn expand_concrete_summary_state_groups(
             .copied()
             .collect();
         for child in dependencies {
+            check_generation_deadline(deadline)?;
             memo.groups[child.0 as usize]
                 .parents
                 .push(MemoGroupId(group as u32));
@@ -203,11 +254,13 @@ pub fn expand_concrete_summary_state_groups(
             .copied()
             .collect();
         for child in children {
+            check_generation_deadline(deadline)?;
             memo.groups[child.0 as usize].queries.extend(&queries);
             memo.groups[child.0 as usize].queries.sort_unstable();
             memo.groups[child.0 as usize].queries.dedup();
         }
     }
+    check_generation_deadline(deadline)?;
     Ok(StateGroupExpansion {
         memo,
         state_groups,
@@ -237,13 +290,7 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
             .children
             .iter()
             .chain(&candidate.implements)
-            .chain(&candidate.requires_exact_children)
-            .chain(candidate.requires_sites.iter().map(|(group, _)| group))
             .any(|id| id.0 as usize >= memo.groups.len())
-            || candidate
-                .rollup_of
-                .as_ref()
-                .is_some_and(|rollup| rollup.finer_group.0 as usize >= memo.groups.len())
         {
             return Err(StateGroupExpansionError::InvalidGroupReference);
         }
@@ -271,11 +318,6 @@ pub(super) fn direct_input_builds(
             | CandidateOrigin::Rollup
             | CandidateOrigin::SummaryResult
     ) || candidate.implements.is_empty()
-        || !candidate.coupling_sites.is_empty()
-        || !candidate.requires_sites.is_empty()
-        || !candidate.requires_exact_children.is_empty()
-        || candidate.rollup_of.is_some()
-        || !candidate.materializations.is_empty()
         || candidate.budget_share == 0
     {
         return Vec::new();
@@ -335,6 +377,47 @@ pub(super) fn boundary_groups(
     found
 }
 
+// Hashing narrows comparisons only; full strict equality below remains the
+// authority, including probability metadata and floating-point corner cases.
+#[derive(Hash, PartialEq, Eq)]
+struct BuildFingerprint {
+    local: String,
+    inputs: Vec<(usize, Option<String>)>,
+}
+
+fn local_fingerprint(node: &OperatorNode) -> Option<String> {
+    serde_json::to_string(&(
+        node.operator.map_children(|_| ()),
+        &node.schema,
+        node.result_kind,
+        &node.guarantee,
+        node.timing,
+        node.materialization,
+    ))
+    .ok()
+}
+
+fn build_fingerprint(node: &OperatorNode) -> Option<BuildFingerprint> {
+    let inputs = node
+        .children()
+        .into_iter()
+        .map(|input| {
+            match input.non_asap() {
+                Some(NonASAPOp::TimeRange { child, .. }) => {
+                    // Exactly the existing same_range_input contract: identical
+                    // local range semantics over the same canonical source.
+                    Some((Rc::as_ptr(child) as usize, Some(local_fingerprint(input)?)))
+                }
+                _ => Some((Rc::as_ptr(input) as usize, None)),
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(BuildFingerprint {
+        local: local_fingerprint(node)?,
+        inputs,
+    })
+}
+
 // Immediate inputs are canonical memo nodes. Compare local fields without
 // recursively walking their potentially shared DAGs; serialization additionally
 // distinguishes signed-zero parameters, matching conservative CSE semantics.
@@ -390,7 +473,7 @@ fn replace_node(
     old: &Rc<OperatorNode>,
     new: &Rc<OperatorNode>,
 ) -> Rc<OperatorNode> {
-    super::reuse_candidates::replace(node, &HashMap::from([(Rc::as_ptr(old), Rc::clone(new))]))
+    super::rules::reuse::replace(node, &HashMap::from([(Rc::as_ptr(old), Rc::clone(new))]))
 }
 
 #[cfg(test)]
@@ -401,6 +484,66 @@ mod tests {
     use crate::per_computation_candidates::generate_per_computation_candidates;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
+
+    // Hash indexing is only an acceleration: independently run the original
+    // linear state lookup and compare every generated candidate and state.
+    #[test]
+    fn indexed_state_interning_preserves_linear_catalog() {
+        let memo = with_local_panes(
+            workload(&[
+                ("quantile_over_time(0.95, latency[5m])", 0.01),
+                ("quantile_over_time(0.99, latency[15m])", 0.02),
+                ("quantile_over_time(0.9, latency{job=\"other\"}[5m])", 0.01),
+            ]),
+            &[6, 6, 6],
+        );
+        let domain = super::super::state_configurations::PaneWidthDomain::Complete;
+        let indexed = expand_with_state_index(memo.clone(), domain, None, true).unwrap();
+        let linear = expand_with_state_index(memo, domain, None, false).unwrap();
+        assert_eq!(indexed.state_groups, linear.state_groups);
+        assert_eq!(indexed.memo.groups.len(), linear.memo.groups.len());
+        for (left, right) in indexed.memo.candidates.iter().zip(&linear.memo.candidates) {
+            let signatures = |candidates: &[ImplementationCandidate]| {
+                candidates
+                    .iter()
+                    .map(|candidate| {
+                        (
+                            candidate.children.clone(),
+                            candidate.budget_share,
+                            serde_json::to_string(
+                                &asap_types::ir::flat::flatten(&[QueryRoot::Operator(Rc::clone(
+                                    &candidate.node,
+                                ))])
+                                .0,
+                            )
+                            .unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(signatures(left), signatures(right));
+        }
+        for (left, right) in indexed.memo.groups.iter().zip(&linear.memo.groups) {
+            assert_eq!(left.children, right.children);
+            assert_eq!(left.parents, right.parents);
+            assert_eq!(left.queries, right.queries);
+        }
+    }
+
+    // State expansion returns a typed timeout, not a partial success that a
+    // solver could incorrectly report as optimal over the complete catalog.
+    #[test]
+    fn expired_state_expansion_returns_timeout() {
+        let memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
+        assert!(matches!(
+            expand_concrete_summary_state_groups_before(
+                memo,
+                super::super::state_configurations::PaneWidthDomain::Complete,
+                Some(Instant::now())
+            ),
+            Err(StateGroupExpansionError::DeadlineExceeded(_))
+        ));
+    }
 
     fn workload(queries: &[(&str, f64)]) -> CandidateMemo {
         workload_with_identity(queries, false)
@@ -756,7 +899,7 @@ mod tests {
             .filter(|candidate| candidate.origin == CandidateOrigin::Panes)
             .count();
         assert!(local_panes >= 2);
-        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
         let chains: Vec<_> = expanded
             .state_groups
             .iter()
@@ -778,16 +921,13 @@ mod tests {
                 .iter()
                 .any(|node| Rc::ptr_eq(node, &expanded.memo.groups[input.0 as usize].node))));
         }
-        assert_eq!(
-            expanded
-                .memo
-                .candidates
-                .iter()
-                .flatten()
-                .filter(|candidate| candidate.origin == CandidateOrigin::Panes)
-                .count(),
-            local_panes
-        );
+        for (group, candidates) in original.candidates.iter().enumerate() {
+            for original in candidates {
+                assert!(expanded.memo.candidates[group]
+                    .iter()
+                    .any(|candidate| Rc::ptr_eq(&original.node, &candidate.node)));
+            }
+        }
         assert!(matches!(
             expand_concrete_summary_state_groups(expanded.memo),
             Err(StateGroupExpansionError::AlreadyExpanded)
@@ -843,7 +983,7 @@ mod tests {
     }
 
     // Rollup readers preserve original outputs while referencing explicit finer
-    // producers; no legacy coupling or exact-child flags escape into the graph.
+    // producers through ordinary child-group dependencies.
     #[test]
     fn exact_rollup_exposes_shared_finalized_values() {
         let original = workload(&[
@@ -859,11 +999,6 @@ mod tests {
             .filter(|candidate| candidate.origin == CandidateOrigin::Rollup)
             .collect();
         assert!(!rollups.is_empty());
-        assert!(rollups
-            .iter()
-            .all(|candidate| candidate.coupling_sites.is_empty()
-                && candidate.requires_exact_children.is_empty()
-                && candidate.rollup_of.is_none()));
         assert!(expanded.memo.groups.iter().enumerate().any(|(id, group)| id
             >= original.groups.len()
             && matches!(
@@ -1096,6 +1231,119 @@ mod tests {
                 ))));
     }
 
+    // Private identity projections retain their full typed contract, but no
+    // longer hide compatible builds from canonical state sharing.
+    #[test]
+    fn private_projection_inputs_gain_canonical_shared_states() {
+        check_private_inputs(false);
+    }
+
+    // Key-only HAVING uses private Filter nodes below summary builds; equal
+    // filters can share without dropping their predicates.
+    #[test]
+    fn private_filter_inputs_gain_canonical_shared_states() {
+        check_private_inputs(true);
+    }
+
+    fn check_private_inputs(filter: bool) {
+        use asap_types::ir::scalar::ScalarValue;
+        use asap_types::ir::{Operator, Predicate, ProjectItem, ScalarExpr};
+        let mut memo = workload(&[
+            ("quantile_over_time(0.95, latency[5m])", 0.01),
+            ("quantile_over_time(0.99, latency[5m])", 0.01),
+        ]);
+        let mut injected = 0;
+        for owner in 0..memo.candidates.len() {
+            let originals = memo.candidates[owner].clone();
+            for mut candidate in originals {
+                let builds = direct_input_builds(&memo, &candidate);
+                if builds.is_empty() {
+                    continue;
+                }
+                let mut replacements = HashMap::new();
+                for (build, _) in builds {
+                    let input = build.children()[0];
+                    let project = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+                        cols: input
+                            .schema
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .map(|(column, field)| ProjectItem {
+                                alias: Some(field.name.clone()),
+                                expr: ScalarExpr::Column(column),
+                            })
+                            .collect(),
+                        qualifier: None,
+                        child: Rc::clone(input),
+                    }))
+                    .unwrap();
+                    let project = if filter {
+                        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
+                            pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+                            child: project,
+                        }))
+                        .unwrap()
+                    } else {
+                        project
+                    };
+                    replacements.insert(Rc::as_ptr(input), project);
+                }
+                candidate.node = crate::memo::rules::reuse::replace(&candidate.node, &replacements);
+                assert!(direct_input_builds(&memo, &candidate).is_empty());
+                memo.candidates[owner].push(candidate);
+                injected += 1;
+            }
+        }
+        assert!(injected >= 2);
+        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        assert!(expanded.state_groups.iter().any(|state| {
+            let group = &expanded.memo.groups[state.0 as usize];
+            group.queries == vec![0, 1]
+                && group.children.iter().any(|input| {
+                    expanded.memo.candidates[input.0 as usize]
+                        .iter()
+                        .any(|candidate| candidate.origin == CandidateOrigin::SummaryInput)
+                })
+        }));
+        assert!(expanded.memo.topological_order().is_some());
+    }
+
+    // Real identity-aware frequency candidates retain UnivMon inputs and their
+    // error metadata when private preprocessing is made an explicit boundary.
+    #[test]
+    fn univmon_identity_inputs_remain_admissible_after_factoring() {
+        use asap_types::ir::schema::{sketch::SketchAlgorithm, FieldDataType};
+        let mut memo = workload_with_identity(&[("count_over_time(latency[5m])", 0.01)], true);
+        let is_univmon = |node: &OperatorNode| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::UnivMon);
+        let before: Vec<_> = memo
+            .candidates
+            .iter()
+            .flatten()
+            .flat_map(|candidate| OperatorNode::reachable(&candidate.node))
+            .filter(|node| is_univmon(node))
+            .collect();
+        assert!(!before.is_empty(), "real generation must offer UnivMon");
+        crate::memo::rules::summary_inputs::factor_summary_inputs(&mut memo, None).unwrap();
+        assert!(memo
+            .candidates
+            .iter()
+            .flatten()
+            .any(|candidate| direct_input_builds(&memo, candidate)
+                .iter()
+                .any(|(node, _)| is_univmon(node))));
+        for original in before {
+            assert!(
+                memo.candidates
+                    .iter()
+                    .flatten()
+                    .flat_map(|candidate| OperatorNode::reachable(&candidate.node))
+                    .any(|node| Rc::ptr_eq(&original, &node)),
+                "local generated candidates remain intact"
+            );
+        }
+    }
+
     // Reader deduplication must retain distinct recorded probability contracts
     // even though SketchParams structural equality intentionally ignores them.
     #[test]
@@ -1159,7 +1407,7 @@ mod tests {
             let QueryRoot::Operator(root) = &roots[0] else {
                 unreachable!()
             };
-            let root = super::super::reuse_candidates::restore_inputs(root, &memo, &base.children);
+            let root = crate::memo::rules::reuse::restore_inputs(root, &memo, &base.children);
             without_private_guarantees(&root, &boundaries)
         };
         let weak = rewritten(0.001);
@@ -1170,7 +1418,7 @@ mod tests {
         );
         base.node = weak;
         memo.candidates[owner] = vec![base.clone()];
-        assert!(super::super::reuse_candidates::append_reader(
+        assert!(crate::memo::rules::reuse::append_reader(
             &mut memo,
             owner,
             &base,

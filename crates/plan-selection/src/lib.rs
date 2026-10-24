@@ -283,25 +283,23 @@ use asap_logical_asap_optimization::per_computation_candidates::{
     approximate_inputs, distinct_bound_source, operand_domain_statistic, operand_guarantee,
     operand_of, project_column_guarantee, root_guarantee, with_resized_summaries,
 };
-use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
 pub mod accuracy;
 pub use accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
 };
-pub(crate) use cost::execution_demand::shared_evaluation_rate;
 use cost::execution_demand::{computations, evaluation_rate, query_starts};
 
 pub mod cost;
-pub use search::pane_sharing;
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
 pub mod search;
 pub use search as pass;
 pub use search::{
     optimize, run_stage1_to_stage3, run_stage1_to_stage3_with, ExecutorCompileCheck,
-    OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError, PassNameConflict,
-    PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
-    Stage1ToStage3Search,
+    ExecutorCompileError, OptimizationInput, OptimizationInputError, OptimizationPass,
+    OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
+    Stage1ToStage3Pass, Stage1ToStage3Run, Stage1ToStage3Search,
 };
 
 use cost::measured::{aggregate_lookup, lookup, StateFamily};
@@ -1004,32 +1002,6 @@ pub struct Selection {
 pub struct SearchReport {
     /// The physical candidates Stage 3 checked, valid or not.
     pub candidates_checked: u64,
-    /// Per query, in workload order, its own candidates checked before
-    /// composition and the ones discarded there; empty when the search
-    /// composed every choice (an exhaustive search, or [`select_plan`]).
-    pub queries: Vec<QuerySearchReport>,
-    /// The independent components searched separately, whose selections
-    /// were combined (design method 5); empty when the workload was
-    /// searched as one, for the reason in [`Self::searched_as_one`].
-    pub components: Vec<ComponentReport>,
-    /// Why the workload was searched as one; `None` when its components
-    /// were searched separately.
-    pub searched_as_one: Option<SearchedAsOne>,
-    /// Stage 2 materialization assignments the search did not build because
-    /// they scan raw data at query time, in a deployment that keeps none:
-    /// Stage 3 would reject each of them (`RawDataNotRetained`).
-    pub raw_scan_assignments_skipped: u64,
-    /// Stage 1 candidates the search did not enumerate because every
-    /// materialization of theirs scans raw data at query time, in a
-    /// deployment that keeps none (nor their identical-expression Pass 2
-    /// candidates, which inherit that).
-    pub raw_scan_candidates_skipped: u64,
-    /// The classes of interchangeable queries, by query index: queries
-    /// that differ at most in a quantile rank, which the search gave one
-    /// shared choice and the same summary builds (design method 4). Empty
-    /// for the exhaustive search and outside cost model 1.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub interchangeable_queries: Vec<Vec<usize>>,
     /// Under cost models 1 and 2, the cost per second of the cheapest
     /// valid candidate priced more than rounding (1e-12 of it) above the
     /// cheapest: how close the selection came to a tie. Candidates within
@@ -1037,42 +1009,34 @@ pub struct SearchReport {
     /// candidate costs the same, under cost model 3, or for a combination
     /// of components.
     pub runner_up_cost_per_second: Option<f64>,
-    /// The size of the sub-expression memo the search built; `None` when
-    /// the search built none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memo: Option<MemoStats>,
-    /// The search algorithm that ran; omitted in JSON for the legacy
-    /// search.
-    #[serde(default, skip_serializing_if = "SearchAlgorithm::is_legacy")]
+    /// The joint candidate selection engine used for this run.
+    #[serde(default)]
     pub algorithm: SearchAlgorithm,
-    /// Why the legacy search ran instead of the requested memo search;
-    /// `None` when the requested algorithm ran.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routed_to_legacy: Option<RoutedToLegacy>,
     /// The selected plan's cost per second (Stage 3's exact cost); `None`
     /// when no plan was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incumbent_cost: Option<f64>,
-    /// What the MILP search ([`SearchAlgorithm::MemoMilp`]) did; `None`
-    /// for every other search.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub milp: Option<MilpReport>,
-    /// The memo-MILP search's selected plan over the memo: each group with
-    /// the implementation candidate chosen for it, and the coupling sites
-    /// at their chosen thresholds; `None` for every other search, or when
-    /// the selected plan is the warm start (each query planned alone) in
-    /// every cluster; a cluster whose warm start was selected adds no
-    /// groups.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memo_plan: Option<MemoPlanReport>,
-    /// Explicit candidate-connection route; optimality is limited to its
-    /// reported finite catalog and configured evaluator, not other search routes.
+    /// Joint selection metrics. Optimality is limited to the generated finite
+    /// catalog and configured cost and constraint models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_connections: Option<CandidateConnectionReport>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateConnectionReport {
+    /// Time spent obtaining a validated incumbent from the seed width domain.
+    #[serde(default)]
+    pub seed_planning_ms: f64,
+    /// Complete-domain phase wall time, including interrupted generation.
+    #[serde(default)]
+    pub full_planning_ms: f64,
+    #[serde(default)]
+    pub seed_selected: bool,
+    /// Full-width generation completed; distinct from exhaustive assignment traversal.
+    #[serde(default)]
+    pub full_catalog_completed: bool,
+    #[serde(default)]
+    pub seed_fallback_reason: Option<String>,
     #[serde(default)]
     pub independent_components: usize,
     #[serde(default)]
@@ -1132,179 +1096,6 @@ pub struct CandidateConnectionReport {
     pub validation_rejection_examples: Vec<String>,
 }
 
-/// The selected plan over the memo (joint-planning-search design, "How the
-/// stages and the memo work together"), for the selection report.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct MemoPlanReport {
-    /// Every group of the memo; a cluster's groups follow the earlier
-    /// clusters', so `group` is its index here.
-    pub groups: Vec<MemoGroupReport>,
-    /// The coupling sites the chosen candidates read, each at the threshold
-    /// the plan chose.
-    pub coupling_sites: Vec<CouplingSiteReport>,
-    /// Whether the selected plan is the solution's variant with every
-    /// metric's scans widened to one label set and identical scans one node
-    /// (scan widening is no model variable yet, so solution decoding
-    /// evaluates it beside the plan the choices describe).
-    #[serde(default)]
-    pub scans_widened: bool,
-}
-
-/// One memo group: a distinct logical sub-expression of the workload.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct MemoGroupReport {
-    /// Its index in [`MemoPlanReport::groups`].
-    pub group: usize,
-    /// Its logical node's operator, its children named by group index.
-    pub operator: asap_types::ir::Operator<Option<usize>>,
-    /// The groups that read it, and the queries whose roots reach it and
-    /// whose root it is, by index in the workload.
-    pub parents: Vec<usize>,
-    pub queries: Vec<usize>,
-    pub roots_of: Vec<usize>,
-    /// Its implementation candidates.
-    pub candidates: usize,
-    /// The implementation candidate the plan chose for it; `None` when the
-    /// plan reads no implementation of it, or another group's chosen
-    /// candidate implements it (`implemented_by`).
-    pub chosen: Option<ChosenCandidateReport>,
-    /// The group whose chosen candidate implements this one too (a fused
-    /// computation); `None` otherwise.
-    pub implemented_by: Option<usize>,
-}
-
-/// A group's chosen implementation candidate.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ChosenCandidateReport {
-    /// How it was made: `Pass1`, or the Pass 2 transformation
-    /// (`SharedBuild`, `Panes`, `Rollup`, `TopKReuse`, `WidenedScans`).
-    pub origin: String,
-    /// Its root node's operator kind.
-    pub operator: String,
-    /// The groups it implements (several for a fused computation) and the
-    /// groups it reads.
-    pub implements: Vec<usize>,
-    pub reads: Vec<usize>,
-    /// Whether the group's one node is built once per evaluation for every
-    /// reader, rather than recomputed per reader.
-    pub built_once: bool,
-    /// The coupling sites it reads, by index in
-    /// [`MemoPlanReport::coupling_sites`].
-    pub coupling_sites: Vec<usize>,
-}
-
-/// A coupling site of the selected plan: a choice several groups' costs
-/// depend on, at the threshold the plan chose.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CouplingSiteReport {
-    /// `SharedBuildSize`, `PaneChain` or `ScanLabels` (raw horizons are
-    /// priced per scan, not chosen as a threshold, so none is reported).
-    pub kind: String,
-    /// The chosen threshold: a shared build's size parameters (`params`,
-    /// null for an exact accumulator), a pane chain's `pane_width_ms`,
-    /// `longest_window_ms` and `family`, a scan's `labels`, or a raw
-    /// `horizon_ms`.
-    pub threshold: serde_json::Value,
-    /// The thresholds the site was enumerated with.
-    pub thresholds: usize,
-    /// The groups whose chosen candidates read it (its readers).
-    pub readers: Vec<usize>,
-}
-
-/// The MILP search's report: its bound, gap and effort.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct MilpReport {
-    /// The MILP lower bound at the end: a lower bound on the cost per
-    /// second of every plan the search did not evaluate (the last solver
-    /// objective, or the incumbent cost once no plan below it is left);
-    /// `None` when no round finished and no relaxation was solved.
-    pub lower_bound: Option<f64>,
-    /// The first round's MILP lower bound, before any cut: how tight the
-    /// model is against the incumbent cost.
-    pub first_lower_bound: Option<f64>,
-    /// (incumbent cost − lower bound) / incumbent cost, at least 0: 0 when
-    /// the incumbent is proven optimal over the memo, within the solver's
-    /// tolerances (a relative 1e-9 in the stopping rule, about 1e-4 when
-    /// HiGHS stops at its own gap tolerance).
-    pub gap: Option<f64>,
-    /// Its rounds (each: a solve, the decoded plan's incumbent evaluation,
-    /// a cut).
-    pub rounds: u32,
-    /// The MILP's variables and constraints in its last round.
-    pub variable_count: u64,
-    pub constraint_count: u64,
-    /// The wall time in milliseconds spent in the solver, every round
-    /// together.
-    pub solver_time_ms: u64,
-    /// Whether it stopped at its time limit
-    /// ([`crate::Stage1ToStage3Search::milp_time_limit_ms`]) or another
-    /// solver limit (iterations, memory, interrupt): the plan is then
-    /// proven optimal only if `gap` is 0.
-    pub time_limit_reached: bool,
-    /// Solutions solution decoding could not compose into a plan: each
-    /// keeps its objective as a lower bound, so the gap stays honest.
-    #[serde(default)]
-    pub decode_failures: u32,
-    /// Each independent cluster's search, ordered by its first query: one
-    /// cluster when the memo was searched as one. The fields above are
-    /// their totals: bounds, rounds, model sizes and solver time summed,
-    /// the gap from the summed bound and incumbent cost.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub clusters: Vec<MilpClusterReport>,
-    /// The cost per second of the warm-start plan: each query planned
-    /// alone by the bounded memo baseline, with no sharing between queries.
-    /// This is not necessarily the per-query optimum; `None` when the
-    /// bounded attempts do not find a validated plan for every query.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queries_alone_cost: Option<f64>,
-}
-
-/// One independent cluster of the MILP search: queries whose plans share
-/// no cost with other clusters' under cost model 1, searched with their
-/// own model and lazy loop.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct MilpClusterReport {
-    /// Its queries, by index in the workload.
-    pub queries: Vec<usize>,
-    /// The memo groups of its own workload.
-    pub groups: usize,
-    /// Its lazy loop's rounds.
-    pub rounds: u32,
-    /// (incumbent cost − lower bound) / incumbent cost, at least 0.
-    pub gap: Option<f64>,
-    /// Its MILP lower bound at the end.
-    pub lower_bound: Option<f64>,
-    /// Its selected plan's cost per second.
-    pub incumbent_cost: Option<f64>,
-    /// The wall time in milliseconds its solves took, together.
-    pub solver_time_ms: u64,
-    /// Whether it stopped at the search's time limit.
-    pub time_limit_reached: bool,
-    /// Solutions solution decoding could not compose into a plan.
-    #[serde(default)]
-    pub decode_failures: u32,
-}
-
-/// The size of a sub-expression memo (planner-layering design, "The
-/// stages over a memo of sub-expressions"), for the selection report.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct MemoStats {
-    /// Its groups: the workload's distinct logical sub-expressions.
-    pub groups: usize,
-    /// The groups two or more parents, or two or more queries' roots, read.
-    pub shared_groups: usize,
-    /// Its implementation candidates, over every group.
-    pub candidates: usize,
-    /// The candidates by how they were made (`Pass1`, `SharedBuild`,
-    /// `Panes`, `Rollup`, `TopKReuse`).
-    pub candidates_by_origin: BTreeMap<String, usize>,
-    /// The distinct coupling sites by kind (`SharedBuildSize`, `PaneChain`,
-    /// `ScanLabels`, `RawHorizon`).
-    pub coupling_sites_by_kind: BTreeMap<String, usize>,
-    /// The time building it took, in milliseconds.
-    pub build_ms: f64,
-}
-
 /// How the Stage 1 to Stage 3 search explores the plans
 /// ([`Stage1ToStage3Search::search`]).
 #[derive(
@@ -1312,109 +1103,16 @@ pub struct MemoStats {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum SearchAlgorithm {
-    /// The search over whole-workload candidates: each query's own
-    /// candidates checked first, independent components searched
-    /// separately, only the best so far kept.
+    /// Joint physical candidate activation and connection selection.
     #[default]
-    Legacy,
-    /// Every plan of the memo over logical sub-expressions, each priced by
-    /// Stage 3: the reference the MILP is checked against.
-    MemoBruteForce,
-    /// The memo over logical sub-expressions solved as a mixed-integer
-    /// linear program.
-    MemoMilp,
-    /// Explicit bounded connection search over Pass 1 candidates and concrete
-    /// shared summary groups. Its report identifies omitted rule families.
     CandidateConnections,
-}
-
-impl SearchAlgorithm {
-    fn is_legacy(&self) -> bool {
-        *self == SearchAlgorithm::Legacy
-    }
-}
-
-/// Why the legacy search ran instead of the requested memo search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutedToLegacy {
-    /// The caller asked for the exhaustive search, which the memo searches
-    /// do not replace.
-    ExhaustiveRequested,
-    /// The MILP's objective is cost model 1's sum of local prices; cost
-    /// models 2 and 3 are searched by the legacy search.
-    CostModelNotSupported,
-}
-
-/// One independent component of the workload: queries that can read no
-/// node another component's queries read, nor any source when raw data on
-/// disk is priced, so no Pass 2 rule, raw-data retention or
-/// node charge links them to another component.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ComponentReport {
-    /// Its queries, by index in the workload.
-    pub queries: Vec<usize>,
-    /// The physical candidates Stage 3 checked for it.
-    pub candidates_checked: u64,
-    /// The candidate selected for it, by its id in the component's search.
-    pub selected: String,
-}
-
-/// Why a workload was searched as one rather than component by component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SearchedAsOne {
-    /// Its queries are all linked: through common sources, and over one
-    /// source through a node two of them can read.
-    OneComponent,
-    /// The cost model's objective or limits are not a sum over components
-    /// (cost models 2 and 3: peak cores and cluster limits).
-    CostNotAdditive,
-    /// The caller asked for the exhaustive search or for every candidate.
-    EveryCandidateRequested,
-    /// The deployment's measured cost table calibrates the formulas by one
-    /// factor fitted over every candidate of the whole workload, which a
-    /// component's search does not see.
-    CalibratedOverTheWorkload,
-    /// A component's two cheapest plans are within the selection's tie
-    /// tolerance of the workload's cost, so only the joint search's
-    /// enumeration order decides between them.
-    NearTie,
-    /// The combined plan did not cost the sum of its components' (an
-    /// interaction the components missed); the joint search decides.
-    NotAdditive,
-    /// The combination of the components' selections is not a candidate
-    /// the joint search enumerates: the Pass 2 rules combine only some
-    /// rewrites (exact top-k reuse is not combined with panes).
-    NotInJointSpace,
-}
-
-/// One query's own candidates, checked before composition: the query
-/// planned alone, for each choice of a candidate for every Pass 1 target it
-/// reads. A discarded one is never composed with the other queries'.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct QuerySearchReport {
-    /// How many of its own candidates were checked.
-    pub candidates_checked: u64,
-    /// The ones that failed a check that sharing cannot fix, with why.
-    pub discarded: Vec<DiscardedQueryCandidate>,
-}
-
-/// One discarded candidate of one query.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DiscardedQueryCandidate {
-    /// For each Pass 1 target the query reads, by its index in the Pass 1
-    /// inventory, the index of the chosen candidate
-    /// (`ComputationTarget::computation_for`).
-    pub choice: Vec<(usize, usize)>,
-    /// The check it failed: unsupported by the executor, or its accuracy.
-    pub cause: RejectionCause,
-    /// The failure, with its numbers.
-    pub reason: String,
 }
 
 #[derive(Debug, Error)]
 pub enum SelectionError {
+    /// Evaluation stopped without proving feasibility or infeasibility.
+    #[error("candidate evaluation deadline exceeded")]
+    EvaluationDeadlineExceeded,
     /// Bad input: the deployment's plan selection settings
     /// ([`PlanSelectionSettings::validate`]).
     #[error("plan selection settings: {0}")]
@@ -1454,7 +1152,7 @@ pub enum SelectionError {
 /// how often it is evaluated. Every candidate is kept in the selection
 /// ([`PlanSelector`] with `keep_every_candidate`).
 pub fn select_plan(
-    cands: &[PhysicalCandidate],
+    cands: &[PhysicalWorkloadPlan],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
@@ -1504,534 +1202,6 @@ pub struct PlanSelector<'a> {
     runner_up: Option<f64>,
 }
 
-/// Memory a query-time node holds while an evaluation runs, charged once
-/// its readers' latencies are known (Stage 3's "held" memory):
-/// `byte_seconds_per_ms` times the readers' rate-weighted mean latency in
-/// ms (`weighted`), or their longest latency (otherwise), is the byte-seconds
-/// per second it adds to the average memory.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct HeldMemory {
-    pub(crate) byte_seconds_per_ms: f64,
-    /// The queries reading it, each with its evaluations per second, by
-    /// position among the part's roots (or, once mapped, in the workload).
-    pub(crate) readers: Vec<(usize, f64)>,
-    /// Whether each reader computes its own copy (rate-weighted mean
-    /// latency) rather than one copy held until the longest finishes.
-    pub(crate) weighted: bool,
-}
-
-impl HeldMemory {
-    /// Its byte-seconds per second given each reader's latency in ms.
-    pub(crate) fn byte_seconds(&self, latency_ms: impl Fn(usize) -> f64) -> f64 {
-        let longest = || {
-            self.readers
-                .iter()
-                .map(|&(q, _)| latency_ms(q))
-                .fold(0.0, f64::max)
-        };
-        let rate: f64 = self.readers.iter().map(|&(_, r)| r).sum();
-        let evaluation_ms = match self.weighted && rate > 0.0 {
-            true => {
-                self.readers
-                    .iter()
-                    .map(|&(q, r)| r * latency_ms(q))
-                    .sum::<f64>()
-                    / rate
-            }
-            false => longest(),
-        };
-        self.byte_seconds_per_ms * evaluation_ms
-    }
-}
-
-/// Who computes a set of nodes: a reader at `rate_per_second`
-/// computations per second, through which the `queries` (positions among
-/// [`PrivatePricing::queries`]) reach them at query time; at ingestion time
-/// (`at_ingestion`, a build above them materialized at ingestion) no query
-/// reaches them.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct NodeConsumer {
-    pub(crate) rate_per_second: f64,
-    pub(crate) queries: Vec<usize>,
-    pub(crate) at_ingestion: bool,
-}
-
-/// Stage 3's pricing of some nodes of a physical DAG on their own
-/// ([`price_private_nodes`]): a candidate's private nodes, the others being
-/// its children's, whose outputs are given.
-pub(crate) struct PrivatePricing<'a> {
-    /// The DAG (Stage 2's, the candidate over its children), its first
-    /// root the candidate's node.
-    pub(crate) dag: &'a PhysicalASAPDAG,
-    /// Which nodes are priced, by position in `dag.nodes`.
-    pub(crate) private: &'a [bool],
-    /// The output of each other node a private node reads (a child's root).
-    pub(crate) child_outputs: &'a HashMap<PhysicalASAPNodeId, EdgeStatistics>,
-    /// Who computes the candidate's node; all at ingestion time or all not.
-    pub(crate) consumers: &'a [NodeConsumer],
-    /// The queries the consumers name.
-    pub(crate) queries: &'a [QueryWorkloadEntry],
-    /// Per query, whether the candidate's node is its root (its request
-    /// overhead is charged here).
-    pub(crate) root_of: &'a [bool],
-    /// The look-back of a query-time scan no window among the private
-    /// nodes bounds; `None` when the scan has no window, so it reads the
-    /// source's `rows_held` or fails with `MissingSourceFact`.
-    pub(crate) scan_lookback_ms: Option<u64>,
-    pub(crate) data: &'a DataWorkload,
-    pub(crate) settings: &'a PlanSelectionSettings,
-    pub(crate) formula_scale: f64,
-}
-
-/// The usage of a candidate's private nodes ([`price_private_nodes`]).
-/// Charges that need the whole plan are kept apart: memory held for an
-/// evaluation ([`HeldMemory`]) and each query-time raw scan (Stage 3 keeps
-/// each source's longest on disk). Per query (position): the query-time
-/// work it reaches among the private nodes, in ms, and the longest
-/// compaction among the ingestion-time ones it reads first.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PrivateNodesUsage {
-    /// Under cost model 1, the nodes' prices without held memory and raw
-    /// data; `None` otherwise.
-    pub(crate) cost_per_second: Option<f64>,
-    pub(crate) cpu_ops_per_second: f64,
-    pub(crate) scanned_bytes_per_second: f64,
-    pub(crate) average_memory_bytes: f64,
-    pub(crate) peak_memory_bytes: u64,
-    pub(crate) disk_bytes: u64,
-    pub(crate) query_ms: Vec<f64>,
-    pub(crate) compaction_ms: Vec<f64>,
-    pub(crate) held: Vec<HeldMemory>,
-    pub(crate) raw_scans: Vec<(String, u64)>,
-    /// The candidate's node's output per computation.
-    pub(crate) output: EdgeStatistics,
-    pub(crate) fit: CalibrationFit,
-}
-
-/// Each node of `dag` below and including `id`: the sources it reads,
-/// without pricing (for a child's root, whose output is given).
-fn sources_below<'a>(
-    dag: &'a PhysicalASAPDAG,
-    nodes: &NodeMap<'a>,
-    id: PhysicalASAPNodeId,
-) -> BTreeSet<&'a str> {
-    let mut sources = BTreeSet::new();
-    let mut stack = vec![id];
-    let mut seen = HashSet::new();
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &nodes[&id].payload {
-            sources.insert(source_name(source));
-        }
-        stack.extend(
-            dag.edges
-                .iter()
-                .filter(|e| e.consumer == id)
-                .map(|e| e.producer),
-        );
-    }
-    sources
-}
-
-/// The state family of node `id` of `dag`, without pricing.
-fn family_below<'a>(
-    dag: &'a PhysicalASAPDAG,
-    nodes: &NodeMap<'a>,
-    id: PhysicalASAPNodeId,
-) -> StateFamily<'a> {
-    let first = dag
-        .edges
-        .iter()
-        .find(|e| e.consumer == id)
-        .map(|e| e.producer);
-    let producer_family = match &nodes[&id].payload {
-        Payload::ASAP(
-            ASAPOp::SummaryMerge { .. }
-            | ASAPOp::SummaryEstimate { .. }
-            | ASAPOp::FinalizeExactAccumulator { .. },
-        ) => first.map(|p| family_below(dag, nodes, p)),
-        _ => None,
-    };
-    state_family(&nodes[&id].payload, producer_family)
-}
-
-/// The unchanged source columns of node `id` of `dag`
-/// ([`unchanged_source_columns`]), without pricing; memoized by node in
-/// `known`, so a node shared below several is walked once.
-fn unchanged_below<'a>(
-    dag: &'a PhysicalASAPDAG,
-    nodes: &NodeMap<'a>,
-    id: PhysicalASAPNodeId,
-    known: &mut HashMap<PhysicalASAPNodeId, BTreeSet<&'a str>>,
-) -> BTreeSet<&'a str> {
-    if let Some(columns) = known.get(&id) {
-        return columns.clone();
-    }
-    let producers: Vec<(&'a Schema, BTreeSet<&'a str>)> = dag
-        .edges
-        .iter()
-        .filter(|e| e.consumer == id)
-        .map(|e| {
-            (
-                &nodes[&e.producer].output_schema,
-                unchanged_below(dag, nodes, e.producer, known),
-            )
-        })
-        .collect();
-    let views: Vec<(&'a Schema, &BTreeSet<&'a str>)> = producers
-        .iter()
-        .map(|(schema, columns)| (*schema, columns))
-        .collect();
-    let columns = unchanged_source_columns(nodes[&id], &views);
-    known.insert(id, columns.clone());
-    columns
-}
-
-/// Price `input`'s private nodes as Stage 3 prices them in the whole plan
-/// ([`price_node`]): each computed for its consumers as [`computations`]
-/// counts them (a materialized private node once, at its own rate:
-/// 1 at ingestion time, the queries reaching it together at query time,
-/// once per request when kept across evaluations), reading its children's
-/// given outputs. With consumers at ingestion time every private node runs
-/// at ingestion time. `None` when a private node fails a check no summary
-/// size repairs: a per-series aggregate the executor cannot run, or a
-/// query-time scan of raw data the deployment does not keep; also when a
-/// node materialized at query time runs under an ingestion-time consumer.
-pub(crate) fn price_private_nodes(
-    input: &PrivatePricing<'_>,
-    raw_data_retained: bool,
-) -> Result<Option<PrivateNodesUsage>, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let at_ingestion = input.consumers.iter().any(|c| c.at_ingestion);
-    // The DAG with the private nodes placed for the consumers.
-    let mut placed = input.dag.clone();
-    if at_ingestion {
-        for (node, private) in placed.nodes.iter_mut().zip(input.private) {
-            if !*private {
-                continue;
-            }
-            if node.materialization.timing() == ExecutionTiming::QueryTime
-                && node.materialization != Materialization::NotMaterialized
-            {
-                return Ok(None);
-            }
-            node.output_state.timing = ExecutionTiming::IngestionTime;
-        }
-    }
-    let dag = &placed;
-    let private_ids: HashSet<PhysicalASAPNodeId> = dag
-        .nodes
-        .iter()
-        .zip(input.private)
-        .filter(|(_, p)| **p)
-        .map(|(n, _)| n.id)
-        .collect();
-    let private_dag = PhysicalASAPDAG {
-        nodes: dag
-            .nodes
-            .iter()
-            .filter(|n| private_ids.contains(&n.id))
-            .cloned()
-            .collect(),
-        edges: Vec::new(),
-        roots: Vec::new(),
-        scalar_roots: Vec::new(),
-    };
-    if per_entity_aggregate_violation(&private_dag).is_some() {
-        return Ok(None);
-    }
-    let nodes = node_map(dag);
-    let kept_chains = kept_pane_chains(dag);
-    let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
-    let Some(&root) = dag.roots.first() else {
-        return Ok(None);
-    };
-    let settings = input.settings;
-    let horizon = settings.non_repeating_query_horizon_seconds;
-    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-    for e in &dag.edges {
-        producers_of.entry(e.consumer).or_default().push(e.producer);
-    }
-    let private_inputs = |id: PhysicalASAPNodeId| {
-        producers_of
-            .get(&id)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|p| private_ids.contains(p))
-            .collect::<Vec<_>>()
-    };
-    // Each query's reach among the private nodes at query time, stopping
-    // at (and including) ingestion-time nodes, as Stage 3's.
-    let query_count = input.queries.len();
-    let mut reach: Vec<HashSet<PhysicalASAPNodeId>> = vec![HashSet::new(); query_count];
-    if private_ids.contains(&root) {
-        for consumer in input.consumers.iter().filter(|c| !c.at_ingestion) {
-            for &query in &consumer.queries {
-                let mut stack = vec![root];
-                while let Some(id) = stack.pop() {
-                    if reach[query].insert(id)
-                        && nodes[&id].output_state.timing != ExecutionTiming::IngestionTime
-                    {
-                        stack.extend(private_inputs(id));
-                    }
-                }
-            }
-        }
-    }
-    let rate_of = |queries: &mut dyn Iterator<Item = usize>, per_request: bool| {
-        evaluation_rate(
-            queries.filter_map(|q| {
-                input.queries.get(q).map(|e| {
-                    let range = if per_request {
-                        None
-                    } else {
-                        e.range_evaluation
-                    };
-                    (&e.recurrence, range)
-                })
-            }),
-            horizon,
-        )
-    };
-    // How often each private node is computed ([`computations`]).
-    let mut rate_of_materialized: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
-    for node in dag.nodes.iter().filter(|n| private_ids.contains(&n.id)) {
-        let rate = match node.materialization {
-            Materialization::NotMaterialized => continue,
-            Materialization::MatAtIngestion(_) => 1.0,
-            m => {
-                let per_request = matches!(m, Materialization::MatAtQueryKeptAcrossEvaluations(_));
-                let reaching: Vec<usize> = (0..query_count)
-                    .filter(|&q| reach[q].contains(&node.id))
-                    .collect();
-                rate_of(&mut reaching.into_iter(), per_request).map_err(|error| (node.id, error))?
-            }
-        };
-        rate_of_materialized.insert(node.id, rate);
-    }
-    let mut walks: Vec<(Vec<PhysicalASAPNodeId>, f64)> = input
-        .consumers
-        .iter()
-        .map(|c| (vec![root], c.rate_per_second))
-        .collect();
-    for (&id, &rate) in &rate_of_materialized {
-        walks.push((private_inputs(id), rate));
-    }
-    let mut multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)> = HashMap::new();
-    for (start, rate) in walks {
-        let mut seen = HashSet::new();
-        let mut stack = start;
-        while let Some(id) = stack.pop() {
-            if !private_ids.contains(&id)
-                || rate_of_materialized.contains_key(&id)
-                || !seen.insert(id)
-            {
-                continue;
-            }
-            let entry = multipliers.entry(id).or_default();
-            entry.0 += 1;
-            entry.1 += rate;
-            stack.extend(private_inputs(id));
-        }
-    }
-    for (&id, &rate) in &rate_of_materialized {
-        multipliers.insert(id, (1, rate));
-    }
-    let retention_ms = pane_retention_ms(
-        dag,
-        &reach,
-        &input
-            .queries
-            .iter()
-            .map(|e| e.range_evaluation)
-            .collect::<Vec<_>>(),
-    );
-    // Price each private node, children first.
-    let mut priced: HashMap<PhysicalASAPNodeId, PricedNode<'_>> = HashMap::new();
-    let mut unchanged_known = HashMap::new();
-    for node in dag.nodes.iter().filter(|n| private_ids.contains(&n.id)) {
-        let views: Vec<ProducerOutput<'_>> = producers_of
-            .get(&node.id)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|p| match priced.get(p) {
-                Some(produced) => ProducerOutput {
-                    payload: &nodes[p].payload,
-                    output_schema: &nodes[p].output_schema,
-                    output: produced.output,
-                    sources: produced.sources.clone(),
-                    family: produced.family,
-                    unchanged_columns: produced.unchanged_columns.clone(),
-                },
-                None => ProducerOutput {
-                    payload: &nodes[p].payload,
-                    output_schema: &nodes[p].output_schema,
-                    output: input
-                        .child_outputs
-                        .get(p)
-                        .copied()
-                        .unwrap_or(EdgeStatistics { rows: 1, bytes: 1 }),
-                    sources: sources_below(dag, &nodes, *p),
-                    family: family_below(dag, &nodes, *p),
-                    unchanged_columns: unchanged_below(dag, &nodes, *p, &mut unchanged_known),
-                },
-            })
-            .collect();
-        let lookback_ms = match (&node.payload, node.output_state.timing) {
-            (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
-                windows_read(dag, &nodes, node.id, &kept_chains)
-                    .into_iter()
-                    .max()
-                    .or(input.scan_lookback_ms)
-            }
-            _ => None,
-        };
-        let node_priced = price_node(
-            node,
-            &views,
-            multipliers.get(&node.id).copied().unwrap_or((0, 0.0)),
-            lookback_ms,
-            retained_panes(node, &retention_ms),
-            (node.output_state.timing == ExecutionTiming::IngestionTime)
-                .then(|| maintained_window_ms(node.id, &nodes, &producers_of))
-                .flatten(),
-            input.data,
-            settings,
-            input.formula_scale,
-        )
-        .map_err(|error| (node.id, error))?;
-        priced.insert(node.id, node_priced);
-    }
-    if !raw_data_retained
-        && priced.values().any(|p| p.raw_scan.is_some())
-        && raw_data_violation(dag, &nodes, &kept_chains).is_some()
-    {
-        return Ok(None);
-    }
-    let work_ms: HashMap<PhysicalASAPNodeId, f64> = dag
-        .nodes
-        .iter()
-        .map(|n| (n.id, priced.get(&n.id).map_or(0.0, |p| p.work_ms)))
-        .collect();
-    let mut usage = PrivateNodesUsage {
-        cost_per_second: match settings.cost_model {
-            CostModel::UsageOverTime(_) => Some(0.0),
-            _ => None,
-        },
-        cpu_ops_per_second: 0.0,
-        scanned_bytes_per_second: 0.0,
-        average_memory_bytes: 0.0,
-        peak_memory_bytes: 0,
-        disk_bytes: 0,
-        query_ms: vec![0.0; query_count],
-        compaction_ms: vec![0.0; query_count],
-        held: Vec::new(),
-        raw_scans: Vec::new(),
-        output: priced
-            .get(&root)
-            .map_or(EdgeStatistics { rows: 0, bytes: 0 }, |p| p.output),
-        fit: CalibrationFit::default(),
-    };
-    let table = &settings.measured_operation_costs;
-    let sketch_size =
-        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
-    let formula_merge_ms = settings.resource_speed.ms_per_cpu_op * input.formula_scale;
-    for node in dag.nodes.iter().filter(|n| private_ids.contains(&n.id)) {
-        let node_priced = &priced[&node.id];
-        if let (Some(total), Some(cost)) =
-            (&mut usage.cost_per_second, node_priced.cost.cost_per_second)
-        {
-            *total += cost;
-        }
-        usage.cpu_ops_per_second += node_priced.cpu_ops_per_second;
-        usage.scanned_bytes_per_second += node_priced.scanned_bytes_per_second;
-        usage.average_memory_bytes += node_priced.average_memory_bytes;
-        usage.peak_memory_bytes = usage
-            .peak_memory_bytes
-            .saturating_add(node_priced.peak_memory_bytes);
-        usage.disk_bytes = usage.disk_bytes.saturating_add(node_priced.disk_bytes);
-        usage.fit.add(node_priced.fit);
-        // Partial copies: the workers this state's ingestion work below it
-        // takes, counting the private nodes only.
-        if let Some(window) = node_priced.maintained {
-            let copies = ingest_workers(dag, &work_ms, node.id) - 1;
-            usage.peak_memory_bytes = usage
-                .peak_memory_bytes
-                .saturating_add(copies.saturating_mul(window));
-        }
-        if let Some((source, bytes)) = node_priced.raw_scan {
-            usage
-                .raw_scans
-                .push((source_name(source).to_string(), bytes));
-        }
-        if let Some((state, per_second, weighted)) = node_priced.held {
-            let mut readers = Vec::new();
-            for (query, reached) in reach.iter().enumerate() {
-                if reached.contains(&node.id) {
-                    let rate = match weighted {
-                        true => rate_of(&mut std::iter::once(query), false)
-                            .map_err(|error| (node.id, error))?,
-                        false => 0.0,
-                    };
-                    readers.push((query, rate));
-                }
-            }
-            usage.held.push(HeldMemory {
-                byte_seconds_per_ms: state as f64 / 1_000.0 * per_second,
-                readers,
-                weighted,
-            });
-        }
-        for (query, reached) in reach.iter().enumerate() {
-            if !reached.contains(&node.id) {
-                continue;
-            }
-            if node.output_state.timing == ExecutionTiming::IngestionTime {
-                let workers = ingest_workers(dag, &work_ms, node.id) as f64;
-                let states = (node_priced.output.rows / panes_of(node)) as f64;
-                let per_merge_ms = lookup(
-                    table,
-                    OperatorKind::SummaryMerge,
-                    ExecutionTiming::QueryTime,
-                    node_priced.family,
-                    sketch_size,
-                )
-                .map_or(formula_merge_ms, |unit| {
-                    (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6
-                });
-                let compaction = (workers - 1.0) * states * per_merge_ms;
-                usage.compaction_ms[query] = usage.compaction_ms[query].max(compaction);
-            } else {
-                usage.query_ms[query] += node_priced.work_ms;
-            }
-        }
-    }
-    // A query's fixed request cost, where the candidate is its root.
-    let evaluation_ms = table.ns_per_evaluation * 1e-6;
-    for query in 0..query_count {
-        if evaluation_ms <= 0.0 || !input.root_of.get(query).copied().unwrap_or(false) {
-            continue;
-        }
-        let requests_per_second = evaluation_rate(
-            input.queries.get(query).map(|e| (&e.recurrence, None)),
-            horizon,
-        )
-        .map_err(|error| (first, error))?;
-        let ops_per_second =
-            evaluation_ms / settings.resource_speed.ms_per_cpu_op * requests_per_second;
-        usage.cpu_ops_per_second += ops_per_second;
-        usage.query_ms[query] += evaluation_ms;
-        if let (Some(cost), CostModel::UsageOverTime(prices)) =
-            (&mut usage.cost_per_second, &settings.cost_model)
-        {
-            *cost += prices.cost_per_cpu_op * ops_per_second;
-        }
-    }
-    Ok(Some(usage))
-}
-
 /// Prices within this fraction of each other are the same sum of charges
 /// rounded differently (Stage 3's tie tolerance is 1e-9).
 const ROUNDING: f64 = 1e-12;
@@ -2039,8 +1209,8 @@ const ROUNDING: f64 = 1e-12;
 /// A valid candidate the selector keeps: as Stage 2 built it, and sized
 /// for its queries' failure probabilities as Stage 3 priced it.
 struct KeptCandidate {
-    built: PhysicalCandidate,
-    sized: PhysicalCandidate,
+    built: PhysicalWorkloadPlan,
+    sized: PhysicalWorkloadPlan,
 }
 
 impl<'a> PlanSelector<'a> {
@@ -2109,7 +1279,7 @@ impl<'a> PlanSelector<'a> {
     /// checks before pricing; nothing otherwise.
     pub fn calibration_fit(
         &self,
-        candidate: &PhysicalCandidate,
+        candidate: &PhysicalWorkloadPlan,
     ) -> Result<CalibrationFit, SelectionError> {
         if candidate.roots.len() != self.entries.len() {
             return Err(SelectionError::EntryCount {
@@ -2159,7 +1329,24 @@ impl<'a> PlanSelector<'a> {
 
     /// Check and price `candidate`, the next in candidate order, and keep
     /// it if it can still be selected.
-    pub fn offer(&mut self, candidate: &PhysicalCandidate) -> Result<(), SelectionError> {
+    pub fn offer(&mut self, candidate: &PhysicalWorkloadPlan) -> Result<(), SelectionError> {
+        self.offer_before(candidate, None)
+    }
+
+    /// A stopped compiler is not evidence that the candidate is invalid.
+    pub fn offer_before(
+        &mut self,
+        candidate: &PhysicalWorkloadPlan,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), SelectionError> {
+        let check_deadline = || {
+            if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+                Err(SelectionError::EvaluationDeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        };
+        check_deadline()?;
         if candidate.roots.len() != self.entries.len() {
             return Err(SelectionError::EntryCount {
                 candidate: candidate.id.clone(),
@@ -2239,12 +1426,21 @@ impl<'a> PlanSelector<'a> {
         // the executor's own compiler, the costliest check. It compiles the
         // plan the executor would run, with each weight requirement Stage 3
         // confirmed made a proof, as `Selection::plan` holds it.
+        check_deadline()?;
         if let Some(check) = self.models.executor_compile_check {
-            if let Err(reason) = check.compiles(&with_confirmed_weights(&sized.roots, self.data)) {
-                self.reject(&candidate.id, RejectionCause::ExecutorCannotCompile, reason);
-                return Ok(());
+            match check.compiles_before(&with_confirmed_weights(&sized.roots, self.data), deadline)
+            {
+                Ok(()) => {}
+                Err(crate::search::ExecutorCompileError::Rejected(reason)) => {
+                    self.reject(&candidate.id, RejectionCause::ExecutorCannotCompile, reason);
+                    return Ok(());
+                }
+                Err(crate::search::ExecutorCompileError::DeadlineExceeded) => {
+                    return Err(SelectionError::EvaluationDeadlineExceeded);
+                }
             }
         }
+        check_deadline()?;
         if !self.keep_every_candidate {
             let kept_cost = |kept: &KeptCandidate| &self.costs[&kept.built.id];
             let dominated: Vec<bool> = self
@@ -2287,7 +1483,7 @@ impl<'a> PlanSelector<'a> {
     /// The selection over every candidate offered, and the selected
     /// candidate as Stage 2 built it (the selection's plan is it sized for
     /// its queries' failure probabilities).
-    pub fn finish(mut self) -> Result<(Selection, PhysicalCandidate), SelectionError> {
+    pub fn finish(mut self) -> Result<(Selection, PhysicalWorkloadPlan), SelectionError> {
         let ranking = self.ranking;
         let valid_costs: Vec<&CandidateCost> = self
             .kept
@@ -2337,12 +1533,6 @@ impl<'a> PlanSelector<'a> {
         Ok((selection, built))
     }
 
-    /// Under a price ranking, the cheapest price of the valid candidates
-    /// offered so far.
-    pub(crate) fn cheapest_price(&self) -> Option<f64> {
-        self.cheapest
-    }
-
     /// Under a price ranking, fold the price of valid candidate `cost`
     /// into the cheapest price and the runner-up ([`ROUNDING`]).
     fn track_runner_up(&mut self, cost: &CandidateCost) {
@@ -2385,11 +1575,11 @@ impl<'a> PlanSelector<'a> {
 /// summaries do not rebuild, the executor cannot run a per-series
 /// aggregate it reads, or a query misses its accuracy target.
 pub(crate) fn checked_candidate(
-    candidate: &PhysicalCandidate,
+    candidate: &PhysicalWorkloadPlan,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
-) -> Result<(PhysicalCandidate, Vec<AcceptedAccuracy>), CheckFailure> {
+) -> Result<(PhysicalWorkloadPlan, Vec<AcceptedAccuracy>), CheckFailure> {
     let sized =
         sized_for_failure_probability(candidate, targets, data).map_err(|reason| CheckFailure {
             cause: RejectionCause::FailureProbabilityResizeFailed,
@@ -3041,10 +2231,10 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
 /// stage binds `G`. `Err` is the reason the candidate is rejected when its
 /// resized summaries do not rebuild into a plan.
 pub(crate) fn sized_for_failure_probability(
-    candidate: &PhysicalCandidate,
+    candidate: &PhysicalWorkloadPlan,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
-) -> Result<PhysicalCandidate, String> {
+) -> Result<PhysicalWorkloadPlan, String> {
     let resize_failed = |error: &dyn std::fmt::Display| {
         format!("resizing for the failure probability failed: {error}")
     };
@@ -3069,7 +2259,7 @@ pub(crate) fn sized_for_failure_probability(
             }
         }
     }
-    Ok(PhysicalCandidate {
+    Ok(PhysicalWorkloadPlan {
         roots,
         dag,
         ..candidate.clone()
@@ -3133,28 +2323,6 @@ pub fn resize_for_failure_probability(
     with_resized_summaries(roots, &resize)
 }
 
-/// `roots` with each summary at the most any target can make
-/// [`resize_for_failure_probability`] enlarge it: classic HLL at precision
-/// 18 (its failure probability only falls with precision), every other
-/// summary sized for a vanishing per-value failure probability. A failure
-/// probability this plan misses, it misses at every size Stage 3 can give.
-pub(crate) fn resized_to_the_largest(
-    roots: &[QueryRoot],
-) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
-    with_resized_summaries(roots, &|_, params| {
-        Some(match params {
-            SketchParams::Hll {
-                precision,
-                relative_error,
-            } => SketchParams::Hll {
-                precision: (*precision).max(18),
-                relative_error: Some(hll::classic_relative_error(*precision, *relative_error)),
-            },
-            params => with_failure_probability(params, 1e-300),
-        })
-    })
-}
-
 /// What Stage 3 accepted for each query ([`AcceptedAccuracy`]), or the
 /// first query whose output is not shown to meet its target, as a reason. An output meets its target when its theoretical root guarantee
 /// (composed in Stage 1 with the built-in model) satisfies it, or when the
@@ -3185,7 +2353,7 @@ pub(crate) fn resized_to_the_largest(
 /// [`RejectionCause::NoAccuracyGuarantee`], and any other miss as
 /// [`RejectionCause::AccuracyTargetMissed`].
 fn accuracy_check(
-    candidate: &PhysicalCandidate,
+    candidate: &PhysicalWorkloadPlan,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
@@ -6061,7 +5229,7 @@ mod tests {
 
     /// Exact (P1), whole-expression CMS+heap (P2) and CountSketch+heap (P3) realizations of
     /// one approximate top-k query, in Pass 1 catalog order.
-    fn candidates() -> Vec<PhysicalCandidate> {
+    fn candidates() -> Vec<PhysicalWorkloadPlan> {
         let root = lower_promql(
             "topk by (job) (10, sum_over_time(m[1m]))",
             AccuracyTarget::max_error(0.01).failure_probability(0.001),
@@ -6233,7 +5401,7 @@ mod tests {
 
     /// The Count-Min sketch algorithms (plain or with a heap) `candidate`
     /// builds.
-    fn count_min_builds(candidate: &PhysicalCandidate) -> Vec<SketchAlgorithm> {
+    fn count_min_builds(candidate: &PhysicalWorkloadPlan) -> Vec<SketchAlgorithm> {
         candidate
             .dag
             .nodes
@@ -6327,7 +5495,7 @@ mod tests {
             ("topk(10, sum by (job) (increase(m[5m])))", false),
         ] {
             let candidates = all_candidates(query, &target);
-            let count_min: Vec<&PhysicalCandidate> = candidates
+            let count_min: Vec<&PhysicalWorkloadPlan> = candidates
                 .iter()
                 .filter(|c| count_min_builds(c).contains(&SketchAlgorithm::CmsWithHeap))
                 .collect();
@@ -6776,7 +5944,7 @@ mod tests {
 
     /// Every combination of Pass 1 candidates of one query, as Stage 2
     /// candidates `P1`, `P2`, ...
-    fn all_candidates(query: &str, target: &AccuracyTarget) -> Vec<PhysicalCandidate> {
+    fn all_candidates(query: &str, target: &AccuracyTarget) -> Vec<PhysicalWorkloadPlan> {
         let root = lower_promql(query, target.clone());
         let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -6821,7 +5989,7 @@ mod tests {
             .collect()
     }
 
-    fn has_summary_estimate(candidate: &PhysicalCandidate) -> bool {
+    fn has_summary_estimate(candidate: &PhysicalWorkloadPlan) -> bool {
         candidate
             .dag
             .nodes
@@ -6831,7 +5999,7 @@ mod tests {
 
     /// The KLL candidates of `quantile_over_time(0.99, x[5m])`, per series,
     /// within rank error 0.01 at δ = 0.01 over `scope`.
-    fn per_series_kll(scope: AccuracyScope) -> (Vec<PhysicalCandidate>, AccuracyTarget) {
+    fn per_series_kll(scope: AccuracyScope) -> (Vec<PhysicalWorkloadPlan>, AccuracyTarget) {
         let requested = AccuracyTarget::max_error(0.01)
             .failure_probability(0.01)
             .accuracy_metric(AccuracyMetric::Rank);
@@ -8049,7 +7217,7 @@ mod tests {
 
     /// The ids of `candidates` whose DAG reduces raw data samples per series with
     /// an exact `Aggregate`.
-    fn with_per_entity_aggregate(candidates: &[PhysicalCandidate]) -> Vec<String> {
+    fn with_per_entity_aggregate(candidates: &[PhysicalWorkloadPlan]) -> Vec<String> {
         candidates
             .iter()
             .filter(|c| {
@@ -8180,7 +7348,7 @@ mod tests {
     /// aggregate) kept at ingestion time, so selection charges its kept
     /// bytes every second (a `MatAtQuery` state is held only for one
     /// evaluation).
-    fn keeping_state(mut candidates: Vec<PhysicalCandidate>) -> Vec<PhysicalCandidate> {
+    fn keeping_state(mut candidates: Vec<PhysicalWorkloadPlan>) -> Vec<PhysicalWorkloadPlan> {
         for candidate in &mut candidates {
             for node in &mut candidate.dag.nodes {
                 if matches!(
@@ -8611,7 +7779,7 @@ mod tests {
     }
 
     /// The candidates of `query` that build a DDSketch.
-    fn ddsketch_candidates(candidates: &[PhysicalCandidate]) -> Vec<String> {
+    fn ddsketch_candidates(candidates: &[PhysicalWorkloadPlan]) -> Vec<String> {
         candidates
             .iter()
             .filter(|c| {
@@ -8845,7 +8013,7 @@ mod tests {
         target: &AccuracyTarget,
         data: &DataWorkload,
         models: PlanningModels<'_>,
-    ) -> (Vec<PhysicalCandidate>, Selection) {
+    ) -> (Vec<PhysicalWorkloadPlan>, Selection) {
         run_selecting(query, target, target, data, models)
     }
 
@@ -8857,7 +8025,7 @@ mod tests {
         selected: &AccuracyTarget,
         data: &DataWorkload,
         models: PlanningModels<'_>,
-    ) -> (Vec<PhysicalCandidate>, Selection) {
+    ) -> (Vec<PhysicalWorkloadPlan>, Selection) {
         let root = lower_promql(query, planned.clone());
         let run = crate::search::run_stage1_to_stage3_with(
             vec![(0, QueryRoot::Operator(root))],
@@ -8873,7 +8041,7 @@ mod tests {
         )
     }
 
-    fn sketches(candidate: &PhysicalCandidate) -> Vec<SketchAlgorithm> {
+    fn sketches(candidate: &PhysicalWorkloadPlan) -> Vec<SketchAlgorithm> {
         candidate
             .dag
             .nodes
@@ -8888,12 +8056,12 @@ mod tests {
             .collect()
     }
 
-    fn reads_only(candidate: &PhysicalCandidate, algorithm: SketchAlgorithm) -> bool {
+    fn reads_only(candidate: &PhysicalWorkloadPlan, algorithm: SketchAlgorithm) -> bool {
         let sketches = sketches(candidate);
         !sketches.is_empty() && sketches.iter().all(|a| *a == algorithm)
     }
 
-    fn output_guarantee(candidate: &PhysicalCandidate) -> Option<AccuracyGuarantee> {
+    fn output_guarantee(candidate: &PhysicalWorkloadPlan) -> Option<AccuracyGuarantee> {
         root_guarantee(&candidate.roots[0])
     }
 
@@ -9048,23 +8216,42 @@ mod tests {
     /// symbolic and plan selection treats it as unmet.
     #[test]
     fn average_over_relative_estimates_needs_the_sign() {
+        use asap_logical_asap_optimization::per_computation_candidates as pcc;
         let target = AccuracyTarget::max_error(0.01);
-        let (candidates, selection) = run(
+        let root = lower_promql(
             "avg by (job) (quantile_over_time(0.99, m[1m]))",
-            &target,
-            &data(),
-            PlanningModels::builtin(),
+            target.clone(),
         );
-        let ddsketch: Vec<_> = candidates
+        let inventory =
+            pcc::generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        // Exercise the intended approximation directly; a joint optimizer may
+        // legitimately prefer an exact implementation or a different sharing
+        // topology, neither of which tests this compositional error contract.
+        let choices: Vec<_> = inventory
+            .targets
             .iter()
-            .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
+            .map(|target| {
+                target
+                    .choices
+                    .candidates
+                    .iter()
+                    .position(|candidate| {
+                        *candidate == pcc::ComputationCandidate::Summary(SketchAlgorithm::DDSketch)
+                    })
+                    .unwrap_or(0)
+            })
             .collect();
-        assert!(!ddsketch.is_empty());
-        for candidate in ddsketch {
-            let g = output_guarantee(candidate).expect("a symbolic bound");
-            assert!(g.spec.error.has_unknown(), "{g:?}");
-            assert!(!selection.costs.contains_key(&candidate.id));
-        }
+        assert!(inventory
+            .targets
+            .iter()
+            .zip(&choices)
+            .any(|(target, &choice)| target.choices.candidates[choice]
+                == pcc::ComputationCandidate::Summary(SketchAlgorithm::DDSketch)));
+        let outputs = pcc::compose_logical_candidate(&inventory, &choices).unwrap();
+        let output = &outputs[0].1;
+        let guarantee = root_guarantee(output).expect("a symbolic bound");
+        assert!(guarantee.spec.error.has_unknown(), "{guarantee:?}");
+        assert!(guarantee_check(0, output, &target, &data(), &PlanningModels::builtin()).is_err());
     }
 
     /// `max` folds one value per series, so its failure probability is
@@ -9077,7 +8264,7 @@ mod tests {
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::Relative);
         let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
-        let ddsketch = |candidates: &[PhysicalCandidate]| -> Vec<String> {
+        let ddsketch = |candidates: &[PhysicalWorkloadPlan]| -> Vec<String> {
             candidates
                 .iter()
                 .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
@@ -9892,7 +9079,7 @@ mod tests {
     /// in five 1-min tumbling panes, every minute over data arriving at
     /// `rows_per_s`: rebuilt at query time (B2), then maintained at
     /// ingestion time (B1).
-    fn pane_candidates(rows_per_s: f64) -> Vec<PhysicalCandidate> {
+    fn pane_candidates(rows_per_s: f64) -> Vec<PhysicalWorkloadPlan> {
         let candidates = pane_candidates_for(rows_per_s, &DeploymentCapabilities::default());
         assert_eq!(candidates.len(), 2);
         candidates
@@ -9904,7 +9091,7 @@ mod tests {
     fn pane_candidates_for(
         rows_per_s: f64,
         deployment: &DeploymentCapabilities,
-    ) -> Vec<PhysicalCandidate> {
+    ) -> Vec<PhysicalWorkloadPlan> {
         let root = lower_promql("quantile_over_time(0.99, m[5m])", p99_target());
         let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -10277,7 +9464,7 @@ mod tests {
     #[test]
     fn a_candidate_over_a_querys_latency_bound_is_rejected_with_its_latency() {
         let candidates = pane_candidates(10_000.0);
-        let latency = |c: &PhysicalCandidate| {
+        let latency = |c: &PhysicalWorkloadPlan| {
             let cost = price(
                 &c.dag,
                 &[repeating(MINUTE)],
@@ -10327,7 +9514,7 @@ mod tests {
     fn a_candidate_slower_than_a_querys_repeat_interval_is_rejected_without_a_bound() {
         let rows_per_s = 1e9;
         let candidates = pane_candidates(rows_per_s);
-        let latency = |c: &PhysicalCandidate| {
+        let latency = |c: &PhysicalWorkloadPlan| {
             price(
                 &c.dag,
                 &[repeating(MINUTE)],
@@ -10826,7 +10013,7 @@ mod tests {
     #[test]
     fn cluster_objectives_keep_the_earlier_of_tied_candidates() {
         let b2 = pane_candidates(10_000.0).remove(0);
-        let twin = PhysicalCandidate {
+        let twin = PhysicalWorkloadPlan {
             id: format!("{}-twin", b2.id),
             ..b2.clone()
         };
@@ -10876,7 +10063,7 @@ mod tests {
     /// 1-min panes: `shared` picks one chain read by both (the 2-min query
     /// merging its newest 2 panes) or a chain each. Its physical candidate
     /// with every chain maintained at ingestion time.
-    fn nested_windows_at_ingestion(shared: bool, rows_per_s: f64) -> PhysicalCandidate {
+    fn nested_windows_at_ingestion(shared: bool, rows_per_s: f64) -> PhysicalWorkloadPlan {
         let queries = [
             ("quantile_over_time(0.5, m[2m])", MINUTE),
             ("quantile_over_time(0.99, m[5m])", MINUTE),
@@ -10890,7 +10077,7 @@ mod tests {
         queries: [(&str, u32); 2],
         shared: bool,
         rows_per_s: f64,
-    ) -> PhysicalCandidate {
+    ) -> PhysicalWorkloadPlan {
         use asap_logical_asap_optimization::per_computation_candidates as pcc;
         let inventory = pcc::generate_per_computation_candidates(
             queries
@@ -11099,7 +10286,7 @@ mod tests {
         let separate = shared_windows_at_ingestion(queries, false, rows_per_s);
         let recurrence = [repeating(MINUTE), repeating(45_000)];
         let settings = PlanSelectionSettings::default();
-        let price_of = |candidate: &PhysicalCandidate| {
+        let price_of = |candidate: &PhysicalWorkloadPlan| {
             price(
                 &candidate.dag,
                 &recurrence,
@@ -11196,7 +10383,7 @@ mod tests {
 
     /// The KLL build of a `quantile_over_time` candidate, with its sketch
     /// parameters, and the candidate.
-    fn kll_build() -> (PhysicalCandidate, PhysicalASAPNodeId, SketchParams) {
+    fn kll_build() -> (PhysicalWorkloadPlan, PhysicalASAPNodeId, SketchParams) {
         let (candidates, _) = per_series_kll(AccuracyScope::PerValue);
         let candidate = candidates.into_iter().next().unwrap();
         let (build, sketch) = candidate
@@ -11406,7 +10593,7 @@ mod tests {
     /// minute over data arriving at 10,000 rows per second: each Stage 1
     /// choice (the exact rebuild from raw data samples, KLL, DDSketch, ...)
     /// with each Stage 2 materialization, ids `P<choice>-m<k>`.
-    fn quantile_candidates() -> Vec<PhysicalCandidate> {
+    fn quantile_candidates() -> Vec<PhysicalWorkloadPlan> {
         let root = lower_promql("quantile_over_time(0.99, m[5m])", p99_target());
         let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -11440,7 +10627,7 @@ mod tests {
 
     /// Whether `candidate` builds no summary: it rebuilds the quantile
     /// exactly from raw data samples.
-    fn exact_rebuild(candidate: &PhysicalCandidate) -> bool {
+    fn exact_rebuild(candidate: &PhysicalWorkloadPlan) -> bool {
         !candidate.dag.nodes.iter().any(|n| {
             matches!(
                 n.payload,
@@ -11452,7 +10639,7 @@ mod tests {
     /// The exact rebuild of [`quantile_candidates`] and the KLL pane
     /// candidates ([`pane_candidates`]: B2 rebuilt at query time, B1
     /// maintained at ingestion time), with the KLL's parameters.
-    fn exact_and_kll() -> (Vec<PhysicalCandidate>, SketchParams) {
+    fn exact_and_kll() -> (Vec<PhysicalWorkloadPlan>, SketchParams) {
         let mut candidates: Vec<_> = quantile_candidates()
             .into_iter()
             .filter(exact_rebuild)
@@ -11493,7 +10680,10 @@ mod tests {
 
     /// The candidate Stage 3 selects among `candidates` for one p99 every
     /// minute over 10,000 rows per second.
-    fn selected(candidates: &[PhysicalCandidate], settings: &PlanSelectionSettings) -> Selection {
+    fn selected(
+        candidates: &[PhysicalWorkloadPlan],
+        settings: &PlanSelectionSettings,
+    ) -> Selection {
         select_plan(
             candidates,
             &[every_minute()],
@@ -11506,10 +10696,10 @@ mod tests {
     /// The candidate cheapest when every node without an entry keeps its
     /// formulas' price (no calibration), as Stage 3 priced before.
     fn cheapest_uncalibrated(
-        candidates: &[PhysicalCandidate],
+        candidates: &[PhysicalWorkloadPlan],
         settings: &PlanSelectionSettings,
     ) -> String {
-        let cost = |candidate: &PhysicalCandidate| {
+        let cost = |candidate: &PhysicalWorkloadPlan| {
             price_at_scale(
                 &candidate.dag,
                 &node_map(&candidate.dag),

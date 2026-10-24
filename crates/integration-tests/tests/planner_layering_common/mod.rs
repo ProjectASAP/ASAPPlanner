@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::PlanSelectionSettings;
 use asap_plan_selection::Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
@@ -116,7 +116,7 @@ pub struct Physical {
     pub id: String,
     pub from_logical: String,
     pub query_roots: Vec<NodeId>,
-    pub candidate: PhysicalCandidate,
+    pub candidate: PhysicalWorkloadPlan,
 }
 
 impl Physical {

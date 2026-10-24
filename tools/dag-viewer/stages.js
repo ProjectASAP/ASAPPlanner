@@ -404,7 +404,7 @@ function accuracyGuaranteesText(doc) {
 // exhaustive search, the rejections by cause with their counts. "" for a
 // document that does not say.
 function searchText(doc) {
-  const name = { default: 'default search', exhaustive: 'exhaustive search', 'memo-brute-force': 'memo brute-force search', 'memo-milp': 'memo-MILP search' }[doc.search];
+  const name = { default: 'default search', exhaustive: 'exhaustive search', 'candidate-connections': 'candidate-connection search', 'memo-milp': 'memo-MILP search', 'memo-brute-force': 'memo brute-force search' }[doc.search];
   if (!name) return '';
   const parts = [name];
   const selection = doc.stage3_plan_selection || {};
@@ -427,7 +427,6 @@ function searchText(doc) {
     if (search.raw_scan_candidates_skipped) parts.push(`${search.raw_scan_candidates_skipped} Stage 1 candidates skipped: they scan raw data at query time`);
     if (search.raw_scan_assignments_skipped) parts.push(`${search.raw_scan_assignments_skipped} Stage 2 assignments skipped: they scan raw data at query time`);
     if (search.searched_as_one) parts.push(`searched as one: ${cause(search.searched_as_one)}`);
-    if (search.routed_to_legacy) parts.push(`legacy search ran instead: ${cause(search.routed_to_legacy)}`);
     const classes = (search.interchangeable_queries || []).map((members) => `(${members.map((i) => queryIds[i] || `q${i + 1}`).join(', ')})`);
     if (classes.length) parts.push(`interchangeable queries: ${classes.join(', ')}`);
   }
@@ -1041,6 +1040,19 @@ function gcd(a, b) { return b ? gcd(b, a % b) : a; }
 // and the threshold (a size is set by its strictest reader).
 function memoSearchView(doc) {
   const search = (doc.stage3_plan_selection || {}).search || {};
+  const candidate = search.candidate_connections;
+  if (candidate) {
+    const number = (value) => typeof value === 'number' ? String(Number(value.toPrecision(4))) : null;
+    return { summary: {
+      incumbent: number(search.incumbent_cost), lowerBound: number(candidate.lower_bound),
+      gap: candidate.relative_gap ?? null, rounds: candidate.refinements,
+      certified: candidate.status === 'optimal', alone: null, saving: null,
+      clusters: 0, memo: null, objective: candidate.objective,
+      status: candidate.status, calibration: candidate.calibration_scope,
+      generationMs: candidate.memo_expansion_ms, modelMs: candidate.model_construction_ms,
+      solverMs: candidate.solver_ms, validationMs: candidate.validation_ms,
+    }, groups: [], sharedUnits: [] };
+  }
   const milp = search.milp;
   const plan = search.memo_plan;
   if (!milp && !plan) return null;
@@ -1174,7 +1186,11 @@ function memoSummaryText(summary) {
   if (!summary) return '';
   const parts = [`incumbent ${summary.incumbent ?? '—'}`, `lower bound ${summary.lowerBound ?? '—'}`,
     `gap ${summary.gap === null ? '—' : (summary.gap === 0 ? '0' : summary.gap.toExponential(2))}`, `${summary.rounds} round${summary.rounds === 1 ? '' : 's'}`,
-    summary.certified ? 'certified (gap ≤ 1e-4)' : 'not certified'];
+    summary.certified ? (summary.status ? 'optimal over generated catalog' : 'certified (gap ≤ 1e-4)') : 'not certified'];
+  if (summary.status) parts.push(`status ${summary.status}`);
+  if (summary.objective) parts.push(`objective ${summary.objective}`);
+  if (summary.calibration) parts.push(`calibration ${summary.calibration}`);
+  if (summary.solverMs !== undefined) parts.push(`generation ${summary.generationMs ?? '—'} ms, model ${summary.modelMs ?? '—'} ms, solve ${summary.solverMs} ms, validation ${summary.validationMs ?? '—'} ms`);
   if (summary.clusters > 1) parts.push(`${summary.clusters} independent clusters`);
   if (summary.memo) parts.push(`${summary.memo.groups} groups (${summary.memo.shared_groups} shared), ${summary.memo.candidates} implementation candidates`);
   if (summary.alone !== null) parts.push(`queries planned alone ${summary.alone}${summary.saving === null ? '' : ` (sharing saves ${Number((summary.saving * 100).toFixed(1))}%)`}`);

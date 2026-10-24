@@ -13,7 +13,7 @@ use asap_integration_tests::physical_export::{
     at_ingestion, at_ingestion_physical_asap_dag, physical_asap_dag,
 };
 use asap_integration_tests::planning::logical_candidates;
-use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::Selection;
 use asap_types::ir::operator::operator_properties::Reduction;
@@ -687,7 +687,7 @@ fn ddsketch_ratio_selection(
     query: &str,
     planned: AccuracyTarget,
     accuracy: AccuracyTarget,
-) -> (Vec<PhysicalCandidate>, Selection) {
+) -> (Vec<PhysicalWorkloadPlan>, Selection) {
     let root = lower_promql(query, planned).unwrap();
     let data = asap_integration_tests::planning::declared_data(&root);
     let run = asap_plan_selection::run_stage1_to_stage3_with(

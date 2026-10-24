@@ -22,40 +22,12 @@
 //     --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --out run.json
 //
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
-// four planner stages (#509 MVP), searched with the default search, the one
-// `plan_installable` runs (`Stage1ToStage3Search::default`: each query's own
-// candidates are checked first, a whole-workload choice that picks a
-// discarded one is not composed, independent components are searched
-// separately, and without raw data retained the candidates that scan it at
-// query time are skipped), over the models `plan_installable` plans with:
-// the stage crates' built-in models, the declared capabilities with the
-// executor's summary families when none are declared, and, for a PromQL
-// workload, the executor's compile check (it does not compile SQL table
-// scans, so a SQL workload plans without it). It keeps only the best candidate, so the document
-// holds the selected Stage 1 and Stage 2 candidates, the rejections Stage 3
-// recorded (the first of each cause, under `search_rejected` since their
-// candidates are not kept) and the search's report; `search` is
-// `"default"`. `--exhaustive` instead composes and prices every candidate
-// (the search the default one is tested against, for small workloads and
-// comparison) and the document lists them; `search` is `"exhaustive"`.
-// `--search legacy|memo-brute-force|memo-milp|candidate-connections` picks the default search's
-// algorithm (`SearchAlgorithm`): `legacy` (the default, `search` is
-// `"default"`), the memo over logical sub-expressions searched by brute
-// force (the reference), or solved as a MILP; `search` names it, and the
-// search report says which ran (`algorithm`, omitted for legacy) and,
-// when the legacy search ran instead, why (`routed_to_legacy`). These choices
-// cannot be combined with `--exhaustive`.
-// `candidate-connections` is an temporary migration catalog (Pass 1, local panes and
-// concrete shared summaries), with a separate scope/termination report. It
-// defaults to 30 seconds and 128 evaluator refinements; --milp-time-limit-s
-// overrides its time budget. It does not replace the other rule catalogs.
-// `--milp-time-limit-s <f64>` limits the MILP search: at
-// the limit it selects its best plan so far and reports
-// `time_limit_reached` with the gap to its bound. The memo-MILP search's
-// report also has `milp.queries_alone_cost` (each query planned alone)
-// and `memo_plan`: every memo group with its chosen implementation
-// candidate, and the coupling sites at their chosen thresholds with their
-// reader groups, which the viewer shows as the plan's shared units.
+// four planner stages, using the joint candidate-connection engine. The default
+// document keeps the selected plan; `--exhaustive` archives evaluated plans
+// and rejections from the same finite catalog, not an independent optimizer.
+// `--search candidate-connections` explicitly names this engine.
+// `--milp-time-limit-s` bounds planning in either mode; a timeout reports a
+// partial result, never an optimality claim for unexplored candidates.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.
@@ -141,14 +113,9 @@
 // When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
 // `error` and no candidates, and nothing is selected.
 //
-// Under `--exhaustive`, a workload with more than `--max-combinations`
-// (default 10^4) Stage 1 candidates, Pass 2's included, is refused as soon
-// as enumeration passes the limit, and so is one whose Stage 2 physical
-// candidates (one per materialization assignment, counted before they are
-// built) pass it: the run exits with status 3 and the limit, and writes no
-// document. The default search has no limit.
-// Planning never caps or truncates the candidates it ranks; only the display
-// does (`--max-displayed`).
+// Under `--exhaustive`, `--max-combinations` (default 10^4) bounds evaluated
+// assignments. The report distinguishes catalog exhaustion from budget limits.
+// Display truncation (`--max-displayed`) is separate from the planning budgets.
 //
 // `--workload` may repeat, so one run plans queries in several languages
 // (e.g. a PromQL file and a SQL file) together. Each file is lowered by
@@ -251,8 +218,8 @@ use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_planning_stages_over, run_search_over, sql_catalog,
-    PlanningStagesError, PlanningStagesRun,
+    lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog, PlanningStagesError,
+    PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
@@ -281,20 +248,16 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp|candidate-connections [--milp-time-limit-s <f64>]] [--max-displayed <n>] --out <file>\n\
---search legacy is the default search (the document's \"search\" is \"default\").";
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search candidate-connections] [--milp-time-limit-s <f64>] [--max-displayed <n>] --out <file>\n\
+--search candidate-connections is the default search.";
 
-/// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
-/// included) an exhaustive run enumerates.
+/// Default evaluator-assignment budget for an exhaustive archive run.
 const MAX_COMBINATIONS: usize = 10_000;
 
 /// Why a run wrote no document.
 enum Failure {
     /// Bad arguments or a query that does not plan (exit status 2).
     Usage(String),
-    /// More Stage 1 or Stage 2 candidates than `--max-combinations` under
-    /// `--exhaustive` (exit status 3).
-    TooManyCandidates(PlanningStagesError),
 }
 
 impl From<String> for Failure {
@@ -315,15 +278,6 @@ fn main() {
         Err(Failure::Usage(message)) => {
             eprintln!("stage_pipeline: {message}\n{USAGE}");
             std::process::exit(2);
-        }
-        Err(Failure::TooManyCandidates(error)) => {
-            // Only the exhaustive search (`--exhaustive`) counts against
-            // the limit.
-            eprintln!(
-                "stage_pipeline: {error}; --exhaustive composes every candidate, so raise \
-                 --max-combinations or drop --exhaustive to run the default search, which prunes"
-            );
-            std::process::exit(3);
         }
     }
 }
@@ -356,10 +310,6 @@ fn document_of(
             "stage2_physical_asap_optimization": { "candidates": [], "pruned": [] },
             "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [], "stored_outputs": [] },
         })),
-        Err(
-            error @ (PlanningStagesError::TooManyCandidates { .. }
-            | PlanningStagesError::TooManyPhysicalCandidates { .. }),
-        ) => Err(Failure::TooManyCandidates(error)),
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
     }
 }
@@ -387,7 +337,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_selection_settings_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
-    // `--search`: the default search's algorithm, legacy unless given;
+    // `--search` explicitly names the candidate-connection engine;
     // `--milp-time-limit-s` limits the MILP search.
     let mut search_algorithm: Option<SearchAlgorithm> = None;
     let mut milp_time_limit_ms: Option<u64> = None;
@@ -455,15 +405,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--exhaustive" => exhaustive = true,
             "--search" => {
                 search_algorithm = Some(match value()?.as_str() {
-                    "legacy" => SearchAlgorithm::Legacy,
-                    "memo-brute-force" => SearchAlgorithm::MemoBruteForce,
-                    "memo-milp" => SearchAlgorithm::MemoMilp,
                     "candidate-connections" => SearchAlgorithm::CandidateConnections,
                     other => {
-                        return Err(format!(
-                            "--search {other}: expected legacy, memo-brute-force, memo-milp or candidate-connections"
+                        return Err(
+                            format!("--search {other}: expected candidate-connections").into()
                         )
-                        .into())
                     }
                 })
             }
@@ -493,24 +439,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         );
     }
     if max_combinations_given && !exhaustive {
-        return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (the default search has no limit)".into());
+        return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (bounds evaluated assignments)".into());
     }
     if exhaustive && search_algorithm.is_some() {
         return Err(
             "--search picks the default search's algorithm: drop it with --exhaustive".into(),
         );
     }
-    let search_algorithm = search_algorithm.unwrap_or_default();
-    if milp_time_limit_ms.is_some()
-        && !matches!(
-            search_algorithm,
-            SearchAlgorithm::MemoMilp | SearchAlgorithm::CandidateConnections
-        )
-    {
-        return Err(
-            "--milp-time-limit-s limits the MILP search: it needs --search memo-milp or candidate-connections".into(),
-        );
-    }
+    let search_algorithm = search_algorithm.unwrap_or(SearchAlgorithm::CandidateConnections);
     if plan_selection_settings_path.is_some()
         && (cost_model.is_some()
             || cluster_memory.is_some()
@@ -722,25 +658,19 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .with_plan_selection(&plan_selection)
         .with_deployment_capabilities(&deployment_capabilities)
         .with_executor_compile_check(&PlannerExecutorCompileCheck);
-    let result = match exhaustive {
-        true => run_planning_stages_over(
-            roots.clone(),
-            &entries,
-            &data,
-            Some(max_combinations),
-            models,
-        ),
-        false => run_search_over(
-            roots.clone(),
-            &entries,
-            &data,
-            models,
-            Stage1ToStage3Search {
-                milp_time_limit_ms,
-                ..Stage1ToStage3Search::with_algorithm(search_algorithm)
-            },
-        ),
-    };
+    let result = run_search_over(
+        roots.clone(),
+        &entries,
+        &data,
+        models,
+        Stage1ToStage3Search {
+            search: search_algorithm,
+            exhaustive,
+            keep_every_candidate: exhaustive,
+            max_evaluations: exhaustive.then_some(max_combinations),
+            milp_time_limit_ms,
+        },
+    );
     // A rate, increase or irate over a declared gauge (the query still plans).
     let mut warnings = counter_function_over_gauge_warnings_of(&described, &data)?;
     // A selected plan's very large peak memory, when the deployment
@@ -765,9 +695,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
     document["search"] = json!(match (exhaustive, search_algorithm) {
         (true, _) => "exhaustive",
-        (false, SearchAlgorithm::Legacy) => "default",
-        (false, SearchAlgorithm::MemoBruteForce) => "memo-brute-force",
-        (false, SearchAlgorithm::MemoMilp) => "memo-milp",
         (false, SearchAlgorithm::CandidateConnections) => "candidate-connections",
     });
     document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
