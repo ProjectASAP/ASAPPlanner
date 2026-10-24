@@ -430,7 +430,7 @@ fn assert_pane_coverage(plan: &InstallablePlan, root: PhysicalASAPNodeId, start:
             assert!(window.width_ms > 0 && 600_000 % window.width_ms == 0);
             (
                 window.end_offset_ms,
-                window.end_offset_ms + window.width_ms as i64,
+                window.end_offset_ms + window.width_ms,
             )
         })
         .collect();
