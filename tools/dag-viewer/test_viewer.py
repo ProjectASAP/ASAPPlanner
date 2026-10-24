@@ -441,7 +441,7 @@ class DefaultSearchTests(unittest.TestCase):
 
     def setUp(self):
         self.js = stages_js()
-        # Two queries over two metrics: two components, each searched alone;
+        # Two queries over two metrics, jointly planned by the current engine;
         # Accuracy guarantees are ignored (stage_pipeline's default).
         self.doc = stage_pipeline(
             "--promql", "sum(rate(a[1m]))", "--promql", "topk(5, rate(b[1m]))",
@@ -449,7 +449,7 @@ class DefaultSearchTests(unittest.TestCase):
         )
 
     def test_document_is_valid_and_holds_the_selected_candidate(self):
-        self.assertEqual(self.doc["search"], "default")
+        self.assertEqual(self.doc["search"], "candidate-connections")
         self.assertEqual(self.js.call("validateStagePipeline", self.doc), [])
         physical = self.doc["stage2_physical_asap_optimization"]["candidates"]
         self.assertEqual([p["id"] for p in physical], [self.doc["stage3_plan_selection"]["selected"]])
@@ -466,11 +466,27 @@ class DefaultSearchTests(unittest.TestCase):
         self.assertEqual(self.js.call("accuracyGuaranteesText", enforced), "accuracy guarantees enforced")
         self.assertEqual(self.js.call("accuracyGuaranteesText", {}), "")
 
-    def test_header_names_the_search_and_its_components(self):
+    def test_header_names_the_search_and_checked_candidates(self):
         text = self.js.call("searchText", self.doc)
-        self.assertTrue(text.startswith("default search · "), text)
+        self.assertTrue(text.startswith("candidate-connection search · "), text)
         self.assertIn("physical candidates checked", text)
-        self.assertIn("2 independent components searched separately", text)
+        report = self.doc["stage3_plan_selection"]["search"]["candidate_connections"]
+        self.assertEqual(report["output_references"], 2)
+        # Render the current report without forcing the live solver to choose
+        # a particular decomposition for this workload.
+        with_components = json.loads(json.dumps(self.doc))
+        search = with_components["stage3_plan_selection"]["search"]
+        search["candidate_connections"]["independent_components"] = 2
+        self.assertIn("2 independent components searched separately",
+                      self.js.call("searchText", with_components))
+        search["candidate_connections"]["independent_components"] = 1
+        search["components"] = [{}, {}]
+        self.assertNotIn("components searched separately",
+                         self.js.call("searchText", with_components))
+        # Old archived documents still render their component list.
+        del search["candidate_connections"]
+        self.assertIn("2 independent components searched separately",
+                      self.js.call("searchText", with_components))
         self.assertTrue(self.js.call("searchText", example1()).startswith("exhaustive search · "))
 
     def test_rejections_of_candidates_not_kept_are_rows_after_the_others(self):

@@ -412,7 +412,10 @@ function searchText(doc) {
   const cause = (c) => String(c).replace(/_/g, ' ');
   if (search) {
     parts.push(`${search.candidates_checked} physical candidates checked`);
-    if ((search.components || []).length) parts.push(`${search.components.length} independent components searched separately`);
+    const componentCount = typeof search.candidate_connections?.independent_components === 'number'
+      ? search.candidate_connections.independent_components
+      : (search.components || []).length;
+    if (componentCount > 1) parts.push(`${componentCount} independent components searched separately`);
     if (typeof search.runner_up_cost_per_second === 'number') parts.push(`runner-up costs ${Number(search.runner_up_cost_per_second.toPrecision(4))}`);
     const queryIds = ((doc.workload || {}).queries || []).map((q) => q.id);
     const byCause = new Map();
