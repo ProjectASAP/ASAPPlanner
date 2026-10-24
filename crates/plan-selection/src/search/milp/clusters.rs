@@ -111,7 +111,7 @@ pub(crate) fn split(
         _ => true,
     };
     if disk_priced && models.deployment_capabilities.raw_data_retained {
-        for queries in crate::search::legacy::components::source_components(roots) {
+        for queries in crate::search::workload_dependencies::source_connected_queries(roots) {
             for pair in queries.windows(2) {
                 union(&mut parent, pair[0], pair[1]);
             }
@@ -202,12 +202,9 @@ pub(crate) fn combine(
         for (&q, report) in cluster.iter().zip(&s.search.queries) {
             queries[q] = report.clone();
         }
-        rejected.extend(
-            s.rejected
-                .iter()
-                .cloned()
-                .map(|r| crate::search::legacy::components::renumber(r, cluster)),
-        );
+        rejected.extend(s.rejected.iter().cloned().map(|r| {
+            crate::search::workload_dependencies::remap_rejection_query_indices(r, cluster)
+        }));
     }
     selection.rejected = rejected;
     selection.search.queries = queries;

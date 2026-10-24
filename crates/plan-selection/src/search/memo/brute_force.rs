@@ -18,6 +18,8 @@ use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate}
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
+use asap_logical_asap_optimization::memo::LogicalMemo;
+
 use crate::search::memo::{groups, CouplingKind, GroupId, ImplementationCandidate, Memo};
 use crate::{MemoStats, PlanSelector, PlanningModels, Selection, SelectionError};
 
@@ -27,7 +29,20 @@ pub(crate) fn memo<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
 ) -> Memo {
-    let mut memo = groups::memo_of(per_computation);
+    memo_from_initial(
+        LogicalMemo::from_roots(&per_computation.roots),
+        per_computation,
+        entries,
+    )
+}
+
+/// Pass 1 fills existing logical groups; Pass 2 may append groups and candidates.
+pub(crate) fn memo_from_initial<Id: Clone>(
+    initial: LogicalMemo,
+    per_computation: &PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+) -> Memo {
+    let mut memo = groups::populate_pass1(initial, per_computation);
     crate::search::memo::rules::capability::add_shared_builds(&mut memo);
     crate::search::memo::rules::windows::add_pass2_candidates(&mut memo, entries);
     crate::search::memo::rules::scans::add_scan_widening(&mut memo);
@@ -78,6 +93,12 @@ pub(crate) type GroupChoice = Vec<Option<usize>>;
 /// before children: a group is needed when it is a query's root or a child
 /// of a chosen candidate, and not implemented by a chosen fused candidate.
 pub(crate) fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
+    group_choices_up_to(memo, usize::MAX)
+}
+
+/// Stop traversal at the requested number of assignments, before building the
+/// remaining Cartesian product. Used only for bounded incumbent construction.
+pub(crate) fn group_choices_up_to(memo: &Memo, limit: usize) -> Option<Vec<GroupChoice>> {
     let order = memo.topological_order()?;
     let parents_first: Vec<GroupId> = order.into_iter().rev().collect();
     let n = memo.groups.len();
@@ -93,22 +114,28 @@ pub(crate) fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
     fn walk(
         memo: &Memo,
         order: &[GroupId],
-        at: usize,
         needed: &mut [u32],
         covered: &mut [u32],
         choice: &mut GroupChoice,
         out: &mut Vec<GroupChoice>,
+        limit: usize,
     ) {
-        let Some(&GroupId(g)) = order.get(at) else {
+        if out.len() >= limit {
+            return;
+        }
+        let Some(&GroupId(g)) = order.first() else {
             out.push(choice.clone());
             return;
         };
         let g = g as usize;
         if needed[g] == 0 || covered[g] > 0 {
-            walk(memo, order, at + 1, needed, covered, choice, out);
+            walk(memo, &order[1..], needed, covered, choice, out, limit);
             return;
         }
         for (index, candidate) in memo.candidates[g].iter().enumerate() {
+            if out.len() >= limit {
+                break;
+            }
             for absorbed in &candidate.implements[1..] {
                 covered[absorbed.0 as usize] += 1;
             }
@@ -116,7 +143,7 @@ pub(crate) fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
                 needed[child.0 as usize] += 1;
             }
             choice[g] = Some(index);
-            walk(memo, order, at + 1, needed, covered, choice, out);
+            walk(memo, &order[1..], needed, covered, choice, out, limit);
             choice[g] = None;
             for child in &candidate.children {
                 needed[child.0 as usize] -= 1;
@@ -129,11 +156,11 @@ pub(crate) fn group_choices(memo: &Memo) -> Option<Vec<GroupChoice>> {
     walk(
         memo,
         &parents_first,
-        0,
         &mut needed,
         &mut covered,
         &mut choice,
         &mut out,
+        limit,
     );
     Some(out)
 }
@@ -587,9 +614,29 @@ pub(crate) fn brute_force<Id: Clone>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<(Selection, PhysicalCandidate, Vec<QueryRoot>), SelectionError> {
+    brute_force_with_initial_memo(
+        LogicalMemo::from_roots(&per_computation.roots),
+        per_computation,
+        entries,
+        data,
+        models,
+    )
+}
+
+pub(crate) fn brute_force_with_initial_memo<Id: Clone>(
+    initial: LogicalMemo,
+    per_computation: &PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<(Selection, PhysicalCandidate, Vec<QueryRoot>), SelectionError> {
+    let initial_build_duration = initial.build_duration;
     let started = std::time::Instant::now();
-    let memo = memo(per_computation, entries);
-    let memo_stats = stats(&memo, started.elapsed().as_secs_f64() * 1e3);
+    let memo = memo_from_initial(initial, per_computation, entries);
+    let memo_stats = stats(
+        &memo,
+        (initial_build_duration + started.elapsed()).as_secs_f64() * 1e3,
+    );
     let choices = group_choices(&memo).unwrap_or_default();
     let mut selector = PlanSelector::new(entries, data, models, false)?;
     let mut logical: HashMap<String, Vec<QueryRoot>> = HashMap::new();
@@ -625,6 +672,36 @@ mod tests {
         DataArrival, DurationMs, MetricType, Predictability, QueryRecurrence, QueryRequirements,
         RepeatedDemand, RepetitionInterval, SourceFacts,
     };
+
+    /// A baseline cap stops before materializing a billion complete assignments.
+    #[test]
+    fn bounded_choices_do_not_expand_the_remaining_product() {
+        let roots: Vec<_> = (0..30)
+            .map(|query| {
+                (
+                    query,
+                    QueryRoot::Operator(lower_promql(
+                        &format!("m{query}"),
+                        AccuracyTarget::exact(),
+                    )),
+                )
+            })
+            .collect();
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let mut memo = groups::memo_of(&inventory);
+        for candidates in &mut memo.candidates {
+            candidates.push(candidates[0].clone());
+        }
+        // PromQL lowering may introduce additional logical nodes per root.
+        assert!(memo.groups.len() >= 30);
+        assert!(group_choices_up_to(&memo, 0).unwrap().is_empty());
+        let choices = group_choices_up_to(&memo, 3).unwrap();
+        assert_eq!(choices.len(), 3);
+        assert!(choices
+            .iter()
+            .all(|choice| choice.iter().all(Option::is_some)));
+        assert_ne!(choices[0], choices[1]);
+    }
 
     /// The 0.9 quantile of `m[5m]` within 1% and within 2% error, each
     /// query reading its shared-build twin: at the larger threshold both

@@ -70,3 +70,6 @@ pub mod per_computation_candidates;
 pub mod asap_aware_cse;
 
 pub mod workload_candidates;
+
+/// Logical group identity available before Pass 1 candidate generation.
+pub mod memo;

@@ -18,6 +18,8 @@ use good_lp::{
     constraint, variable, Expression, ProblemVariables, Solution, SolverModel, Variable,
 };
 
+use asap_logical_asap_optimization::memo::LogicalMemo;
+
 use crate::search::memo::{GroupId, ImplementationCandidate, Memo};
 use crate::search::milp::coefficients::LazyTerms;
 use crate::search::milp::cuts::{SharedBuildHeld, Term, TermCuts, WidenedScan};
@@ -2157,8 +2159,31 @@ pub(crate) fn search<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     time_limit_ms: Option<u64>,
 ) -> MemoSearchResult {
-    let started = std::time::Instant::now();
-    let memo = crate::search::memo::brute_force::memo(per_computation, entries);
+    search_with_initial_memo(
+        LogicalMemo::from_roots(&per_computation.roots),
+        per_computation,
+        entries,
+        data,
+        models,
+        time_limit_ms,
+    )
+}
+
+/// Search the memo whose identities were established before Pass 1.
+pub(crate) fn search_with_initial_memo<Id: Clone + std::fmt::Debug>(
+    initial: LogicalMemo,
+    per_computation: &PerComputationCandidates<Id>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    time_limit_ms: Option<u64>,
+) -> MemoSearchResult {
+    // Moving logical interning before Pass 1 must not remove its cost from
+    // the existing memo-search budget (which excludes Pass 1 generation).
+    let now = std::time::Instant::now();
+    let started = now.checked_sub(initial.build_duration).unwrap_or(now);
+    let memo =
+        crate::search::memo::brute_force::memo_from_initial(initial, per_computation, entries);
     let memo_stats =
         crate::search::memo::brute_force::stats(&memo, started.elapsed().as_secs_f64() * 1e3);
     let roots: Vec<QueryRoot> = per_computation
@@ -2232,17 +2257,22 @@ fn search_clusters<Id: Clone + std::fmt::Debug>(
             .iter()
             .map(|&q| per_computation.roots[q].clone())
             .collect();
+        let initial = LogicalMemo::from_roots(&roots);
         let inventory =
-            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots)
+            asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates_with_memo(roots, &initial)
                 .ok()?
                 .without_unsupported_summaries(models.deployment_capabilities);
         let cluster_entries: Vec<QueryWorkloadEntry> =
             queries.iter().map(|&q| entries[q].clone()).collect();
-        workloads.push((inventory, cluster_entries));
+        workloads.push((inventory, cluster_entries, initial));
     }
     let mut loops = Vec::with_capacity(clusters.len());
-    for (queries, (inventory, cluster_entries)) in clusters.iter().zip(&workloads) {
-        let memo = crate::search::memo::brute_force::memo(inventory, cluster_entries);
+    for (queries, (inventory, cluster_entries, initial)) in clusters.iter().zip(&workloads) {
+        let memo = crate::search::memo::brute_force::memo_from_initial(
+            initial.clone(),
+            inventory,
+            cluster_entries,
+        );
         match ClusterLoop::new(
             memo,
             inventory,
@@ -2268,7 +2298,11 @@ fn search_clusters<Id: Clone + std::fmt::Debug>(
                 return Some(Err(SelectionError::NoValidCandidate(
                     rejected
                         .into_iter()
-                        .map(|r| crate::search::legacy::components::renumber(r, queries))
+                        .map(|r| {
+                            crate::search::workload_dependencies::remap_rejection_query_indices(
+                                r, queries,
+                            )
+                        })
                         .collect(),
                 )))
             }
@@ -2453,33 +2487,37 @@ impl<'a, Id: Clone> ClusterLoop<'a, Id> {
     }
 
     /// Offer the selector the warm-start incumbent before round 1: each
-    /// query planned alone by the legacy search, with no sharing between
+    /// query planned alone by the bounded memo baseline, with no sharing between
     /// queries, the plans side by side. It only sets the starting
     /// incumbent: certification still compares the MILP lower bound with
     /// the incumbent, and a time-limited loop has a plan to report. A
-    /// query the legacy search finds no plan for leaves no warm start.
+    /// query the bounded baseline finds no plan for leaves no warm start.
     fn offer_independent_plan(&mut self) {
         const ID: &str = "L0";
         let mut roots = Vec::with_capacity(self.entries.len());
         let mut assignments = Vec::with_capacity(self.entries.len());
         for (q, (_, root)) in self.per_computation.roots.iter().enumerate() {
+            let query_roots = vec![(q, root.clone())];
+            let initial = LogicalMemo::from_roots(&query_roots);
             let Ok(inventory) =
-                asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
-                    vec![(q, root.clone())],
+                asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates_with_memo(
+                    query_roots,
+                    &initial,
                 )
             else {
                 return;
             };
-            let run = crate::search::legacy::stage1_to_stage3::run_stage1_to_stage3_from_pass1(
-                inventory,
+            let inventory =
+                inventory.without_unsupported_summaries(self.models.deployment_capabilities);
+            // Do not call the stage driver here: its default/fallback route can
+            // re-enter legacy search. The bounded baseline has no MILP recursion.
+            let Ok(Some((selected, alone))) = crate::search::memo::incumbent::feasible_plan(
+                initial,
+                &inventory,
                 &self.entries[q..=q],
                 self.data,
                 self.models,
-                crate::Stage1ToStage3Search::default(),
-            );
-            let (Some(selected), Some(Ok(alone))) =
-                (run.stage3_selected, run.stage1_selected.map(|l| l.roots))
-            else {
+            ) else {
                 return;
             };
             roots.extend(alone);

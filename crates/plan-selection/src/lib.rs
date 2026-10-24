@@ -288,7 +288,7 @@ pub use accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
 };
 pub mod cost;
-pub use search::legacy::pane_sharing;
+pub use search::pane_sharing;
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
 pub mod search;
 pub use search as pass;
@@ -1172,8 +1172,9 @@ pub struct MilpReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<MilpClusterReport>,
     /// The cost per second of the warm-start plan: each query planned
-    /// alone, with no sharing between queries; `None` when some query has
-    /// no plan alone.
+    /// alone by the bounded memo baseline, with no sharing between queries.
+    /// This is not necessarily the per-query optimum; `None` when the
+    /// bounded attempts do not find a validated plan for every query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queries_alone_cost: Option<f64>,
 }
