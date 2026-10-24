@@ -22,8 +22,8 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalCandidate;
 
+pub use crate::search::candidate_evaluation::run_stage2_and_stage3;
 use crate::search::legacy::stage1_to_stage3::legacy_search;
-pub use crate::search::legacy::stage1_to_stage3::run_stage2_and_stage3;
 
 /// One whole-workload CandidateLogicalASAPDAG: `choice[t]` picks target
 /// `t`'s candidate, or its fused computation's

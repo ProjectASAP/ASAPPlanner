@@ -12,6 +12,7 @@
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
+pub(crate) mod candidate_evaluation;
 pub(crate) mod legacy;
 pub(crate) mod memo;
 pub(crate) mod milp;
