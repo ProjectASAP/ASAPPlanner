@@ -95,7 +95,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     let source = build_candidate_inventory(&memo, &output_groups, |_| Ok(0.0))
         .map_err(|error| unsupported(&error.to_string()))?;
     let immediate_candidates = source.graph.candidates.len();
-    let configured = enumerate_candidate_configurations(
+    let mut configured = enumerate_candidate_configurations(
         &source,
         &output_queries,
         entries,
@@ -103,7 +103,6 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         models.deployment_capabilities,
     )
     .map_err(|error| unsupported(&error.to_string()))?;
-    let inventory_construction_ms = started.elapsed().as_secs_f64() * 1000.0;
     let context = CandidatePlanningContext {
         original_roots: &roots,
         entries,
@@ -111,6 +110,9 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         models,
         calibration: crate::CalibrationFit::default(),
     };
+    super::candidate_lower_bounds::apply(&mut configured, &context)
+        .map_err(|error| unsupported(&error))?;
+    let inventory_construction_ms = started.elapsed().as_secs_f64() * 1000.0;
     let started = Instant::now();
     let result = optimize_configured_candidates(
         &configured,

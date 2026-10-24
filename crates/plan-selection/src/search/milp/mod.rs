@@ -16,6 +16,7 @@ pub(crate) mod candidate_connections;
 pub(crate) mod candidate_demand;
 
 pub(crate) mod candidate_inventory;
+pub(crate) mod candidate_lower_bounds;
 pub(crate) mod candidate_physical;
 pub(crate) mod candidate_planner;
 pub(crate) mod candidate_reconstruction;
