@@ -157,7 +157,9 @@ For a common evaluation of Q1 and Q2, the selected merge state serves both estim
 
 The cost of a shared plan is obtained from its selected execution nodes, not by summing independently priced query paths. Each node owns its local work and state, excluding its inputs. In the running example, the KLL build owns construction and retained state, while each estimator owns extraction. Two estimators using one build therefore incur one build charge and two extraction charges.
 
-A node may execute repeatedly. Its materialization, consumer schedules, and lifetime determine how frequently its work is performed and how long its state occupies resources. A constant candidate cost is appropriate only when this context is fixed. All terms use a common horizon or consistent rates, so ingestion work and evaluation work can be compared.
+**Charging a selected candidate once does not mean executing it once.** It means assigning its cost to one owner rather than repeating that cost for every consumer. If a shared KLL build is reconstructed every minute, its charge includes every reconstruction over the accounting horizon. For 60 common evaluations of P95 and P99, the build work costs `60 × B`, where `B` is one reconstruction's cost—not `B`, and not `120 × B`.
+
+The candidate's materialization, selected consumer schedules, and lifetime determine its execution count and state occupancy. When those quantities depend on selected connections, its cost must depend on those connections as well; it cannot be a constant fixed before selection. For example, a query-time build serving only a five-minute consumer executes 12 times over 60 aligned minute ticks. Connecting an additional one-minute consumer can increase that count to 60, with sharing at common ticks when legal. The model must derive this demand from the selected graph using execution-count/lifetime variables or consistent finite context configurations. All terms use a common horizon or consistent rates, so ingestion work and evaluation work can be compared.
 
 Some charges belong to a resource shared beyond one computation. If two consumers need 5m and 15m of the same raw source, the required retention horizon is 15m, not 20m. Represent this shared storage as a state group `G_raw[d]` for source `d` and a particular storage scope, with candidates such as `Retain5m` and `Retain15m`. The group describes access to retained raw data; each candidate advertises its coverage, and each consumer connects only to a candidate covering its required horizon. Both consumers can use `Retain15m`, whose storage cost is charged once through candidate selection. Reads and intermediate KLL state retain their own cost owners.
 
@@ -241,11 +243,15 @@ order[c] ∈ [0, N−1]     continuous topological rank of candidate c
 
 #### Objective
 
+For candidates whose execution demand and lifetime are fixed, the objective is:
+
 ```text
 min Σ_c local_cost[c] × x[c]
 ```
 
 Each selected candidate owns its local work and state, excluding producers. This includes shared-resource candidates such as `Retain15m`, so no separate shared-resource charge is needed. Fixed request overhead is omitted from the objective because it is constant for the workload; Section 4 describes its inclusion in reported total cost. Where selected consumers or connections change cost, additional expressions model that dependence rather than treating it as a constant.
+
+Here `local_cost[c]` covers the entire accounting horizon, not just one invocation. If selected connections change demand, the fixed-coefficient expression above is insufficient. The MILP must instead include the resulting execution and retention costs, with constraints tying execution counts and lifetimes to the selected connections. Selecting `x[c] = 1` alone determines neither the number of executions nor their total cost; the same accounting applies to resource limits.
 
 ### 5.2 Constraints
 
