@@ -4,7 +4,8 @@
 //! conjunction of individual-reader restrictions and pairwise interval/phase
 //! compatibility; selected-reader constraints encode those conditions. Complete
 //! Stage 2 validation still checks operator legality and upstream timing.
-//! Non-summary materialization at highest-shared boundaries is not generated.
+//! Potential shared non-summary nodes also receive query materialization; Stage 2
+//! checks highest-shared eligibility on the selected graph, not all possible consumers.
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
@@ -175,6 +176,14 @@ pub(super) fn enumerate_candidate_configurations(
                 ExecutionTiming::IngestionTime,
             ));
         }
+        // Potential reach only generates the choice. Selected-reader cardinality
+        // and Stage 2's highest-shared rule determine actual eligibility.
+        if !summary && queries.len() >= 2 {
+            modes.push((
+                Materialization::MatAtQuery(Medium::Memory),
+                ExecutionTiming::QueryTime,
+            ));
+        }
         // This is the same deployment restriction enforced by PlanSelector's
         // raw_data_violation. Encode it before solving instead of excluding
         // each complete plan that uses an unavailable query-time raw scan.
@@ -197,6 +206,15 @@ pub(super) fn enumerate_candidate_configurations(
                 local_cost: 0.0,
                 producer_requirements: Vec::new(),
             });
+            if materialization == Materialization::MatAtQuery(Medium::Memory) {
+                result.inventory.graph.reader_constraints.push(
+                    ReaderConstraint::MinimumQueryReaders {
+                        candidate: id,
+                        query_outputs: query_outputs.clone(),
+                        minimum: 2,
+                    },
+                );
+            }
             if summary {
                 let eligible = queries
                     .iter()
@@ -224,15 +242,6 @@ pub(super) fn enumerate_candidate_configurations(
                         candidate: id,
                         outputs,
                     });
-                if materialization == Materialization::MatAtQuery(Medium::Memory) {
-                    result.inventory.graph.reader_constraints.push(
-                        ReaderConstraint::MinimumQueryReaders {
-                            candidate: id,
-                            query_outputs: query_outputs.clone(),
-                            minimum: 2,
-                        },
-                    );
-                }
                 // The current Stage 2 rules require common intervals/phases,
                 // whose conflicts are pairwise. No arbitrary set predicate is
                 // approximated by this encoding.

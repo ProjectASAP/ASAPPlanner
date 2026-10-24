@@ -110,11 +110,6 @@ pub(super) fn materialize_selected_candidates(
     if let Some(error) = assignment_error {
         return Err(error);
     }
-    for (id, mode) in materializations.iter().enumerate() {
-        if mode.is_some_and(|mode| mode != Materialization::NotMaterialized) && !seen[id] {
-            return Err(format!("candidate {id} is not an eligible materialization node").into());
-        }
-    }
     let physical = physical.ok_or_else(|| {
         PhysicalCandidateError::RejectedAssignment(
             "selected materialization assignment violates Stage 2 timing or dependency rules"
@@ -124,6 +119,16 @@ pub(super) fn materialize_selected_candidates(
     physical.dag.validate().map_err(|error| error.to_string())?;
     let physical_outputs = ordered_output_references(&physical.roots);
     let identities = paired_node_identities(&rebuilt.outputs, &physical_outputs)?;
+    for (id, mode) in materializations.iter().enumerate() {
+        if mode.is_some_and(|mode| mode != Materialization::NotMaterialized) && !seen[id] {
+            // The decoder already established candidate identity. Stage 2 did
+            // not offer this selected node (e.g. a lower shared non-summary),
+            // so the assignment is infeasible rather than an adapter failure.
+            return Err(PhysicalCandidateError::RejectedAssignment(format!(
+                "candidate {id} is not an eligible materialization node in the selected graph"
+            )));
+        }
+    }
     let nodes_by_candidate = rebuilt
         .nodes_by_candidate
         .into_iter()
@@ -287,6 +292,152 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    fn shared_non_summary_fixture(
+        with_shared_parent: bool,
+    ) -> (CandidateInventory, Vec<QueryRoot>, Vec<QueryWorkloadEntry>) {
+        use super::super::candidate_connections::{
+            CandidateDependencyGraph, PhysicalCandidate, PhysicalCandidateId, ProducerRequirement,
+            QueryRootCandidates,
+        };
+        let logical = lower_promql("latency", AccuracyTarget::exact());
+        let scan = OperatorNode::reachable(&logical)
+            .into_iter()
+            .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .unwrap();
+        let mut templates = vec![Some(Rc::clone(&scan))];
+        let mut candidates = vec![PhysicalCandidate {
+            group: MemoGroupId(0),
+            local_cost: 0.0,
+            producer_requirements: Vec::new(),
+        }];
+        if with_shared_parent {
+            let range =
+                OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
+                    range: std::time::Duration::from_secs(60),
+                    kind: asap_types::ir::TimeRangeKind::Range,
+                    child: scan,
+                }))
+                .unwrap();
+            templates.push(Some(range));
+            candidates.push(PhysicalCandidate {
+                group: MemoGroupId(1),
+                local_cost: 0.0,
+                producer_requirements: vec![ProducerRequirement {
+                    compatible_producers: vec![PhysicalCandidateId(0)],
+                }],
+            });
+        }
+        let root_id = templates.len() - 1;
+        let roots = vec![QueryRoot::Operator(Rc::clone(templates[root_id].as_ref().unwrap())); 2];
+        let inventory = CandidateInventory {
+            graph: CandidateDependencyGraph {
+                candidates,
+                query_roots: vec![
+                    QueryRootCandidates {
+                        compatible_candidates: vec![PhysicalCandidateId(root_id)]
+                    };
+                    2
+                ],
+                ..Default::default()
+            },
+            templates,
+            group_candidates: Vec::new(),
+        };
+        let entries = (0..2)
+            .map(|_| QueryWorkloadEntry {
+                query: Query("latency".into()),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyTarget::exact(),
+                    max_latency_ms: None,
+                },
+                predictability: Predictability::AdHoc,
+                recurrence: QueryRecurrence::Unknown,
+                range_evaluation: None,
+            })
+            .collect();
+        (inventory, roots, entries)
+    }
+
+    // A real shared scan can be built once per evaluation for two distinct queries.
+    #[test]
+    fn shared_scan_enumerates_and_executes_query_materialization() {
+        use super::super::candidate_configurations::enumerate_candidate_configurations;
+        let (source, roots, entries) = shared_non_summary_fixture(false);
+        let data = DataWorkload::default();
+        let deployment = DeploymentCapabilities::default();
+        let mut configured =
+            enumerate_candidate_configurations(&source, &[0, 1], &entries, &data, &deployment)
+                .unwrap();
+        let mode = Materialization::MatAtQuery(Medium::Memory);
+        assert!(configured
+            .configurations
+            .iter()
+            .any(|configuration| configuration.materialization == mode));
+        for (candidate, configuration) in configured
+            .inventory
+            .graph
+            .candidates
+            .iter_mut()
+            .zip(&configured.configurations)
+        {
+            candidate.local_cost = if configuration.materialization == mode {
+                0.0
+            } else {
+                1.0
+            };
+        }
+        let selected = select_candidates(&configured.inventory.graph)
+            .unwrap()
+            .unwrap();
+        let mut assignments = vec![None; configured.configurations.len()];
+        for id in &selected.selected_candidates {
+            assignments[id.0] = Some(configured.configurations[id.0].materialization);
+        }
+        let physical = materialize_selected_candidates(
+            &configured.inventory,
+            &selected,
+            &assignments,
+            &roots,
+            &entries,
+            &data,
+            &deployment,
+        )
+        .unwrap();
+        assert_eq!(physical.physical.dag.nodes.len(), 1);
+        assert_eq!(physical.physical.dag.nodes[0].materialization, mode);
+        let same_query =
+            enumerate_candidate_configurations(&source, &[0, 0], &entries[..1], &data, &deployment)
+                .unwrap();
+        assert!(!same_query
+            .configurations
+            .iter()
+            .any(|configuration| configuration.materialization == mode));
+    }
+
+    // A shared scan below an already shared range is not a highest shared node;
+    // reject that selected assignment using Stage 2's exact eligibility result.
+    #[test]
+    fn query_materialization_below_shared_parent_is_rejected_assignment() {
+        let (inventory, roots, entries) = shared_non_summary_fixture(true);
+        let selected = select_candidates(&inventory.graph).unwrap().unwrap();
+        let modes = vec![
+            Some(Materialization::MatAtQuery(Medium::Memory)),
+            Some(Materialization::NotMaterialized),
+        ];
+        assert!(matches!(
+            materialize_selected_candidates(
+                &inventory,
+                &selected,
+                &modes,
+                &roots,
+                &entries,
+                &DataWorkload::default(),
+                &DeploymentCapabilities::default()
+            ),
+            Err(PhysicalCandidateError::RejectedAssignment(_))
+        ));
     }
 
     // Exact selected modes survive Stage 2 and retain one producer identity.
