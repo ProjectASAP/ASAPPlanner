@@ -840,7 +840,10 @@ mod tests {
     fn nongridded_reader_does_not_veto_another_readers_ingestion_panes() {
         use crate::search::milp::model::select_candidates;
         use asap_types::ir::properties::ExecutionTiming;
-        let (_, original, mut entries, data) = fixture();
+        let (_, original, mut entries, mut data) = fixture();
+        for facts in data.sources.values_mut() {
+            facts.values_non_negative = true;
+        }
         let roots = vec![original[0].clone(), original[0].clone()];
         let identified: Vec<_> = roots.iter().cloned().enumerate().collect();
         let initial = LogicalMemo::from_roots(&identified);

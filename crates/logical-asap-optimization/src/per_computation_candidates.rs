@@ -1359,6 +1359,45 @@ pub fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
     }
 }
 
+/// Bind known statistics in existing contracts, then recover compositions
+/// that previously required constant child bounds. Physical state contracts,
+/// schemas, timing, materialization, and sharing are preserved. This does not
+/// infer facts: `bind` must leave unsupported statistics unknown.
+pub fn bind_guarantees(
+    root: &QueryRoot,
+    bind: &dyn Fn(&AccuracyGuarantee) -> AccuracyGuarantee,
+) -> Option<AccuracyGuarantee> {
+    fn walk(
+        node: &Rc<OperatorNode>,
+        bind: &dyn Fn(&AccuracyGuarantee) -> AccuracyGuarantee,
+        memo: &mut Memo,
+    ) -> Rc<OperatorNode> {
+        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+            return done.clone();
+        }
+        let operator = node.operator.map_children(|child| walk(child, bind, memo));
+        let mut rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
+            .with_timing(node.timing)
+            .with_materialization(node.materialization);
+        rebuilt.guarantee = node
+            .guarantee
+            .as_ref()
+            .map(bind)
+            .or_else(|| composed_guarantee(&rebuilt).as_ref().map(bind));
+        let rebuilt = Rc::new(rebuilt);
+        memo.insert(Rc::as_ptr(node), rebuilt.clone());
+        rebuilt
+    }
+    let mut memo = HashMap::new();
+    let bound = match root {
+        QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, bind, &mut memo)),
+        QueryRoot::Scalar(expr) => {
+            QueryRoot::Scalar(expr.map_operator_refs(&mut |node| walk(node, bind, &mut memo)))
+        }
+    };
+    root_guarantee(&bound)
+}
+
 /// `roots` with every sketch summary state rebuilt with the parameters
 /// `resize` gives it (same algorithm; `None` keeps them), and every node
 /// above one rebuilt over its new inputs with its guarantee composed again
@@ -1689,6 +1728,7 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
                     None => source_distinct_guarantee(family, query, input)
                         .or_else(|| local_guarantee(family, query))?,
                 };
+                let local = interpolation_guarantee(family, update, query, input, local)?;
                 if exact_inputs(summary_input) {
                     Some(local)
                 } else if exact_filter(summary_input) && !groups_by_estimate(reduction, input) {
@@ -1962,6 +2002,12 @@ fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<Propaga
 /// functions) ends it. Only the sign of the values is read from it.
 fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<String> {
     match &node.operator {
+        Operator::NonASAP(NonASAPOp::TimeRange { child, .. }) => {
+            estimates_raw_data_samples_of(child)
+        }
+        Operator::NonASAP(NonASAPOp::TimeShift { child, shift }) if shift.at.is_none() => {
+            estimates_raw_data_samples_of(child)
+        }
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap()? {
             ASAPOp::SummaryAgg {
                 family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
@@ -2804,6 +2850,45 @@ fn estimate_has_bound(
     );
     !matches!(query, SketchStatistic::TopK { .. })
         && !(count_min && !matches!(update.weight_domain, WeightDomain::NonNegative { .. }))
+}
+
+/// DDS quantiles use linear interpolation of neighbouring representatives.
+/// Relative error survives that convex combination only without cancellation.
+/// Endpoints select an extremum; interior quantiles need a sign proof. Keep a
+/// raw metric's requirement symbolic so Stage 3 can bind declared source facts.
+fn interpolation_guarantee(
+    family: &FieldDataType,
+    update: &SummaryUpdate,
+    query: &SketchStatistic,
+    input: &OperatorNode,
+    mut guarantee: AccuracyGuarantee,
+) -> Option<AccuracyGuarantee> {
+    let interpolates = matches!(family, FieldDataType::Sketch(kind, _)
+        if *kind.algorithm() == SketchAlgorithm::DDSketch)
+        && matches!(query, SketchStatistic::Quantile { q } if *q > 0.0 && *q < 1.0);
+    if !interpolates || matches!(update.weight_domain, WeightDomain::NonNegative { .. }) {
+        return Some(guarantee);
+    }
+    let metric = match &update.weight_domain {
+        WeightDomain::RawDataSamplesOfMetric { metric } => metric.clone(),
+        _ if matches!(
+            update.weight,
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
+        ) =>
+        {
+            estimates_raw_data_samples_of(input)?
+        }
+        _ => return None,
+    };
+    guarantee.spec.error = asap_types::ir::properties::BoundExpr::Product {
+        factors: vec![
+            guarantee.spec.error,
+            asap_types::ir::properties::BoundExpr::Unknown {
+                statistic: raw_data_samples_sign_statistic(&metric),
+            },
+        ],
+    };
+    Some(guarantee)
 }
 
 /// A Count-Min estimate whose weights carry the open requirement that they

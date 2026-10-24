@@ -2,7 +2,7 @@
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::physical_export::physical_asap_dag;
-use asap_integration_tests::planning::logical_candidates;
+use asap_integration_tests::planning::{explicit_local_candidates, explicit_summary_candidate};
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::ColumnRef;
@@ -10,11 +10,11 @@ use asap_types::ir::schema::{ExactKind, FieldDataType, SummaryInputExpr, Summary
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
 
-/// The first logical candidate (in enumeration order) with an ASAP operator,
-/// else the exact one.
+/// The first explicitly generated local-rule fixture containing an ASAP
+/// operator, or its exact computation when no summary is applicable.
 fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let pre = lower_promql(query, accuracy.clone()).unwrap();
-    let candidates = logical_candidates(pre, accuracy);
+    let candidates = explicit_local_candidates(pre);
     candidates
         .iter()
         .find(|node| node.contains_asap())
@@ -114,16 +114,31 @@ fn interpolated_quantile(sketch: &asap_sketchlib::DdSketch, q: f64) -> f64 {
 /// A finite, nonzero approximate denominator does not certify a ratio bound.
 #[test]
 fn checked_ratio_must_not_certify_cross_zero_interpolation() {
-    let node = plan(
+    let root = lower_promql(
         "quantile_over_time(0.5, data[5m]) / quantile_over_time(0.9, data[5m])",
         AccuracyTarget::max_error(0.01),
-    );
+    )
+    .unwrap();
+    let node = explicit_summary_candidate(root, asap_types::ir::schema::SketchAlgorithm::DDSketch);
+    assert_eq!(OperatorNode::reachable(&node).iter().filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind.algorithm() == asap_types::ir::schema::SketchAlgorithm::DDSketch)).count(), 2,
+        "the signed interpolation counterexample requires two explicit DDSketch builds");
     assert!(
         matches!(node.operator, Operator::NonASAP(NonASAPOp::BinaryOp { .. }))
             && node.contains_asap(),
         "direct quantile ratio should remain an available candidate"
     );
-    assert!(node.guarantee.is_none());
+    assert!(node.guarantee.is_none(), "{:?}", node.guarantee);
+    use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
+    use asap_logical_asap_optimization::per_computation_candidates::bind_guarantees;
+    let root = asap_types::ir::QueryRoot::Operator(node.clone());
+    assert!(bind_guarantees(&root, &Clone::clone).is_none());
+    let proven = bind_guarantees(&root, &|guarantee| {
+        guarantee.bind(&|statistic| {
+            (statistic == raw_data_samples_sign_statistic("data")).then_some(1.0)
+        })
+    })
+    .expect("a declared nonnegative source recovers the ratio contract");
+    assert!(proven.spec.error.evaluate().unwrap().is_finite());
     physical_asap_dag(&node);
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.
@@ -157,6 +172,41 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     );
 }
 
+/// Interpolated DDS quantiles require a source-domain proof; extrema do not
+/// interpolate, and a computed value must not inherit its source's sign.
+#[test]
+fn ddsketch_interpolation_requires_a_nonnegative_domain() {
+    use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
+    use asap_logical_asap_optimization::per_computation_candidates::bind_guarantees;
+    use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
+    for (query, endpoint, raw_samples) in [
+        ("quantile_over_time(0, data[5m])", true, true),
+        ("quantile_over_time(1, data[5m])", true, true),
+        ("quantile_over_time(0.5, data[5m])", false, true),
+        ("quantile(0.5, data - 100)", false, false),
+    ] {
+        let node = explicit_summary_candidate(
+            lower_promql(query, AccuracyTarget::max_error(0.01)).unwrap(),
+            SketchAlgorithm::DDSketch,
+        );
+        let bound = node
+            .guarantee
+            .as_ref()
+            .and_then(|g| g.spec.error.evaluate());
+        assert_eq!(bound.is_some(), endpoint, "{query}");
+        let proven = bind_guarantees(&QueryRoot::Operator(node), &|guarantee| {
+            guarantee.bind(&|statistic| {
+                (statistic == raw_data_samples_sign_statistic("data")).then_some(1.0)
+            })
+        });
+        assert_eq!(
+            proven.and_then(|g| g.spec.error.evaluate()).is_some(),
+            raw_samples,
+            "{query}"
+        );
+    }
+}
+
 /// Rewriting the inner average (its own target, as sum and count
 /// accumulators) must not invalidate an otherwise usable outer sketch.
 #[test]
@@ -167,7 +217,7 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
     ] {
         let accuracy = AccuracyTarget::max_error(0.01);
         let pre = lower_promql(query, accuracy.clone()).unwrap();
-        let node = logical_candidates(pre, accuracy)
+        let node = explicit_local_candidates(pre)
             .into_iter()
             .find(|node| {
                 OperatorNode::reachable(node).iter().any(|n| {
@@ -196,7 +246,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
         };
         let accuracy = AccuracyTarget::max_error(0.01);
         let pre = lower_promql(query, accuracy.clone()).unwrap();
-        let candidates = logical_candidates(pre, accuracy);
+        let candidates = explicit_local_candidates(pre);
         // The heap state each summarized candidate builds.
         let heap = |node: &Rc<OperatorNode>| {
             OperatorNode::reachable(node).into_iter().find(|n| {

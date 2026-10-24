@@ -800,6 +800,7 @@ mod tests {
                 "latency".into(),
                 SourceFacts {
                     series_count: Some(2),
+                    values_non_negative: true,
                     ..Default::default()
                 },
             )]

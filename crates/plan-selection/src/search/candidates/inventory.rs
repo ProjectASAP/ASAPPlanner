@@ -1277,7 +1277,6 @@ mod tests {
     fn ratio_accuracy_is_validated_after_selecting_concrete_budget_shares() {
         use crate::{CalibrationFit, PlanSelector, PlanningModels, SelectionError};
         use asap_logical_asap_optimization::accuracy::satisfies;
-        use asap_logical_asap_optimization::per_computation_candidates::root_guarantee;
         use asap_logical_asap_optimization::test_support::entry_with;
         use asap_physical_asap_optimization::optimize_physical_asap_chosen;
         use asap_types::ir::properties::AccuracyMetric;
@@ -1315,6 +1314,7 @@ mod tests {
                 "m".into(),
                 SourceFacts {
                     series_count: Some(1),
+                    values_non_negative: true,
                     ..Default::default()
                 },
             )]
@@ -1354,8 +1354,8 @@ mod tests {
                 reconstruct_candidate_outputs(&inventory.graph, &selected, &inventory.templates)
                     .unwrap();
             let roots = vec![QueryRoot::Operator(Rc::clone(&outputs[0]))];
-            let guarantee =
-                root_guarantee(&roots[0]).expect("relative ratio has a composed guarantee");
+            let guarantee = crate::bound_root_guarantee(&roots[0], Some(1), &data, &models)
+                .expect("proven nonnegative relative ratio has a composed guarantee");
             assert_eq!(
                 satisfies(&guarantee, &target),
                 valid,

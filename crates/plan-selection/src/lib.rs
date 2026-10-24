@@ -2667,12 +2667,19 @@ fn bound_root_guarantee(
     data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> Option<AccuracyGuarantee> {
-    let guarantee = root_guarantee(root)?;
     let domains = operand_domain_bounds(root, series, data, models);
-    Some(bind_statistics(&guarantee, &|statistic| {
-        workload_statistic(statistic, series, data)
-            .or_else(|| domains.get(statistic).copied().flatten())
-    }))
+    let bind = |guarantee: &AccuracyGuarantee| {
+        bind_statistics(guarantee, &|statistic| {
+            workload_statistic(statistic, series, data)
+                .or_else(|| domains.get(statistic).copied().flatten())
+        })
+    };
+    match root_guarantee(root) {
+        Some(guarantee) => Some(bind(&guarantee)),
+        None => {
+            asap_logical_asap_optimization::per_computation_candidates::bind_guarantees(root, &bind)
+        }
+    }
 }
 
 /// `guarantee` with the statistics `value` supplies bound. A sign gate
@@ -5245,6 +5252,15 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// Explicit domain assumption needed for interpolated DDS quantiles.
+    fn non_negative_data() -> DataWorkload {
+        let mut data = data();
+        for facts in data.sources.values_mut() {
+            facts.values_non_negative = true;
+        }
+        data
     }
 
     /// `data` with each of `types`' metrics declared of its type.
@@ -7854,7 +7870,8 @@ mod tests {
     /// samples are non-negative, the DDSketch candidate of
     /// `avg by (region) (quantile_over_time(0.99, x[100s]))` (and of its `sum`)
     /// is valid and accepted with a relative-error guarantee; without the
-    /// declaration it is rejected. `max` is valid either way (issue #772).
+    /// declaration it is rejected. Even `max` needs the primitive interpolated
+    /// quantile contract, which can fail across zero.
     #[test]
     fn a_non_negative_gauge_carries_a_ddsketch_relative_bound_through_avg() {
         let target = AccuracyTarget::max_error(0.01)
@@ -7864,7 +7881,7 @@ mod tests {
         for (outer, window, needs_sign) in [
             ("avg", "x[100s]", true),
             ("sum", "x[100s]", true),
-            ("max", "x[100s]", false),
+            ("max", "x[100s]", true),
             ("avg", "x[100s] offset 1h", true),
         ] {
             let query = format!("{outer} by (region) (quantile_over_time(0.99, {window}))");
@@ -8131,14 +8148,24 @@ mod tests {
             "max by (job) (quantile_over_time(0.99, m[1m]))",
             "2 * max by (job) (quantile_over_time(0.99, m[1m]))",
         ] {
-            let (candidates, selection) = run(query, &target, &data(), PlanningModels::builtin());
+            let (candidates, selection) = run(
+                query,
+                &target,
+                &non_negative_data(),
+                PlanningModels::builtin(),
+            );
             let ddsketch: Vec<_> = candidates
                 .iter()
                 .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
                 .collect();
             assert!(!ddsketch.is_empty(), "{query}");
             for candidate in ddsketch {
-                let g = output_guarantee(candidate).expect(query);
+                let g = bound_of(
+                    &candidate.roots[0],
+                    &non_negative_data(),
+                    &PlanningModels::builtin(),
+                )
+                .expect(query);
                 assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative, "{query}");
                 assert!(g.spec.error.evaluate().unwrap() <= 0.01, "{query}");
                 assert!(selection.costs.contains_key(&candidate.id), "{query}");
@@ -8147,7 +8174,15 @@ mod tests {
                 .iter()
                 .filter(|c| reads_only(c, SketchAlgorithm::Kll))
             {
-                assert_eq!(output_guarantee(candidate), None, "{query}");
+                assert_eq!(
+                    bound_of(
+                        &candidate.roots[0],
+                        &non_negative_data(),
+                        &PlanningModels::builtin()
+                    ),
+                    None,
+                    "{query}"
+                );
             }
         }
     }
@@ -8169,14 +8204,23 @@ mod tests {
             (format!("{q} > 5"), false),
             (format!("{q} > bool 5"), false),
         ] {
-            let (candidates, selection) = run(&query, &target, &data(), PlanningModels::builtin());
+            let (candidates, selection) = run(
+                &query,
+                &target,
+                &non_negative_data(),
+                PlanningModels::builtin(),
+            );
             let ddsketch: Vec<_> = candidates
                 .iter()
                 .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
                 .collect();
             assert!(!ddsketch.is_empty(), "{query}");
             for candidate in ddsketch {
-                let g = output_guarantee(candidate);
+                let g = bound_of(
+                    &candidate.roots[0],
+                    &non_negative_data(),
+                    &PlanningModels::builtin(),
+                );
                 if kept {
                     let g = g.expect(&query);
                     assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative, "{query}");
@@ -8202,7 +8246,7 @@ mod tests {
         let (candidates, selection) = run(
             &format!("max_over_time({q}[10m:1m])"),
             &target,
-            &data(),
+            &non_negative_data(),
             PlanningModels::builtin(),
         );
         let ddsketch: Vec<_> = candidates
@@ -8211,7 +8255,12 @@ mod tests {
             .collect();
         assert!(!ddsketch.is_empty());
         for candidate in ddsketch {
-            let g = output_guarantee(candidate).expect("a guarantee");
+            let g = bound_of(
+                &candidate.roots[0],
+                &non_negative_data(),
+                &PlanningModels::builtin(),
+            )
+            .expect("a guarantee");
             assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative);
             assert!(g.spec.error.evaluate().unwrap() <= 0.01);
             let ProbabilityExpr::Scaled { count, .. } = &g.spec.failure_probability else {
@@ -8223,14 +8272,21 @@ mod tests {
         let (candidates, _) = run(
             &format!("max_over_time({q}[10m:])"),
             &target,
-            &data(),
+            &non_negative_data(),
             PlanningModels::builtin(),
         );
         for candidate in candidates
             .iter()
             .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
         {
-            assert_eq!(output_guarantee(candidate), None);
+            assert_eq!(
+                bound_of(
+                    &candidate.roots[0],
+                    &non_negative_data(),
+                    &PlanningModels::builtin()
+                ),
+                None
+            );
         }
     }
 
@@ -8326,11 +8382,19 @@ mod tests {
                 .map(|c| c.id.clone())
                 .collect()
         };
-        let (candidates, with) = run(query, &target, &data(), PlanningModels::builtin());
+        let (candidates, with) = run(
+            query,
+            &target,
+            &non_negative_data(),
+            PlanningModels::builtin(),
+        );
         let ids = ddsketch(&candidates);
         assert!(!ids.is_empty());
         assert!(ids.iter().all(|id| with.costs.contains_key(id)));
-        let unknown = with_series(None);
+        let mut unknown = with_series(None);
+        for facts in unknown.sources.values_mut() {
+            facts.values_non_negative = true;
+        }
         // Evaluate the same physical candidates: IDs from independent timed
         // searches do not identify the same implementation or connections.
         let without = select_plan(
@@ -8366,8 +8430,13 @@ mod tests {
         let planned = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
         let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
-        let (candidates, selection) =
-            run_selecting(query, &planned, &target, &data(), PlanningModels::builtin());
+        let (candidates, selection) = run_selecting(
+            query,
+            &planned,
+            &target,
+            &non_negative_data(),
+            PlanningModels::builtin(),
+        );
         let ids: Vec<_> = candidates
             .iter()
             .filter(|c| sketches(c) == [SketchAlgorithm::DDSketch, SketchAlgorithm::DDSketch])
@@ -8558,8 +8627,13 @@ mod tests {
         let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
         let query = "(quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])) \
                      / max_over_time(m[1m])";
-        let (candidates, selection) =
-            run_selecting(query, &planned, &target, &data(), PlanningModels::builtin());
+        let (candidates, selection) = run_selecting(
+            query,
+            &planned,
+            &target,
+            &non_negative_data(),
+            PlanningModels::builtin(),
+        );
         let ids: Vec<_> = candidates
             .iter()
             .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
