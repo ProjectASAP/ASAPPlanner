@@ -12,7 +12,7 @@ use asap_executor::physical_planner::{compile, promql_rows, CompiledPhysicalDAG,
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::selected_dag;
+use asap_integration_tests::planning::{explicit_local_candidates, explicit_summary_candidate};
 use asap_logical_asap_optimization::asap_aware_cse::{
     pane_candidates, window_composition_pass2_candidates,
     window_composition_shared_chain_candidates,
@@ -32,11 +32,24 @@ const EVALUATION_MS: i64 = 300_000;
 const PANE_MS: i64 = 60_000;
 const PANES: i64 = 5;
 
-/// The selected single-build plan for a 5-minute per-series PromQL query.
+/// An explicit supported single-build fixture for the pane merge rules.
 fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy.clone()).unwrap();
     let root = promql_rows::with_series_identity(&root).unwrap();
-    selected_dag(root, accuracy)
+    if accuracy.is_exact() {
+        explicit_local_candidates(root)
+            .into_iter()
+            .find(|candidate| {
+                OperatorNode::reachable(candidate)
+                    .iter()
+                    .any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
+            })
+            .expect("an exact accumulator fixture")
+    } else {
+        // Pin DDS so the actual positive-sample interpolation and pane merge
+        // checks do not depend on the optimizer's preferred implementation.
+        explicit_summary_candidate(root, asap_types::ir::schema::SketchAlgorithm::DDSketch)
+    }
 }
 
 /// The per-entity `SummaryAgg` of `root` over its raw `TimeRange`.
