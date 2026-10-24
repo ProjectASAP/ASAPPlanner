@@ -9,3 +9,6 @@ pub(crate) mod cuts;
 pub(crate) mod decode;
 pub(crate) mod model;
 pub(crate) mod report;
+
+// Candidate-connection core being integrated into the staged memo pipeline.
+pub(crate) mod candidate_connections;
