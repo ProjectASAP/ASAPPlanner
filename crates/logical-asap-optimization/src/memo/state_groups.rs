@@ -34,6 +34,8 @@ pub enum StateGroupExpansionError {
     AlreadyExpanded,
     #[error("a previously discovered reader no longer exposes its summary boundary")]
     InvalidReaderBoundary,
+    #[error("scan-label candidate expansion: {0}")]
+    ScanLabelWidening(String),
 }
 
 struct BuildReaders {
@@ -60,6 +62,7 @@ pub fn expand_concrete_summary_state_groups(
     if memo.topological_order().is_none() {
         return Err(StateGroupExpansionError::CyclicDependencies);
     }
+    super::scan_label_candidates::add_scan_label_candidates(&mut memo)?;
     let mut builds: Vec<BuildReaders> = Vec::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for (index, candidate) in candidates.iter().enumerate() {
@@ -231,13 +234,13 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
     Ok(())
 }
 
-fn simple_build(
+pub(super) fn simple_build(
     memo: &CandidateMemo,
     candidate: &ImplementationCandidate,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     if !matches!(
         candidate.origin,
-        CandidateOrigin::Pass1 | CandidateOrigin::Panes
+        CandidateOrigin::Pass1 | CandidateOrigin::Panes | CandidateOrigin::WidenedScans
     ) || candidate.implements.len() != 1
         || !candidate.coupling_sites.is_empty()
         || !candidate.requires_sites.is_empty()
@@ -285,7 +288,7 @@ fn simple_build(
     Some((build, children))
 }
 
-fn boundary_groups(
+pub(super) fn boundary_groups(
     node: &Rc<OperatorNode>,
     boundaries: &HashMap<*const OperatorNode, MemoGroupId>,
 ) -> Vec<MemoGroupId> {
@@ -404,17 +407,25 @@ mod tests {
     use asap_types::ir::QueryRoot;
 
     fn workload(queries: &[(&str, f64)]) -> CandidateMemo {
+        workload_with_identity(queries, false)
+    }
+
+    fn workload_with_identity(queries: &[(&str, f64)], identity: bool) -> CandidateMemo {
         let roots: Vec<_> = queries
             .iter()
             .enumerate()
             .map(|(id, (query, error))| {
-                (
-                    id,
-                    QueryRoot::Operator(crate::test_support::lower_promql(
-                        query,
-                        AccuracyTarget::max_error(*error).failure_probability(0.001),
-                    )),
-                )
+                let root = crate::test_support::lower_promql(
+                    query,
+                    AccuracyTarget::max_error(*error).failure_probability(0.001),
+                );
+                let root = if identity {
+                    asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
+                        .unwrap()
+                } else {
+                    root
+                };
+                (id, QueryRoot::Operator(root))
             })
             .collect();
         let initial = LogicalMemo::from_roots(&roots);
@@ -540,6 +551,180 @@ mod tests {
             }
         }
         memo
+    }
+
+    // Different label projections can consume one wider pane state through
+    // typed reader projections; no original scan needs to contain the union.
+    #[test]
+    fn disjoint_scan_labels_share_a_union_pane_state_with_typed_readers() {
+        let original = with_local_panes(
+            workload(&[
+                ("avg by (job) (quantile_over_time(0.95, latency[5m]))", 0.01),
+                (
+                    "avg by (region) (quantile_over_time(0.99, latency[5m]))",
+                    0.01,
+                ),
+            ]),
+            &[60_000, 60_000],
+        );
+        assert!(!original.groups.iter().any(|group| matches!(
+            group.node.non_asap(),
+            Some(NonASAPOp::Scan { .. })
+        ) && group
+            .node
+            .schema
+            .fields
+            .iter()
+            .any(|field| field.name == "job")
+            && group
+                .node
+                .schema
+                .fields
+                .iter()
+                .any(|field| field.name == "region")));
+        let local_nodes: Vec<_> = original
+            .candidates
+            .iter()
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .map(|candidate| Rc::clone(&candidate.node))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let shared = expanded
+            .state_groups
+            .iter()
+            .find(|id| {
+                let group = &expanded.memo.groups[id.0 as usize];
+                matches!(group.node.asap(), Some(ASAPOp::PaneChain { .. }))
+                    && group.queries == vec![0, 1]
+                    && ["job", "region"].iter().all(|name| {
+                        group
+                            .node
+                            .schema
+                            .fields
+                            .iter()
+                            .any(|field| field.name == *name)
+                    })
+            })
+            .expect("one state over union labels");
+        let state = &expanded.memo.groups[shared.0 as usize];
+        assert!(state.parents.len() >= 2);
+        for parent in &state.parents {
+            let reader = expanded.memo.candidates[parent.0 as usize]
+                .iter()
+                .find(|candidate| candidate.children.contains(shared))
+                .unwrap();
+            assert_eq!(
+                reader.node.schema.fields,
+                expanded.memo.groups[parent.0 as usize].node.schema.fields
+            );
+            assert!(OperatorNode::reachable(&reader.node)
+                .iter()
+                .any(|node| matches!(node.non_asap(), Some(NonASAPOp::Project { .. }))));
+            reader.node.validate_structure().unwrap();
+        }
+        for (group, locals) in local_nodes.into_iter().enumerate() {
+            assert!(locals
+                .iter()
+                .zip(&expanded.memo.candidates[group])
+                .all(|(before, after)| Rc::ptr_eq(before, &after.node)));
+        }
+        assert!(expanded.memo.topological_order().is_some());
+        assert!(state
+            .children
+            .iter()
+            .all(|child| expanded.memo.groups[child.0 as usize].queries == vec![0, 1]));
+    }
+
+    // Widening shifts identity's position but must retain its full typed field
+    // and remap the source's unique key rather than treating it as a plain label.
+    #[test]
+    fn widened_pane_inputs_preserve_series_identity_and_keys() {
+        let memo = with_local_panes(
+            workload_with_identity(
+                &[
+                    ("avg by (job) (quantile_over_time(0.95, latency[5m]))", 0.01),
+                    (
+                        "avg by (region) (quantile_over_time(0.99, latency[5m]))",
+                        0.01,
+                    ),
+                ],
+                true,
+            ),
+            &[60_000, 60_000],
+        );
+        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        let state = expanded
+            .state_groups
+            .iter()
+            .map(|id| &expanded.memo.groups[id.0 as usize])
+            .find(|group| {
+                matches!(group.node.asap(), Some(ASAPOp::PaneChain { .. }))
+                    && group.queries == vec![0, 1]
+                    && ["job", "region"].iter().all(|name| {
+                        group
+                            .node
+                            .schema
+                            .fields
+                            .iter()
+                            .any(|field| field.name == *name)
+                    })
+            })
+            .expect("identity-carrying union pane state");
+        let input = state.node.children()[0];
+        assert!(input.schema.has_promql_series_identity());
+        let identity = input
+            .schema
+            .column_id(asap_types::ir::schema::PROMQL_SERIES_IDENTITY)
+            .unwrap();
+        let time = input.schema.time_index.unwrap();
+        assert!(input
+            .schema
+            .unique_keys
+            .iter()
+            .any(|key| key.contains(&identity) && key.contains(&time)));
+        for parent in &state.parents {
+            let reader = expanded.memo.candidates[parent.0 as usize]
+                .iter()
+                .find(|candidate| {
+                    candidate.children.contains(&MemoGroupId(
+                        expanded
+                            .memo
+                            .groups
+                            .iter()
+                            .position(|group| Rc::ptr_eq(&group.node, &state.node))
+                            .unwrap() as u32,
+                    ))
+                })
+                .unwrap();
+            assert_eq!(
+                reader.node.schema,
+                expanded.memo.groups[parent.0 as usize].node.schema
+            );
+        }
+    }
+
+    // Label widening must not erase source predicates in order to create reuse.
+    #[test]
+    fn scan_label_widening_keeps_different_filters_separate() {
+        let original = with_local_panes(
+            workload(&[
+                (
+                    "avg by (job) (quantile_over_time(0.95, latency{env=\"a\"}[5m]))",
+                    0.01,
+                ),
+                (
+                    "avg by (region) (quantile_over_time(0.99, latency{env=\"b\"}[5m]))",
+                    0.01,
+                ),
+            ]),
+            &[60_000, 60_000],
+        );
+        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        assert!(expanded.state_groups.is_empty());
     }
 
     // Real pane rewrites expose one identical chain to distinct quantile readers.

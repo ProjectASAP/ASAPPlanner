@@ -474,6 +474,174 @@ mod tests {
         assert_eq!(physical.roots.len(), 2);
     }
 
+    // Union-label pane sharing survives typed connection selection and real
+    // Stage 2, while each query receives only its original output columns.
+    #[test]
+    fn widened_label_readers_materialize_one_shared_pane_chain() {
+        use super::super::candidate_configurations::enumerate_candidate_configurations;
+        use super::super::candidate_physical::materialize_selected_candidates;
+        use asap_logical_asap_optimization::test_support::entry_with;
+        use asap_types::workload::{
+            DataArrival, DataWorkload, Predictability, QueryRecurrence, RepeatedDemand,
+            RepetitionInterval, SourceFacts,
+        };
+        let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
+        let roots: Vec<_> = [
+            "avg by (job) (quantile_over_time(0.95, latency[5m]))",
+            "avg by (region) (quantile_over_time(0.99, latency[5m]))",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+        .collect();
+        let initial = LogicalMemo::from_roots(&roots);
+        let outputs: Vec<_> = (0..roots.len())
+            .map(|query| {
+                MemoGroupId(
+                    initial
+                        .groups
+                        .iter()
+                        .position(|group| group.roots_of.contains(&query))
+                        .unwrap() as u32,
+                )
+            })
+            .collect();
+        let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+        let mut memo = try_populate_pass1(initial, &generated).unwrap();
+        let entries: Vec<_> = (0..roots.len())
+            .map(|_| {
+                let mut entry = entry_with(
+                    target.clone(),
+                    QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
+                        1000,
+                    ))),
+                );
+                entry.predictability = Predictability::Predictable { known_at: None };
+                entry
+            })
+            .collect();
+        crate::search::memo::rules::windows::add_local_window_composition(&mut memo, &entries);
+        let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
+        let source = build_candidate_inventory(&memo, &outputs, |_| Ok(0.0)).unwrap();
+        let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
+            raw_data_retained: false,
+            ..Default::default()
+        };
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1000.0,
+            },
+            sources: [(
+                "latency".into(),
+                SourceFacts {
+                    series_count: Some(10),
+                    values_non_negative: true,
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut configured =
+            enumerate_candidate_configurations(&source, &[0, 1], &entries, &data, &deployment)
+                .unwrap();
+        // Synthetic activation objective exposes reuse; it is not runtime pricing.
+        for (id, candidate) in configured.inventory.graph.candidates.iter_mut().enumerate() {
+            candidate.local_cost = if matches!(
+                configured.inventory.templates[id].as_ref().unwrap().asap(),
+                Some(ASAPOp::PaneChain { .. })
+            ) {
+                1000.0
+            } else {
+                1.0
+            };
+        }
+        let selected = select_candidates(&configured.inventory.graph)
+            .unwrap()
+            .unwrap();
+        let chains: Vec<_> = selected
+            .selected_candidates
+            .iter()
+            .filter(|id| {
+                matches!(
+                    configured.inventory.templates[id.0]
+                        .as_ref()
+                        .unwrap()
+                        .asap(),
+                    Some(ASAPOp::PaneChain { .. })
+                )
+            })
+            .collect();
+        assert_eq!(chains.len(), 1);
+        let chain = configured.inventory.templates[chains[0].0]
+            .as_ref()
+            .unwrap();
+        assert!(["job", "region"].iter().all(|name| chain
+            .schema
+            .fields
+            .iter()
+            .any(|field| field.name == *name)));
+        let mut modes = vec![None; configured.configurations.len()];
+        for id in &selected.selected_candidates {
+            modes[id.0] = Some(configured.configurations[id.0].materialization);
+        }
+        let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
+        let physical = materialize_selected_candidates(
+            &configured.inventory,
+            &selected,
+            &modes,
+            &roots,
+            &entries,
+            &data,
+            &deployment,
+        )
+        .unwrap();
+        physical.physical.dag.validate().unwrap();
+        assert!(physical.nodes_by_candidate[chains[0].0].is_some());
+        // The deployment search must also validate composed accuracy and actual
+        // evaluator pricing; the synthetic activation objective is discarded.
+        for candidate in &mut configured.inventory.graph.candidates {
+            candidate.local_cost = 0.0;
+        }
+        let planned = super::super::candidate_planner::optimize_configured_candidates(
+            &configured,
+            &super::super::candidate_planner::CandidatePlanningContext {
+                original_roots: &roots,
+                entries: &entries,
+                data: &data,
+                models: crate::PlanningModels {
+                    deployment_capabilities: &deployment,
+                    ..crate::PlanningModels::builtin()
+                },
+                calibration: crate::CalibrationFit::default(),
+            },
+            super::super::candidate_search::CandidateSearchLimits {
+                max_refinements: 3,
+                wall_time: std::time::Duration::from_secs(10),
+            },
+        )
+        .unwrap();
+        let (selection, physical) = planned
+            .best
+            .expect("widened pane plan must pass accuracy and cost validation");
+        assert!(selection.costs[&selection.selected]
+            .cost_per_second
+            .unwrap()
+            .is_finite());
+        assert_eq!(
+            physical
+                .dag
+                .nodes
+                .iter()
+                .filter(|node| matches!(
+                    node.payload,
+                    asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { .. })
+                ))
+                .count(),
+            1
+        );
+    }
+
     // Exact top-k's executable Sort/Limit/Project nodes are selected and charged
     // explicitly, so final Stage 2 does not introduce unmodeled identities.
     #[test]

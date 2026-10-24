@@ -7,6 +7,7 @@
 /// Logical implementation candidates populated after initial identity construction.
 pub mod candidates;
 mod groups;
+mod scan_label_candidates;
 /// Pass 2 summary-capability expansion and consistent producer/reader resizing.
 pub mod shared_builds;
 /// Concrete summary-state groups for the connection-based planner migration.
