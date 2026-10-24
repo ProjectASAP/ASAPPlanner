@@ -78,6 +78,8 @@ Legacy deletion includes reorganizing files by responsibility, not merely moving
 
 Final acceptance requires one production path, no `legacy`, `old`, `new`, or `v2` implementation directories, no temporary comparison routes or forwarding reexports, and no shared evaluator or rule implementation hidden under a solver-specific folder. Keep tests with the scope they verify. Update imports, public names and documentation together; verify dependency direction and existing public behavior after the moves. Reuse existing folders where they express these responsibilities clearly rather than adding a folder for every file.
 
+Audit the migration modules by content before moving them. In particular, split candidate graph/domain types from MILP construction in `candidate_connections`; move window rule generation out of selection's `memo/rules`; place configuration legality and physical reconstruction with physical planning; place execution-demand accounting with costs; and keep evaluator orchestration separate from the solver refinement loop. A file move alone does not resolve mixed responsibilities or dependency cycles. Record the final ownership of each retained module when deleting its predecessor.
+
 ## Implementation sequence
 
 ### 1. Capture behavior and extract shared infrastructure
