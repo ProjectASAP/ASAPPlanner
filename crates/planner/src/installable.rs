@@ -51,9 +51,8 @@ use asap_types::ir::operator::pane_chain::{
     expand_pane_chains_in_workload_before, PaneChainExpansionError,
 };
 use asap_types::ir::physical_export::{
-    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPDAGDocument,
-    PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
-    RawDataSampleWindow, ReferencePlanError,
+    PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPDAGValidationError, PhysicalASAPNodeId, RawDataSampleWindow, ReferencePlanError,
 };
 use asap_types::ir::properties::summary_coverage::{SelectionBox, SummaryCoverage};
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
@@ -1334,13 +1333,30 @@ fn pane_retention_of_expanded_panes(
     pane_retention_of_expanded_panes_before(timed, selection, None)
 }
 
+fn export_physical_dag_before(
+    roots: &[QueryRoot],
+    deadline: Option<Instant>,
+) -> Result<asap_types::ir::physical_export::PhysicalASAPDAGCompilation, InstallablePlanError> {
+    use asap_types::ir::physical_export::{
+        compile_physical_asap_workload_with_node_ids_before, PhysicalASAPCompilationError,
+    };
+    compile_physical_asap_workload_with_node_ids_before(roots, deadline).map_err(
+        |error| match error {
+            PhysicalASAPCompilationError::Invalid(error) => error.into(),
+            PhysicalASAPCompilationError::DeadlineExceeded => {
+                InstallablePlanError::DeadlineExceeded
+            }
+        },
+    )
+}
+
 fn pane_retention_of_expanded_panes_before(
     timed: &[QueryRoot],
     selection: Option<&Selection>,
     deadline: Option<Instant>,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
     check_installation_deadline(deadline)?;
-    let selected = compile_physical_asap_workload_with_node_ids(timed)?;
+    let selected = export_physical_dag_before(timed, deadline)?;
     // Reject unsupported raw-source shapes before expanding possibly thousands
     // of panes. The complete expanded-plan validation remains authoritative.
     let indexed = IndexedDag::new(&selected.dag);
@@ -1376,7 +1392,7 @@ fn pane_retention_of_expanded_panes_before(
             PaneChainExpansionError::DeadlineExceeded => InstallablePlanError::DeadlineExceeded,
         })?;
     check_installation_deadline(deadline)?;
-    let compiled = compile_physical_asap_workload_with_node_ids(&expansion.roots)?;
+    let compiled = export_physical_dag_before(&expansion.roots, deadline)?;
     check_installation_deadline(deadline)?;
     // Index physical identity once. Looking up every expanded pane through
     // the identity map's linear search makes this phase quadratic in panes.
@@ -1511,6 +1527,10 @@ mod tests {
     /// An expired validation budget is not evidence that an operator is unsupported.
     #[test]
     fn executor_validation_timeout_is_distinct_from_rejection() {
+        assert!(matches!(
+            export_physical_dag_before(&[], Some(Instant::now())),
+            Err(InstallablePlanError::DeadlineExceeded)
+        ));
         assert_eq!(
             map_executor_compile_error(
                 asap_executor::Error::CompilationDeadlineExceeded,
@@ -1653,11 +1673,16 @@ mod tests {
         let nodes = plan.dag.dag.nodes.len();
         let stored = plan.stored_outputs.len();
         assert!(stored >= 300, "{stored} stored outputs");
-        // Stage 3's compile check builds the plan of each candidate it may
-        // select, so a few plans are compiled; each costs about its size.
+        // Measure one installation and one compile check, independently of
+        // how many candidates the optimizer explored before selecting this DAG.
+        COMPILED_NODES.with(|count| count.set(0));
+        let (rebuilt, _) =
+            runtime_inputs_of(&plan.dag.dag, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(rebuilt.len(), stored);
+        plan.check_compiles().unwrap();
         let compiled = COMPILED_NODES.with(std::cell::Cell::get);
         assert!(
-            compiled <= 40 * nodes,
+            compiled <= 6 * nodes,
             "{compiled} nodes compiled for a plan of {nodes} nodes and {stored} stored outputs"
         );
     }

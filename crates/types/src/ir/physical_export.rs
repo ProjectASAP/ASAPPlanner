@@ -13,7 +13,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::flat::{flatten, NodeId};
+use super::flat::{flatten_before, NodeId};
 use super::scalar::ScalarExpr;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
@@ -569,10 +569,38 @@ pub fn compile_physical_asap_workload(
     Ok(compile_physical_asap_workload_with_node_ids(roots)?.dag)
 }
 
+#[derive(Debug, Error)]
+pub enum PhysicalASAPCompilationError {
+    #[error(transparent)]
+    Invalid(#[from] ExecutionDataStateError),
+    #[error("planning deadline exceeded exporting the physical DAG")]
+    DeadlineExceeded,
+}
+
 pub fn compile_physical_asap_workload_with_node_ids(
     roots: &[QueryRoot],
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    let (flat, nodes_by_id) = flatten(roots);
+    compile_physical_asap_workload_with_node_ids_before(roots, None).map_err(|error| match error {
+        PhysicalASAPCompilationError::Invalid(error) => error,
+        PhysicalASAPCompilationError::DeadlineExceeded => {
+            unreachable!("no export deadline supplied")
+        }
+    })
+}
+
+pub fn compile_physical_asap_workload_with_node_ids_before(
+    roots: &[QueryRoot],
+    deadline: Option<std::time::Instant>,
+) -> Result<PhysicalASAPDAGCompilation, PhysicalASAPCompilationError> {
+    let check_deadline = || {
+        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+            Err(PhysicalASAPCompilationError::DeadlineExceeded)
+        } else {
+            Ok(())
+        }
+    };
+    let (flat, nodes_by_id) = flatten_before(roots, deadline)
+        .map_err(|_| PhysicalASAPCompilationError::DeadlineExceeded)?;
     let mut scalar_roots = Vec::new();
     let roots = flat
         .roots
@@ -589,12 +617,14 @@ pub fn compile_physical_asap_workload_with_node_ids(
     let mut nodes: Vec<PhysicalASAPDAGNode> = Vec::with_capacity(flat.nodes.len());
     let mut edges = Vec::new();
     for (id, flat_node) in flat.nodes.into_iter().enumerate() {
+        check_deadline()?;
         let node = &nodes_by_id[id];
         let output_state = data_state(node).ok_or(ExecutionDataStateError::UntimedNode {
             operator: node.operator.kind_name(),
         })?;
         // Children come before their parents, so every producer is already in `nodes`.
         for (producer, role) in edge_roles(&flat_node.operator) {
+            check_deadline()?;
             let producer_state = nodes[producer].output_state;
             let ingestion_dependency = producer_state.timing == ExecutionTiming::IngestionTime
                 && output_state.timing == ExecutionTiming::IngestionTime;
@@ -627,7 +657,9 @@ pub fn compile_physical_asap_workload_with_node_ids(
         roots,
         scalar_roots,
     };
-    dag.validate()?;
+    check_deadline()?;
+    dag.validate().map_err(ExecutionDataStateError::from)?;
+    check_deadline()?;
     Ok(PhysicalASAPDAGCompilation {
         dag,
         node_ids: PhysicalASAPNodeIdentityMap { nodes_by_id },

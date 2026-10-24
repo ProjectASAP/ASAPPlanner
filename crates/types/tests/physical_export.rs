@@ -585,3 +585,28 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
         Err(PhysicalASAPDAGValidationError::EdgeRoleMismatch { .. })
     ));
 }
+
+#[test]
+fn physical_export_deadline_is_typed_and_preserves_unbounded_behavior() {
+    use asap_types::ir::physical_export::{
+        compile_physical_asap_workload_with_node_ids_before, PhysicalASAPCompilationError,
+    };
+    use std::time::Instant;
+    let timed = timed_at_ingestion();
+    let roots = [QueryRoot::Operator(Rc::clone(&timed))];
+    let bounded = compile_physical_asap_workload_with_node_ids_before(
+        &roots,
+        Some(Instant::now() + std::time::Duration::from_secs(1)),
+    )
+    .unwrap();
+    assert_eq!(bounded.dag, compile_physical_asap_dag(&timed).unwrap());
+    assert!(matches!(
+        compile_physical_asap_workload_with_node_ids_before(&roots, Some(Instant::now())),
+        Err(PhysicalASAPCompilationError::DeadlineExceeded)
+    ));
+    let untimed = [QueryRoot::Operator(plan())];
+    assert!(matches!(
+        compile_physical_asap_workload_with_node_ids_before(&untimed, None),
+        Err(PhysicalASAPCompilationError::Invalid(_))
+    ));
+}
