@@ -114,7 +114,6 @@ pub(crate) fn group_choices_up_to(memo: &Memo, limit: usize) -> Option<Vec<Group
     fn walk(
         memo: &Memo,
         order: &[GroupId],
-        at: usize,
         needed: &mut [u32],
         covered: &mut [u32],
         choice: &mut GroupChoice,
@@ -124,13 +123,13 @@ pub(crate) fn group_choices_up_to(memo: &Memo, limit: usize) -> Option<Vec<Group
         if out.len() >= limit {
             return;
         }
-        let Some(&GroupId(g)) = order.get(at) else {
+        let Some(&GroupId(g)) = order.first() else {
             out.push(choice.clone());
             return;
         };
         let g = g as usize;
         if needed[g] == 0 || covered[g] > 0 {
-            walk(memo, order, at + 1, needed, covered, choice, out, limit);
+            walk(memo, &order[1..], needed, covered, choice, out, limit);
             return;
         }
         for (index, candidate) in memo.candidates[g].iter().enumerate() {
@@ -144,7 +143,7 @@ pub(crate) fn group_choices_up_to(memo: &Memo, limit: usize) -> Option<Vec<Group
                 needed[child.0 as usize] += 1;
             }
             choice[g] = Some(index);
-            walk(memo, order, at + 1, needed, covered, choice, out, limit);
+            walk(memo, &order[1..], needed, covered, choice, out, limit);
             choice[g] = None;
             for child in &candidate.children {
                 needed[child.0 as usize] -= 1;
@@ -157,7 +156,6 @@ pub(crate) fn group_choices_up_to(memo: &Memo, limit: usize) -> Option<Vec<Group
     walk(
         memo,
         &parents_first,
-        0,
         &mut needed,
         &mut covered,
         &mut choice,

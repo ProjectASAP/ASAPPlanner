@@ -8,7 +8,7 @@ Replace the legacy whole-workload search with one memo-based planning pipeline. 
 
 This is a migration of supported behavior, not just a solver replacement. Keep existing accuracy semantics, physical eligibility checks, cost objectives, scalar outputs, and execution export valid. New runtime algorithms and scheduling are outside scope. No latency or speedup target is claimed before benchmarks.
 
-## Current gaps
+## Starting gaps (before this migration)
 
 Current `run_stage1_to_stage3_with` generates `PerComputationCandidates` before memo construction. `groups::memo_of` constructs identity and fills candidates together. Shared builds and panes use `CouplingSite` choices; MILP `Choice.copy_of` largely represents all-shared or per-query copies. The proposed producer-state groups and arbitrary partial-sharing connections are not implemented.
 
@@ -134,10 +134,11 @@ The first implementation change should establish the stage/memo ownership bounda
 ## First draft status
 
 - Implemented: `LogicalMemo`, `MemoGroup`, and `MemoGroupId` in the logical optimization crate, independent of solver types.
+- Implemented: `CandidateMemo` and Pass 1 candidate population now belong to logical optimization; population rejects inventories with incompatible roots or invalid target references. Selection retains only a temporary forwarding adapter and pricing context.
 - Implemented: initialize logical groups before Pass 1 on memo routes; populate those groups after capability pruning; apply existing Pass 2 rules afterward. The from-Pass-1 API remains supported.
 - Implemented: shared stage orchestration, source-dependency analysis, diagnostic index mapping, and pane reuse moved out of the legacy namespace.
 - Implemented: an internal fixed-context candidate-connection MILP core, including same-group multi-selection and an independent tiny-graph enumerator. Production IR decoding and workload-dependent cost/constraint adapters are pending; this core is not yet a replacement production search mode.
 - Verified: initial group identity survives Pass 1 population and summary pruning; scalar/literal roots retain query positions; distinct quantile results remain distinct groups.
-- Pending: Pass 1 rule generation directly into memo groups, shared-state contracts, arbitrary candidate connections, complete cost-model migration, bounded baseline generation, and deletion of legacy search/fallback. The baseline now tries at most 16 local memo assignments and three materialization policies per query, without calling the legacy route or materializing all combinations. A strict wall-clock budget across generation and evaluators remains pending.
+- Pending: Pass 1 rule generation directly into memo groups, shared-state contracts, arbitrary candidate connections, complete cost-model migration, a strict planning-time budget, and deletion of legacy search/fallback. The baseline now tries at most 16 local memo assignments and three materialization policies per query, without calling the legacy route or materializing all combinations. A strict wall-clock budget across generation and evaluators remains pending.
 
 The current first draft preserves legacy runtime behavior while preparing its removal. It must not be described as completion of the full implementation plan.

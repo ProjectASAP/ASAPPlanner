@@ -4,6 +4,10 @@
 //! legality rules and owns the original roots so pointer-based lookup remains
 //! valid while later stages populate implementation candidates.
 
+/// Logical implementation candidates populated after initial identity construction.
+pub mod candidates;
+mod groups;
+
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
