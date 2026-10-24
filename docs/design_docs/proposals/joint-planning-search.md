@@ -178,7 +178,8 @@ Give every charge one owner:
 - **Producer:** build/update, maintenance, and retained state.
 - **Consumer:** local merge, extraction, read, and finalization.
 - **Other physical work:** local operators and temporary state.
-- **Shared accounting:** per-source raw retention and other plan-level charges.
+- **Shared resources:** raw-data retention charged once per source.
+- **Query overhead:** configured work charged once per request.
 
 Charge shared work once per actual execution or maintained state, not once per query path. Consumer-specific work remains separately charged. Use a common horizon or consistent per-second rates; distinguish memory/storage occupancy over time from peak capacity. Producer costs can depend on selected consumers, evaluation schedules, upstream materialization, and retention. Model that context rather than assuming every producer has a constant cost.
 
@@ -192,17 +193,38 @@ The formulation selects a covering execution DAG. Groups represent computation c
 
 #### Sets and notation
 
-| Symbol | Meaning |
-| --- | --- |
-| `Q`, `G` | Queries and memo groups, including intermediate states. |
-| `P_g` | Finite physical-instance slots for group `g`. |
-| `C_g` | Legal physical candidates, including state configuration and materialization assignment. |
-| `R(g,c)` | Indexed input-edge occurrences required by candidate `(g,c)`. |
-| `H(g,c,e)` | Group required by input edge `e ∈ R(g,c)`. |
-| `K(g,c,e)` | Candidates of that input group compatible with this edge. |
-| `T(q)` | Query-root references; each reference `t` identifies group `root(q,t)`. |
+First distinguish **how many copies may exist** from **how each copy is implemented**. Consider a group `G_KLL` representing KLL state for a specified input and window:
 
-Input edges reference groups but connect to particular instances. Preserve distinct edge occurrences even when two inputs reference the same group. Capacity, pane width, retention, and materialization are candidate configurations, not separate producer decisions. Finite configurations permit lookup-table costs without assuming a linear size/cost function.
+```text
+Potential instances: P_G_KLL = {1, 2}
+Candidate implementations: C_G_KLL = {small-KLL, large-KLL}
+
+One possible selection:
+    instance 1 → small-KLL → consumers A, B
+    instance 2 → large-KLL → consumers C, D
+```
+
+The instance numbers carry no implementation choice. They are potential copies that the solver may enable or leave unused. Each enabled instance selects one candidate from the same implementation set; two instances may also select the same candidate. Thus `P_g` bounds the number of copies, while `C_g` defines the supported ways to implement each copy.
+
+| Set | Meaning |
+| --- | --- |
+| `Q` | The workload queries. |
+| `G` | Memo groups: result computations and reusable intermediate states. |
+| `P_g` | Indices of potential physical instances of group `g`, such as `{1,2}`. An index identifies a copy, not its algorithm or configuration. |
+| `C_g` | Supported implementation candidates for group `g`. Each candidate specifies its computation, configuration, input dependencies, and legal materialization assignment. |
+
+Candidates refer to input **groups**; the solver later chooses the specific input **instances**. The following notation describes those dependencies:
+
+| Notation | Meaning |
+| --- | --- |
+| `R(g,c)` | Input positions needed by candidate `c` of group `g`. Keep two positions distinct even if both require the same group. |
+| `H(g,c,e)` | The group whose output is needed at input position `e`. |
+| `K(g,c,e)` | Candidates of that input group that can supply the required output, configuration, and guarantees. |
+| `T(q)` | References to computation results needed to produce query `q`'s output. `root(q,t)` identifies the group for reference `t`. A scalar query can reference several computation groups. |
+
+For example, a KLL estimator has an input position `state`. `H(G95, estimator, state) = G_KLL`; `K(G95, estimator, state)` lists the KLL-state candidates that meet this estimator's requirements. Its input may connect to instance 1 or 2, provided that instance selects a compatible candidate. Likewise, a selected KLL build has its own input position referring to the input-data group.
+
+Capacity, pane width, retention, and materialization are candidate configurations. Finite configurations permit lookup-table costs without assuming a linear size/cost function.
 
 #### Decision variables
 
@@ -220,12 +242,15 @@ Each instance's materialization can be bundled into its candidate or represented
 For fixed-context costs:
 
 ```text
-min  Σ_{g,i,c} cost[g,i,c] × x[g,i,c] + plan-level charges
+min  Σ_{g,i,c} cost[g,i,c] × x[g,i,c] + shared_resource_cost + query_overhead
 ```
 
 The cost belongs to the instance's local work/state, excluding input instances. A KLL-state instance owns build and retention; estimator instances own extraction. A reused merge result also has its own instance. Two consumers sharing one state instance incur its owned charge once; two enabled state instances incur two charges.
 
-An enabled instance is not necessarily executed only once: query-time work can repeat. Its materialization, consumer schedules, phases, range steps, and upstream consumers determine the execution rate and state lifetime. Extend the base model with reach/rate/lifetime variables or finite context configurations constrained to match the selected graph. Do not assign a fixed cost independent of that context. Raw retention and other non-computation charges remain shared resource/accounting variables.
+`shared_resource_cost` accounts for resources owned outside computation instances, such as retained raw data charged once per source. If selected scans require 5m and 15m of the same raw source, that source's required horizon is 15m, not 20m; derive its storage cost from a retention variable constrained by the selected scans. Intermediate-state retention already charged to an instance is excluded here. `query_overhead` is any configured once-per-request charge, counted at each query's request rate and excluded from instance costs; it is zero when the model has no such charge. Both terms must have explicit model expressions, not arbitrary residual adjustments after solving.
+
+
+An enabled instance is not necessarily executed only once: query-time work can repeat. Its materialization, consumer schedules, phases, range steps, and upstream consumers determine the execution rate and state lifetime. Extend the base model with reach/rate/lifetime variables or finite context configurations constrained to match the selected graph. Do not assign a fixed cost independent of that context. Raw retention uses shared resource variables; request overhead uses query-level demand.
 
 ### 5.2 Constraints
 
@@ -281,10 +306,10 @@ For additive, fixed-context resource usage:
 
 ```text
 Σ_{g,i,c} usage[k,g,i,c] × x[g,i,c]
-  + plan-level usage[k] ≤ capacity[k]
+  + shared_resource_usage[k] ≤ capacity[k]
 ```
 
-Peak capacity is not average occupancy; temporary lifetimes and concurrency need their own accounting. Use bounded auxiliary-variable linearizations where needed. A sum of fixed candidate costs is only the base case, not a substitute for the configured evaluator.
+`shared_resource_usage[k]` covers non-instance resources such as per-source raw-data storage, without repeating instance-owned usage. Peak capacity is not average occupancy; temporary lifetimes and concurrency need their own accounting. Use bounded auxiliary-variable linearizations where needed. A sum of fixed candidate costs is only the base case, not a substitute for the configured evaluator.
 
 ## 6. Worked Example: Shared KLL for P95/P99
 
