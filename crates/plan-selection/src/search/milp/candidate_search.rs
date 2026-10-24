@@ -5,8 +5,9 @@
 use std::time::{Duration, Instant};
 
 use super::candidate_connections::{
-    solve_candidate_proposal_with_metrics, CandidateDependencyGraph, CandidateSelectionError,
-    CandidateSolveMetrics, ObservedAssignment, RejectedQuerySubgraph, SelectedCandidateGraph,
+    solve_candidate_proposal_with_metrics, CandidateDependencyGraph, CandidateProposal,
+    CandidateSelectionError, CandidateSolveMetrics, ObservedAssignment, RejectedQuerySubgraph,
+    SelectedCandidateGraph,
 };
 
 #[derive(Debug, Default)]
@@ -122,7 +123,30 @@ fn search_with_structural_baseline(
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
+    evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
+) -> Result<CandidateSearchResult, String> {
+    search_with_solver(
+        graph,
+        limits,
+        structural_baseline,
+        baseline_weights,
+        evaluate,
+        solve_candidate_proposal_with_metrics,
+    )
+}
+
+fn search_with_solver(
+    graph: &CandidateDependencyGraph,
+    limits: CandidateSearchLimits,
+    structural_baseline: bool,
+    baseline_weights: Option<&[f64]>,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
+    mut propose: impl FnMut(
+        &CandidateDependencyGraph,
+        &[ObservedAssignment],
+        Option<f64>,
+        &mut CandidateSolveMetrics,
+    ) -> Result<Option<CandidateProposal>, CandidateSelectionError>,
 ) -> Result<CandidateSearchResult, String> {
     graph.validate().map_err(|error| error.to_string())?;
     let started = Instant::now();
@@ -196,7 +220,7 @@ fn search_with_structural_baseline(
         } else {
             (graph, observations.clone(), remaining)
         };
-        let mut proposal = match solve_candidate_proposal_with_metrics(
+        let mut proposal = match propose(
             proposal_graph,
             &proposal_observations,
             Some(solve_budget.as_secs_f64()),
@@ -234,8 +258,8 @@ fn search_with_structural_baseline(
                 .iter()
                 .map(|id| graph.candidates[id.0].local_cost)
                 .sum();
-        } else {
-            lower_bound = lower_bound.max(proposal.model_lower_bound);
+        } else if let Some(bound) = proposal.model_lower_bound {
+            lower_bound = lower_bound.max(bound);
         }
         if let Some(best) = &incumbent {
             if closes_gap(lower_bound, best.actual_cost) {
@@ -373,6 +397,54 @@ mod tests {
             max_refinements,
             wall_time: Duration::from_secs(10),
         }
+    }
+
+    // A later unproven solve can improve the validated incumbent without replacing
+    // the earlier certified bound or falsely closing the optimality gap.
+    #[test]
+    fn nonoptimal_proposal_preserves_bound_and_improves_incumbent() {
+        use super::super::candidate_connections::{validate_selected_graph, QueryRootAssignment};
+        let graph = choices(&[2.0, 3.0]);
+        let mut round = 0;
+        let result = search_with_solver(
+            &graph,
+            limits(2),
+            false,
+            None,
+            |selected| {
+                Ok(Some(if selected.selected_candidates[0].0 == 0 {
+                    20.0
+                } else {
+                    10.0
+                })
+                .into())
+            },
+            |graph, observations, _, _| {
+                assert_eq!(observations.len(), round);
+                let selected = SelectedCandidateGraph {
+                    selected_candidates: vec![PhysicalCandidateId(round)],
+                    connections: Vec::new(),
+                    query_roots: vec![QueryRootAssignment {
+                        query_root: 0,
+                        candidate: PhysicalCandidateId(round),
+                    }],
+                    modeled_cost: graph.candidates[round].local_cost,
+                };
+                validate_selected_graph(graph, &selected).unwrap();
+                let model_lower_bound = (round == 0).then_some(2.0);
+                round += 1;
+                Ok(Some(CandidateProposal {
+                    selected,
+                    model_lower_bound,
+                }))
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
+        assert_eq!(result.incumbent.unwrap().actual_cost, 10.0);
+        assert_eq!(result.lower_bound, 2.0);
+        assert_eq!(result.relative_gap, Some(0.8));
+        assert_eq!(result.refinements, 2);
     }
 
     #[test]

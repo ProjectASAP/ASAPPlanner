@@ -255,7 +255,17 @@ impl CandidateDependencyGraph {
 pub(crate) fn select_candidates(
     graph: &CandidateDependencyGraph,
 ) -> Result<Option<SelectedCandidateGraph>, CandidateSelectionError> {
-    Ok(solve_candidate_proposal(graph, &[], None)?.map(|proposal| proposal.selected))
+    let proposal = solve_candidate_proposal(graph, &[], None)?;
+    proposal
+        .map(|proposal| {
+            if proposal.model_lower_bound.is_none() {
+                return Err(CandidateSelectionError::Solver(
+                    "covering graph is feasible but optimality is unproven".into(),
+                ));
+            }
+            Ok(proposal.selected)
+        })
+        .transpose()
 }
 
 /// A certified size-independent failure of a complete query dependency closure.
@@ -344,8 +354,9 @@ pub(super) struct ObservedAssignment {
 #[derive(Debug)]
 pub(super) struct CandidateProposal {
     pub selected: SelectedCandidateGraph,
-    /// Optimal relaxation objective, distinct from selected.modeled_cost (local sum).
-    pub model_lower_bound: f64,
+    /// Certified optimal relaxation objective, distinct from the local sum.
+    /// A feasible gap/time-limited incumbent objective is NOT a lower bound.
+    pub model_lower_bound: Option<f64>,
 }
 
 /// Accumulated across refinement rounds, including infeasible and stopped solves.
@@ -361,7 +372,7 @@ pub(super) struct CandidateSolveMetrics {
 
 /// Refine exact costs at complete assignments and certified query failures at
 /// their complete upstream dependency closures.
-/// A solver timeout is an error, never a proven optimum or infeasibility.
+/// Feasible stopped solves may return proposals without a certified bound.
 pub(super) fn solve_candidate_proposal(
     graph: &CandidateDependencyGraph,
     observations: &[ObservedAssignment],
@@ -424,10 +435,12 @@ pub(super) fn solve_candidate_proposal_with_metrics(
                 query_roots: Vec::new(),
                 modeled_cost: 0.0,
             },
-            model_lower_bound: observations
-                .iter()
-                .filter_map(|observation| observation.exact_cost)
-                .fold(0.0, f64::max),
+            model_lower_bound: Some(
+                observations
+                    .iter()
+                    .filter_map(|observation| observation.exact_cost)
+                    .fold(0.0, f64::max),
+            ),
         }));
     }
     if graph
@@ -744,11 +757,14 @@ pub(super) fn solve_candidate_proposal_with_metrics(
         Err(ResolutionError::Infeasible) => return Ok(None),
         Err(error) => return Err(CandidateSelectionError::Solver(error.to_string())),
     };
-    if !matches!(solution.status(), SolutionStatus::Optimal) {
-        return Err(CandidateSelectionError::Solver(format!(
-            "search stopped with {:?}",
-            solution.status()
-        )));
+    // A stopped solve may still have a useful integral incumbent. Never round
+    // fractional or nonfinite decision values into a different feasible graph.
+    for variable in candidate_selected
+        .iter()
+        .chain(connections.iter().map(|(_, variable)| variable))
+        .chain(root_assignments.iter().map(|(_, variable)| variable))
+    {
+        validate_binary_value(solution.value(*variable))?;
     }
     let selected_candidates: Vec<_> = candidate_selected
         .iter()
@@ -774,17 +790,40 @@ pub(super) fn solve_candidate_proposal_with_metrics(
             .collect(),
         modeled_cost,
     };
-    validate_selected_graph(graph, &selected).map_err(CandidateSelectionError::Solver)?;
-    let model_lower_bound = solution.value(total_cost) * divisor;
-    if !model_lower_bound.is_finite() || model_lower_bound < 0.0 {
+    decoded_proposal(
+        graph,
+        selected,
+        solution.status(),
+        solution.value(total_cost) * divisor,
+    )
+    .map(Some)
+}
+
+fn validate_binary_value(value: f64) -> Result<(), CandidateSelectionError> {
+    if !value.is_finite() || (value.abs() > 1e-6 && (value - 1.0).abs() > 1e-6) {
         return Err(CandidateSelectionError::Solver(
-            "invalid lower-bound objective".into(),
+            "nonintegral candidate decision in solver incumbent".into(),
         ));
     }
-    Ok(Some(CandidateProposal {
+    Ok(())
+}
+
+fn decoded_proposal(
+    graph: &CandidateDependencyGraph,
+    selected: SelectedCandidateGraph,
+    status: SolutionStatus,
+    objective: f64,
+) -> Result<CandidateProposal, CandidateSelectionError> {
+    validate_selected_graph(graph, &selected).map_err(CandidateSelectionError::Solver)?;
+    if !objective.is_finite() || objective < 0.0 {
+        return Err(CandidateSelectionError::Solver(
+            "invalid solver incumbent objective".into(),
+        ));
+    }
+    Ok(CandidateProposal {
         selected,
-        model_lower_bound,
-    }))
+        model_lower_bound: matches!(status, SolutionStatus::Optimal).then_some(objective),
+    })
 }
 
 /// Check the decoded integral graph instead of trusting rounded solver values.
@@ -953,6 +992,33 @@ pub(super) fn validate_selected_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A feasible stopped incumbent is usable, but its objective is not a dual bound.
+    #[test]
+    fn stopped_proposal_keeps_valid_graph_without_certifying_objective() {
+        let graph = dependency_graph(vec![candidate(0, 2.0, &[])], &[&[0]]);
+        let selected = select_candidates(&graph).unwrap().unwrap();
+        for status in [SolutionStatus::GapLimit, SolutionStatus::TimeLimit] {
+            let proposal = decoded_proposal(&graph, selected.clone(), status, 50.0).unwrap();
+            assert_eq!(proposal.selected, selected);
+            assert_eq!(proposal.model_lower_bound, None);
+        }
+        assert_eq!(
+            decoded_proposal(&graph, selected.clone(), SolutionStatus::Optimal, 2.0)
+                .unwrap()
+                .model_lower_bound,
+            Some(2.0)
+        );
+        let mut invalid = selected;
+        invalid.query_roots.clear();
+        assert!(decoded_proposal(&graph, invalid, SolutionStatus::GapLimit, 50.0).is_err());
+        for value in [f64::NAN, f64::INFINITY, -1.0, 0.4, 0.999] {
+            assert!(validate_binary_value(value).is_err());
+        }
+        for value in [0.0, 1.0, 1.0 - 1e-8] {
+            assert!(validate_binary_value(value).is_ok());
+        }
+    }
 
     // A shared producer owns resident state once, regardless of its reader count.
     #[test]
