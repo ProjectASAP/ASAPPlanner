@@ -1190,7 +1190,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!ignored_excluded.contains(&projected[0]));
+        // Runtime raw-window shape restrictions do not depend on accuracy.
+        assert!(ignored_excluded.contains(&projected[0]));
+        assert!(!ignored_excluded.contains(&projected[1]));
+        assert!(!ignored_excluded.contains(&source));
         assert_eq!(
             configured.inventory.group_candidates
                 [configured.inventory.graph.candidates[source.0].group.0 as usize]
