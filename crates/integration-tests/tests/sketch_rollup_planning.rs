@@ -7,7 +7,7 @@ use std::rc::Rc;
 use asap_executor::physical_planner::promql_rows;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_plan_selection::{run_stage1_to_stage3_with, PlanningModels, Stage1ToStage3Run};
+use asap_plan_selection::Stage1ToStage3Run;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -72,14 +72,39 @@ async fn plan_sql(queries: &[&str], accuracy: AccuracyTarget) -> Stage1ToStage3R
             .unwrap();
         roots.push((i, QueryRoot::Operator(root)));
     }
-    run_stage1_to_stage3_with(
+    explicit_rollup_plans(
         roots,
         &vec![entry(&accuracy, 60_000); queries.len()],
         &data(),
-        PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
-    .unwrap()
+}
+
+/// Explicit exact, KMV, and KLL assignments expose both separate builds and
+/// their rollup rewrites without relying on which plans a timed solver visits.
+fn explicit_rollup_plans(
+    roots: Vec<(usize, QueryRoot)>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+) -> Stage1ToStage3Run<usize> {
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_types::ir::schema::SketchAlgorithm;
+    let inventory = generate_per_computation_candidates(roots).unwrap();
+    let mut assignments = vec![vec![0; inventory.targets.len()]];
+    for family in [SketchAlgorithm::Kmv, SketchAlgorithm::Kll] {
+        let choice: Vec<_> = inventory.targets.iter().map(|target| target.choices.candidates.iter()
+            .position(|candidate| matches!(candidate, ComputationCandidate::Summary(found) if *found == family)).unwrap_or(0)).collect();
+        if !assignments.contains(&choice) {
+            assignments.push(choice);
+        }
+    }
+    asap_integration_tests::planning::explicit_assignment_plans(
+        inventory,
+        assignments,
+        entries,
+        data,
+    )
 }
 
 /// The logical candidate `id`'s roots.
@@ -235,14 +260,7 @@ fn promql_quantile_by_job_rolls_up_from_by_host_job() {
     }))
     .unwrap();
     let entry = entry(&accuracy, 10_000);
-    let run = run_stage1_to_stage3_with(
-        roots,
-        &[entry.clone(), entry],
-        &data,
-        PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
-    )
-    .unwrap();
+    let run = explicit_rollup_plans(roots, &[entry.clone(), entry], &data);
     let rolled: Vec<_> = run
         .stage1_logical_asap_optimization
         .iter()
