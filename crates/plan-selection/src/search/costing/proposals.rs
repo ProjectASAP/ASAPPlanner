@@ -257,6 +257,7 @@ mod tests {
         .unwrap();
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,

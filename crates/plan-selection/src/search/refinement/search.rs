@@ -72,6 +72,12 @@ pub(in crate::search) struct CandidateSearchResult {
     pub certified_query_cuts: usize,
 }
 
+#[derive(Clone, Copy, Default)]
+struct SeedRestrictions<'a> {
+    excluded: &'a [PhysicalCandidateId],
+    materialization_changes: &'a [(PhysicalCandidateId, PhysicalCandidateId)],
+}
+
 /// The callback returns an actual total cost for a validated feasible plan, or
 /// `None` for a proven infeasible assignment. Errors stop search, preserving the
 /// incumbent. Its cost must include every configured cost component and must be
@@ -84,9 +90,14 @@ pub(in crate::search) fn search_candidates(
     limits: CandidateSearchLimits,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
 ) -> Result<CandidateSearchResult, String> {
-    search_with_structural_baseline(graph, limits, false, None, &[], |selected| {
-        evaluate(selected).map(Into::into)
-    })
+    search_with_structural_baseline(
+        graph,
+        limits,
+        false,
+        None,
+        SeedRestrictions::default(),
+        |selected| evaluate(selected).map(Into::into),
+    )
 }
 
 /// Seed the same certified-cost search with a bounded minimum-active-node plan.
@@ -122,7 +133,14 @@ pub(in crate::search) fn search_candidates_with_feedback(
     weights: Option<&[f64]>,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
-    search_with_structural_baseline(graph, limits, true, weights, &[], evaluate)
+    search_with_structural_baseline(
+        graph,
+        limits,
+        true,
+        weights,
+        SeedRestrictions::default(),
+        evaluate,
+    )
 }
 
 pub(in crate::search) fn search_candidates_with_restricted_feedback(
@@ -130,6 +148,7 @@ pub(in crate::search) fn search_candidates_with_restricted_feedback(
     limits: CandidateSearchLimits,
     weights: &[f64],
     excluded_from_seed: &[PhysicalCandidateId],
+    materialization_changes: &[(PhysicalCandidateId, PhysicalCandidateId)],
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_structural_baseline(
@@ -137,7 +156,10 @@ pub(in crate::search) fn search_candidates_with_restricted_feedback(
         limits,
         true,
         Some(weights),
-        excluded_from_seed,
+        SeedRestrictions {
+            excluded: excluded_from_seed,
+            materialization_changes,
+        },
         evaluate,
     )
 }
@@ -147,7 +169,7 @@ fn search_with_structural_baseline(
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
-    excluded_from_seed: &[PhysicalCandidateId],
+    restrictions: SeedRestrictions<'_>,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_solver(
@@ -155,7 +177,7 @@ fn search_with_structural_baseline(
         limits,
         structural_baseline,
         baseline_weights,
-        excluded_from_seed,
+        restrictions,
         evaluate,
         solve_candidate_proposal_with_metrics,
     )
@@ -166,7 +188,7 @@ fn search_with_solver(
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
-    excluded_from_seed: &[PhysicalCandidateId],
+    restrictions: SeedRestrictions<'_>,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
     mut propose: impl FnMut(
         &CandidateDependencyGraph,
@@ -186,7 +208,8 @@ fn search_with_solver(
     if baseline_weights.is_some_and(|weights| weights.len() != graph.candidates.len()) {
         return Err("baseline weights must be indexed by candidate ID".into());
     }
-    if excluded_from_seed
+    if restrictions
+        .excluded
         .iter()
         .any(|id| id.0 >= graph.candidates.len())
     {
@@ -212,7 +235,7 @@ fn search_with_solver(
                 .collect();
             // Contract-risk exclusions affect the feasibility seed only. They
             // are not accuracy proofs or cuts in the certified full graph.
-            extra_copies.extend_from_slice(excluded_from_seed);
+            extra_copies.extend_from_slice(restrictions.excluded);
             extra_copies.sort_unstable();
             extra_copies.dedup();
             // Remove disabled-copy edges before model construction, retaining
@@ -253,6 +276,12 @@ fn search_with_solver(
     // capped at two seconds; stop the baseline once it supplies an incumbent.
     let baseline_budget = (limits.wall_time / 5).min(Duration::from_secs(2));
     let mut baseline_attempts = 0;
+    // Each local proposal uses the same solver and evaluator. Limit the phase
+    // to four validations and one fifth of this domain's existing wall budget.
+    let neighborhood_budget = (limits.wall_time / 5).min(Duration::from_secs(1));
+    let mut neighborhood_spent = Duration::ZERO;
+    let mut neighborhood_attempts = 0;
+    let mut tried_changes = std::collections::HashSet::new();
     let status = loop {
         let remaining = limits.wall_time.saturating_sub(started.elapsed());
         if remaining.is_zero() {
@@ -265,41 +294,89 @@ fn search_with_solver(
             && incumbent.is_none()
             && baseline_attempts < 3
             && started.elapsed() < baseline_budget;
-        let (proposal_graph, proposal_observations, solve_budget) = if use_baseline {
-            baseline_attempts += 1;
-            // A structural proposal is never repriced by monetary observations.
-            // Tried assignments are skipped here only; their validated costs
-            // remain in the certified model used after this heuristic phase.
-            let skipped = observations
-                .iter()
-                .map(|observation: &ObservedAssignment| {
-                    let mut selected = observation.selected.clone();
-                    selected.modeled_cost = selected
-                        .selected_candidates
-                        .iter()
-                        .map(|id| {
-                            heuristic_graph
-                                .as_ref()
-                                .expect("baseline graph exists")
-                                .candidates[id.0]
-                                .local_cost
-                        })
-                        .sum();
-                    ObservedAssignment {
-                        selected,
-                        exact_cost: None,
-                        rejected_queries: observation.rejected_queries.clone(),
+        let neighborhood_started = Instant::now();
+        let neighborhood_deadline = neighborhood_started
+            + remaining.min(neighborhood_budget.saturating_sub(neighborhood_spent));
+        let mut neighborhood = None;
+        if !use_baseline && neighborhood_attempts < 4 && neighborhood_spent < neighborhood_budget {
+            if let Some(best) = &incumbent {
+                for &(from, to) in restrictions.materialization_changes {
+                    if Instant::now() >= neighborhood_deadline {
+                        break;
                     }
-                })
-                .collect::<Vec<_>>();
-            (
-                heuristic_graph.as_ref().expect("baseline graph exists"),
-                skipped,
-                remaining.min(baseline_budget.saturating_sub(started.elapsed())),
-            )
-        } else {
-            (graph, observations.clone(), remaining)
-        };
+                    if !best.selected.selected_candidates.contains(&from)
+                        || !tried_changes.insert((from, to))
+                    {
+                        continue;
+                    }
+                    if let Some(restricted) = super::materialization::restrict(
+                        graph,
+                        &best.selected,
+                        from,
+                        to,
+                        neighborhood_deadline,
+                    ) {
+                        neighborhood = Some(restricted);
+                        neighborhood_attempts += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        let use_neighborhood = neighborhood.is_some();
+        if !use_neighborhood {
+            neighborhood_spent += neighborhood_started.elapsed();
+        }
+        let remaining = limits.wall_time.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break CandidateSearchStatus::TimeLimit;
+        }
+        let (proposal_graph, proposal_observations, solve_budget) =
+            if let Some(restricted) = &neighborhood {
+                (
+                    restricted,
+                    Vec::new(),
+                    remaining.min(neighborhood_deadline.saturating_duration_since(Instant::now())),
+                )
+            } else if use_baseline {
+                baseline_attempts += 1;
+                // A structural proposal is never repriced by monetary observations.
+                // Tried assignments are skipped here only; their validated costs
+                // remain in the certified model used after this heuristic phase.
+                let skipped = observations
+                    .iter()
+                    .map(|observation: &ObservedAssignment| {
+                        let mut selected = observation.selected.clone();
+                        selected.modeled_cost = selected
+                            .selected_candidates
+                            .iter()
+                            .map(|id| {
+                                heuristic_graph
+                                    .as_ref()
+                                    .expect("baseline graph exists")
+                                    .candidates[id.0]
+                                    .local_cost
+                            })
+                            .sum();
+                        ObservedAssignment {
+                            selected,
+                            exact_cost: None,
+                            rejected_queries: observation.rejected_queries.clone(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    heuristic_graph.as_ref().expect("baseline graph exists"),
+                    skipped,
+                    remaining.min(baseline_budget.saturating_sub(started.elapsed())),
+                )
+            } else {
+                (graph, observations.clone(), remaining)
+            };
+        if use_neighborhood && solve_budget.is_zero() {
+            neighborhood_spent += neighborhood_started.elapsed();
+            continue;
+        }
         let mut proposal = match propose(
             proposal_graph,
             &proposal_observations,
@@ -307,6 +384,10 @@ fn search_with_solver(
             &mut solve_metrics,
         ) {
             Ok(Some(proposal)) => proposal,
+            Ok(None) if use_neighborhood => {
+                neighborhood_spent += neighborhood_started.elapsed();
+                continue;
+            }
             Ok(None) if use_baseline => {
                 heuristic_graph = None;
                 continue;
@@ -321,6 +402,12 @@ fn search_with_solver(
                 if use_baseline && started.elapsed() >= baseline_budget =>
             {
                 heuristic_graph = None;
+                continue;
+            }
+            Err(CandidateSelectionError::Solver(_))
+                if use_neighborhood && Instant::now() >= neighborhood_deadline =>
+            {
+                neighborhood_spent += neighborhood_started.elapsed();
                 continue;
             }
             Err(error) => {
@@ -338,8 +425,10 @@ fn search_with_solver(
                 .iter()
                 .map(|id| graph.candidates[id.0].local_cost)
                 .sum();
-        } else if let Some(bound) = proposal.model_lower_bound {
-            lower_bound = lower_bound.max(bound);
+        } else if !use_neighborhood {
+            if let Some(bound) = proposal.model_lower_bound {
+                lower_bound = lower_bound.max(bound);
+            }
         }
         if let Some(best) = &incumbent {
             if closes_gap(lower_bound, best.actual_cost) {
@@ -354,12 +443,19 @@ fn search_with_solver(
         if observations.iter().any(|observation: &ObservedAssignment| {
             same_assignment(&observation.selected, &proposal.selected)
         }) {
+            if use_neighborhood {
+                neighborhood_spent += neighborhood_started.elapsed();
+                continue;
+            }
             break CandidateSearchStatus::NumericalStall;
         }
         refinements += 1;
         let validation_started = Instant::now();
         let evaluated = evaluate(&proposal.selected);
         validation_seconds += validation_started.elapsed().as_secs_f64();
+        if use_neighborhood {
+            neighborhood_spent += neighborhood_started.elapsed();
+        }
         let feedback = match evaluated {
             Ok(cost) => cost,
             Err(error) => break CandidateSearchStatus::EvaluatorStopped(error),
@@ -494,7 +590,7 @@ mod tests {
             limits(2),
             false,
             None,
-            &[],
+            SeedRestrictions::default(),
             |selected| {
                 Ok(Some(if selected.selected_candidates[0].0 == 0 {
                     20.0
@@ -629,7 +725,7 @@ mod tests {
             limits(1),
             true,
             None,
-            &[],
+            SeedRestrictions::default(),
             |selected| {
                 assert_eq!(selected.selected_candidates.len(), 2);
                 Ok(Some(2.0).into())
@@ -743,6 +839,7 @@ mod tests {
             limits(2),
             &[1.0, 1_000_000.0],
             &[PhysicalCandidateId(0)],
+            &[],
             |selected| {
                 let id = selected.query_roots[0].candidate.0;
                 visited.push(id);

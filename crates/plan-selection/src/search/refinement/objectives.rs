@@ -530,6 +530,7 @@ mod tests {
             };
             let context = CandidatePlanningContext {
                 deadline: None,
+                refine_materialization: false,
                 original_roots: &roots,
                 entries: &entries,
                 data: &data,
@@ -587,6 +588,7 @@ mod tests {
         };
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -627,6 +629,7 @@ mod tests {
         };
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -672,6 +675,7 @@ mod tests {
         let models = PlanningModels::builtin();
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -726,6 +730,7 @@ mod tests {
         };
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -770,6 +775,7 @@ mod tests {
         entries[0].predictability = Predictability::AdHoc;
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -831,6 +837,7 @@ mod tests {
             .push_str("_changed");
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -882,6 +889,7 @@ mod tests {
         };
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -927,6 +935,7 @@ mod tests {
         };
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -975,6 +984,7 @@ mod tests {
         let policy = CandidateCalibration::for_models(models).unwrap();
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,

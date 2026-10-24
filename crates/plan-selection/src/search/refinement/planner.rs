@@ -21,6 +21,7 @@ use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, 
 #[derive(Clone, Copy)]
 pub(in crate::search) struct CandidatePlanningContext<'a> {
     pub deadline: Option<std::time::Instant>,
+    pub refine_materialization: bool,
     pub original_roots: &'a [QueryRoot],
     pub entries: &'a [QueryWorkloadEntry],
     pub data: &'a DataWorkload,
@@ -116,6 +117,11 @@ pub(in crate::search) fn optimize_configured_candidates(
     let mut rejections = CandidateRejectionSummary::default();
     let weighting_started = std::time::Instant::now();
     let (weights, exclusions) = accuracy_baseline(configured, context)?;
+    let changes = if context.refine_materialization {
+        super::materialization::counterparts(configured, context.deadline)
+    } else {
+        Vec::new()
+    };
     let search = search_candidates_with_restricted_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
@@ -124,6 +130,7 @@ pub(in crate::search) fn optimize_configured_candidates(
         },
         &weights,
         &exclusions,
+        &changes,
         |selected| {
             evaluation_number += 1;
             let mut rejected_queries = Vec::new();
@@ -907,6 +914,7 @@ mod tests {
             .expect("repeated reader still has an ingestion pane plan");
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1012,6 +1020,7 @@ mod tests {
         let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1158,6 +1167,7 @@ mod tests {
         }
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1201,6 +1211,7 @@ mod tests {
         };
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1247,6 +1258,7 @@ mod tests {
         let (mut configured, roots, entries, data) = fixture();
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1268,6 +1280,7 @@ mod tests {
         let (mut configured, roots, entries, data) = fixture();
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1361,6 +1374,7 @@ mod tests {
         }
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1388,6 +1402,7 @@ mod tests {
                 &configured,
                 &CandidatePlanningContext {
                     deadline: None,
+                    refine_materialization: false,
                     original_roots: &roots,
                     entries,
                     data: &data,
@@ -1461,6 +1476,7 @@ mod tests {
             };
             let context = CandidatePlanningContext {
                 deadline: None,
+                refine_materialization: false,
                 original_roots: &roots,
                 entries: &entries,
                 data: &data,
@@ -1512,6 +1528,7 @@ mod tests {
         let (configured, roots, entries, data) = fixture();
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1543,6 +1560,7 @@ mod tests {
         entries[1].predictability = Predictability::AdHoc;
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1624,6 +1642,7 @@ mod tests {
             .push_str("_changed");
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1662,6 +1681,7 @@ mod tests {
         };
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,

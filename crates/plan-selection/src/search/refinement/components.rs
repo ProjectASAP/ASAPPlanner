@@ -399,6 +399,7 @@ pub(in crate::search) fn optimize_independent_components(
             .collect();
         let local_context = CandidatePlanningContext {
             deadline: context.deadline,
+            refine_materialization: context.refine_materialization,
             original_roots: &roots,
             entries: &entries,
             data: context.data,
@@ -620,6 +621,7 @@ mod tests {
         settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -692,6 +694,7 @@ mod tests {
         let models = PlanningModels::builtin().with_plan_selection(&retention_settings);
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,

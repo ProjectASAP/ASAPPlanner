@@ -510,6 +510,8 @@ Search reductions must preserve joint choices. A candidate that costs more alone
 
 Bounded fixed-calibration search may first obtain a validated seed from a smaller reader-grid/GCD width domain using the same engine, then spend the remaining budget on the complete domain. Only a definite budget stop may fall back to that validated seed; internal errors remain errors. Exhaustive archives and complete-catalog calibration skip this seed phase. Reports distinguish complete-domain generation from exhaustive assignment traversal, and a seed fallback supplies no full-domain optimum or gap certificate. Generation and model construction cooperate with the deadline; individual evaluator calls may overrun it.
 
+Within the seed budget, the same MILP can also hold a validated plan's computations and producer connections fixed and try supported query-time materializations. The normal evaluator measures whether retaining a shared result avoids enough repeated upstream work to reduce cost. These limited proposals use the existing solve/evaluation budgets; their bounds and infeasibility apply only to the restricted proposal, never to the full search. This does not create another selector or an optimality claim for the seed.
+
 After selection, the planner reconstructs the DAG and evaluates accuracy, latency, and resource cost. A complete MILP does not require LBBD. Lazy refinement is useful when difficult checks are left outside the initial model, provided the resulting feasibility or cost cuts are sound. The report includes the validated cost, solver status and gap, and generation limits; validating one solution alone does not prove a relaxed model optimal.
 
 ## 8. Implementation and Evaluation

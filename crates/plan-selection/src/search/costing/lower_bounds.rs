@@ -972,6 +972,7 @@ mod tests {
         let calibration = CalibrationFit::default();
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1122,6 +1123,7 @@ mod tests {
             };
             let context = CandidatePlanningContext {
                 deadline: None,
+                refine_materialization: false,
                 original_roots: &roots,
                 entries: &entries,
                 data: &data,
@@ -1216,6 +1218,7 @@ mod tests {
         }
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1284,6 +1287,7 @@ mod tests {
         }
         let context = CandidatePlanningContext {
             deadline: None,
+            refine_materialization: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,

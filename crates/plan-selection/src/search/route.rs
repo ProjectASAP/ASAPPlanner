@@ -509,6 +509,7 @@ fn search_domain<Id: Clone>(
     check_budget("physical candidate generation", progress)?;
     let context = CandidatePlanningContext {
         deadline,
+        refine_materialization: domain == asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::SeedGrids,
         original_roots: &roots,
         entries,
         data,
