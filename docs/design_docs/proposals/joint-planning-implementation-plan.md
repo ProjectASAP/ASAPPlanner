@@ -14,6 +14,32 @@ Current `run_stage1_to_stage3_with` generates `PerComputationCandidates` before 
 
 Legacy is currently more than a selectable algorithm. The stage driver and public exports live under `search/legacy`; memo clustering uses its source-component and renumbering helpers; the MILP baseline calls legacy planning. Unsupported cost objectives and exhaustive requests also route there. These dependencies must be removed before deleting the directory.
 
+## Capability parity gates
+
+The existing planner's behavior is the migration baseline. A new representation or a feasible smoke test is not parity. Do not switch the default or remove the existing route until every required row is verified on the new pipeline. Temporary comparison entry points are removed at that switch; they are not permanent product variants.
+
+| Existing capability | Connection-pipeline status | Required acceptance evidence |
+| --- | --- | --- |
+| Exact, accumulator, sketch, fused and scalar computations | Implemented for the current bridge; remaining shapes must be audited | Existing generation/composition tests; all output contracts preserved |
+| Exact TopK physical lowering and ranked-row contracts | Implemented, including retained labels/identity | Logical, physical, frontend and selected-graph regressions |
+| Local panes and identical-configuration shared pane states | Implemented | Window alignment, separate/shared state, and actual evaluator-cost tests |
+| Different label projections reading one shared scan/state | In progress | Original ASAPQuery q03/q04/q05 can share the wider state through typed projections |
+| Cross-capacity summary reuse, pane widths/horizons and newest-pane reads | Partial: exact configurations only | Existing capability/window reuse cases, preserving local choices |
+| Exact/sketch rollup and shared TopK ranking | Pending | Existing rollup/ranking rules and their conditional input requirements |
+| Size-independent per-query accuracy pruning | In progress; final validation already reused | Reuse existing `CheckFailure::size_independent` policy; changing unrelated queries cannot repair a certified failure, changing a relevant producer can |
+| Safe cost lower bounds and context-dependent term cuts | Pending beyond zero bounds and exact-assignment refinement | Existing evaluator parity/lower-bound tests, including execution frequency, held memory and raw retention |
+| Feasible incumbent before cost optimization | Bounded same-graph baseline implemented | Actual accuracy/materialization validation; heuristic scores never become cost bounds |
+| Independent-component optimization | Pending on the connection graph | Preserve shared resources and global constraints; match unsplit optimum on small inputs |
+| Summary materialization and execution-demand accounting | Implemented for supported modes | Existing timing, selected-reader, range/repeated-query and retained-state cases |
+| Non-summary shared materialization | Pending | Highest-shared-node behavior and consumer-dependent eligibility |
+| Usage-over-time and provisioned-price objectives | Evaluator-backed path implemented | Same objective, resources, accuracy and latency as independent final evaluation |
+| Cluster-capacity priorities and Pareto output | Pending | Existing lexicographic/frontier semantics; no arbitrary scalar replacement |
+| Measured-cost calibration | Frozen-fit internal API exists; driver integration pending | One consistent workload fit reused across all proposals |
+| Reports, execution export and planning budgets | Partial | All stage timings, model size, validation reasons, solver gap/status, peak-memory measurements and validated exports |
+| Default routing and legacy deletion | Blocked on the gates above | One production implementation; no legacy selector, fallback, baseline call or temporary comparison mode |
+
+The ASAPQuery viewer manifests are acceptance workloads, not just demonstrations. Record coverage failures, rejected guarantees, feasible-plan costs and planning times. A timeout incumbent is not a proven optimum, and an optimum over an incomplete catalog does not establish parity. See `docs/develop_docs/joint-candidate-workload-evaluation.md` for measured migration checkpoints.
+
 ## Naming and ownership
 
 Names should identify domain concepts without requiring readers to decode mathematical notation. Do not introduce synonyms for the same concept or rename unrelated identifiers in bulk. The following are proposed responsibilities, not a requirement to create a new type for every row:
@@ -155,6 +181,6 @@ Execution-rate accounting is shared with the existing evaluator. A selected-grap
 
 A bounded refinement loop now reconstructs configurations through Stage 2 and prices them with `PlanSelector` under usage and provisioned-price objectives, with a frozen calibration fit. It retains a validated incumbent and reports its bound, gap, and stopping reason. Exact observed full-assignment cost cuts include absent as well as selected decisions; only proven rejected assignments are excluded. Internal or unsupported reconstruction failures remain diagnostics.
 
-The standard stage driver and `stage_pipeline --search candidate-connections` now expose this path explicitly. Its report identifies the migration catalog (Pass 1, local pane composition, and concrete shared summaries), defaults of 128 evaluator refinements and 30 seconds, and any stopping reason. It reports memo expansion, physical inventory construction, model construction, solver and validation time, refinement rounds, and peak MILP variables/constraints. Memo expansion timing excludes frontend lowering and Pass 1 generation. A no-incumbent result includes the report in its diagnostic; it does not silently use legacy.
+The standard stage driver and `stage_pipeline --search candidate-connections` now expose this path explicitly. Its report identifies the migration catalog (Pass 1, local pane composition, and identical-configuration shared summary/pane states), defaults of 128 evaluator refinements and 30 seconds, and any stopping reason. It reports memo expansion, physical inventory construction, model construction, solver and validation time, refinement rounds, and peak MILP variables/constraints. Memo expansion timing excludes frontend lowering and Pass 1 generation. A no-incumbent result includes the report in its diagnostic; it does not silently use legacy.
 
-The initial zero lower bounds and full-assignment cuts are a correctness foundation, not a scalability claim. Existing routes remain available because the new route does not yet cover cross-group shared pane chains, rollup/scan-widening expansion, or all physical rewrites, or cluster lexicographic/Pareto objectives. Default production replacement, complete rule coverage, constructive baseline/budget integration, stronger contextual bounds/cuts, and deletion of legacy search remain required before this migration is complete.
+The initial zero lower bounds and full-assignment cuts are a correctness foundation, not a scalability claim. Existing routes remain available because the new route does not yet cover cross-width/horizon pane reuse or rollup/scan-widening expansion, or all physical rewrites, or cluster lexicographic/Pareto objectives. Default production replacement, complete rule coverage, constructive baseline/budget integration, stronger contextual bounds/cuts, and deletion of legacy search remain required before this migration is complete.
