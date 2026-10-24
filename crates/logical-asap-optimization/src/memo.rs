@@ -6,6 +6,8 @@
 
 /// Logical implementation candidates populated after initial identity construction.
 pub mod candidates;
+/// Pass 2 summary-capability expansion and consistent producer/reader resizing.
+pub mod shared_builds;
 mod groups;
 
 use std::collections::{HashMap, HashSet};

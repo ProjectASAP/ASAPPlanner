@@ -136,6 +136,7 @@ The first implementation change should establish the stage/memo ownership bounda
 - Implemented: `LogicalMemo`, `MemoGroup`, and `MemoGroupId` in the logical optimization crate, independent of solver types.
 - Implemented: `CandidateMemo` and Pass 1 candidate population now belong to logical optimization; population rejects inventories with incompatible roots or invalid target references. Selection retains only a temporary forwarding adapter and pricing context.
 - Implemented: initialize logical groups before Pass 1 on memo routes; populate those groups after capability pruning; apply existing Pass 2 rules afterward. The from-Pass-1 API remains supported.
+- Implemented: consumer-independent Pass 1 rules are cached by logical group and measure; per-occurrence HAVING, nullable pruning, fusion, and absorption remain contextual. Shared-summary Pass 2 rules now live in logical optimization, with temporary selection reexports.
 - Implemented: shared stage orchestration, source-dependency analysis, diagnostic index mapping, and pane reuse moved out of the legacy namespace.
 - Implemented: an internal fixed-context candidate-connection MILP core, including same-group multi-selection and an independent tiny-graph enumerator. Production IR decoding and workload-dependent cost/constraint adapters are pending; this core is not yet a replacement production search mode.
 - Verified: initial group identity survives Pass 1 population and summary pruning; scalar/literal roots retain query positions; distinct quantile results remain distinct groups.

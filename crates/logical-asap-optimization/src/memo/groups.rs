@@ -4,9 +4,9 @@
 //! Groups are the workload's logical DAG interned by
 //! [`asap_types::ir::cse::share_common_sub_dags`], the identical-expression rule's legality
 //! included: structurally equal nodes are one group when sharing them is
-//! legal (an ASAP node, or one whose schema has a unique key), so the
-//! unkeyed scans of two queries stay two groups while a keyed aggregate
-//! over them is one.
+//! legal (an ASAP node, a scan, or one whose schema has a unique key).
+//! Structurally equal keyless aggregates remain separate; eligible scans
+//! and keyed aggregates can share a group.
 //!
 //! A Pass 1 target's aggregate group gets one candidate per combination of
 //! its measures' Pass 1 candidates: the aggregate alone composed by
