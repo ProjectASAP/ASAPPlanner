@@ -122,7 +122,9 @@ pub struct Stage1ToStage3Search {
     /// Stopped at the limit, it selects its best plan so far and reports
     /// the gap to its bound ([`crate::MilpReport::gap`]) and
     /// [`crate::MilpReport::time_limit_reached`]: not proven
-    /// optimal unless the gap is 0.
+    /// optimal unless the gap is 0. CandidateConnections defaults to 30 seconds
+    /// and at most 128 evaluator refinements; its separate report names the
+    /// restricted catalog and termination reason.
     pub milp_time_limit_ms: Option<u64>,
 }
 
@@ -182,7 +184,7 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
     let uses_memo = !search.exhaustive
         && match search.search {
             SearchAlgorithm::Legacy => false,
-            SearchAlgorithm::MemoBruteForce => true,
+            SearchAlgorithm::MemoBruteForce | SearchAlgorithm::CandidateConnections => true,
             SearchAlgorithm::MemoMilp => matches!(
                 models.plan_selection.cost_model,
                 CostModel::UsageOverTime(_)
@@ -234,6 +236,20 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     search: Stage1ToStage3Search,
     initial: Option<LogicalMemo>,
 ) -> Stage1ToStage3Run<Id> {
+    if search.search == SearchAlgorithm::CandidateConnections {
+        let pruned = per_computation.without_unsupported_summaries(models.deployment_capabilities);
+        let initial = initial.unwrap_or_else(|| LogicalMemo::from_roots(&pruned.roots));
+        let found = crate::search::milp::candidate_route::candidate_connection_search(
+            initial, &pruned, entries, data, models, search,
+        );
+        return memo_run(
+            pruned,
+            found,
+            entries,
+            data,
+            SearchAlgorithm::CandidateConnections,
+        );
+    }
     let routed_to_legacy = match (search.exhaustive, search.search) {
         (_, SearchAlgorithm::Legacy) => None,
         (true, _) => Some(RoutedToLegacy::ExhaustiveRequested),
@@ -255,6 +271,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
                 SearchAlgorithm::MemoBruteForce,
             );
         }
+        (false, SearchAlgorithm::CandidateConnections) => unreachable!("handled above"),
         (false, SearchAlgorithm::MemoMilp) => {
             if !matches!(
                 models.plan_selection.cost_model,

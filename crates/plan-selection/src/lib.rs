@@ -1073,12 +1073,21 @@ pub struct CandidateConnectionReport {
     pub compatible_connections: usize,
     pub output_references: usize,
     pub refinements: usize,
+    pub max_refinements: usize,
+    pub time_limit_ms: u64,
     pub lower_bound: f64,
     pub relative_gap: Option<f64>,
-    /// Includes logical group population and concrete state sharing, not frontend lowering.
+    /// Memo population and concrete state sharing only; excludes frontend
+    /// lowering, initial memo identity, and Pass 1 local rule generation.
     pub memo_expansion_ms: f64,
     pub inventory_construction_ms: f64,
     pub search_and_validation_ms: f64,
+    pub model_construction_ms: f64,
+    pub solver_ms: f64,
+    pub validation_ms: f64,
+    pub solve_calls: usize,
+    pub peak_milp_variables: usize,
+    pub peak_milp_constraints: usize,
 }
 
 /// The selected plan over the memo (joint-planning-search design, "How the

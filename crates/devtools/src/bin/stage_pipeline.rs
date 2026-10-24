@@ -38,13 +38,18 @@
 // `"default"`. `--exhaustive` instead composes and prices every candidate
 // (the search the default one is tested against, for small workloads and
 // comparison) and the document lists them; `search` is `"exhaustive"`.
-// `--search legacy|memo-brute-force|memo-milp` picks the default search's
+// `--search legacy|memo-brute-force|memo-milp|candidate-connections` picks the default search's
 // algorithm (`SearchAlgorithm`): `legacy` (the default, `search` is
 // `"default"`), the memo over logical sub-expressions searched by brute
 // force (the reference), or solved as a MILP; `search` names it, and the
 // search report says which ran (`algorithm`, omitted for legacy) and,
-// when the legacy search ran instead, why (`routed_to_legacy`). Not with
-// `--exhaustive`. `--milp-time-limit-s <f64>` limits the MILP search: at
+// when the legacy search ran instead, why (`routed_to_legacy`). These choices
+// cannot be combined with `--exhaustive`.
+// `candidate-connections` is an explicit restricted catalog (Pass 1 and
+// concrete shared summaries), with a separate scope/termination report. It
+// defaults to 30 seconds and 128 evaluator refinements; --milp-time-limit-s
+// overrides its time budget. It does not replace the other rule catalogs.
+// `--milp-time-limit-s <f64>` limits the MILP search: at
 // the limit it selects its best plan so far and reports
 // `time_limit_reached` with the gap to its bound. The memo-MILP search's
 // report also has `milp.queries_alone_cost` (each query planned alone)
@@ -276,7 +281,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp [--milp-time-limit-s <f64>]] [--max-displayed <n>] --out <file>\n\
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search legacy|memo-brute-force|memo-milp|candidate-connections [--milp-time-limit-s <f64>]] [--max-displayed <n>] --out <file>\n\
 --search legacy is the default search (the document's \"search\" is \"default\").";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
@@ -453,9 +458,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     "legacy" => SearchAlgorithm::Legacy,
                     "memo-brute-force" => SearchAlgorithm::MemoBruteForce,
                     "memo-milp" => SearchAlgorithm::MemoMilp,
+                    "candidate-connections" => SearchAlgorithm::CandidateConnections,
                     other => {
                         return Err(format!(
-                            "--search {other}: expected legacy, memo-brute-force or memo-milp"
+                            "--search {other}: expected legacy, memo-brute-force, memo-milp or candidate-connections"
                         )
                         .into())
                     }
@@ -495,9 +501,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         );
     }
     let search_algorithm = search_algorithm.unwrap_or_default();
-    if milp_time_limit_ms.is_some() && search_algorithm != SearchAlgorithm::MemoMilp {
+    if milp_time_limit_ms.is_some()
+        && !matches!(
+            search_algorithm,
+            SearchAlgorithm::MemoMilp | SearchAlgorithm::CandidateConnections
+        )
+    {
         return Err(
-            "--milp-time-limit-s limits the MILP search: it needs --search memo-milp".into(),
+            "--milp-time-limit-s limits the MILP search: it needs --search memo-milp or candidate-connections".into(),
         );
     }
     if plan_selection_settings_path.is_some()
@@ -757,6 +768,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         (false, SearchAlgorithm::Legacy) => "default",
         (false, SearchAlgorithm::MemoBruteForce) => "memo-brute-force",
         (false, SearchAlgorithm::MemoMilp) => "memo-milp",
+        (false, SearchAlgorithm::CandidateConnections) => "candidate-connections",
     });
     document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
         "enforced"

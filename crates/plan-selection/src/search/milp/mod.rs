@@ -20,3 +20,5 @@ pub(crate) mod candidate_physical;
 pub(crate) mod candidate_planner;
 pub(crate) mod candidate_reconstruction;
 pub(crate) mod candidate_search;
+
+pub(crate) mod candidate_route;

@@ -1,6 +1,6 @@
 # Joint Planning Implementation Plan
 
-Status: implementation in progress. The first draft implements the logical memo/stage boundary and extracts shared infrastructure; it does not yet replace the selection model or remove legacy search.
+Status: implementation in progress. Logical memo construction, candidate connections, physical configuration selection, and evaluator-backed refinement are implemented. The candidate-connection route is explicitly selectable through the stage driver and CLI; it is not yet the default or a complete replacement for legacy search.
 
 ## Outcome
 
@@ -155,4 +155,6 @@ Execution-rate accounting is shared with the existing evaluator. A selected-grap
 
 A bounded refinement loop now reconstructs configurations through Stage 2 and prices them with `PlanSelector` under usage and provisioned-price objectives, with a frozen calibration fit. It retains a validated incumbent and reports its bound, gap, and stopping reason. Exact observed full-assignment cost cuts include absent as well as selected decisions; only proven rejected assignments are excluded. Internal or unsupported reconstruction failures remain diagnostics.
 
-This path is still opt-in internally. Its initial zero lower bounds and full-assignment cuts are a correctness foundation, not a scalability claim. Remaining work includes finer contextual bounds/cuts, cluster lexicographic/Pareto objectives, complete rule and physical-implementation coverage, production routing, baseline/budget integration, benchmark evidence, and legacy deletion.
+The standard stage driver and `stage_pipeline --search candidate-connections` now expose this path explicitly. Its report identifies the restricted catalog (Pass 1 and concrete shared summaries), defaults of 128 evaluator refinements and 30 seconds, and any stopping reason. It reports memo expansion, physical inventory construction, model construction, solver and validation time, refinement rounds, and peak MILP variables/constraints. Memo expansion timing excludes frontend lowering and Pass 1 generation. A no-incumbent result includes the report in its diagnostic; it does not silently use legacy.
+
+The initial zero lower bounds and full-assignment cuts are a correctness foundation, not a scalability claim. Existing routes remain available because the new route does not yet cover pane/rollup/scan-widening expansion, all fusion and physical rewrites, or cluster lexicographic/Pareto objectives. Default production replacement, complete rule coverage, constructive baseline/budget integration, stronger contextual bounds/cuts, and deletion of legacy search remain required before this migration is complete.
