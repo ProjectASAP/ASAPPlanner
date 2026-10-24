@@ -25,9 +25,9 @@
 //! physical DAG ([`ResourceUsage`]), and the deployment's [`CostModel`]
 //! chooses among them ("Cost models" below). The rest are reported valid
 //! but costlier (or slower, or larger).
-//! Selection prices every candidate it is given; a search that avoids
-//! building every candidate (e.g. a dynamic program over target nesting) is
-//! deferred to #671.
+//! Candidate-connection MILP search selects and validates workload DAGs
+//! without constructing the Cartesian product of local candidates.
+//! Dynamic-programming compression is outside the current implementation.
 //!
 //! ## Cost model: cost per second of wall time
 //!
