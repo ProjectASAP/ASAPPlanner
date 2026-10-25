@@ -1024,6 +1024,11 @@ pub struct SearchReport {
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateConnectionReport {
+    /// Pane-width domain of the most recently reported complete inventory.
+    /// Inventory counts form one snapshot from this domain, even if a later
+    /// expansion timed out. This does not certify full-domain optimality.
+    #[serde(default)]
+    pub inventory_pane_width_domain: Option<String>,
     /// Width domains attempted in order; state/physical catalogs are rebuilt per round.
     #[serde(default)]
     pub pane_width_rounds: Vec<String>,

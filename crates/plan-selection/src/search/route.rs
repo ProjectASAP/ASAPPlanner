@@ -517,6 +517,25 @@ fn add_phase_metrics(
     report: &mut crate::CandidateConnectionReport,
     phase: &crate::CandidateConnectionReport,
 ) {
+    // An early timeout has no inventory snapshot. Retain the latest complete
+    // one as a unit, with explicit provenance; never combine field-wise maxima.
+    // A genuine empty inventory still has Some(domain) and must replace older
+    // counts rather than inheriting them because they happen to be nonzero.
+    if report.inventory_pane_width_domain.is_none() && phase.inventory_pane_width_domain.is_some() {
+        report.inventory_pane_width_domain = phase.inventory_pane_width_domain.clone();
+        report.groups = phase.groups;
+        report.logical_candidates = phase.logical_candidates;
+        report.immediate_candidates = phase.immediate_candidates;
+        report.physical_configurations = phase.physical_configurations;
+        report.compatible_connections = phase.compatible_connections;
+        report.supplier_sets = phase.supplier_sets;
+        report.stored_supplier_ids = phase.stored_supplier_ids;
+        report.output_references = phase.output_references;
+        report.structurally_removed_candidates = phase.structurally_removed_candidates;
+        report.structurally_removed_connections = phase.structurally_removed_connections;
+        report.rounded_down_cost_bounds = phase.rounded_down_cost_bounds;
+        report.independent_components = phase.independent_components;
+    }
     report.memo_expansion_ms += phase.memo_expansion_ms;
     report.inventory_construction_ms += phase.inventory_construction_ms;
     report.search_and_validation_ms += phase.search_and_validation_ms;
@@ -953,6 +972,7 @@ fn search_domain<Id: Clone>(
     let supplier_storage =
         crate::search::candidates::suppliers::supplier_storage_metrics(&configured.inventory.graph);
     let report = crate::CandidateConnectionReport {
+        inventory_pane_width_domain: Some(format!("{domain:?}")),
         supplier_sets: supplier_storage.unique_supplier_sets,
         stored_supplier_ids: supplier_storage.stored_supplier_ids,
         pane_width_rounds: vec![format!("{domain:?}")],
@@ -1297,6 +1317,93 @@ mod tests {
         assert_eq!(report.relative_gap, None);
         assert_ne!(report.status, "optimal");
         assert!(selection.search.candidates_checked <= 4);
+    }
+
+    #[test]
+    fn interrupted_round_preserves_one_complete_inventory_snapshot() {
+        let previous = crate::CandidateConnectionReport {
+            inventory_pane_width_domain: Some("Expanding { max_parts: 32 }".into()),
+            groups: 7,
+            logical_candidates: 11,
+            immediate_candidates: 13,
+            physical_configurations: 17,
+            compatible_connections: 101,
+            supplier_sets: 3,
+            stored_supplier_ids: 19,
+            output_references: 2,
+            structurally_removed_candidates: 5,
+            structurally_removed_connections: 23,
+            rounded_down_cost_bounds: 2,
+            independent_components: 1,
+            lower_bound: Some(4.0),
+            relative_gap: Some(0.1),
+            full_catalog_completed: true,
+            ..Default::default()
+        };
+        let mut interrupted = crate::CandidateConnectionReport {
+            status: "pane_width_domain_incomplete".into(),
+            pane_widths_pending: true,
+            pane_width_rounds: vec!["Expanding { max_parts: 64 }".into()],
+            ..Default::default()
+        };
+        add_phase_metrics(&mut interrupted, &previous);
+        assert_eq!(
+            interrupted.inventory_pane_width_domain,
+            previous.inventory_pane_width_domain
+        );
+        assert_eq!(
+            (
+                interrupted.groups,
+                interrupted.logical_candidates,
+                interrupted.immediate_candidates
+            ),
+            (7, 11, 13)
+        );
+        assert_eq!(
+            (
+                interrupted.physical_configurations,
+                interrupted.compatible_connections,
+                interrupted.supplier_sets,
+                interrupted.stored_supplier_ids
+            ),
+            (17, 101, 3, 19)
+        );
+        assert_eq!(
+            (
+                interrupted.output_references,
+                interrupted.structurally_removed_candidates,
+                interrupted.structurally_removed_connections
+            ),
+            (2, 5, 23)
+        );
+        assert_eq!(interrupted.lower_bound, None);
+        assert_eq!(interrupted.relative_gap, None);
+        assert!(!interrupted.full_catalog_completed);
+        assert!(interrupted.pane_widths_pending);
+        assert_eq!(interrupted.status, "pane_width_domain_incomplete");
+        assert_eq!(
+            interrupted.pane_width_rounds,
+            vec!["Expanding { max_parts: 64 }"]
+        );
+
+        let mut empty = crate::CandidateConnectionReport {
+            inventory_pane_width_domain: Some("Complete".into()),
+            ..Default::default()
+        };
+        add_phase_metrics(&mut empty, &previous);
+        assert_eq!(
+            empty.inventory_pane_width_domain.as_deref(),
+            Some("Complete")
+        );
+        assert_eq!(
+            (
+                empty.physical_configurations,
+                empty.compatible_connections,
+                empty.supplier_sets,
+                empty.stored_supplier_ids
+            ),
+            (0, 0, 0, 0)
+        );
     }
 
     #[test]
