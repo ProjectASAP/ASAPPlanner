@@ -15,7 +15,7 @@ use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
-use asap_plan_selection::{run_stage1_to_stage3_with, PlanningModels, Stage1ToStage3Run};
+use asap_plan_selection::Stage1ToStage3Run;
 use asap_types::ir::physical_export::compile_physical_asap_dag_with_node_ids;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::Schema;
@@ -42,14 +42,61 @@ fn plan(queries: &[&str], recurrence: QueryRecurrence) -> Stage1ToStage3Run<usiz
             (i, QueryRoot::Operator(root))
         })
         .collect();
-    run_stage1_to_stage3_with(
-        roots,
-        &vec![exact(recurrence); queries.len()],
+    explicit_rule_plans(roots, &vec![exact(recurrence); queries.len()])
+}
+
+/// Price and execute explicit exact, fused, and shared-summary rule fixtures.
+/// This catalog tests rewrite semantics independently of a timed search archive.
+fn explicit_rule_plans(
+    roots: Vec<(usize, QueryRoot)>,
+    entries: &[QueryWorkloadEntry],
+) -> Stage1ToStage3Run<usize> {
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_types::ir::schema::SketchAlgorithm;
+    let inventory = generate_per_computation_candidates(roots).unwrap();
+    let exact = vec![0; inventory.targets.len()];
+    let mut fused = exact.clone();
+    for (index, target) in inventory.targets.iter().enumerate() {
+        if target
+            .fused
+            .as_ref()
+            .is_some_and(|fused| !fused.candidates.is_empty())
+        {
+            fused[index] = target.choices.candidates.len();
+        }
+    }
+    for target in &inventory.targets {
+        if let Some(fusion) = &target.fused {
+            for &absorbed in &fusion.absorbs {
+                fused[absorbed] = 0;
+            }
+        }
+    }
+    let mut summaries = fused.clone();
+    for (index, target) in inventory.targets.iter().enumerate() {
+        if let Some(choice) = target.choices.candidates.iter().position(|candidate| {
+            matches!(
+                candidate,
+                ComputationCandidate::Summary(SketchAlgorithm::DDSketch)
+            )
+        }) {
+            summaries[index] = choice;
+        }
+    }
+    let mut assignments = vec![exact];
+    for assignment in [fused, summaries] {
+        if !assignments.contains(&assignment) {
+            assignments.push(assignment);
+        }
+    }
+    asap_integration_tests::planning::explicit_assignment_plans(
+        inventory,
+        assignments,
+        entries,
         &data(),
-        PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
     )
-    .unwrap()
 }
 
 /// The workload entry of an exact query evaluated as `recurrence` says.
@@ -441,14 +488,7 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
             (i, QueryRoot::Operator(root))
         })
         .collect();
-    let run = run_stage1_to_stage3_with(
-        roots,
-        &vec![exact(repeating()); queries.len()],
-        &data(),
-        PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
-    )
-    .unwrap();
+    let run = explicit_rule_plans(roots, &vec![exact(repeating()); queries.len()]);
     let implemented = |id: &str| {
         run.stage2_physical_asap_optimization
             .iter()

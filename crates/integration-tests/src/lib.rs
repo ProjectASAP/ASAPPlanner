@@ -215,15 +215,77 @@ pub mod planning {
         }
     }
 
-    /// Every logical candidate (a composed CandidateLogicalASAPDAG) of the
-    /// single query `root`, in enumeration order; a candidate that does not
-    /// compose panics, so none is silently skipped.
+    /// Exact computation and each explicit single-target rule application.
+    /// This fixture catalog is independent of the bounded MILP's visited plans.
+    pub fn explicit_local_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
+        use asap_logical_asap_optimization::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates,
+        };
+        let local =
+            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
+        for (target, options) in local.targets.iter().enumerate() {
+            for choice in 1..options.choice_count() {
+                let mut selected = vec![0; local.targets.len()];
+                selected[target] = choice;
+                choices.insert(selected);
+            }
+        }
+        choices
+            .into_iter()
+            .map(|choice| {
+                match compose_logical_candidate(&local, &choice)
+                    .expect("explicit local rule composes")
+                    .remove(0)
+                    .1
+                {
+                    QueryRoot::Operator(node) => node,
+                    QueryRoot::Scalar(_) => panic!("operator fixture"),
+                }
+            })
+            .collect()
+    }
+
+    /// One explicit plan using `family` wherever a local target supports it,
+    /// keeping all other computations exact. No workload Cartesian enumeration.
+    pub fn explicit_summary_candidate(
+        root: Rc<OperatorNode>,
+        family: asap_types::ir::schema::SketchAlgorithm,
+    ) -> Rc<OperatorNode> {
+        use asap_logical_asap_optimization::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        };
+        let local =
+            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let choices = local.targets.iter().map(|target| target.choices.candidates.iter()
+            .position(|candidate| matches!(candidate, ComputationCandidate::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
+        match compose_logical_candidate(&local, &choices)
+            .expect("explicit family choices compose")
+            .remove(0)
+            .1
+        {
+            QueryRoot::Operator(node) => node,
+            QueryRoot::Scalar(_) => panic!("operator fixture"),
+        }
+    }
+
+    /// Logical plans visited by the bounded search for `root`, in archive order.
+    /// This is not the generated candidate catalog. Rule-existence tests should
+    /// use explicit fixtures; failed compositions in this archive still panic.
     pub fn logical_candidates(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        run_stage1_to_stage3(root, accuracy)
-            .stage1_logical_asap_optimization
+        require_composed_operator_candidates(
+            run_stage1_to_stage3(root, accuracy).stage1_logical_asap_optimization,
+        )
+    }
+
+    /// Fail on rejected composition rather than silently skipping a candidate.
+    pub fn require_composed_operator_candidates(
+        candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
+    ) -> Vec<Rc<OperatorNode>> {
+        candidates
             .into_iter()
             .filter_map(|candidate| {
                 match candidate
@@ -236,5 +298,79 @@ pub mod planning {
                 }
             })
             .collect()
+    }
+    /// Apply sharing rules and Stage 2 to a small explicitly supplied fixture set,
+    /// then price it with the production evaluator. No workload product search.
+    pub fn explicit_assignment_plans(
+        inventory: asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates<usize>,
+        assignments: Vec<Vec<usize>>,
+        entries: &[asap_types::workload::QueryWorkloadEntry],
+        data: &asap_types::workload::DataWorkload,
+    ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+        use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
+        use asap_logical_asap_optimization::workload_candidates::stage1_candidates_of_choice;
+        use asap_plan_selection::{search::LogicalCandidate, PlanningModels, Stage1ToStage3Run};
+        let mut logical = Vec::new();
+        let mut physical = Vec::new();
+        for assignment in assignments {
+            let source_position = logical.len();
+            for mut candidate in
+                stage1_candidates_of_choice(&inventory, entries, &assignment, &|_| true)
+            {
+                if let Some(pass2) = &mut candidate.pass2 {
+                    pass2.from_pass1_position = source_position;
+                }
+                let roots = recompose_guarantees(&candidate.roots.unwrap()).unwrap();
+                let id = format!("L{}", logical.len() + 1);
+                physical.extend(
+                    asap_physical_asap_optimization::optimize_physical_asap(
+                        &id,
+                        &roots,
+                        entries,
+                        data,
+                        PlanningModels::builtin().deployment_capabilities,
+                    )
+                    .expect("explicit rewrite is executable"),
+                );
+                logical.push(LogicalCandidate {
+                    id,
+                    choice: candidate.choice,
+                    roots: Ok(roots),
+                    pass2: candidate.pass2,
+                });
+            }
+        }
+        for (index, plan) in physical.iter_mut().enumerate() {
+            plan.id = format!("fixture-{index}");
+        }
+        let selection =
+            asap_plan_selection::select_plan(&physical, entries, data, PlanningModels::builtin())
+                .unwrap();
+        let selected = physical
+            .iter()
+            .find(|plan| plan.id == selection.selected)
+            .unwrap()
+            .clone();
+        let source = logical
+            .iter()
+            .find(|candidate| candidate.id == selected.from_logical)
+            .unwrap();
+        let selected_logical = LogicalCandidate {
+            id: source.id.clone(),
+            choice: source.choice.clone(),
+            roots: Ok(source.roots.as_ref().unwrap().clone()),
+            pass2: source.pass2.clone(),
+        };
+        Stage1ToStage3Run {
+            combinations: inventory.combinations(),
+            stage1_pass1_per_computation: inventory,
+            stage1_logical_asap_optimization: logical,
+            stage2_physical_asap_optimization: physical,
+            stage2_pruned: vec![],
+            stage3_selected_logical: Some(selected.roots.clone()),
+            stage3_selected: Some(selected),
+            stage1_selected: Some(selected_logical),
+            stage3_plan_selection: Ok(selection),
+        }
     }
 }

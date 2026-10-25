@@ -537,7 +537,10 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
         AccuracyTarget::max_error(0.01),
     )
     .await;
-    let planned = realize(&pre_asap, AccuracyTarget::max_error(0.01));
+    let planned = asap_integration_tests::planning::explicit_summary_candidate(
+        pre_asap,
+        SketchAlgorithm::Kll,
+    );
     let root = below_projects(&planned);
 
     let Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -627,10 +630,8 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 
 /// `SELECT COUNT(DISTINCT service) FROM metrics` at ε = 0.01 lowers to
 /// `AggIntent::Cardinality` (`sql_lowering.rs::count_distinct_is_cardinality`)
-/// — unlike `Quantile`/`Count`/`TopK`, its preferred candidate is HLL, not
-/// KLL/CMS (`realization::summary_candidates`), so this exercises a
-/// distinct branch of the sketch-vs-exact decision than the quantile test
-/// above. HLL is sized from ε and the default δ = 0.01 (#694): `m ≥
+/// — this fixture explicitly selects the HLL rule, independently of the
+/// optimizer's cost preference. HLL is sized from ε and the default δ = 0.01 (#694): `m ≥
 /// 1/(2ε²δ)` reaches precision 18, the largest.
 #[tokio::test]
 async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
@@ -639,7 +640,10 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
         AccuracyTarget::max_error(0.01),
     )
     .await;
-    let planned = realize(&pre_asap, AccuracyTarget::max_error(0.01));
+    let planned = asap_integration_tests::planning::explicit_summary_candidate(
+        pre_asap,
+        SketchAlgorithm::Hll,
+    );
     let root = below_projects(&planned);
 
     let Operator::ASAP(ASAPOp::SummaryEstimate {

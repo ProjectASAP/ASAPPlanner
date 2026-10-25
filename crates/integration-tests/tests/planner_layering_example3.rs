@@ -1,12 +1,10 @@
-//! Acceptance tests for #509 "Example 3: Aggregation over windows — the
-//! window-composition rule in Pass 2".
+//! Rule-fixture and production acceptance for Example 3: window implementations.
 //!
-//! Spec: `docs/design_docs/proposals/planner-layering-example3-acceptance.md`.
-//! Written by a test designer who does not implement the stages. Tests that
-//! need an unimplemented feature are `#[ignore]`d, naming it and the PR that
-//! delivers it. Window summaries are read through
-//! `planner_layering_common::window_form`, which the window-composition
-//! implementer fills in.
+//! Numerical, accuracy, and operator assertions use explicitly supplied
+//! configurations of the existing rules and physical evaluator. They do not
+//! assume a bounded MILP run archives every supported workload plan. Separate
+//! production checks exercise memo search and validated output selection.
+//! Unsupported algorithms retain their existing ignored tests.
 
 mod planner_layering_common;
 
@@ -18,17 +16,112 @@ use asap_types::workload::DataArrival;
 
 use planner_layering_common::*;
 
+// Fixed algorithm/window fixtures keep numerical evaluator checks independent
+// of a time-bounded production search's archived incumbents.
 fn run_a() -> Run {
-    run_promql(&pattern_a(
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        sharing_candidates, with_shared_candidates,
+    };
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    let workload = pattern_a(
         PatternARecurrence::OnceAdHoc,
         DataArrival::Mixed {
             rows_per_second: SHARED_ROWS_PER_SECOND,
         },
-    ))
+    );
+    let roots = lower_promql(&workload);
+    let local =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let mut computations = Vec::new();
+    for kll in [false, true] {
+        let choices: Vec<_> = local
+            .targets
+            .iter()
+            .map(|target| {
+                if kll {
+                    (0..target.choice_count())
+                        .find(|&choice| {
+                            matches!(
+                                target.computation_for(choice),
+                                Some((ComputationCandidate::Summary(SketchAlgorithm::Kll), _))
+                            )
+                        })
+                        .unwrap()
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let whole: Vec<_> = compose_logical_candidate(&local, &choices)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        let sharing = sharing_candidates(&whole);
+        computations.push(whole.clone());
+        computations.push(with_shared_candidates(
+            &whole,
+            &sharing,
+            &vec![true; sharing.len()],
+        ));
+    }
+    run_explicit_candidates(
+        &workload,
+        roots,
+        computations,
+        asap_plan_selection::PlanningModels::builtin(),
+    )
 }
 
 fn run_b() -> Run {
-    run_promql(&pattern_b())
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    let workload = pattern_b();
+    let roots = lower_promql(&workload);
+    let local =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let mut computations = vec![roots.clone()];
+    for option in 0..local.targets[0].choice_count() {
+        if !matches!(
+            local.targets[0].computation_for(option),
+            Some((ComputationCandidate::Summary(_), _))
+        ) {
+            continue;
+        }
+        let whole: Vec<_> = compose_logical_candidate(&local, &[option])
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        let panes = pane_candidates(&whole, &[Some(PATTERN_B_INTERVAL_MS)]);
+        let chain = window_composition_pass2_candidates(&whole, &panes)
+            .unwrap()
+            .remove(0)
+            .roots
+            .unwrap();
+        computations.extend([whole, chain]);
+    }
+    run_explicit_candidates(
+        &workload,
+        roots,
+        computations,
+        asap_plan_selection::PlanningModels::builtin(),
+    )
+}
+
+#[test]
+fn production_memo_covers_pattern_b_with_validated_accuracy() {
+    let workload = pattern_b();
+    let run =
+        run_stages_with_compile_check(&workload, lower_promql(&workload), &Default::default());
+    assert_selects_cheapest_valid(&run);
+    assert_eq!(run.selection.accepted[&run.selection.selected].len(), 1);
 }
 
 /// The per-computation options of `query` across all candidates.

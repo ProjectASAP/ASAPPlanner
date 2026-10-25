@@ -159,7 +159,7 @@ pub fn run_stage1_to_stage3(
         }],
         &data,
         asap_plan_selection::PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
+        asap_plan_selection::Stage1ToStage3Search::default(),
     )
     .expect("Pass 1 accepts the query")
 }
@@ -175,16 +175,47 @@ pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<Oper
     }
 }
 
-/// Every logical candidate (a composed CandidateLogicalASAPDAG) of the single
-/// query `root` at `accuracy`, in enumeration order; a candidate that does not
-/// compose panics, so none is silently skipped.
+/// Local computation candidates for frontend binding tests. Other computations
+/// keep their default choices; a timed MILP archive is not a candidate catalog.
 #[allow(dead_code)]
-pub fn logical_candidates(
-    root: Rc<OperatorNode>,
-    accuracy: AccuracyTarget,
+pub fn logical_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
+    local_computation_candidates(root).expect("generated computation candidates compose")
+}
+
+fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    use asap_types::ir::QueryRoot;
+    let inventory = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
+        .map_err(|error| error.to_string())?;
+    let mut choices = vec![vec![0; inventory.targets.len()]];
+    for (index, target) in inventory.targets.iter().enumerate() {
+        for choice in 1..target.choice_count() {
+            let mut selected = vec![0; inventory.targets.len()];
+            selected[index] = choice;
+            choices.push(selected);
+        }
+    }
+    choices
+        .into_iter()
+        .map(|choice| {
+            let mut roots = compose_logical_candidate(&inventory, &choice)
+                .map_err(|error| error.to_string())?;
+            match roots.remove(0).1 {
+                QueryRoot::Operator(root) => Ok(root),
+                QueryRoot::Scalar(_) => Err("expected an operator root".into()),
+            }
+        })
+        .collect()
+}
+
+/// Fail on a rejected candidate rather than silently dropping it from assertions.
+#[allow(dead_code)]
+pub fn require_composed_operator_candidates(
+    candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
 ) -> Vec<Rc<OperatorNode>> {
-    run_stage1_to_stage3(root, accuracy)
-        .stage1_logical_asap_optimization
+    candidates
         .into_iter()
         .filter_map(|candidate| {
             match candidate
@@ -199,46 +230,14 @@ pub fn logical_candidates(
         .collect()
 }
 
-/// One logical candidate of the single query `root`: the first composed
-/// candidate (in enumeration order) that reads a summary, else
-/// the exact one (the first). `Err` when Pass 1 rejects the query or the
-/// exact candidate does not compose; another candidate may legitimately not
-/// compose (a candidate its input cannot feed), and selection skips it.
+/// One generated ASAP candidate, or the exact computation if no local rule
+/// applies. Corpus coverage tests exercise binding, not cost-based selection.
 #[allow(dead_code)]
 pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String> {
-    let data = declared_data(root);
-    let run = asap_plan_selection::run_stage1_to_stage3_with(
-        vec![(0, asap_types::ir::QueryRoot::Operator(Rc::clone(root)))],
-        &[asap_types::workload::QueryWorkloadEntry {
-            query: Default::default(),
-            requirements: asap_types::workload::QueryRequirements {
-                accuracy: asap_types::ir::properties::AccuracyTarget::exact(),
-                max_latency_ms: None,
-            },
-            predictability: Default::default(),
-            recurrence: Default::default(),
-            range_evaluation: None,
-        }],
-        &data,
-        asap_plan_selection::PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
-    )
-    .map_err(|e| e.to_string())?;
-    let operator = |roots: &[asap_types::ir::QueryRoot]| match &roots[0] {
-        asap_types::ir::QueryRoot::Operator(node) => Rc::clone(node),
-        asap_types::ir::QueryRoot::Scalar(_) => unreachable!("an operator root stays one"),
-    };
-    let summarized = run
-        .stage1_logical_asap_optimization
+    let candidates = local_computation_candidates(Rc::clone(root))?;
+    Ok(candidates
         .iter()
-        .filter_map(|candidate| candidate.roots.as_deref().ok().map(operator))
-        .find(|node| node.contains_asap());
-    match summarized {
-        Some(node) => Ok(node),
-        None => run.stage1_logical_asap_optimization[0]
-            .roots
-            .as_deref()
-            .map(operator)
-            .map_err(|e| e.to_string()),
-    }
+        .find(|node| node.contains_asap())
+        .unwrap_or(&candidates[0])
+        .clone())
 }

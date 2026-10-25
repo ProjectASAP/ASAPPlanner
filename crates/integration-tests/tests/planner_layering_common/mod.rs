@@ -15,9 +15,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
+use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::PlanSelectionSettings;
 use asap_plan_selection::Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
@@ -116,7 +116,7 @@ pub struct Physical {
     pub id: String,
     pub from_logical: String,
     pub query_roots: Vec<NodeId>,
-    pub candidate: PhysicalCandidate,
+    pub candidate: PhysicalWorkloadPlan,
 }
 
 impl Physical {
@@ -179,11 +179,9 @@ fn logical(id: String, roots: Vec<QueryRoot>) -> Logical {
     }
 }
 
-/// Every stage over `roots`, the lowered entries of `workload`, with every
-/// logical candidate. Every candidate of the examples composes and
-/// plan selection selects one. Physical ASAP-aware optimization reads each
-/// entry's recurrence and predictability and the data arrival (Example 4);
-/// plan selection also reads the latency bounds.
+/// The bounded production stages over `roots`, retaining the selected plan
+/// and search diagnostics. Tests that require a particular algorithm or window
+/// use `run_explicit_candidates` instead of assuming it appears in the archive.
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
     run_stages_under(workload, roots, &PlanSelectionSettings::default())
 }
@@ -238,8 +236,7 @@ fn run_stages_over(
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let run = run_planning_stages_over(roots, &entries, &data, None, models)
-        .expect("planning stages run");
+    let run = run_default_search_over(roots, &entries, &data, models).expect("planning stages run");
     let logical_candidates = run
         .stage1_logical_asap_optimization
         .into_iter()
@@ -272,6 +269,128 @@ fn run_stages_over(
             .collect(),
         selection: run.stage3_plan_selection.expect("plan selection selects"),
     }
+}
+
+/// Evaluate deliberately supplied logical configurations. This fixture helper
+/// does not search or enumerate cross-query combinations; it exercises the
+/// existing physical rules and evaluator on the computations named by a test.
+/// Production-search tests continue to use `run_stages`.
+pub fn run_explicit_candidates(
+    workload: &PlanningWorkload,
+    original_roots: Vec<QueryRoot>,
+    candidates: Vec<Vec<QueryRoot>>,
+    models: asap_plan_selection::PlanningModels<'_>,
+) -> Run {
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    let logical: Vec<_> =
+        candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, roots)| {
+                logical(format!("P{}", index + 1),
+            asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees(&roots)
+                .expect("explicit fixture contracts compose"))
+            })
+            .collect();
+    let mut physical = Vec::new();
+    for candidate in &logical {
+        for (index, mut plan) in asap_physical_asap_optimization::optimize_physical_asap(
+            &candidate.id,
+            &candidate.roots,
+            &entries,
+            &data,
+            models.deployment_capabilities,
+        )
+        .expect("explicit computation has executable physical configurations")
+        .into_iter()
+        .enumerate()
+        {
+            plan.id = if index == 0 {
+                candidate.id.clone()
+            } else {
+                format!("{}-m{}", candidate.id, index)
+            };
+            physical.push(Physical {
+                id: plan.id.clone(),
+                from_logical: plan.from_logical.clone(),
+                query_roots: plan.dag.roots.clone(),
+                candidate: plan,
+            });
+        }
+    }
+    let plans: Vec<_> = physical.iter().map(|plan| plan.candidate.clone()).collect();
+    let selection = asap_plan_selection::select_plan(&plans, &entries, &data, models)
+        .expect("explicit fixture contains a valid physical configuration");
+    Run {
+        stage0_query_language_frontends: logical_stage0(original_roots),
+        logical,
+        physical,
+        pruned: Vec::new(),
+        selection,
+    }
+}
+
+pub fn run_pattern_b_fixture(
+    workload: &PlanningWorkload,
+    settings: &PlanSelectionSettings,
+    deployment: &DeploymentCapabilities,
+) -> Run {
+    run_explicit_candidates(
+        workload,
+        lower_promql(workload),
+        pattern_b_computations(workload),
+        asap_plan_selection::PlanningModels::builtin()
+            .with_plan_selection(settings)
+            .with_deployment_capabilities(deployment),
+    )
+}
+
+/// Three fixed Pattern-B computations used by cost/retention fixtures:
+/// exact, whole-window KLL, and a KLL chain of sixty-second panes.
+pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>> {
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    let roots = lower_promql(workload);
+    let local =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    assert_eq!(
+        local.targets.len(),
+        1,
+        "Pattern B has one quantile computation"
+    );
+    let kll = local.targets[0]
+        .choices
+        .candidates
+        .iter()
+        .position(|candidate| {
+            matches!(
+                candidate,
+                ComputationCandidate::Summary(SketchAlgorithm::Kll)
+            )
+        })
+        .unwrap();
+    let whole: Vec<_> = compose_logical_candidate(&local, &[kll])
+        .unwrap()
+        .into_iter()
+        .map(|(_, root)| root)
+        .collect();
+    let panes = pane_candidates(&whole, &[Some(60_000)]);
+    assert_eq!(panes.len(), 1);
+    let chain = window_composition_pass2_candidates(&whole, &panes)
+        .unwrap()
+        .remove(0)
+        .roots
+        .expect("sixty-second panes compose");
+    vec![roots, whole, chain]
+}
+
+fn logical_stage0(roots: Vec<QueryRoot>) -> Logical {
+    logical("stage0-query-language-frontends".into(), roots)
 }
 
 // ── DAG helpers ──────────────────────────────────────────────────────────

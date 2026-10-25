@@ -108,13 +108,11 @@ use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPNodeId,
 };
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
-use asap_types::ir::scalar::column_resolution::resolve_column_ref;
-use asap_types::ir::scalar::expr_ir::ColumnRef;
-use asap_types::ir::schema::{DataType, ExactKind, FieldDataType};
+use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
     apply_materialization_timings, is_filtered_build, split_shared_by_timing, ASAPOp,
-    MaterializationAssignment, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot,
-    ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
+    MaterializationAssignment, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
+    SchemaDerivationError, SortKey, TimingMemo,
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
@@ -132,7 +130,7 @@ use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilit
 /// CandidateLogicalASAPDAG (Stage 1 output). It holds planning data only;
 /// display labels are derived from it by the devtools.
 #[derive(Debug, Clone)]
-pub struct PhysicalCandidate {
+pub struct PhysicalWorkloadPlan {
     /// `P<n>` (nothing materialized) or `P<n>-m<k>`, set by the caller.
     pub id: String,
     /// The id of the logical candidate it implements.
@@ -155,7 +153,7 @@ pub struct PhysicalCandidate {
     pub assignment: Vec<Materialization>,
 }
 
-impl PhysicalCandidate {
+impl PhysicalWorkloadPlan {
     /// Whether any node is materialized: a summary build, or a shared
     /// non-summary node built once per evaluation.
     pub fn materializes_any(&self) -> bool {
@@ -167,6 +165,8 @@ impl PhysicalCandidate {
 
 #[derive(Debug, Error)]
 pub enum PhysicalASAPOptimizationError {
+    #[error("invalid operator implementation boundary: {0}")]
+    ImplementationBoundary(&'static str),
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
     #[error(transparent)]
@@ -191,9 +191,9 @@ pub enum PhysicalASAPOptimizationError {
 }
 
 /// Why a summary build cannot be materialized at ingestion time (S4).
-/// Stage 2 bookkeeping, like [`MaterializationCandidate`].
+/// Shared by complete-plan Stage 2 and explicit selected-reader eligibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum IngestionPruneReason {
+pub enum IngestionPruneReason {
     /// The data workload is at rest, or its arrival is unknown.
     NotIngesting,
     /// A query reading it is not repeated.
@@ -229,9 +229,100 @@ pub(crate) enum IngestionPruneReason {
     NotASummaryBuild,
 }
 
+/// Workload eligibility for one summary and only its selected query readers.
+/// These are local options, not a complete physical assignment. Ingestion still
+/// requires selected upstream implementations to pass timing/down-closure checks.
+#[derive(Debug)]
+pub struct SummaryMaterializationEligibility {
+    pub at_ingestion: Result<(), IngestionPruneReason>,
+    pub may_keep_across_evaluations: bool,
+    pub may_materialize_at_query: bool,
+    /// A pane's selected readers must also meet their range-step grids.
+    pub range_compatibility: Result<(), PhysicalASAPOptimizationError>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SummaryEligibilityError {
+    #[error("selected reader {query} has no workload entry")]
+    UnknownReader { query: usize },
+    #[error("materialization eligibility requires a summary build or pane chain")]
+    NotSummary,
+    #[error("materialization eligibility requires at least one selected reader")]
+    NoSelectedReaders,
+    #[error("pane width must be positive")]
+    ZeroPaneWidth,
+}
+
+/// Evaluate an implemented summary against explicit selected query indices.
+/// Never supply the union of potential readers. Duplicate indices count once;
+/// missing workload entries are rejected as malformed reader references. The node must carry the actual bound source/filter/window subtree,
+/// and `data` describes that source's arrival. This function does not implement
+/// operators, assign upstream timing, or prove complete execution legality.
+pub fn summary_materialization_eligibility(
+    node: &OperatorNode,
+    selected_readers: &[usize],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+) -> Result<SummaryMaterializationEligibility, SummaryEligibilityError> {
+    if !is_summary_build(node) {
+        return Err(SummaryEligibilityError::NotSummary);
+    }
+    if selected_readers.is_empty() {
+        return Err(SummaryEligibilityError::NoSelectedReaders);
+    }
+    if matches!(
+        node.asap(),
+        Some(ASAPOp::PaneChain {
+            pane_width_ms: 0,
+            ..
+        })
+    ) {
+        return Err(SummaryEligibilityError::ZeroPaneWidth);
+    }
+    if let Some(&query) = selected_readers
+        .iter()
+        .find(|&&query| query >= entries.len())
+    {
+        return Err(SummaryEligibilityError::UnknownReader { query });
+    }
+    let mut readers = selected_readers.to_vec();
+    readers.sort_unstable();
+    readers.dedup();
+    Ok(summary_reader_eligibility(
+        node, &readers, entries, data, deployment,
+    ))
+}
+
+fn summary_reader_eligibility(
+    node: &OperatorNode,
+    readers: &[usize],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    deployment: &DeploymentCapabilities,
+) -> SummaryMaterializationEligibility {
+    let recurrences: Option<Vec<&QueryRecurrence>> = readers
+        .iter()
+        .map(|&query| entries.get(query).map(|entry| &entry.recurrence))
+        .collect();
+    let may_keep_across_evaluations = deployment.query_time_results_retained
+        && match (node.asap(), recurrences) {
+            (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
+                builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
+            }
+            _ => false,
+        };
+    SummaryMaterializationEligibility {
+        at_ingestion: ingestion_eligibility(node, readers, entries, data),
+        may_keep_across_evaluations,
+        may_materialize_at_query: readers.len() > 1,
+        range_compatibility: check_summary_range_steps(node, readers, entries),
+    }
+}
+
 /// One summary build, or one highest shared non-summary node, Stage 2 may
 /// store, with its materialization options.
-/// It is not a whole-workload plan like [`PhysicalCandidate`]: it is Stage
+/// It is not a whole-workload plan like [`PhysicalWorkloadPlan`]: it is Stage
 /// 2's enumeration bookkeeping, and the physical candidates are the
 /// combinations of the materialization candidates' options. For example,
 /// over one metric:
@@ -257,7 +348,7 @@ pub(crate) enum IngestionPruneReason {
 /// ingestion time over one that is not; Stage 3 prices each.
 /// `at_ingestion` records why ingestion is ruled out when it is (e.g.
 /// `Filtered`, `NotRepeated`). Each physical candidate carries the
-/// resulting assignment ([`PhysicalCandidate::materialization`]).
+/// resulting assignment ([`PhysicalWorkloadPlan::materialization`]).
 #[derive(Debug, Clone)]
 pub(crate) struct MaterializationCandidate {
     /// The build in the implemented DAG.
@@ -311,6 +402,9 @@ pub(crate) fn builds_one_pane_per_evaluation<'a>(
     pane_width_ms: u64,
     readers: impl IntoIterator<Item = &'a QueryRecurrence>,
 ) -> bool {
+    if pane_width_ms == 0 {
+        return false;
+    }
     let mut phase_ms = None;
     let mut any_reader = false;
     for recurrence in readers {
@@ -346,7 +440,7 @@ pub fn optimize_physical_asap(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
-) -> Result<Vec<PhysicalCandidate>, PhysicalASAPOptimizationError> {
+) -> Result<Vec<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
@@ -372,7 +466,7 @@ pub fn optimize_physical_asap_without_query_time_raw_scans(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
-) -> Result<(Vec<(usize, PhysicalCandidate)>, usize), PhysicalASAPOptimizationError> {
+) -> Result<(Vec<(usize, PhysicalWorkloadPlan)>, usize), PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
@@ -451,7 +545,7 @@ fn reads_raw_at_query_time(
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
 /// assignment: the physical candidate [`optimize_physical_asap`] lists for
 /// it. `choose(readers)` gives the option for each materialization
-/// candidate in the order of [`PhysicalCandidate::assignment`], `readers`
+/// candidate in the order of [`PhysicalWorkloadPlan::assignment`], `readers`
 /// being the queries that read it. `None` when
 /// a chosen option is not one of the build's, or the assignment
 /// materializes a build at ingestion time above one at query time.
@@ -462,7 +556,7 @@ pub fn optimize_physical_asap_assigned(
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
     choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
-) -> Result<Option<PhysicalCandidate>, PhysicalASAPOptimizationError> {
+) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
@@ -503,7 +597,7 @@ pub fn optimize_physical_asap_chosen(
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
     choose: &mut ChooseMaterialization<'_>,
-) -> Result<Option<PhysicalCandidate>, PhysicalASAPOptimizationError> {
+) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let logical_of: HashMap<*const OperatorNode, *const OperatorNode> = memo
@@ -539,7 +633,7 @@ fn assigned_candidate(
     implemented: &[QueryRoot],
     mat_candidates: &[MaterializationCandidate],
     assignment: Vec<Materialization>,
-) -> Result<PhysicalCandidate, PhysicalASAPOptimizationError> {
+) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
     let materialized: Vec<_> = mat_candidates
         .iter()
         .zip(&assignment)
@@ -579,7 +673,7 @@ fn assigned_candidate(
         })
         .map(|n| (n.id, n.materialization))
         .collect();
-    Ok(PhysicalCandidate {
+    Ok(PhysicalWorkloadPlan {
         id: String::new(),
         from_logical: from_logical.to_string(),
         roots: timed,
@@ -613,25 +707,33 @@ fn check_panes_on_range_steps(
     mat_candidates: &[MaterializationCandidate],
     entries: &[QueryWorkloadEntry],
 ) -> Result<(), PhysicalASAPOptimizationError> {
-    for mat_candidate in mat_candidates {
-        let Some(ASAPOp::PaneChain { pane_width_ms, .. }) = mat_candidate.node.asap() else {
+    for candidate in mat_candidates {
+        check_summary_range_steps(&candidate.node, &candidate.readers, entries)?;
+    }
+    Ok(())
+}
+
+fn check_summary_range_steps(
+    node: &OperatorNode,
+    readers: &[usize],
+    entries: &[QueryWorkloadEntry],
+) -> Result<(), PhysicalASAPOptimizationError> {
+    let Some(ASAPOp::PaneChain { pane_width_ms, .. }) = node.asap() else {
+        return Ok(());
+    };
+    for &query in readers {
+        let Some(range) = entries
+            .get(query)
+            .and_then(|entry| entry.range_evaluation)
+            .filter(|range| range.evaluations_per_request() > 1)
+        else {
             continue;
         };
-        for &query in &mat_candidate.readers {
-            // A one-step range evaluates only at the request's end.
-            let Some(range) = entries
-                .get(query)
-                .and_then(|e| e.range_evaluation)
-                .filter(|range| range.evaluations_per_request() > 1)
-            else {
-                continue;
-            };
-            if range.step_ms % pane_width_ms.max(&1) != 0 {
-                return Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
-                    pane_width_ms: *pane_width_ms,
-                    step_ms: range.step_ms,
-                });
-            }
+        if range.step_ms % pane_width_ms.max(&1) != 0 {
+            return Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
+                pane_width_ms: *pane_width_ms,
+                step_ms: range.step_ms,
+            });
         }
     }
     Ok(())
@@ -705,7 +807,8 @@ pub(crate) fn materialization_candidates(
     let below = candidates_below(&nodes);
     let builds = nodes.iter().enumerate().map(|(c, node)| {
         let readers = readers[&Rc::as_ptr(node)].clone();
-        let at_ingestion = ingestion_eligibility(node, &readers, entries, data).and_then(|()| {
+        let eligibility = summary_reader_eligibility(node, &readers, entries, data, deployment);
+        let at_ingestion = eligibility.at_ingestion.and_then(|()| {
             // Only this build and the builds below it at ingestion time.
             let mut trial =
                 MaterializationAssignment::with_default(Materialization::NotMaterialized);
@@ -716,23 +819,11 @@ pub(crate) fn materialization_candidates(
                 .map(|_| ())
                 .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
         });
-        // A reader without a workload entry has an unknown recurrence.
-        let recurrences: Option<Vec<&QueryRecurrence>> = readers
-            .iter()
-            .map(|&q| entries.get(q).map(|e| &e.recurrence))
-            .collect();
-        let may_keep_across_evaluations = deployment.query_time_results_retained
-            && match (node.asap(), recurrences) {
-                (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
-                    builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
-                }
-                _ => false,
-            };
         MaterializationCandidate {
             node: Rc::clone(node),
             readers,
             at_ingestion,
-            may_keep_across_evaluations,
+            may_keep_across_evaluations: eligibility.may_keep_across_evaluations,
         }
     });
     // A node fixed at ingestion time cannot be built at query time.
@@ -1004,6 +1095,39 @@ fn map_roots(
         .collect()
 }
 
+/// Lower the private operators of one candidate while preserving its already
+/// canonical input-group nodes. This reuses the complete-plan implementation
+/// rules (currently exact top-k -> Project/Limit/Sort), without assigning timing
+/// or materialization and without recursively implementing another group's input.
+/// Returned new operators must be enumerated and priced before plan selection.
+pub fn implement_candidate_operators(
+    root: &Rc<OperatorNode>,
+    inputs: &[Rc<OperatorNode>],
+) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
+    if inputs.iter().any(|input| Rc::ptr_eq(input, root)) {
+        return Err(PhysicalASAPOptimizationError::ImplementationBoundary(
+            "candidate root cannot also be an input",
+        ));
+    }
+    let reachable = OperatorNode::reachable(root)
+        .into_iter()
+        .map(|node| Rc::as_ptr(&node))
+        .collect::<HashSet<_>>();
+    if inputs
+        .iter()
+        .any(|input| !reachable.contains(&Rc::as_ptr(input)))
+    {
+        return Err(PhysicalASAPOptimizationError::ImplementationBoundary(
+            "input is absent from candidate subtree",
+        ));
+    }
+    let mut implementations = inputs
+        .iter()
+        .map(|input| (Rc::as_ptr(input), Rc::clone(input)))
+        .collect();
+    implement(root, &mut implementations)
+}
+
 /// Each node's implementation.
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
@@ -1085,56 +1209,13 @@ fn implement_topk(
         }))?
         .with_guarantee(node.guarantee.clone()),
     );
-    let (ranked, key_fields) = node
-        .schema
-        .fields
-        .split_last()
-        .expect("an aggregate outputs its measure");
-    let mut cols = key_fields
-        .iter()
-        .map(|field| {
-            let column = resolve_column_ref(&ColumnRef::Named(field.name.clone()), &child.schema)
-                .map_err(|e| unsupported(&format!("group key {}: {e}", field.name)))?;
-            Ok(ProjectItem {
-                alias: Some(field.name.clone()),
-                expr: ScalarExpr::Column(column),
-            })
-        })
-        .collect::<Result<Vec<_>, PhysicalASAPOptimizationError>>()?;
-    cols.push(ProjectItem {
-        alias: Some(ranked.name.clone()),
-        expr: ScalarExpr::Column(value),
-    });
-    // PromQL `topk` answers whole input series: rows that carry the series
-    // identity keep it, after the logical columns, so each answer has the
-    // chosen series' full label set and readers of `[keys.., topk_k]` still
-    // find those columns where they were.
-    if let Ok(identity) = resolve_column_ref(
-        &ColumnRef::Named(asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into()),
-        &child.schema,
-    ) {
-        cols.push(ProjectItem {
-            alias: Some(asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into()),
-            expr: ScalarExpr::Column(identity),
-        });
-    } else {
-        // Otherwise each answer keeps the columns naming its ranked item
-        // that the logical columns do not: over PromQL rows without the
-        // identity (e.g. those of `sum by (job)`) their string labels, so
-        // `topk(k, sum by (job) (...))` answers each job; over a SQL
-        // aggregate its other group keys, so `ORDER BY COUNT(*) DESC LIMIT
-        // k` over `GROUP BY host` answers each host.
-        let promql = reads_only_time_series(&child);
-        for (index, field) in child.schema.fields.iter().enumerate() {
-            let names_item = !promql || field.dtype == FieldDataType::Plain(DataType::Utf8);
-            if names_item && index != value && !key_fields.iter().any(|k| k.name == field.name) {
-                cols.push(ProjectItem {
-                    alias: Some(field.name.clone()),
-                    expr: ScalarExpr::Column(index),
-                });
-            }
-        }
-    }
+    let output_name = node.schema.fields[keys.len()].name.clone();
+    let cols = asap_types::ir::schema::topk::ranked_row_projection(
+        &child,
+        &Reduction::Reduce(keys.clone()),
+        &output_name,
+    )
+    .map_err(|error| unsupported(&format!("ranked rows: {error}")))?;
     Ok(Rc::new(
         OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
             cols,
@@ -1175,8 +1256,64 @@ mod tests {
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::ASAPOp;
 
+    // Candidate-local implementation must leave another group's canonical root untouched.
+    #[test]
+    fn candidate_operator_lowering_preserves_input_boundaries() {
+        let root = lower_promql(
+            "topk by (job) (3, sum_over_time(m[1m]))",
+            AccuracyTarget::exact(),
+        );
+        let boundary = Rc::clone(root.children()[0]);
+        let lowered =
+            implement_candidate_operators(&root, std::slice::from_ref(&boundary)).unwrap();
+        assert_eq!(lowered.schema, root.schema);
+        let nodes = OperatorNode::reachable(&lowered);
+        assert!(nodes.iter().any(|node| node.operator.kind_name() == "Sort"));
+        assert!(nodes
+            .iter()
+            .any(|node| node.operator.kind_name() == "Limit"));
+        assert!(nodes.iter().any(|node| Rc::ptr_eq(node, &boundary)));
+        assert!(matches!(
+            implement_candidate_operators(&root, std::slice::from_ref(&root)),
+            Err(PhysicalASAPOptimizationError::ImplementationBoundary(_))
+        ));
+    }
+
+    // Logical and exact ranked rows retain the full series identity contract.
+    #[test]
+    fn topk_logical_contract_preserves_series_identity() {
+        let template = lower_promql("topk(3, sum_over_time(m[1m]))", AccuracyTarget::exact());
+        let source = asap_logical_asap_optimization::test_support::metric_scan(&[
+            "job",
+            "instance",
+            asap_types::ir::schema::PROMQL_SERIES_IDENTITY,
+        ]);
+        let root = Rc::new(template.with_new_children(|_| Rc::clone(&source)).unwrap());
+        let boundary = Rc::clone(root.children()[0]);
+        let lowered = implement_candidate_operators(&root, &[boundary]).unwrap();
+        assert_eq!(lowered.schema, root.schema);
+        assert_eq!(
+            names(&root),
+            [
+                "topk_3",
+                "job",
+                "instance",
+                asap_types::ir::schema::PROMQL_SERIES_IDENTITY
+            ]
+        );
+        assert!(root
+            .schema
+            .fields
+            .iter()
+            .any(|field| field.name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY));
+        assert_eq!(
+            root.schema.fields[0].dtype,
+            asap_types::ir::schema::FieldDataType::Plain(asap_types::ir::schema::DataType::Float64)
+        );
+    }
+
     /// The all-`NotMaterialized` candidate, with no workload declared.
-    fn first_candidate(roots: &[QueryRoot]) -> PhysicalCandidate {
+    fn first_candidate(roots: &[QueryRoot]) -> PhysicalWorkloadPlan {
         optimize_physical_asap(
             "L1",
             roots,
@@ -1188,7 +1325,7 @@ mod tests {
         .remove(0)
     }
 
-    fn operator_root(candidate: &PhysicalCandidate, i: usize) -> Rc<OperatorNode> {
+    fn operator_root(candidate: &PhysicalWorkloadPlan, i: usize) -> Rc<OperatorNode> {
         match &candidate.roots[i] {
             QueryRoot::Operator(node) => node.clone(),
             QueryRoot::Scalar(_) => panic!("operator root"),
@@ -1502,13 +1639,122 @@ mod tests {
     const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
 
     /// The options `candidate` chose other than `NotMaterialized`, by node.
-    fn materialized(candidate: &PhysicalCandidate) -> Vec<Materialization> {
+    fn materialized(candidate: &PhysicalWorkloadPlan) -> Vec<Materialization> {
         candidate
             .materialization
             .values()
             .copied()
             .filter(|m| *m != Materialization::NotMaterialized)
             .collect()
+    }
+
+    // An unselected unpredictable query must not restrict an ingestion candidate.
+    #[test]
+    fn selected_reader_eligibility_ignores_optional_unpredictable_consumers() {
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let node = root_operators(&root)
+            .into_iter()
+            .flat_map(OperatorNode::reachable)
+            .find(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .unwrap();
+        let entries = vec![
+            every_minute(),
+            QueryWorkloadEntry {
+                predictability: Predictability::AdHoc,
+                ..every_minute()
+            },
+        ];
+        let data = arriving();
+        let deployment = DeploymentCapabilities::default();
+        let selected =
+            summary_materialization_eligibility(&node, &[0, 0], &entries, &data, &deployment)
+                .unwrap();
+        assert_eq!(selected.at_ingestion, Ok(()));
+        assert!(
+            !selected.may_materialize_at_query,
+            "duplicate reader indices are one query"
+        );
+        assert!(matches!(
+            summary_materialization_eligibility(&node, &[0, entries.len()], &entries, &data, &deployment),
+            Err(SummaryEligibilityError::UnknownReader { query }) if query == entries.len()
+        ));
+        let combined =
+            summary_materialization_eligibility(&node, &[0, 1], &entries, &data, &deployment)
+                .unwrap();
+        assert_eq!(
+            combined.at_ingestion,
+            Err(IngestionPruneReason::NotPredictable)
+        );
+        assert!(combined.may_materialize_at_query);
+        // The complete-DAG path uses the same selected-reader workload rules.
+        let candidates = materialization_candidates(&[root], &entries, &data, &deployment);
+        let original = candidates
+            .iter()
+            .find(|candidate| matches!(candidate.node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .unwrap();
+        assert_eq!(original.at_ingestion, selected.at_ingestion);
+        assert_eq!(
+            original.may_keep_across_evaluations,
+            selected.may_keep_across_evaluations
+        );
+    }
+
+    // Phase and range-step restrictions apply only to the selected reader set.
+    #[test]
+    fn selected_reader_eligibility_checks_phase_and_range_compatibility() {
+        use asap_types::workload::RangeEvaluation;
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let node = root_operators(&root)
+            .into_iter()
+            .flat_map(OperatorNode::reachable)
+            .find(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .unwrap();
+        let at = |phase| QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(MINUTE as u32),
+                evaluation_phase: TimestampMs(phase),
+            }),
+            ..every_minute()
+        };
+        let entries = vec![
+            at(0),
+            at(MINUTE / 2),
+            QueryWorkloadEntry {
+                range_evaluation: Some(RangeEvaluation {
+                    step_ms: MINUTE / 2,
+                    span_ms: 10 * MINUTE,
+                }),
+                ..at(0)
+            },
+        ];
+        let deployment = DeploymentCapabilities {
+            query_time_results_retained: true,
+            ..DeploymentCapabilities::default()
+        };
+        let data = arriving();
+        let one =
+            summary_materialization_eligibility(&node, &[0], &entries, &data, &deployment).unwrap();
+        assert!(one.may_keep_across_evaluations);
+        assert!(one.range_compatibility.is_ok());
+        let different_phase =
+            summary_materialization_eligibility(&node, &[0, 1], &entries, &data, &deployment)
+                .unwrap();
+        assert!(!different_phase.may_keep_across_evaluations);
+        assert_eq!(
+            different_phase.at_ingestion,
+            Err(IngestionPruneReason::PanesOffPhase)
+        );
+        let off_grid =
+            summary_materialization_eligibility(&node, &[0, 2], &entries, &data, &deployment)
+                .unwrap();
+        assert!(matches!(
+            off_grid.range_compatibility,
+            Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep { .. })
+        ));
+        assert!(matches!(
+            summary_materialization_eligibility(&node, &[], &entries, &data, &deployment),
+            Err(SummaryEligibilityError::NoSelectedReaders)
+        ));
     }
 
     /// A predictable query evaluated every minute.
@@ -1531,7 +1777,7 @@ mod tests {
     }
 
     /// The distinct nodes of `kind` the candidate's roots read.
-    fn node_of(candidate: &PhysicalCandidate, kind: &str) -> Vec<Rc<OperatorNode>> {
+    fn node_of(candidate: &PhysicalWorkloadPlan, kind: &str) -> Vec<Rc<OperatorNode>> {
         let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
         for root in candidate.roots.iter().flat_map(root_operators) {
             for node in OperatorNode::reachable(root) {
@@ -2075,7 +2321,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(candidates.len(), 3);
-        let scans = |c: &PhysicalCandidate| {
+        let scans = |c: &PhysicalWorkloadPlan| {
             let mut scans: Vec<_> = c
                 .dag
                 .nodes

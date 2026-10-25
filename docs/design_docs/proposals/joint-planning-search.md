@@ -1,6 +1,6 @@
 # ASAPPlanner: Memo-Based Joint Optimization with MILP
 
-**Status:** Design proposal. The staged memo and selection model below includes proposed extensions.
+**Status:** Design and implementation contract. The candidate-connection pipeline is implemented on the migration branch; acceptance is in progress. Direct linear encodings below also describe extensions where production currently relies on evaluator refinement. See the [implementation plan](joint-planning-implementation-plan.md) for current scope and verification gates.
 
 ## 1. Motivation and Challenges
 
@@ -78,7 +78,7 @@ The workflow follows [planner layering](planner-layering.md). Local group candid
 
 ### Stage 0: build initial groups
 
-The frontend produces normalized logical expressions. The proposed memo builder interns equivalent sub-expressions and records their query roots. Consider two queries over the same input and evaluation schedule:
+The frontend produces normalized logical expressions. The memo builder interns equivalent sub-expressions and records their query roots. Consider two queries over the same input and evaluation schedule:
 
 ```text
 Q1: P95(X[15m]), every 1m
@@ -89,7 +89,7 @@ G95: P95 over X[15m]     root of Q1
 G99: P99 over X[15m]     root of Q2
 ```
 
-P95 and P99 remain different groups. Initial grouping before Pass 1 is proposed; current memo construction receives Pass 1 candidates.
+P95 and P99 remain different groups. The production driver builds initial logical groups before generating Pass 1 candidates, then populates those groups from the supported per-computation inventory. The API accepting an existing Pass 1 inventory constructs initial identities from its roots.
 
 ### Stage 1, Pass 1: expand computation candidates
 
@@ -176,6 +176,8 @@ The candidate's materialization, selected consumer schedules, and lifetime deter
 
 Some charges belong to a resource shared beyond one computation. If two consumers need 5m and 15m of the same raw source, the required retention horizon is 15m, not 20m. Represent this shared storage as a state group `G_raw[d]` for source `d` and a particular storage scope, with candidates such as `Retain5m` and `Retain15m`. The group describes access to retained raw data; each candidate advertises its coverage, and each consumer connects only to a candidate covering its required horizon. Both consumers can use `Retain15m`, whose storage cost is charged once through candidate selection. Reads and intermediate KLL state retain their own cost owners.
 
+The current evaluator owns shared raw retention; explicit retention candidates above describe a direct encoding rather than an additional implemented storage charge.
+
 Fixed request overhead does not affect plan selection. If query `q` executes `N_q` times over the accounting horizon with fixed per-request cost `h_q`, add `Σ_q N_q × h_q` to the reported total after optimization. Its resource usage still counts against applicable budgets. Any overhead that changes with implementation or connections belongs in the corresponding decision-dependent cost model instead.
 
 The following cases make the accounting concrete. Let `B` be the cost of one whole-window KLL build, `M` one pane merge, and `E95` and `E99` the extraction costs. These are illustrative work charges; retained and temporary resources are accounted for separately over the same horizon.
@@ -194,7 +196,7 @@ The following cases make the accounting concrete. Let `B` be the cost of one who
 
 Memory-time and capacity answer different questions. A state occupying `m` bytes for duration `t` contributes `m × t` to memory-time. A capacity limit instead considers simultaneous residency, including temporary allocations; it cannot be inferred from memory-time alone.
 
-The configured Stage 3 objective and evaluators remain authoritative. Current memo MILP supports usage-over-time pricing; broader cost-model support is an extension. Accuracy is an output requirement, since locally acceptable errors may compose into an unacceptable query result. Latency and resource limits likewise depend on the configured timing and capacity assumptions.
+The configured Stage 3 objective and evaluators remain authoritative. The candidate-connection route supports usage-over-time and provisioned-price objectives, and cluster-capacity latency/memory priorities and Pareto traversal. Scalar cost bounds apply only where certified; bounded objective/frontier traversal reports incompleteness. Accuracy is an output requirement, since locally acceptable errors may compose into an unacceptable query result. Latency and resource limits likewise depend on the configured timing and capacity assumptions.
 
 ## 5. MILP Formulation
 
@@ -244,6 +246,18 @@ r[q,c]                                    ∈ {0,1}   candidate c provides query
 ```
 
 Connection variables exist only for compatible producer–consumer requirements. Capacity and materialization belong to candidate configuration, so selection needs no separate copy or instance variables.
+
+#### Pane width is an optimization decision
+
+The query's window width is fixed semantics. The pane width is a physical decision, selected jointly with retention, summary capacity, materialization, and consumer connections. Do not restrict the search to a few manually chosen widths and describe the result as optimal over all supported pane widths.
+
+For the supported whole-pane, aligned reconstruction algorithm, use the declared time resolution (currently integer milliseconds). Derive the complete legal width set from the window boundaries and evaluation grid. For example, a 15m window evaluated every 1m admits positive integer-millisecond divisors of 60,000, subject to alignment, offset, representable pane counts, and physical eligibility. A 5m pane alone cannot serve every minute endpoint. Different compatible reader subsets can select different widths.
+
+This finite domain has an exact MILP encoding: activate width-specific configurations with binary decisions. If a single chain is represented by mutually exclusive width configurations, `sum_d u[d] = active` and its selected width is `sum_d d*u[d]`. The candidate graph encodes the same choice through configuration-specific candidate activations and compatible connections. Multiple chains may be active, so there is no single workload-wide pane-width variable.
+
+Precompute each configuration's local resource estimates and reader compatibility. A free integer width by itself would leave nonlinear terms such as `window_width / pane_width` and arbitrary measured size/cost functions; it would not make the current model a valid MILP. Complete discrete encoding avoids that issue. Prune widths only with a proof covering costs, accuracy, and sharing interfaces; a candidate-count cap must be reported as a restricted domain.
+
+A proven optimum applies to all generated legal widths and the other configured finite decisions under the encoded model. A planning-budget stop returns a validated incumbent and an available certified bound, not a globally optimal pane width. This does not claim optimality over unsupported boundary reconstruction, new window algorithms, or every possible sketch capacity.
 
 #### Auxiliary variables: `order`, `run`, and `need`
 
@@ -414,7 +428,7 @@ Consumer-dependent freshness, invalidation, and lifetime checks may involve seve
 
 #### Every query meets its accuracy target
 
-For each query `q`, the configured accuracy contract specifies an error metric and target, and, when probabilistic, a failure-probability target. A plan is feasible only if its composed output error and failure probability satisfy those targets. These are end-to-end checks, not a sum of arbitrary local sketch errors.
+For each query `q`, the configured accuracy contract specifies an error metric and target, and, when probabilistic, a failure-probability target. A plan is feasible only if its composed output error and failure probability satisfy those targets. These are end-to-end checks, not a sum of arbitrary local sketch errors. Primitive contracts also carry their data-domain conditions. For example, an interior DDSketch quantile using interpolation cannot assume a relative-error bound across zero; a supported nonnegative-source proof can discharge that condition. Bind declared data facts before recovering dependent arithmetic guarantees, and leave unproved contracts unknown.
 
 When proven composition rules exist, encode their bounds directly. Otherwise use the exact finite-assignment exclusion below for each plan whose validated accuracy fails. For example, if a selected P99 estimator and its small KLL producer violate the target regardless of all other choices, the following focused cut is sound:
 
@@ -492,15 +506,29 @@ Candidate generation maintains a worklist of new expressions and applicable rule
 
 Let `n` be the number of physical candidates, `m` the number of compatible producer–consumer connections, and `r` the number of compatible query-output connections. The base formulation has `n + m + r` binary variables, plus ordering and any cost-model auxiliaries. This counts the model size, not its solution time. Even a restricted producer-selection case contains set cover: producers cover subsets of outputs and have activation costs. Removing interchangeable instance slots reduces redundant representation but does not remove this combinatorial difficulty.
 
+Cost normalization must preserve small, meaningful differences relative to solver tolerances. An unused expensive candidate must not scale every feasible objective toward zero. Check the supported coefficient range and reject a claimed lower bound that exceeds an independently validated incumbent; retain the feasible plan but report the certificate as invalid.
+
 Search reductions must preserve joint choices. A candidate that costs more alone may enable useful sharing, so local cost dominance is insufficient. Independent components can be solved separately only when dependencies, sharing, and global constraints also separate. Generation caching and sparse compatibility edges reduce overhead without requiring enumeration of complete workload plans.
+
+Bounded fixed-calibration search first attempts to obtain a validated seed from a smaller reader-grid/GCD width domain using the same engine, then progressively adds legal widths toward the complete domain. A cached divisor frontier skips rounds that introduce no new width. Logical expansion reuses the pre-state-expansion memo and generates newly introduced window expressions; state expansion, physical inventory, and the MILP are rebuilt for each attempted domain. This is not incremental MILP solving. Only a definite budget stop may fall back to that validated seed; internal errors remain errors. Exhaustive archives and complete-catalog calibration skip this seed phase. Reports distinguish complete-domain generation from exhaustive assignment traversal, and a seed fallback supplies no full-domain optimum or gap certificate. Generation and model construction cooperate with the deadline; individual evaluator calls may overrun it.
+
+Three complementary reductions control dense pane inventories:
+
+- **Compatibility memoization and supplier-list sharing.** Cache exact compatibility subproblems and intern identical ordered supplier lists. Separate input positions still have separate connection decisions. This reduces repeated checking and storage, not the logical edge count or MILP variable count by itself.
+- **Terminal reader factoring.** Equivalent unary summary estimators and exact-accumulator finalizers used only by query outputs can become one reader template with the union of their compatible suppliers. Equality includes operator parameters, result contracts, timing, materialization, local cost, input contracts, and output eligibility. Each output retains an independent binding through execution scopes; consumers may still choose different producers. Internal readers and pane-merge operators are excluded. In particular, merges with different pane counts are not interchangeable.
+- **Progressive width generation.** Spend the shared planning budget on successively larger finite domains and retain the best validated incumbent across rounds. Report attempted domains and pending widths. A restricted-domain lower bound or gap is not a certificate for the complete domain; only a completed full-domain solve can provide that certificate.
+
+The first two reductions preserve the represented choices under their stated contracts; the third controls work before a timeout and may leave choices unexplored. General cost-based DP compression needs a richer boundary contract covering sharing, resource use, accuracy, and execution demand; it is not implied by compatibility memoization. Fine pane widths cannot be discarded merely because their local cost is high.
+
+Within the seed budget, the same MILP can also hold a validated plan's computations and producer connections fixed and try supported query-time materializations. The normal evaluator measures whether retaining a shared result avoids enough repeated upstream work to reduce cost. These limited proposals use the existing solve/evaluation budgets; their bounds and infeasibility apply only to the restricted proposal, never to the full search. This does not create another selector or an optimality claim for the seed.
 
 After selection, the planner reconstructs the DAG and evaluates accuracy, latency, and resource cost. A complete MILP does not require LBBD. Lazy refinement is useful when difficult checks are left outside the initial model, provided the resulting feasibility or cost cuts are sound. The report includes the validated cost, solver status and gap, and generation limits; validating one solution alone does not prove a relaxed model optimal.
 
 ## 8. Implementation and Evaluation
 
-The design extends existing memo and selection structures. `MemoGroup` stores result/state contracts, while `ImplementationCandidate` and physical generation describe supported implementations and their input requirements. Selection adds direct candidate activation and compatible connections, followed by reconstruction and pricing of the resulting graph. These are proposed extensions, not a claim that the existing implementation already supports the full representation.
+The implementation uses `LogicalMemo` and `MemoGroup` for initial identities, and `CandidateMemo` / `ImplementationCandidate` for logical expansion. Local `PhysicalCandidate` choices have explicit producer requirements and compatible connections. Selection reconstructs a `PhysicalWorkloadPlan` and validates its resulting graph through the configured evaluators. The sole production engine is `CandidateConnections`; bounded and exhaustive modes use the same candidate representation and solver. Existing supported runtime operators determine which configurations can be generated.
 
-Implementation proceeds from initial memo identities and rule expansion to physical configurations and connections, then joint selection and validation. State-local choices belong in candidates. Decisions genuinely spanning candidates remain explicit constraints. `SharedDecision` and `SharedDecisionKind` are the proposed names for current `CouplingSite` and `CouplingKind`; no Rust types are renamed by this document.
+Logical memo rules belong in `logical-asap-optimization`; physical eligibility remains authoritative in `physical-asap-optimization`. Within selection, candidate inventory/reconstruction, MILP construction, evaluator refinement, pricing support, and route orchestration have separate scopes. State-local choices belong in candidates; cross-candidate decisions use connections and constraints. The retired `CouplingSite` selector representation and legacy search routes are removed rather than retained under new names.
 
 Evaluation must distinguish generation coverage from selection correctness. Small workloads are exhaustively enumerated over candidate subsets and compatible connections under the same inventory, then compared with MILP results. Cases include multiple selected candidates in one group, shared build costs, separate execution scopes, fusion outputs, and composed accuracy/resource requirements. Scaling experiments measure candidate and connection counts, generation and solve time, planner memory, and validated execution savings. Together these measurements establish whether the representation avoids repeated search work and whether joint selection justifies its planning cost.
 

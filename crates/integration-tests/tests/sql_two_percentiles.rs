@@ -88,7 +88,19 @@ async fn run(queries: &[&str]) -> Run {
         ignore_accuracy_guarantees: true,
         ..PlanSelectionSettings::default()
     };
-    run_stages_with_compile_check(&workload, roots, &settings)
+    let candidates = stage1(queries)
+        .await
+        .into_iter()
+        .map(|(_, roots)| roots)
+        .collect();
+    run_explicit_candidates(
+        &workload,
+        roots,
+        candidates,
+        asap_plan_selection::PlanningModels::builtin()
+            .with_plan_selection(&settings)
+            .with_executor_compile_check(&asap_planner::PlannerExecutorCompileCheck),
+    )
 }
 
 /// Two rows a second over the 20 minutes before the evaluation: city
@@ -291,26 +303,94 @@ async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
 
 /// The id and query roots of every Stage 1 candidate of `queries`.
 async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
-    use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_optimization;
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
     let workload = workload(queries);
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let mut roots = Vec::new();
     for (q, entry) in entries.iter().enumerate() {
-        let root = lower_sql_dialect(
-            &entry.query.0,
-            &catalog(),
-            SqlDialect::DataFusionSQL,
-            entry.requirements.accuracy.clone(),
-        )
-        .await
-        .unwrap();
-        roots.push((q, QueryRoot::Operator(root)));
+        roots.push((
+            q,
+            QueryRoot::Operator(
+                lower_sql_dialect(
+                    &entry.query.0,
+                    &catalog(),
+                    SqlDialect::DataFusionSQL,
+                    entry.requirements.accuracy.clone(),
+                )
+                .await
+                .unwrap(),
+            ),
+        ));
     }
-    let per_computation = generate_per_computation_candidates(roots).unwrap();
-    stage1_logical_asap_optimization(&per_computation, &entries)
+    let local = generate_per_computation_candidates(roots).unwrap();
+    // Explicit fixture configurations: exact; one local substitution at a
+    // time (mixed percentiles); and all quantiles using each supported family.
+    // Do not enumerate a Cartesian product of complete workload choices.
+    let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
+    for (target, options) in local.targets.iter().enumerate() {
+        for option in 1..options.choice_count() {
+            let mut choice = vec![0; local.targets.len()];
+            choice[target] = option;
+            choices.insert(choice);
+        }
+    }
+    for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
+        let together: Option<Vec<_>> = local.targets.iter().map(|target| target.choices.candidates.iter()
+            .position(|candidate| matches!(candidate, ComputationCandidate::Summary(family) if *family == algorithm))).collect();
+        if let Some(choice) = together {
+            choices.insert(choice);
+        }
+    }
+    let share = |roots: Vec<QueryRoot>| {
+        asap_types::ir::cse::share_common_sub_dags(
+            roots
+                .into_iter()
+                .enumerate()
+                .map(|(id, root)| match root {
+                    QueryRoot::Operator(node) => (id, node),
+                    _ => unreachable!(),
+                })
+                .collect(),
+        )
+        .into_iter()
+        .map(|(_, node)| QueryRoot::Operator(node))
+        .collect::<Vec<_>>()
+    };
+    let grids = entries
+        .iter()
+        .map(|entry| entry.evaluation_grid_ms())
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for choice in choices {
+        let roots = share(
+            compose_logical_candidate(&local, &choice)
+                .unwrap()
+                .into_iter()
+                .map(|(_, root)| root)
+                .collect(),
+        );
+        candidates.push(roots.clone());
+        let panes = pane_candidates(&roots, &grids);
+        if !panes.is_empty() {
+            candidates.extend(
+                window_composition_pass2_candidates(&roots, &panes)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|candidate| candidate.pane_candidates.len() == panes.len())
+                    .filter_map(|candidate| candidate.roots.ok())
+                    .map(share),
+            );
+        }
+    }
+    candidates
+        .into_iter()
         .enumerate()
-        .filter_map(|(i, c)| Some((format!("L{}", i + 1), c.roots.ok()?)))
+        .map(|(index, roots)| (format!("explicit-{}", index + 1), roots))
         .collect()
 }
 

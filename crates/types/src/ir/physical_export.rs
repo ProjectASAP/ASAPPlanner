@@ -13,7 +13,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::flat::{flatten, NodeId};
+use super::flat::{flatten_before, NodeId};
 use super::scalar::ScalarExpr;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
@@ -36,7 +36,7 @@ pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 10;
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeRole {
     Input,
     Left,
@@ -394,24 +394,37 @@ impl PhysicalASAPDAG {
         // Each node's incoming edges are exactly its operator's inputs, with
         // the role of each input's position, so a swapped `Left`/`Right`
         // cannot reorder the inputs of a binary operator.
-        let mut expected: HashMap<PhysicalASAPNodeId, Vec<(PhysicalASAPNodeId, EdgeRole)>> = self
+        // Count input occurrences instead of scanning a vector for each edge.
+        // Pane merges can have tens of thousands of distinct inputs; linear
+        // searches made validation quadratic in that fan-in. Multiplicities
+        // still matter when the same producer occupies several input slots.
+        let mut expected: HashMap<_, HashMap<_, usize>> = self
             .nodes
             .iter()
-            .map(|node| (node.id, edge_roles(&node.payload)))
+            .map(|node| {
+                let mut counts = HashMap::new();
+                for input in edge_roles(&node.payload) {
+                    *counts.entry(input).or_insert(0) += 1;
+                }
+                (node.id, counts)
+            })
             .collect();
         for edge in &self.edges {
             let inputs = expected.get_mut(&edge.consumer).ok_or(
                 PhysicalASAPDAGValidationError::MissingEdgeEndpoint(edge.consumer),
             )?;
-            let position = inputs
-                .iter()
-                .position(|input| *input == (edge.producer, edge.role))
+            let count = inputs
+                .get_mut(&(edge.producer, edge.role))
+                .filter(|count| **count > 0)
                 .ok_or(PhysicalASAPDAGValidationError::EdgeRoleMismatch {
                     consumer: edge.consumer,
                 })?;
-            inputs.swap_remove(position);
+            *count -= 1;
         }
-        if let Some((consumer, _)) = expected.iter().find(|(_, inputs)| !inputs.is_empty()) {
+        if let Some((consumer, _)) = expected
+            .iter()
+            .find(|(_, inputs)| inputs.values().any(|count| *count != 0))
+        {
             return Err(PhysicalASAPDAGValidationError::EdgeRoleMismatch {
                 consumer: *consumer,
             });
@@ -556,10 +569,38 @@ pub fn compile_physical_asap_workload(
     Ok(compile_physical_asap_workload_with_node_ids(roots)?.dag)
 }
 
+#[derive(Debug, Error)]
+pub enum PhysicalASAPCompilationError {
+    #[error(transparent)]
+    Invalid(#[from] ExecutionDataStateError),
+    #[error("planning deadline exceeded exporting the physical DAG")]
+    DeadlineExceeded,
+}
+
 pub fn compile_physical_asap_workload_with_node_ids(
     roots: &[QueryRoot],
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    let (flat, nodes_by_id) = flatten(roots);
+    compile_physical_asap_workload_with_node_ids_before(roots, None).map_err(|error| match error {
+        PhysicalASAPCompilationError::Invalid(error) => error,
+        PhysicalASAPCompilationError::DeadlineExceeded => {
+            unreachable!("no export deadline supplied")
+        }
+    })
+}
+
+pub fn compile_physical_asap_workload_with_node_ids_before(
+    roots: &[QueryRoot],
+    deadline: Option<std::time::Instant>,
+) -> Result<PhysicalASAPDAGCompilation, PhysicalASAPCompilationError> {
+    let check_deadline = || {
+        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+            Err(PhysicalASAPCompilationError::DeadlineExceeded)
+        } else {
+            Ok(())
+        }
+    };
+    let (flat, nodes_by_id) = flatten_before(roots, deadline)
+        .map_err(|_| PhysicalASAPCompilationError::DeadlineExceeded)?;
     let mut scalar_roots = Vec::new();
     let roots = flat
         .roots
@@ -576,12 +617,14 @@ pub fn compile_physical_asap_workload_with_node_ids(
     let mut nodes: Vec<PhysicalASAPDAGNode> = Vec::with_capacity(flat.nodes.len());
     let mut edges = Vec::new();
     for (id, flat_node) in flat.nodes.into_iter().enumerate() {
+        check_deadline()?;
         let node = &nodes_by_id[id];
         let output_state = data_state(node).ok_or(ExecutionDataStateError::UntimedNode {
             operator: node.operator.kind_name(),
         })?;
         // Children come before their parents, so every producer is already in `nodes`.
         for (producer, role) in edge_roles(&flat_node.operator) {
+            check_deadline()?;
             let producer_state = nodes[producer].output_state;
             let ingestion_dependency = producer_state.timing == ExecutionTiming::IngestionTime
                 && output_state.timing == ExecutionTiming::IngestionTime;
@@ -614,7 +657,9 @@ pub fn compile_physical_asap_workload_with_node_ids(
         roots,
         scalar_roots,
     };
-    dag.validate()?;
+    check_deadline()?;
+    dag.validate().map_err(ExecutionDataStateError::from)?;
+    check_deadline()?;
     Ok(PhysicalASAPDAGCompilation {
         dag,
         node_ids: PhysicalASAPNodeIdentityMap { nodes_by_id },

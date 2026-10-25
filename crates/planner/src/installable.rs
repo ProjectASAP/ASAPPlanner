@@ -40,16 +40,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_plan_selection::pass::ExecutorCompileError;
 use asap_plan_selection::{
     ExecutorCompileCheck, NodePriceSource, OperatorKind, SearchReport, Selection,
 };
-use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
+use asap_types::ir::operator::pane_chain::{
+    expand_pane_chains_in_workload_before, PaneChainExpansionError,
+};
 use asap_types::ir::physical_export::{
-    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPDAGDocument,
-    PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
-    RawDataSampleWindow, ReferencePlanError,
+    PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPDAGValidationError, PhysicalASAPNodeId, RawDataSampleWindow, ReferencePlanError,
 };
 use asap_types::ir::properties::summary_coverage::{SelectionBox, SummaryCoverage};
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
@@ -274,6 +277,8 @@ pub struct PredictedQueryUsage {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InstallablePlanError {
+    #[error("planning deadline exceeded during installable-plan validation")]
+    DeadlineExceeded,
     /// Internal bug: the selected plan's timings do not hold, or it does
     /// not export; or, for the query-time reference, bad input: the plan
     /// cannot run at query time.
@@ -418,35 +423,82 @@ pub struct PlannerExecutorCompileCheck;
 
 impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
     fn compiles(&self, roots: &[QueryRoot]) -> Result<(), String> {
+        self.compiles_before(roots, None)
+            .map_err(|error| error.to_string())
+    }
+
+    fn compiles_before(
+        &self,
+        roots: &[QueryRoot],
+        deadline: Option<Instant>,
+    ) -> Result<(), ExecutorCompileError> {
+        check_compile_deadline(deadline)?;
         let installable = || -> Result<InstallablePlan, InstallablePlanError> {
             let timed = apply_materialization_timings_to_roots(
                 roots,
                 &MaterializationAssignment::default(),
             )?;
-            let expanded = pane_retention_of_expanded_panes(&timed, None)?;
+            let expanded = pane_retention_of_expanded_panes_before(&timed, None, deadline)?;
             let queries = vec![String::new(); expanded.dag.roots.len()];
-            InstallablePlan::of_dag(
+            InstallablePlan::of_dag_before(
                 expanded.dag,
                 queries,
                 None,
                 &expanded.retention_ms_by_node,
                 &HashMap::new(),
+                deadline,
             )
         };
         match installable() {
-            Ok(plan) => plan.check_compiles(),
+            Ok(plan) => plan.check_compiles_before(deadline),
             // Deriving the plan's stored outputs already compiled each
             // build, and the executor refused one: the plan does not
             // compile, whichever run builds that output, as `check_compiles`
             // reports a build it refuses.
-            Err(InstallablePlanError::StoredOutputNotExecutable { node_id, reason }) => {
-                Err(format!("stored output {node_id}: {reason}"))
+            Err(InstallablePlanError::StoredOutputNotExecutable { node_id, reason }) => Err(
+                ExecutorCompileError::Rejected(format!("stored output {node_id}: {reason}")),
+            ),
+            // Runtime input binding and stored-state coverage are part of
+            // executability too. Passing these failures through as success lets
+            // selection accept a plan that final installation must reject.
+            Err(
+                error @ (InstallablePlanError::UnsupportedRawDataSampleWindow { .. }
+                | InstallablePlanError::StoredOutputReadsUnwindowedSource { .. }
+                | InstallablePlanError::StoredOutputWithoutCoverage { .. }),
+            ) => {
+                check_compile_deadline(deadline)?;
+                Err(ExecutorCompileError::Rejected(error.to_string()))
             }
-            // Not installable for another reason, which `plan_installable`
-            // reports as such (e.g. a scalar root); not the compiler's to say.
-            Err(_) => Ok(()),
+            // Other installation diagnostics (e.g. a standalone scalar root)
+            // remain owned by plan_installable rather than this compiler check.
+            Err(InstallablePlanError::DeadlineExceeded) => {
+                Err(ExecutorCompileError::DeadlineExceeded)
+            }
+            Err(_) => {
+                check_compile_deadline(deadline)?;
+                Ok(())
+            }
         }
     }
+}
+
+fn map_executor_compile_error(error: asap_executor::Error, context: &str) -> ExecutorCompileError {
+    match error {
+        asap_executor::Error::CompilationDeadlineExceeded => ExecutorCompileError::DeadlineExceeded,
+        error => ExecutorCompileError::Rejected(format!("{context}: {error}")),
+    }
+}
+
+fn check_compile_deadline(deadline: Option<Instant>) -> Result<(), ExecutorCompileError> {
+    if deadline.is_some_and(|limit| Instant::now() >= limit) {
+        Err(ExecutorCompileError::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_installation_deadline(deadline: Option<Instant>) -> Result<(), InstallablePlanError> {
+    check_compile_deadline(deadline).map_err(|_| InstallablePlanError::DeadlineExceeded)
 }
 
 impl InstallablePlan {
@@ -457,7 +509,13 @@ impl InstallablePlan {
     /// outside them (bound to the runtime's data sources). `Err` holds the
     /// executor's error.
     pub fn check_compiles(&self) -> Result<(), String> {
-        use asap_executor::physical_planner::{compile, scan_contract, InputContract};
+        self.check_compiles_before(None)
+            .map_err(|error| error.to_string())
+    }
+
+    fn check_compiles_before(&self, deadline: Option<Instant>) -> Result<(), ExecutorCompileError> {
+        check_compile_deadline(deadline)?;
+        use asap_executor::physical_planner::{compile_before, scan_contract, InputContract};
         use std::collections::BTreeMap;
         let dag = &self.dag.dag;
         let indexed = IndexedDag::new(dag);
@@ -476,6 +534,7 @@ impl InstallablePlan {
         // The first build in the whole plan, which runs the executor's checks
         // of the whole plan once; every other over the nodes below it.
         for (position, output) in self.stored_outputs.iter().enumerate() {
+            check_compile_deadline(deadline)?;
             let inputs = output
                 .inputs
                 .raw_data_sample_windows
@@ -494,8 +553,8 @@ impl InstallablePlan {
             };
             #[cfg(test)]
             tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
-            compile(below, inputs, &[output.node_id as u64])
-                .map_err(|error| format!("stored output {}: {error}", output.node_id))?;
+            compile_before(below, inputs, &[output.node_id as u64], deadline)
+                .map_err(|error| map_executor_compile_error(error, "stored output"))?;
         }
         // The query run reads the stored outputs it reaches from the roots
         // without passing another, the query-time windows, and the table
@@ -512,6 +571,7 @@ impl InstallablePlan {
         let mut pending = roots.clone();
         let mut seen = HashSet::new();
         while let Some(id) = pending.pop() {
+            check_compile_deadline(deadline)?;
             if !seen.insert(id) {
                 continue;
             }
@@ -535,8 +595,9 @@ impl InstallablePlan {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         inputs.extend(scans);
         let roots: Vec<u64> = roots.into_iter().map(|id| id as u64).collect();
-        compile(dag, inputs, &roots).map_err(|error| format!("query run: {error}"))?;
-        Ok(())
+        compile_before(dag, inputs, &roots, deadline)
+            .map_err(|error| map_executor_compile_error(error, "query run"))?;
+        check_compile_deadline(deadline)
     }
 
     /// The plan of `dag`, with what the runtime reads from it derived.
@@ -547,8 +608,27 @@ impl InstallablePlan {
         retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     ) -> Result<Self, InstallablePlanError> {
+        Self::of_dag_before(
+            dag,
+            query_texts,
+            selection,
+            retention_ms_by_node,
+            reader_span_ms_by_node,
+            None,
+        )
+    }
+
+    fn of_dag_before(
+        dag: PhysicalASAPDAG,
+        query_texts: Vec<String>,
+        selection: Option<SelectedPlanReport>,
+        retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+        reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+        deadline: Option<Instant>,
+    ) -> Result<Self, InstallablePlanError> {
+        check_installation_deadline(deadline)?;
         let (stored_outputs, query_time_raw_windows) =
-            runtime_inputs_of(&dag, retention_ms_by_node, reader_span_ms_by_node)?;
+            runtime_inputs_of_before(&dag, retention_ms_by_node, reader_span_ms_by_node, deadline)?;
         let plan = InstallablePlan {
             queries: queries_bound_to_roots(&dag, query_texts)?,
             stored_outputs,
@@ -557,7 +637,10 @@ impl InstallablePlan {
             selection,
         };
         // Derived from the exported (validated) DAG, so it validates.
-        debug_assert!(plan.validate().is_ok());
+        if deadline.is_none() {
+            debug_assert!(plan.validate().is_ok());
+        }
+        check_installation_deadline(deadline)?;
         Ok(plan)
     }
 
@@ -726,7 +809,8 @@ impl<'a> IndexedDag<'a> {
                 .flatten()
                 .any(|input| match payload(input) {
                     Operator::NonASAP(NonASAPOp::Scan { .. }) => true,
-                    Operator::NonASAP(NonASAPOp::TimeRange { .. }) => false,
+                    Operator::NonASAP(NonASAPOp::TimeRange { .. })
+                    | Operator::ASAP(ASAPOp::PaneChain { .. }) => false,
                     _ => reading_raw_data_samples.contains(input),
                 });
             if reads {
@@ -814,11 +898,25 @@ impl<'a> IndexedDag<'a> {
         let Some(NonASAPOp::TimeRange { range, .. }) = self.relational(time_range) else {
             return Err(unsupported("not a TimeRange"));
         };
+        self.raw_window_below(time_range, range.as_millis())
+    }
+
+    /// Shared shape check for an explicit range and the range each pane will
+    /// introduce. It does not allocate or compile every pane in a chain.
+    fn raw_window_below(
+        &self,
+        time_range: PhysicalASAPNodeId,
+        width_ms: u128,
+    ) -> Result<RawDataSampleWindow, InstallablePlanError> {
+        let unsupported = |reason| InstallablePlanError::UnsupportedRawDataSampleWindow {
+            time_range_node_id: time_range,
+            reason,
+        };
         if self.re_timed_from_above.contains(&time_range) {
             return Err(unsupported("a subquery or a TimeShift above the range"));
         }
         let width_ms =
-            i64::try_from(range.as_millis()).map_err(|_| unsupported("window width overflows"))?;
+            i64::try_from(width_ms).map_err(|_| unsupported("window width overflows"))?;
         let mut end_offset_ms = 0i64;
         let mut current = time_range;
         loop {
@@ -970,6 +1068,16 @@ fn runtime_inputs_of(
     retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
 ) -> Result<(Vec<StoredOutput>, Vec<RawDataSampleWindow>), InstallablePlanError> {
+    runtime_inputs_of_before(dag, retention_ms_by_node, reader_span_ms_by_node, None)
+}
+
+fn runtime_inputs_of_before(
+    dag: &PhysicalASAPDAG,
+    retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+    reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+    deadline: Option<Instant>,
+) -> Result<(Vec<StoredOutput>, Vec<RawDataSampleWindow>), InstallablePlanError> {
+    check_installation_deadline(deadline)?;
     let indexed = IndexedDag::new(dag);
     let stored: HashSet<PhysicalASAPNodeId> = dag
         .nodes
@@ -1005,6 +1113,7 @@ fn runtime_inputs_of(
         .iter()
         .filter(|id| stored.contains(id))
     {
+        check_installation_deadline(deadline)?;
         let node = indexed.nodes[&id];
         let inputs = indexed.inputs_of_stored(id, &stored)?;
         let coverage = coverage_of(id, &inputs, &ir, &coverage_by_node).map_err(|error| {
@@ -1014,7 +1123,7 @@ fn runtime_inputs_of(
             }
         })?;
         coverage_by_node.insert(id, coverage.clone());
-        executor_builds(id, &inputs, &indexed, !whole_plan_checked)?;
+        executor_builds(id, &inputs, &indexed, !whole_plan_checked, deadline)?;
         whole_plan_checked = true;
         let reach_ms = reach_ms_of(&inputs, &reach_ms_by_node);
         let span_ms = match inputs.stored_outputs.is_empty() {
@@ -1049,6 +1158,7 @@ fn runtime_inputs_of(
     // Outputs before their inputs: an input stays while every output built
     // from it may still be built.
     for index in (0..stored_outputs.len()).rev() {
+        check_installation_deadline(deadline)?;
         let output = &stored_outputs[index];
         let needed_ms = match output.built_at {
             StoredOutputBuild::QueryRun => output.retention_ms,
@@ -1061,6 +1171,7 @@ fn runtime_inputs_of(
     }
     let mut query_time_raw_windows = Vec::new();
     for node in &dag.nodes {
+        check_installation_deadline(deadline)?;
         if matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. }))
             && indexed.reading_raw_data_samples.contains(&node.id)
         {
@@ -1162,8 +1273,9 @@ fn executor_builds(
     inputs: &StoredOutputInputs,
     indexed: &IndexedDag<'_>,
     in_whole_plan: bool,
+    deadline: Option<Instant>,
 ) -> Result<(), InstallablePlanError> {
-    use asap_executor::physical_planner::{compile, InputContract};
+    use asap_executor::physical_planner::{compile_before, InputContract};
     // The build reads only the nodes below it: compile them, or the whole
     // plan once, for the executor's checks of the whole plan.
     let sub_dag;
@@ -1186,11 +1298,16 @@ fn executor_builds(
             (id as u64, InputContract::bounded(schema))
         })
         .collect();
-    compile(below, bound, &[node as u64])
+    compile_before(below, bound, &[node as u64], deadline)
         .map(|_| ())
-        .map_err(|error| InstallablePlanError::StoredOutputNotExecutable {
-            node_id: node,
-            reason: error.to_string(),
+        .map_err(|error| match error {
+            asap_executor::Error::CompilationDeadlineExceeded => {
+                InstallablePlanError::DeadlineExceeded
+            }
+            error => InstallablePlanError::StoredOutputNotExecutable {
+                node_id: node,
+                reason: error.to_string(),
+            },
         })
 }
 
@@ -1213,7 +1330,51 @@ fn pane_retention_of_expanded_panes(
     timed: &[QueryRoot],
     selection: Option<&Selection>,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
-    let selected = compile_physical_asap_workload_with_node_ids(timed)?;
+    pane_retention_of_expanded_panes_before(timed, selection, None)
+}
+
+fn export_physical_dag_before(
+    roots: &[QueryRoot],
+    deadline: Option<Instant>,
+) -> Result<asap_types::ir::physical_export::PhysicalASAPDAGCompilation, InstallablePlanError> {
+    use asap_types::ir::physical_export::{
+        compile_physical_asap_workload_with_node_ids_before, PhysicalASAPCompilationError,
+    };
+    compile_physical_asap_workload_with_node_ids_before(roots, deadline).map_err(
+        |error| match error {
+            PhysicalASAPCompilationError::Invalid(error) => error.into(),
+            PhysicalASAPCompilationError::DeadlineExceeded => {
+                InstallablePlanError::DeadlineExceeded
+            }
+        },
+    )
+}
+
+fn pane_retention_of_expanded_panes_before(
+    timed: &[QueryRoot],
+    selection: Option<&Selection>,
+    deadline: Option<Instant>,
+) -> Result<ExpandedWithRetention, InstallablePlanError> {
+    check_installation_deadline(deadline)?;
+    let selected = export_physical_dag_before(timed, deadline)?;
+    // Reject unsupported raw-source shapes before expanding possibly thousands
+    // of panes. The complete expanded-plan validation remains authoritative.
+    let indexed = IndexedDag::new(&selected.dag);
+    for node in &selected.dag.nodes {
+        check_installation_deadline(deadline)?;
+        if !indexed.reading_raw_data_samples.contains(&node.id) {
+            continue;
+        }
+        match &node.payload {
+            Operator::NonASAP(NonASAPOp::TimeRange { .. }) => {
+                indexed.window_at(node.id)?;
+            }
+            Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }) => {
+                indexed.raw_window_below(node.id, u128::from(*pane_width_ms))?;
+            }
+            _ => {}
+        }
+    }
     let mut retention_by_chain: Vec<(Rc<OperatorNode>, u64)> = Vec::new();
     for (&node_id, &retention_ms) in selection.iter().flat_map(|s| &s.pane_retention_ms) {
         let chain = selected
@@ -1223,10 +1384,30 @@ fn pane_retention_of_expanded_panes(
             .ok_or(InstallablePlanError::PaneRetentionOfUnknownChain { node_id })?;
         retention_by_chain.push((Rc::clone(chain), retention_ms));
     }
-    let expansion = expand_pane_chains_in_workload(timed)?;
-    let compiled = compile_physical_asap_workload_with_node_ids(&expansion.roots)?;
+    let expansion =
+        expand_pane_chains_in_workload_before(timed, deadline).map_err(|error| match error {
+            PaneChainExpansionError::Invalid(error) => {
+                InstallablePlanError::PaneChainExpansion(error)
+            }
+            PaneChainExpansionError::DeadlineExceeded => InstallablePlanError::DeadlineExceeded,
+        })?;
+    check_installation_deadline(deadline)?;
+    let compiled = export_physical_dag_before(&expansion.roots, deadline)?;
+    check_installation_deadline(deadline)?;
+    // Index physical identity once. Looking up every expanded pane through
+    // the identity map's linear search makes this phase quadratic in panes.
+    let mut installed_ids_by_pointer = HashMap::with_capacity(compiled.dag.nodes.len());
+    for node in &compiled.dag.nodes {
+        check_installation_deadline(deadline)?;
+        if let Some(operator) = compiled.node_ids.operator_node(node.id) {
+            installed_ids_by_pointer.insert(Rc::as_ptr(operator), node.id);
+        }
+    }
+    let installed_id =
+        |node: &Rc<OperatorNode>| installed_ids_by_pointer.get(&Rc::as_ptr(node)).copied();
     let mut retention_ms_by_node = HashMap::new();
     for expanded in &expansion.chains {
+        check_installation_deadline(deadline)?;
         let Some((_, retention_ms)) = retention_by_chain
             .iter()
             .find(|(chain, _)| Rc::ptr_eq(chain, &expanded.chain))
@@ -1234,16 +1415,17 @@ fn pane_retention_of_expanded_panes(
             continue;
         };
         for pane in &expanded.panes {
-            if let Some(node_id) = compiled.node_ids.node_id(pane) {
+            check_installation_deadline(deadline)?;
+            if let Some(node_id) = installed_id(pane) {
                 retention_ms_by_node.insert(node_id, *retention_ms);
             }
         }
     }
     // A chain runs as its panes; every other node as the node replacing it
     // (itself when nothing below it changed).
-    let installed_id = |node: &Rc<OperatorNode>| compiled.node_ids.node_id(node);
     let mut installed_node_ids = HashMap::new();
     for node in &selected.dag.nodes {
+        check_installation_deadline(deadline)?;
         let Some(input) = selected.node_ids.operator_node(node.id) else {
             continue;
         };
@@ -1252,7 +1434,16 @@ fn pane_retention_of_expanded_panes(
             .iter()
             .find(|expanded| Rc::ptr_eq(&expanded.chain, input))
         {
-            Some(expanded) => expanded.panes.iter().filter_map(installed_id).collect(),
+            Some(expanded) => {
+                let mut ids = Vec::with_capacity(expanded.panes.len());
+                for pane in &expanded.panes {
+                    check_installation_deadline(deadline)?;
+                    if let Some(id) = installed_id(pane) {
+                        ids.push(id);
+                    }
+                }
+                ids
+            }
             None => {
                 let replacement = expansion
                     .expanded_nodes
@@ -1333,6 +1524,111 @@ mod tests {
     use super::*;
     use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
 
+    /// An expired validation budget is not evidence that an operator is unsupported.
+    #[test]
+    fn executor_validation_timeout_is_distinct_from_rejection() {
+        assert!(matches!(
+            export_physical_dag_before(&[], Some(Instant::now())),
+            Err(InstallablePlanError::DeadlineExceeded)
+        ));
+        assert_eq!(
+            map_executor_compile_error(
+                asap_executor::Error::CompilationDeadlineExceeded,
+                "query run"
+            ),
+            ExecutorCompileError::DeadlineExceeded,
+        );
+        assert_eq!(
+            PlannerExecutorCompileCheck.compiles_before(&[], Some(Instant::now())),
+            Err(ExecutorCompileError::DeadlineExceeded)
+        );
+    }
+
+    /// Selection must reject the same unsupported raw-window shape as final
+    /// installation, rather than accepting a candidate that cannot be installed.
+    #[test]
+    fn executor_check_rejects_projection_below_raw_window() {
+        use asap_types::ir::operator::Source;
+        use asap_types::ir::scalar::{ProjectItem, ScalarExpr};
+        use asap_types::ir::schema::{DataType, Field, Schema};
+        use asap_types::ir::{OperatorNode, TimeRangeKind};
+        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: "latency".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        }))
+        .unwrap();
+        let project = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+            child: scan.clone(),
+            qualifier: None,
+            cols: vec![
+                ProjectItem {
+                    alias: Some("ts".into()),
+                    expr: ScalarExpr::Column(0),
+                },
+                ProjectItem {
+                    alias: Some("value".into()),
+                    expr: ScalarExpr::Column(1),
+                },
+            ],
+        }))
+        .unwrap();
+        let range = |child| {
+            QueryRoot::Operator(
+                OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+                    child,
+                    range: std::time::Duration::from_secs(300),
+                    kind: TimeRangeKind::Range,
+                }))
+                .unwrap(),
+            )
+        };
+        let rejected =
+            PlannerExecutorCompileCheck.compiles_before(&[range(Rc::clone(&project))], None);
+        assert!(
+            matches!(rejected, Err(ExecutorCompileError::Rejected(ref reason))
+            if reason.contains("operator other than TimeShift below the range")),
+            "{rejected:?}"
+        );
+        assert!(PlannerExecutorCompileCheck
+            .compiles_before(&[range(scan)], None)
+            .is_ok());
+        // An invalid source shape must be rejected before allocating millions
+        // of pane nodes; it is not a validation timeout.
+        use asap_types::ir::operator::Reduction;
+        use asap_types::ir::scalar::ColumnRef;
+        use asap_types::ir::schema::sketch::SummaryUpdate;
+        use asap_types::ir::schema::{ExactKind, ExactParams, FieldDataType, GroupingStrategy};
+        let chain = OperatorNode::new_shared(Operator::ASAP(ASAPOp::PaneChain {
+            child: project,
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            grouping: GroupingStrategy::default(),
+            filter: None,
+            pane_width_ms: 1,
+            pane_count: 10_000_000,
+        }))
+        .unwrap();
+        let rejected = PlannerExecutorCompileCheck.compiles_before(
+            &[QueryRoot::Operator(chain)],
+            Some(Instant::now() + std::time::Duration::from_secs(1)),
+        );
+        assert!(
+            matches!(rejected, Err(ExecutorCompileError::Rejected(_))),
+            "{rejected:?}"
+        );
+    }
+
     thread_local! {
         /// The plan nodes handed to the executor's compiler by the stored
         /// outputs' builds in [`runtime_inputs_of`] and
@@ -1377,11 +1673,16 @@ mod tests {
         let nodes = plan.dag.dag.nodes.len();
         let stored = plan.stored_outputs.len();
         assert!(stored >= 300, "{stored} stored outputs");
-        // Stage 3's compile check builds the plan of each candidate it may
-        // select, so a few plans are compiled; each costs about its size.
+        // Measure one installation and one compile check, independently of
+        // how many candidates the optimizer explored before selecting this DAG.
+        COMPILED_NODES.with(|count| count.set(0));
+        let (rebuilt, _) =
+            runtime_inputs_of(&plan.dag.dag, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(rebuilt.len(), stored);
+        plan.check_compiles().unwrap();
         let compiled = COMPILED_NODES.with(std::cell::Cell::get);
         assert!(
-            compiled <= 40 * nodes,
+            compiled <= 6 * nodes,
             "{compiled} nodes compiled for a plan of {nodes} nodes and {stored} stored outputs"
         );
     }

@@ -37,6 +37,7 @@ sql = ["dep:asap-frontend-sql"]
 metricsql = ["dep:asap-frontend-metricsql"]
 
 [dev-dependencies]
+asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is
 # therefore async and its tests need a runtime.
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

@@ -1033,7 +1033,11 @@ impl SelectionBox {
 /// Join boxes that differ only in one dimension whose union is again one
 /// constraint: touching time windows or value ranges, or the values of one
 /// `In` column. Gaps stay separate boxes.
-fn union(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
+fn union(boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
+    union_ordered_time_boxes(&boxes).unwrap_or_else(|| union_general(boxes))
+}
+
+fn union_general(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
     let mut i = 0;
     while i < boxes.len() {
         let joined = (i + 1..boxes.len()).find_map(|j| join(&boxes[i], &boxes[j]).map(|b| (j, b)));
@@ -1047,6 +1051,62 @@ fn union(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
         }
     }
     boxes
+}
+
+/// Pane coverage has identical column predicates and pairwise disjoint time
+/// intervals. Sort once and join adjacent intervals, rather than removing one
+/// element from a large vector for every pane. General multidimensional or
+/// overlapping coverage continues through the existing exact union algorithm.
+fn union_ordered_time_boxes(boxes: &[SelectionBox]) -> Option<Vec<SelectionBox>> {
+    let first = boxes.first()?;
+    if !boxes
+        .iter()
+        .all(|b| b.columns == first.columns && b.relative_time.is_some())
+    {
+        return None;
+    }
+    if !boxes
+        .iter()
+        .all(|b| match b.relative_time.as_ref().unwrap() {
+            (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
+            (Bound::Included(lower), Bound::Included(upper)) => lower <= upper,
+            (
+                Bound::Included(lower) | Bound::Excluded(lower),
+                Bound::Included(upper) | Bound::Excluded(upper),
+            ) => lower < upper,
+        })
+    {
+        return None;
+    }
+    let mut order: Vec<_> = (0..boxes.len()).collect();
+    order.sort_by_key(
+        |&index| match boxes[index].relative_time.as_ref().unwrap().0 {
+            Bound::Unbounded => (false, 0, false),
+            Bound::Included(at) => (true, at, false),
+            Bound::Excluded(at) => (true, at, true),
+        },
+    );
+    if !order.windows(2).all(|pair| {
+        let (_, upper) = boxes[pair[0]].relative_time.as_ref().unwrap();
+        let (lower, _) = boxes[pair[1]].relative_time.as_ref().unwrap();
+        ends_before(upper, lower, |a: &i64, b: &i64| Some(a.cmp(b)))
+    }) {
+        return None;
+    }
+    let mut merged: Vec<(usize, SelectionBox)> = Vec::new();
+    for index in order {
+        if let Some((first_index, previous)) = merged.last_mut() {
+            if let Some(joined) = join(previous, &boxes[index]) {
+                *first_index = (*first_index).min(index);
+                *previous = joined;
+                continue;
+            }
+        }
+        merged.push((index, boxes[index].clone()));
+    }
+    // The general union retains the earliest occurrence of each joined box.
+    merged.sort_by_key(|(index, _)| *index);
+    Some(merged.into_iter().map(|(_, selection)| selection).collect())
 }
 
 fn join(a: &SelectionBox, b: &SelectionBox) -> Option<SelectionBox> {
@@ -1118,5 +1178,87 @@ fn touching<T: Clone>(
         Some((bl.clone(), au.clone()))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod pane_union_tests {
+    use super::*;
+
+    fn pane(start: i64, end: i64) -> SelectionBox {
+        SelectionBox {
+            relative_time: Some((Bound::Excluded(start), Bound::Included(end))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn large_reverse_ordered_pane_union_is_one_exact_interval() {
+        let panes: Vec<_> = (0..75_000).rev().map(|i| pane(i, i + 1)).collect();
+        assert_eq!(union(panes), vec![pane(0, 75_000)]);
+    }
+
+    #[test]
+    fn interval_fast_path_matches_general_union_for_permutations() {
+        use Bound::{Excluded as E, Included as I, Unbounded as U};
+        for intervals in [
+            [(U, I(0)), (E(0), I(1)), (E(1), I(2)), (E(2), U)],
+            [(E(0), E(1)), (I(1), I(1)), (E(1), I(2)), (E(4), I(5))],
+            [(E(0), I(1)), (E(3), E(4)), (I(4), I(5)), (E(5), I(6))],
+        ] {
+            let boxes: Vec<_> = intervals
+                .into_iter()
+                .map(|relative_time| SelectionBox {
+                    relative_time: Some(relative_time),
+                    ..Default::default()
+                })
+                .collect();
+            for a in 0..4 {
+                for b in 0..4 {
+                    for c in 0..4 {
+                        for d in 0..4 {
+                            let order = [a, b, c, d];
+                            if (0..4).any(|i| order[..i].contains(&order[i])) {
+                                continue;
+                            }
+                            let shuffled: Vec<_> =
+                                order.into_iter().map(|i| boxes[i].clone()).collect();
+                            assert_eq!(union(shuffled.clone()), union_general(shuffled));
+                        }
+                    }
+                }
+            }
+        }
+        let empty = SelectionBox {
+            relative_time: Some((E(0), E(0))),
+            ..Default::default()
+        };
+        let singleton = SelectionBox {
+            relative_time: Some((I(0), I(0))),
+            ..Default::default()
+        };
+        let unusual = vec![empty.clone(), empty, singleton];
+        assert!(union_ordered_time_boxes(&unusual).is_none());
+        assert_eq!(union(unusual.clone()), union_general(unusual));
+    }
+
+    #[test]
+    fn sorted_union_preserves_gaps_boundaries_and_original_group_order() {
+        assert_eq!(
+            union(vec![pane(10, 11), pane(1, 2), pane(0, 1), pane(11, 12)]),
+            vec![pane(10, 12), pane(0, 2)]
+        );
+        let missing_endpoint = SelectionBox {
+            relative_time: Some((Bound::Excluded(0), Bound::Excluded(1))),
+            ..Default::default()
+        };
+        assert_eq!(
+            union(vec![missing_endpoint.clone(), pane(1, 2)]),
+            vec![missing_endpoint, pane(1, 2)]
+        );
+        let overlaps = vec![pane(0, 2), pane(1, 3)];
+        assert!(union_ordered_time_boxes(&overlaps).is_none());
+        assert_eq!(union(overlaps.clone()), overlaps);
+        assert_eq!(union(vec![pane(0, 1), pane(0, 1)]), vec![pane(0, 1)]);
     }
 }

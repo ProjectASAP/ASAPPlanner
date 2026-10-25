@@ -1,15 +1,10 @@
-//! Acceptance tests for #509 "Example 4: Materialization of window summaries
-//! in physical planning".
+//! Rule-fixture and production acceptance for Example 4: materialization and objective models.
 //!
-//! Spec: `docs/design_docs/proposals/planner-layering-example4-acceptance.md`.
-//! Written by a test designer who does not implement the stages. Tests that
-//! need an unimplemented feature are `#[ignore]`d, naming it and the PR that
-//! delivers it. Materialization is read from the physical DAG (#667); window
-//! summaries and retention are read through the pending adapters in
-//! `planner_layering_common`, which the implementers fill in.
-//!
-//! The workloads are Example 3's, with Pattern A's recurrence and data
-//! arrival varied as the doc does.
+//! Numerical, accuracy, and operator assertions use explicitly supplied
+//! configurations of the existing rules and physical evaluator. They do not
+//! assume a bounded MILP run archives every supported workload plan. Separate
+//! production checks exercise memo search and validated output selection.
+//! Unsupported algorithms retain their existing ignored tests.
 
 mod planner_layering_common;
 
@@ -324,7 +319,11 @@ fn keeping_query_time_results() -> DeploymentCapabilities {
 /// The 1-min tumbling KLL candidate yields B1 (ingestion time), B2 (not materialized) and B3 (query time, kept).
 #[test]
 fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options() {
-    let run = run_promql_for(&pattern_b(), &keeping_query_time_results());
+    let run = run_pattern_b_fixture(
+        &pattern_b(),
+        &PlanSelectionSettings::default(),
+        &keeping_query_time_results(),
+    );
     let found: BTreeSet<_> = options_of(&run, tumbling(), 1).into_keys().collect();
     assert_eq!(
         found,
@@ -335,7 +334,11 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_op
 /// B1 builds the tumbling KLLs at ingestion time and merges and estimates at query time.
 #[test]
 fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time() {
-    let run = run_promql(&pattern_b());
+    let run = run_pattern_b_fixture(
+        &pattern_b(),
+        &PlanSelectionSettings::default(),
+        &DeploymentCapabilities::default(),
+    );
     let (id, build) = options_of(&run, tumbling(), 1)[&MatAtIngestion].clone();
     let p = run.physical(&id);
     assert!(runs_at_ingestion(p, build));
@@ -362,7 +365,11 @@ fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_quer
 /// B3; both are priced, and B2's evaluation stays within the 200 ms bound.
 #[test]
 fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
-    let run = run_promql(&pattern_b());
+    let run = run_pattern_b_fixture(
+        &pattern_b(),
+        &PlanSelectionSettings::default(),
+        &DeploymentCapabilities::default(),
+    );
     let options = options_of(&run, tumbling(), 1);
     assert_eq!(
         options.keys().copied().collect::<BTreeSet<_>>(),
@@ -381,7 +388,11 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
 /// B2's raw data and keeps a fifth of it on disk.
 #[test]
 fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
-    let run = run_promql_for(&pattern_b(), &keeping_query_time_results());
+    let run = run_pattern_b_fixture(
+        &pattern_b(),
+        &PlanSelectionSettings::default(),
+        &keeping_query_time_results(),
+    );
     let options = options_of(&run, tumbling(), 1);
     let (id, build) = options[&MatAtQuery].clone();
     let p = run.physical(&id);
@@ -398,9 +409,17 @@ fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
 #[test]
 #[ignore = "needs sliding windows (#522)"]
 fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options() {
-    let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), sliding(), 1)
-        .into_keys()
-        .collect();
+    let found: BTreeSet<_> = options_of(
+        &run_pattern_b_fixture(
+            &pattern_b(),
+            &PlanSelectionSettings::default(),
+            &DeploymentCapabilities::default(),
+        ),
+        sliding(),
+        1,
+    )
+    .into_keys()
+    .collect();
     assert_eq!(found, BTreeSet::from([MatAtIngestion, MatAtQuery]));
 }
 
@@ -408,12 +427,13 @@ fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_optio
 
 /// Pattern B under `cost_model`, with the default resource speed and horizon.
 fn pattern_b_under(cost_model: CostModel) -> Run {
-    run_promql_under(
+    run_pattern_b_fixture(
         &pattern_b(),
         &PlanSelectionSettings {
             cost_model,
-            ..PlanSelectionSettings::default()
+            ..Default::default()
         },
+        &DeploymentCapabilities::default(),
     )
 }
 

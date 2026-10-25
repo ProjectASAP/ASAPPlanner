@@ -39,9 +39,9 @@ use asap_frontend_sql::{lower_sql_dialect, SqlError};
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
 pub use asap_plan_selection::pass::{
-    optimize, run_stage1_to_stage3, ExecutorCompileCheck, OptimizationInput, OptimizationPass,
-    OptimizeError, PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass,
-    Stage1ToStage3Run,
+    optimize, run_stage1_to_stage3, ExecutorCompileCheck, ExecutorCompileError, OptimizationInput,
+    OptimizationPass, OptimizeError, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
+    Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
 mod installable;
@@ -59,10 +59,9 @@ pub use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 pub use asap_frontend_sql::SqlCatalog;
 pub use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
 pub use asap_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, CostTableProvenance, DiscardedQueryCandidate,
-    MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind,
-    PlanSelectionSettings, QuerySearchReport, RejectionCause, ResourceSpeed, ResourceUnitCost,
-    SearchReport, SummaryOperation,
+    ClusterLimits, ClusterObjective, CostModel, CostTableProvenance, MeasuredOperationCost,
+    MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind, PlanSelectionSettings,
+    RejectionCause, ResourceSpeed, ResourceUnitCost, SearchReport, SummaryOperation,
 };
 pub use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPNodeId, RawDataSampleWindow,

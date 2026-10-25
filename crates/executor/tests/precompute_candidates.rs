@@ -11,7 +11,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::{compile_physical_asap_dag, logical_candidates, selected_dag};
+use common::{compile_physical_asap_dag, computation_candidates, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::AccuracyTarget;
@@ -409,7 +409,7 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
 #[test]
 fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
     let mut executed = 0;
-    for root in logical_candidates(grouped_rate_root(), AccuracyTarget::exact()) {
+    for root in computation_candidates(grouped_rate_root()) {
         let dag = compile_physical_asap_dag(&root).unwrap();
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(
@@ -724,16 +724,17 @@ fn cut_candidate_rejects_invalid_frontiers() {
     }
 }
 
-/// A candidate that does not compose fails `logical_candidates` instead of
-/// being skipped, so an assertion over every candidate cannot pass on none.
-/// An aggregate over a top-k output does not compose yet (#672).
-/// This test relies on that bug: when #672 is fixed, the query composes and
-/// this test must switch to another candidate that does not compose.
+// A rejected composition must fail the assertion helper without relying on a planner bug.
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    logical_candidates(
-        exact_promql_root("sum by (job) (topk by (job, instance) (1, rate(m[5m])))"),
-        AccuracyTarget::exact(),
-    );
+    use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
+    common::require_composed_operator_candidates(vec![
+        asap_plan_selection::search::LogicalCandidate {
+            id: "invalid-composition".into(),
+            choice: Vec::new(),
+            roots: Err(PerComputationCandidateError::InvalidChoice),
+            pass2: None,
+        },
+    ]);
 }

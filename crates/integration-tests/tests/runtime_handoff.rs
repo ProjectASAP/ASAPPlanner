@@ -132,8 +132,8 @@ fn pane_chain_count(dag: &PhysicalASAPDAG) -> usize {
         .count()
 }
 
-/// The installable plan has the selected pane chain expanded into the six
-/// ten-minute panes the executor runs, each stored at ingestion time, and
+/// The installable plan expands its selected pane width into contiguous
+/// panes, each stored at ingestion time, and
 /// the executor compiles it. The stage export keeps the chain for costing
 /// and display. Its one query is answered by the DAG's one root.
 #[tokio::test]
@@ -144,7 +144,7 @@ async fn installable_plan_has_its_pane_chains_expanded() {
     let plan = &installed;
     let dag = &installed.dag.dag;
     assert_eq!(pane_chain_count(dag), 0);
-    assert_eq!(materialized_count(dag), 6, "six ten-minute panes");
+    assert_eq!(materialized_count(dag), plan.stored_outputs.len());
     let roots: Vec<u64> = dag.roots.iter().map(|&r| r as u64).collect();
     compile(dag, raw_range_inputs(dag), &roots).expect("the executor compiles it");
     assert_eq!(plan.queries.len(), 1);
@@ -153,24 +153,14 @@ async fn installable_plan_has_its_pane_chains_expanded() {
         "quantile_over_time(0.99, latency_ms[60m])"
     );
     assert_eq!(plan.queries[0].root_node_id, dag.roots[0]);
-    // The stored outputs are the ingestion frontier: the six panes, each
-    // ten minutes wide, ending 0, 10, ..., 50 minutes before evaluation.
+    // The stored outputs are exactly the ingestion frontier.
     let stored: Vec<u64> = plan
         .stored_outputs
         .iter()
         .map(|o| o.node_id as u64)
         .collect();
     assert_eq!(stored, frontier_from_timing(dag).unwrap());
-    let mut offsets: Vec<i64> = plan
-        .stored_outputs
-        .iter()
-        .map(|o| {
-            assert_eq!(o.inputs.raw_data_sample_windows[0].width_ms, 600_000);
-            o.inputs.raw_data_sample_windows[0].end_offset_ms
-        })
-        .collect();
-    offsets.sort();
-    assert_eq!(offsets, (0..6).map(|i| i * 600_000).collect::<Vec<_>>());
+    assert_pane_coverage(plan, plan.queries[0].root_node_id, 0, 3_600_000);
     assert!(plan.query_time_raw_windows.is_empty(), "no raw data kept");
     let report = plan.selection.as_ref().expect("Stage 3 selected");
     assert!(report.cost_per_second.is_some());
@@ -218,7 +208,10 @@ async fn reference_plan_runs_the_installable_plan_at_query_time() {
     reference.validate().unwrap();
     assert_eq!(materialized_count(&reference.dag.dag), 0);
     assert!(reference.stored_outputs.is_empty());
-    assert_eq!(reference.query_time_raw_windows.len(), 6);
+    assert_eq!(
+        reference.query_time_raw_windows.len(),
+        plan.stored_outputs.len()
+    );
     assert!(reference
         .dag
         .dag
@@ -260,16 +253,32 @@ fn repeating(queries: &[&str]) -> PlanningWorkload {
 }
 
 /// p99 and p50 over the same 60 minutes share one chain of panes: the
-/// installable plan stores six panes, not one set per query.
+/// installable plan stores one shared set of panes.
 #[tokio::test]
-async fn two_queries_on_one_chain_store_its_six_panes_once() {
+async fn two_queries_on_one_chain_store_its_panes_once() {
     let plan = installable(&repeating(&[
         "quantile_over_time(0.99, latency_ms[60m])",
         "quantile_over_time(0.5, latency_ms[60m])",
     ]))
     .await;
-    assert_eq!(plan.stored_outputs.len(), 6);
     assert_eq!(plan.queries.len(), 2);
+    let stored_below = |root| {
+        let below = nodes_below(&plan.dag.dag, root);
+        plan.stored_outputs
+            .iter()
+            .filter(|output| below.contains(&output.node_id))
+            .map(|output| output.node_id)
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        stored_below(plan.queries[0].root_node_id),
+        stored_below(plan.queries[1].root_node_id)
+    );
+    assert_eq!(
+        stored_below(plan.queries[0].root_node_id).len(),
+        plan.stored_outputs.len()
+    );
+    assert_pane_coverage(&plan, plan.queries[0].root_node_id, 0, 3_600_000);
 }
 
 /// Planned with raw data kept (everything at query time), so each query's
@@ -310,7 +319,17 @@ async fn raw_data_sample_windows_of_unsupported_shapes_are_refused() {
                 reason: refused,
                 ..
             })) => assert_eq!(refused, reason, "{query}"),
-            other => panic!("{query}: {:?}", other.map(|p| p.query_time_raw_windows)),
+            Err(error) => {
+                // Joint selection rejects uncompilable candidates before handoff;
+                // a no-plan diagnostic must preserve the concrete refusal reason.
+                let diagnostic = error.to_string();
+                assert!(diagnostic.contains(reason), "{query}: {diagnostic}");
+                assert!(diagnostic.contains("raw-sample window"), "{diagnostic}");
+            }
+            Ok(plan) => panic!(
+                "{query}: unexpectedly installed {:?}",
+                plan.query_time_raw_windows
+            ),
         }
     }
     let plain = installable_at_query_time("max_over_time(latency_ms[10m] offset 5m)")
@@ -323,7 +342,7 @@ async fn raw_data_sample_windows_of_unsupported_shapes_are_refused() {
 }
 
 /// Example 4b answered as the last hour at 10-minute steps (a range
-/// evaluation): each of the six panes is kept for the hour its window reads
+/// evaluation): each selected pane is kept for the hour its window reads
 /// plus the hour the range spans, 7,200,000 ms, as Stage 3 records for the
 /// chain (`Selection::pane_retention_ms`); without the range, for the hour.
 #[tokio::test]
@@ -339,7 +358,7 @@ async fn stored_panes_carry_stage3_pane_retention() {
         serde_json::json!({"step_ms": 600000, "span_ms": 3600000});
     workload = serde_json::from_value(json).unwrap();
     let ranged = installable(&workload).await;
-    assert_eq!(ranged.stored_outputs.len(), 6);
+    assert_pane_coverage(&ranged, ranged.queries[0].root_node_id, 0, 3_600_000);
     assert!(ranged
         .stored_outputs
         .iter()
@@ -377,24 +396,48 @@ async fn an_offset_chain_keeps_its_panes_for_its_window_plus_the_offset() {
         "quantile_over_time(0.99, latency_ms[60m] offset 10m)",
     ]))
     .await;
-    assert_eq!(plan.stored_outputs.len(), 12);
-    // The retention of the stored outputs below each query's root.
-    let retention_ms_under = |root| {
-        let below = nodes_below(&plan.dag.dag, root);
-        plan.stored_outputs
-            .iter()
-            .filter(|o| below.contains(&o.node_id))
-            .map(|o| o.retention_ms)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        retention_ms_under(plan.queries[0].root_node_id),
-        [3_600_000; 6]
-    );
-    assert_eq!(
-        retention_ms_under(plan.queries[1].root_node_id),
-        [4_200_000; 6]
-    );
+    assert_pane_coverage(&plan, plan.queries[0].root_node_id, 0, 3_600_000);
+    assert_pane_coverage(&plan, plan.queries[1].root_node_id, 600_000, 4_200_000);
+    let below: Vec<_> = plan
+        .queries
+        .iter()
+        .map(|query| nodes_below(&plan.dag.dag, query.root_node_id))
+        .collect();
+    for output in &plan.stored_outputs {
+        let required = [3_600_000, 4_200_000]
+            .into_iter()
+            .zip(&below)
+            .filter(|(_, nodes)| nodes.contains(&output.node_id))
+            .map(|(retention, _)| retention)
+            .max()
+            .expect("stored pane is consumed");
+        assert_eq!(output.retention_ms, required);
+    }
+    plan.validate().unwrap();
+}
+
+/// Any selected legal pane width must cover the requested interval exactly.
+fn assert_pane_coverage(plan: &InstallablePlan, root: PhysicalASAPNodeId, start: i64, end: i64) {
+    let below = nodes_below(&plan.dag.dag, root);
+    let mut intervals: Vec<_> = plan
+        .stored_outputs
+        .iter()
+        .filter(|output| below.contains(&output.node_id))
+        .map(|output| {
+            let [window] = output.inputs.raw_data_sample_windows.as_slice() else {
+                panic!("pane reads one raw interval: {:?}", output.inputs);
+            };
+            assert!(window.width_ms > 0 && 600_000 % window.width_ms == 0);
+            (window.end_offset_ms, window.end_offset_ms + window.width_ms)
+        })
+        .collect();
+    intervals.sort_unstable();
+    assert!(!intervals.is_empty());
+    assert_eq!(intervals[0].0, start);
+    assert_eq!(intervals.last().unwrap().1, end);
+    for pair in intervals.windows(2) {
+        assert_eq!(pair[0].1, pair[1].0);
+    }
 }
 
 /// Every node `root` reads, directly or through other nodes.

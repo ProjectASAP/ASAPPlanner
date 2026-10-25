@@ -172,7 +172,19 @@ async fn facade_plans_match_run_stage1_to_stage3() {
         selection.search.candidates_checked > 1,
         "the stages chose among candidates"
     );
-    assert_eq!(output.selection.as_ref(), Some(selection));
+    // Separate searches have different timings and visited-plan archives.
+    // The facade must preserve the chosen execution, cost, and guarantees.
+    let facade = output.selection.as_ref().expect("facade reports selection");
+    assert_eq!(facade.plan, selection.plan);
+    assert_eq!(
+        facade.costs[&facade.selected],
+        selection.costs[&selection.selected]
+    );
+    assert_eq!(
+        facade.accepted[&facade.selected],
+        selection.accepted[&selection.selected]
+    );
+    assert_eq!(facade.search.algorithm, selection.search.algorithm);
     assert_eq!(output.roots(), selected.roots);
 }
 

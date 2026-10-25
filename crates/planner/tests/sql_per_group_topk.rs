@@ -389,10 +389,17 @@ async fn a_plan_whose_stored_output_does_not_build_is_rejected() {
     .await;
     match planned {
         Err(asap_planner::PlanError::Optimize(error)) => {
+            // Joint search keeps typed validation failures in its no-incumbent
+            // report, including when the search budget ends before exhaustion.
+            let diagnostic = error.to_string();
             assert!(
-                error.to_string().contains("ExecutorCannotCompile"),
-                "{error}"
-            )
+                diagnostic.contains("executor_cannot_compile"),
+                "{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("value operation has no native implementation"),
+                "{diagnostic}"
+            );
         }
         other => panic!("no plan is selected: {:?}", other.map(|_| ())),
     }
