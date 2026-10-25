@@ -6,6 +6,8 @@
 //! Stage 2 validation still checks operator legality and upstream timing.
 //! Potential shared non-summary nodes also receive query materialization; Stage 2
 //! checks highest-shared eligibility on the selected graph, not all possible consumers.
+use super::suppliers::{SupplierCandidates, SupplierSetInterner};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
@@ -297,24 +299,54 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
             }
         }
     }
+    let mut supplier_sets = SupplierSetInterner::default();
+    // Compatibility depends on consumer timing and producer mode/timing only.
+    // Evaluate each source configuration once per timing, then reuse this exact
+    // index; reader eligibility remains expressed by separate graph constraints.
+    let mut timing_index = Vec::with_capacity(source_configurations.len());
+    for configurations in &source_configurations {
+        super::check_deadline(deadline)?;
+        let mut by_timing = [SupplierCandidates::default(), SupplierCandidates::default()];
+        for (timing_index, timing) in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+            .into_iter()
+            .enumerate()
+        {
+            let mut compatible = Vec::new();
+            for &producer in configurations {
+                super::check_deadline(deadline)?;
+                if compatible_timing(timing, &result.configurations[producer.0]) {
+                    compatible.push(producer);
+                }
+            }
+            by_timing[timing_index] = supplier_sets.intern(compatible);
+        }
+        timing_index.push(by_timing);
+    }
+    let mut input_cache: HashMap<(SupplierCandidates, ExecutionTiming), SupplierCandidates> =
+        HashMap::new();
     for (id, configuration) in result.configurations.iter().enumerate() {
         super::check_deadline(deadline)?;
         let mut requirements = Vec::new();
         for input in
             &source.graph.candidates[configuration.source_candidate.0].producer_requirements
         {
-            let mut compatible_producers = Vec::new();
-            for source in &input.compatible_producers {
-                super::check_deadline(deadline)?;
-                compatible_producers.extend(
-                    source_configurations[source.0]
-                        .iter()
-                        .copied()
-                        .filter(|producer| {
-                            compatible_timing(configuration, &result.configurations[producer.0])
-                        }),
-                );
-            }
+            let key = (input.compatible_producers.clone(), configuration.timing);
+            let compatible_producers = if let Some(suppliers) = input_cache.get(&key) {
+                suppliers.clone()
+            } else {
+                let timing = match configuration.timing {
+                    ExecutionTiming::QueryTime => 0,
+                    ExecutionTiming::IngestionTime => 1,
+                };
+                let mut compatible = Vec::new();
+                for producer in &input.compatible_producers {
+                    super::check_deadline(deadline)?;
+                    compatible.extend(timing_index[producer.0][timing].iter().copied());
+                }
+                let suppliers = supplier_sets.intern(compatible);
+                input_cache.insert(key, suppliers.clone());
+                suppliers
+            };
             requirements.push(ProducerRequirement {
                 compatible_producers,
             });
@@ -434,9 +466,9 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
     )
 }
 
-fn compatible_timing(consumer: &CandidateConfiguration, producer: &CandidateConfiguration) -> bool {
-    consumer.timing == producer.timing
-        || (consumer.timing == ExecutionTiming::QueryTime
+fn compatible_timing(consumer_timing: ExecutionTiming, producer: &CandidateConfiguration) -> bool {
+    consumer_timing == producer.timing
+        || (consumer_timing == ExecutionTiming::QueryTime
             && matches!(producer.materialization, Materialization::MatAtIngestion(_)))
 }
 
@@ -558,6 +590,70 @@ mod tests {
         matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind.algorithm() == SketchAlgorithm::Kll)
     }
 
+    // Indexed compatibility must reproduce every original ordered edge while
+    // storing repeated supplier lists once, including query/ingestion modes.
+    #[test]
+    fn supplier_index_preserves_all_edges_and_shares_storage() {
+        let (source, entries, data) = fixture();
+        let expanded = enumerate_candidate_configurations(
+            &source,
+            &[0, 1],
+            &entries,
+            &data,
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap();
+        for (consumer, configuration) in expanded.configurations.iter().enumerate() {
+            let original = &source.graph.candidates[configuration.source_candidate.0];
+            let generated = &expanded.inventory.graph.candidates[consumer];
+            assert_eq!(
+                generated.producer_requirements.len(),
+                original.producer_requirements.len()
+            );
+            for (original, generated) in original
+                .producer_requirements
+                .iter()
+                .zip(&generated.producer_requirements)
+            {
+                let expected: Vec<_> = original
+                    .compatible_producers
+                    .iter()
+                    .flat_map(|source| {
+                        expanded.configurations.iter().enumerate().filter_map(
+                            move |(id, producer)| {
+                                (producer.source_candidate == *source
+                                    && (configuration.timing == producer.timing
+                                        || (configuration.timing == ExecutionTiming::QueryTime
+                                            && matches!(
+                                                producer.materialization,
+                                                Materialization::MatAtIngestion(_)
+                                            ))))
+                                .then_some(PhysicalCandidateId(id))
+                            },
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    generated.compatible_producers.as_slice(),
+                    expected.as_slice()
+                );
+            }
+        }
+        let metrics = super::super::suppliers::supplier_storage_metrics(&expanded.inventory.graph);
+        let requirements = expanded
+            .inventory
+            .graph
+            .candidates
+            .iter()
+            .map(|candidate| candidate.producer_requirements.len())
+            .sum::<usize>();
+        assert!(metrics.unique_supplier_sets < requirements, "{metrics:?}");
+        assert!(
+            metrics.stored_supplier_ids < metrics.logical_connections,
+            "{metrics:?}"
+        );
+    }
+
     // Configuration expansion is bounded per node, and never crosses ephemeral timing.
     #[test]
     fn real_quantiles_offer_local_and_shared_timing_configurations() {
@@ -621,7 +717,7 @@ mod tests {
                 .flat_map(|input| &input.compatible_producers)
             {
                 assert!(compatible_timing(
-                    &expanded.configurations[consumer],
+                    expanded.configurations[consumer].timing,
                     &expanded.configurations[producer.0]
                 ));
             }
@@ -656,7 +752,7 @@ mod tests {
             let mut requirements = Vec::new();
             node.operator.map_children(|child| {
                 requirements.push(ProducerRequirement {
-                    compatible_producers: vec![append(child, source)],
+                    compatible_producers: vec![append(child, source)].into(),
                 });
                 child.clone()
             });

@@ -232,7 +232,7 @@ mod tests {
                     producer_requirements: inputs
                         .iter()
                         .map(|&id| ProducerRequirement {
-                            compatible_producers: vec![PhysicalCandidateId(id)],
+                            compatible_producers: vec![PhysicalCandidateId(id)].into(),
                         })
                         .collect(),
                 })

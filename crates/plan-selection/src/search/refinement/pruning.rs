@@ -5,6 +5,8 @@ use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::candidates::graph::{
     CandidateDependencyGraph, PhysicalCandidateId, ReaderConstraint,
 };
+use crate::search::candidates::suppliers::{SupplierCandidates, SupplierSetInterner};
+use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 pub(in crate::search) struct PruningMetrics {
@@ -37,6 +39,8 @@ pub(in crate::search) fn prune(
         .map(|input| input.compatible_producers.len())
         .sum();
     let graph = &mut configured.inventory.graph;
+    let mut supplier_sets = SupplierSetInterner::default();
+    let mut remapped: HashMap<SupplierCandidates, SupplierCandidates> = HashMap::new();
     graph.candidates = std::mem::take(&mut graph.candidates)
         .into_iter()
         .enumerate()
@@ -45,11 +49,18 @@ pub(in crate::search) fn prune(
                 return None;
             }
             for input in &mut candidate.producer_requirements {
-                input.compatible_producers = input
-                    .compatible_producers
-                    .iter()
-                    .filter_map(|id| mapping[id.0])
-                    .collect();
+                input.compatible_producers = remapped
+                    .entry(input.compatible_producers.clone())
+                    .or_insert_with(|| {
+                        supplier_sets.intern(
+                            input
+                                .compatible_producers
+                                .iter()
+                                .filter_map(|id| mapping[id.0])
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .clone();
             }
             Some(candidate)
         })
@@ -239,6 +250,51 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    // Removing an unrelated candidate remaps IDs once per shared supplier
+    // list; the subsequent solve still sees independent consumer requirements.
+    #[test]
+    fn pruning_retains_shared_supplier_storage_after_remapping() {
+        let graph = CandidateDependencyGraph {
+            candidates: vec![
+                candidate(9.0, &[]),
+                candidate(1.0, &[]),
+                candidate(1.0, &[&[1]]),
+                candidate(1.0, &[&[1]]),
+            ],
+            query_roots: vec![
+                QueryRootCandidates {
+                    compatible_candidates: vec![PhysicalCandidateId(2)],
+                },
+                QueryRootCandidates {
+                    compatible_candidates: vec![PhysicalCandidateId(3)],
+                },
+            ],
+            ..Default::default()
+        };
+        let original = graph.clone();
+        let mut inventory = configured(graph);
+        assert_eq!(prune(&mut inventory).unwrap().removed_candidates, 1);
+        let graph = &inventory.inventory.graph;
+        assert_eq!(
+            graph.candidates[1].producer_requirements[0]
+                .compatible_producers
+                .as_slice(),
+            &[PhysicalCandidateId(0)]
+        );
+        assert_eq!(
+            crate::search::candidates::suppliers::supplier_storage_metrics(graph),
+            crate::search::candidates::suppliers::SupplierStorageMetrics {
+                logical_connections: 2,
+                unique_supplier_sets: 1,
+                stored_supplier_ids: 1
+            }
+        );
+        assert_eq!(
+            select_candidates(graph).unwrap().unwrap().modeled_cost,
+            select_candidates(&original).unwrap().unwrap().modeled_cost
+        );
     }
 
     // Dead dependency cycles and unused nodes disappear; a cycle with a finite

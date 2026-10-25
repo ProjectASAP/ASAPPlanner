@@ -1024,13 +1024,30 @@ pub struct SearchReport {
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateConnectionReport {
+    /// Pane-width domain of the most recently reported complete inventory.
+    /// Inventory counts form one snapshot from this domain, even if a later
+    /// expansion timed out. This does not certify full-domain optimality.
+    #[serde(default)]
+    pub inventory_pane_width_domain: Option<String>,
+    /// Width domains attempted in order; state/physical catalogs are rebuilt per round.
+    #[serde(default)]
+    pub pane_width_rounds: Vec<String>,
+    /// Some legal widths remain unsearched; restricted optima are not global certificates.
+    #[serde(default)]
+    pub pane_widths_pending: bool,
+    /// Number of distinct allocated compatible-supplier lists.
+    #[serde(default)]
+    pub supplier_sets: usize,
+    /// Supplier IDs physically stored across shared lists (not logical edges).
+    #[serde(default)]
+    pub stored_supplier_ids: usize,
     /// Conservative zero bounds used to stay within the solver coefficient range.
     #[serde(default)]
     pub rounded_down_cost_bounds: usize,
     /// Time spent obtaining a validated incumbent from the seed width domain.
     #[serde(default)]
     pub seed_planning_ms: f64,
-    /// Complete-domain phase wall time, including interrupted generation.
+    /// Post-seed expansion/selection wall time, including interrupted rounds.
     #[serde(default)]
     pub full_planning_ms: f64,
     #[serde(default)]

@@ -38,6 +38,18 @@ pub fn try_add_local_window_composition_in_domain(
     domain: PaneWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<(), CandidateGenerationTimeout> {
+    extend_local_window_composition(memo, entries, None, domain, deadline)
+}
+
+/// Extend a pre-state-expansion memo with only newly exposed pane widths.
+/// `previous` must describe widths already generated for this memo.
+pub fn extend_local_window_composition(
+    memo: &mut Memo,
+    entries: &[QueryWorkloadEntry],
+    previous: Option<PaneWidthDomain>,
+    domain: PaneWidthDomain,
+    deadline: Option<Instant>,
+) -> Result<(), CandidateGenerationTimeout> {
     check_generation_deadline(deadline)?;
     // Flatten each existing/generated graph once. Repeatedly flattening the
     // growing candidate list makes a complete pane-width domain quadratic.
@@ -51,7 +63,9 @@ pub fn try_add_local_window_composition_in_domain(
             }
         }
     }
-    for (group, candidate) in local_pane_candidates_before(memo, entries, domain, deadline)? {
+    for (group, candidate) in
+        local_pane_candidates_delta(memo, entries, previous, domain, deadline)?
+    {
         check_generation_deadline(deadline)?;
         let Ok(signature) = candidate_signature(&candidate) else {
             memo.candidates[group].push(candidate);
@@ -89,6 +103,16 @@ fn local_pane_candidates_before(
     domain: PaneWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<Vec<(usize, ImplementationCandidate)>, CandidateGenerationTimeout> {
+    local_pane_candidates_delta(memo, entries, None, domain, deadline)
+}
+
+fn local_pane_candidates_delta(
+    memo: &Memo,
+    entries: &[QueryWorkloadEntry],
+    previous: Option<PaneWidthDomain>,
+    domain: PaneWidthDomain,
+    deadline: Option<Instant>,
+) -> Result<Vec<(usize, ImplementationCandidate)>, CandidateGenerationTimeout> {
     check_generation_deadline(deadline)?;
     let group_of = group_of_node(&memo.groups);
     let mut own: Vec<(usize, ImplementationCandidate)> = Vec::new();
@@ -102,7 +126,23 @@ fn local_pane_candidates_before(
             domain,
             deadline,
         )?;
+        let previous_widths = previous
+            .map(|previous| {
+                pane_width_domain_before(
+                    group
+                        .queries
+                        .iter()
+                        .filter_map(|&query| entries.get(query)?.evaluation_grid_ms()),
+                    previous,
+                    deadline,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
         for grid in grids {
+            if previous_widths.binary_search(&grid).is_ok() {
+                continue;
+            }
             check_generation_deadline(deadline)?;
             for candidate in &memo.candidates[g] {
                 check_generation_deadline(deadline)?;
@@ -306,6 +346,46 @@ mod tests {
             memo.candidates.iter().map(Vec::len).collect::<Vec<_>>(),
             original_sizes
         );
+    }
+
+    #[test]
+    fn incremental_local_widths_match_one_complete_pass() {
+        let (base, entries) = fixture(&[repeated(60)]);
+        let mut incremental = base.clone();
+        let mut previous = None;
+        for domain in [
+            PaneWidthDomain::SeedGrids,
+            PaneWidthDomain::Expanding { max_parts: 4 },
+            PaneWidthDomain::Expanding { max_parts: 8 },
+            PaneWidthDomain::Complete,
+        ] {
+            extend_local_window_composition(&mut incremental, &entries, previous, domain, None)
+                .unwrap();
+            assert!(local_pane_candidates_delta(
+                &incremental,
+                &entries,
+                Some(domain),
+                domain,
+                None
+            )
+            .unwrap()
+            .is_empty());
+            previous = Some(domain);
+        }
+        let mut complete = base;
+        add_local_window_composition(&mut complete, &entries);
+        let signatures = |memo: &Memo| {
+            memo.candidates
+                .iter()
+                .enumerate()
+                .flat_map(|(group, candidates)| {
+                    candidates
+                        .iter()
+                        .map(move |candidate| (group, candidate_signature(candidate).unwrap()))
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(signatures(&incremental), signatures(&complete));
     }
 
     fn repeated(interval: u32) -> QueryRecurrence {

@@ -1,10 +1,12 @@
 //! Candidate graph representation and physical implementation construction.
 pub(crate) mod configurations;
+mod factoring;
 pub(crate) mod graph;
 pub(crate) mod inventory;
 pub(crate) mod physical;
 pub(crate) mod reconstruction;
 pub(crate) mod scopes;
+pub(crate) mod suppliers;
 
 /// Discard partially built catalogs on timeout; they cannot certify coverage.
 fn check_deadline(

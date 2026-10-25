@@ -14,6 +14,12 @@ pub enum PaneWidthDomain {
     #[default]
     Complete,
     SeedGrids,
+    /// Seed grids plus widths obtained by dividing each grid into at most
+    /// `max_parts` equal pieces. Increasing the limit monotonically exposes
+    /// every legal divisor; only `Complete` certifies full-domain search.
+    Expanding {
+        max_parts: u64,
+    },
 }
 
 pub fn pane_width_domain(
@@ -44,6 +50,7 @@ pub(crate) fn pane_width_domain_before(
         }
         return Ok(complete.into_iter().collect());
     }
+    let grids = widths.clone();
     loop {
         let mut additional = BTreeSet::new();
         for &a in &widths {
@@ -60,8 +67,93 @@ pub(crate) fn pane_width_domain_before(
         }
         widths.extend(additional);
     }
+    if let PaneWidthDomain::Expanding { max_parts } = domain {
+        // Work is proportional to the requested frontier, not the complete
+        // divisor domain. Do not introduce the finest reciprocal width early.
+        for grid in grids {
+            for parts in 2..=max_parts.min(grid) {
+                if parts % 1024 == 2 {
+                    super::check_generation_deadline(deadline)?;
+                }
+                if grid.is_multiple_of(parts) {
+                    widths.insert(grid / parts);
+                }
+            }
+        }
+    }
     super::check_generation_deadline(deadline)?;
     Ok(widths.into_iter().collect())
+}
+
+/// Integer-domain frontier, independent of expensive candidate graph expansion.
+/// Complete divisor lists are computed once under the caller's deadline.
+pub struct PaneWidthFrontier {
+    grids: Vec<u64>,
+    complete: Vec<Vec<u64>>,
+    previous: Vec<Vec<u64>>,
+    max_parts: u64,
+    finished: bool,
+}
+
+impl PaneWidthFrontier {
+    pub fn new(
+        grids: impl IntoIterator<Item = u64>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Self, super::CandidateGenerationTimeout> {
+        let grids: Vec<_> = grids
+            .into_iter()
+            .filter(|grid| *grid > 0)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let complete = grids
+            .iter()
+            .map(|&grid| pane_width_divisors_before(grid, deadline))
+            .collect::<Result<Vec<_>, _>>()?;
+        let previous = grids.iter().map(|&grid| vec![grid]).collect();
+        Ok(Self {
+            grids,
+            complete,
+            previous,
+            max_parts: 4,
+            finished: false,
+        })
+    }
+
+    /// Skip frontiers which expose no new width for any individual reader grid.
+    /// Comparing per-grid sets also protects group-specific supplier choices.
+    pub fn next_domain(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<PaneWidthDomain>, super::CandidateGenerationTimeout> {
+        while !self.finished {
+            super::check_generation_deadline(deadline)?;
+            let current: Vec<Vec<u64>> = self
+                .grids
+                .iter()
+                .zip(&self.complete)
+                .map(|(&grid, widths)| {
+                    widths
+                        .iter()
+                        .copied()
+                        .filter(|width| grid / width <= self.max_parts)
+                        .collect()
+                })
+                .collect();
+            self.max_parts = self.max_parts.saturating_mul(2);
+            if current == self.complete {
+                self.finished = true;
+                return Ok(Some(PaneWidthDomain::Complete));
+            }
+            if current != self.previous {
+                self.previous = current;
+                return Ok(Some(PaneWidthDomain::Expanding {
+                    max_parts: self.max_parts / 2,
+                }));
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -387,6 +479,62 @@ mod tests {
 
     // Every integer-millisecond width that divides the grid is offered, not
     // just the coarsest width or GCDs of the readers' original configurations.
+    #[test]
+    fn width_frontier_skips_empty_rounds_and_detects_actual_completion() {
+        let mut frontier = PaneWidthFrontier::new([97], None).unwrap();
+        assert_eq!(
+            frontier.next_domain(None).unwrap(),
+            Some(PaneWidthDomain::Complete)
+        );
+        assert_eq!(frontier.next_domain(None).unwrap(), None);
+        let mut frontier = PaneWidthFrontier::new([12], None).unwrap();
+        assert_eq!(
+            frontier.next_domain(None).unwrap(),
+            Some(PaneWidthDomain::Expanding { max_parts: 4 })
+        );
+        assert_eq!(
+            frontier.next_domain(None).unwrap(),
+            Some(PaneWidthDomain::Expanding { max_parts: 8 })
+        );
+        assert_eq!(
+            frontier.next_domain(None).unwrap(),
+            Some(PaneWidthDomain::Complete)
+        );
+        assert!(PaneWidthFrontier::new([u64::MAX], Some(std::time::Instant::now())).is_err());
+    }
+
+    #[test]
+    fn expanding_widths_are_nested_and_eventually_complete() {
+        let grids = [60, 90];
+        let mut previous = pane_width_domain(grids, PaneWidthDomain::SeedGrids);
+        for max_parts in [2, 4, 8, 16, 32, 64, 128] {
+            let next = pane_width_domain(grids, PaneWidthDomain::Expanding { max_parts });
+            assert!(previous.iter().all(|width| next.contains(width)));
+            assert!(next
+                .iter()
+                .all(|width| grids.iter().any(|grid| grid % width == 0)));
+            previous = next;
+        }
+        assert_eq!(
+            previous,
+            pane_width_domain(grids, PaneWidthDomain::Complete)
+        );
+    }
+
+    #[test]
+    fn expanding_domain_defers_fine_panes_and_obeys_deadline() {
+        let widths = pane_width_domain([60_000], PaneWidthDomain::Expanding { max_parts: 4 });
+        assert_eq!(widths, vec![15_000, 20_000, 30_000, 60_000]);
+        assert!(pane_width_domain_before(
+            [u64::MAX],
+            PaneWidthDomain::Expanding {
+                max_parts: u64::MAX
+            },
+            Some(std::time::Instant::now()),
+        )
+        .is_err());
+    }
+
     #[test]
     fn pane_width_domain_contains_every_legal_divisor() {
         let reader = PaneRequirement {

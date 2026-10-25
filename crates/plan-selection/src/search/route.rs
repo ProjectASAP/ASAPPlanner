@@ -51,11 +51,14 @@ struct DomainProgress {
     catalog_completed: bool,
     refinements: usize,
     report: Option<crate::CandidateConnectionReport>,
+    local_memo: Option<asap_logical_asap_optimization::memo::candidates::CandidateMemo>,
+    previous_domain:
+        Option<asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain>,
 }
 
-/// A small catalog obtains a validated incumbent before full-width expansion.
-/// Both phases use the same planner and frozen objective; only the complete
-/// phase may establish a bound for the full declared domain.
+/// Obtain an incumbent on seed grids, then progressively expose finer widths.
+/// All rounds use the same planner and frozen objective; only a completed
+/// full-domain round can establish a bound for the declared search space.
 pub(crate) fn candidate_connection_search<Id: Clone>(
     initial: LogicalMemo,
     context: &CandidateSearchContext<'_, Id>,
@@ -72,8 +75,26 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     let total_ms = search.milp_time_limit_ms.unwrap_or(30_000);
     let prior_ms = local_candidate_generation_ms.unwrap_or(0.0);
     let calibration = CandidateCalibration::for_models(models).map_err(SelectionError::Solver)?;
+    // Pane rules require a temporal range below a summary build. Pass 1 may
+    // introduce the build, but cannot invent a missing positive Range window.
+    // Instant lookback selectors are not splittable panes. Existing pane
+    // chains also retain the width domain when callers provide lowered state.
+    // This conservative gate keeps SQL/PromQL windows regardless of arrival
+    // mode; recurrence alone does not make a window-free workload pane-capable.
+    let has_pane_window = initial.groups.iter().any(|group| {
+        matches!(
+            group.node.non_asap(),
+            Some(asap_types::ir::NonASAPOp::TimeRange {
+                kind: asap_types::ir::TimeRangeKind::Range, range, ..
+            }) if !range.is_zero()
+        ) || matches!(
+            group.node.asap(),
+            Some(asap_types::ir::ASAPOp::PaneChain { .. })
+        )
+    });
     // Exhaustive archives and complete-catalog calibration require one domain.
-    let seed_enabled = !search.exhaustive
+    let seed_enabled = has_pane_window
+        && !search.exhaustive
         && !search.keep_every_candidate
         && matches!(calibration, CandidateCalibration::Frozen(_))
         && prior_ms.is_finite()
@@ -106,92 +127,193 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         &mut seed_archive,
         PaneWidthDomain::SeedGrids,
         &mut seed_progress,
-    );
+    )
+    .map(|plan| namespace_round(plan, "seed-"));
     let seed_elapsed = started.elapsed();
     if seed.is_err() && !seed_progress.budget_stopped && !seed_progress.infeasible {
         return seed;
     }
     let seed_report = seed_progress.report.clone();
     let full_started = Instant::now();
-    let mut full_progress = DomainProgress::default();
-    let full = search_domain(
-        initial,
-        context,
-        Stage1ToStage3Search {
-            max_evaluations: Some(
-                search
-                    .max_evaluations
-                    .unwrap_or(128)
-                    .saturating_sub(seed_progress.refinements),
-            ),
-            ..search
-        },
-        Some(prior_ms + seed_elapsed.as_secs_f64() * 1_000.0),
-        archive,
-        PaneWidthDomain::Complete,
-        &mut full_progress,
+    let mut full_progress = DomainProgress {
+        local_memo: seed_progress.local_memo.take(),
+        previous_domain: seed_progress.previous_domain,
+        ..Default::default()
+    };
+    let global_deadline = started.checked_add(
+        std::time::Duration::from_millis(total_ms)
+            .saturating_sub(std::time::Duration::from_secs_f64(prior_ms / 1000.0)),
     );
+    // A literal-only workload has no computation in which pane rules can fire.
+    let grids = context
+        .entries
+        .iter()
+        .filter_map(|entry| entry.evaluation_grid_ms())
+        .filter(|_| !initial.groups.is_empty());
+    let mut frontier =
+        asap_logical_asap_optimization::memo::state_configurations::PaneWidthFrontier::new(
+            grids,
+            global_deadline,
+        );
+    let mut rounds = vec!["SeedGrids".to_owned()];
+    let mut full = Err(SelectionError::Solver(
+        "pane-width expansion has not started".into(),
+    ));
+    let mut completed_full_domain = false;
+    loop {
+        let elapsed_ms = prior_ms + started.elapsed().as_secs_f64() * 1000.0;
+        let remaining_ms = total_ms.saturating_sub(elapsed_ms.ceil() as u64);
+        let remaining_evaluations = search
+            .max_evaluations
+            .unwrap_or(128)
+            .saturating_sub(seed_progress.refinements + full_progress.refinements);
+        if remaining_ms == 0 || remaining_evaluations == 0 {
+            break;
+        }
+        let domain = match &mut frontier {
+            Ok(frontier) => match frontier.next_domain(global_deadline) {
+                Ok(Some(domain)) => domain,
+                Ok(None) => break,
+                Err(error) => {
+                    if full.is_err() {
+                        full = Err(SelectionError::Solver(error.to_string()));
+                    }
+                    break;
+                }
+            },
+            Err(error) => {
+                if full.is_err() {
+                    full = Err(SelectionError::Solver(error.to_string()));
+                }
+                break;
+            }
+        };
+        // Frontier enumeration is part of the same global budget. Never pass
+        // the pre-enumeration remainder as a fresh per-round allowance.
+        let remaining_ms = total_ms
+            .saturating_sub((prior_ms + started.elapsed().as_secs_f64() * 1000.0).ceil() as u64);
+        if remaining_ms == 0 {
+            break;
+        }
+        rounds.push(format!("{domain:?}"));
+        let complete = domain == PaneWidthDomain::Complete;
+        let mut round_progress = DomainProgress {
+            local_memo: full_progress.local_memo.take(),
+            previous_domain: full_progress.previous_domain,
+            ..Default::default()
+        };
+        let round = search_domain(
+            initial.clone(),
+            context,
+            Stage1ToStage3Search {
+                milp_time_limit_ms: Some(if complete {
+                    remaining_ms
+                } else {
+                    remaining_ms.min(5_000)
+                }),
+                max_evaluations: Some(if complete {
+                    remaining_evaluations
+                } else {
+                    remaining_evaluations.min(16)
+                }),
+                ..search
+            },
+            Some(0.0),
+            archive,
+            domain,
+            &mut round_progress,
+        )
+        .map(|plan| namespace_round(plan, &format!("pane-round-{}-", rounds.len() - 1)));
+        full_progress.local_memo = round_progress.local_memo.take();
+        full_progress.previous_domain = round_progress.previous_domain;
+        full_progress.refinements += round_progress.refinements;
+        completed_full_domain = complete && round_progress.catalog_completed;
+        full_progress.catalog_completed = completed_full_domain;
+        full_progress.budget_stopped = round_progress.budget_stopped;
+        full_progress.infeasible = complete && round_progress.infeasible;
+        if let Some(mut report) = round_progress.report.take() {
+            if let Some(previous) = full_progress.report.take() {
+                add_phase_metrics(&mut report, &previous);
+            }
+            full_progress.report = Some(report);
+        }
+        full = match (full, round) {
+            (Ok(previous), Ok(next)) => Ok(merge_validated_rounds(previous, next, models).1),
+            (_, Ok(next)) => Ok(next),
+            (previous, Err(error)) => {
+                if complete && round_progress.infeasible {
+                    // The final catalog is infeasible, not a reason to return
+                    // an earlier plan. Preserve prior pruning diagnostics in
+                    // the aggregated failure report below.
+                    full = Err(error);
+                    break;
+                }
+                if !round_progress.budget_stopped && !round_progress.infeasible {
+                    return Err(error);
+                }
+                match previous {
+                    Ok(previous) => Ok(previous),
+                    Err(_) => Err(error),
+                }
+            }
+        };
+        if complete {
+            break;
+        }
+        // A timed-out rule pass leaves no reusable partial memo; stop rather
+        // than repeating all generation and pretending the domain expanded.
+        if full_progress.local_memo.is_none() {
+            break;
+        }
+    }
+    full_progress.catalog_completed = completed_full_domain;
+    if !completed_full_domain {
+        full_progress.budget_stopped = true;
+        if full_progress.report.is_none() {
+            full_progress.report = Some(crate::CandidateConnectionReport {
+                status: "time_limit".into(),
+                pane_width_rounds: rounds.clone(),
+                pane_widths_pending: true,
+                catalog_scope: "pane-width expansion interrupted before catalog completion".into(),
+                time_limit_ms: total_ms,
+                max_refinements: search.max_evaluations.unwrap_or(128),
+                ..Default::default()
+            });
+        }
+    }
+    if !completed_full_domain {
+        if let Some(report) = &mut full_progress.report {
+            report.lower_bound = None;
+            report.relative_gap = None;
+            report.catalog_exhausted = Some(false);
+            report.evaluation_complete = Some(false);
+            report.full_catalog_completed = false;
+            report.pane_widths_pending = true;
+            report.status = "pane_width_domain_incomplete".into();
+        }
+    }
+    if let Ok((selection, _, _)) = &mut full {
+        if let Some(report) = &full_progress.report {
+            selection.search.candidate_connections = Some(report.clone());
+        }
+    }
     let full_planning_ms = full_started.elapsed().as_secs_f64() * 1_000.0;
     let mut seed_selected = false;
     let mut fallback_reason = None;
     let mut result = match (seed, full) {
         (
-            Ok((seed_selection, mut seed_plan, seed_logical)),
+            Ok((seed_selection, seed_plan, seed_logical)),
             Ok((full_selection, full_plan, full_logical)),
         ) => {
-            seed_plan.id = format!("seed-{}", seed_plan.id);
-            seed_plan.from_logical = format!("seed-{}", seed_plan.from_logical);
-            let ranking = crate::Ranking::of(&models.plan_selection.cost_model);
-            // Both plans were validated under the same frozen calibration. Use
-            // PlanSelector's ranking without another unbudgeted evaluator call.
-            seed_selected = ranking.better(
-                &seed_selection.costs[&seed_selection.selected],
-                &full_selection.costs[&full_selection.selected],
+            let merged = merge_validated_rounds(
+                (seed_selection, seed_plan, seed_logical),
+                (full_selection, full_plan, full_logical),
+                models,
             );
-            let full_search = full_selection.search.clone();
-            let mut seed_selection = seed_selection;
-            seed_selection.selected = seed_plan.id.clone();
-            seed_selection.costs = seed_selection
-                .costs
-                .into_iter()
-                .map(|(id, cost)| (format!("seed-{id}"), cost))
-                .collect();
-            seed_selection.accepted = seed_selection
-                .accepted
-                .into_iter()
-                .map(|(id, accuracy)| (format!("seed-{id}"), accuracy))
-                .collect();
-            for rejection in &mut seed_selection.rejected {
-                rejection.id = format!("seed-{}", rejection.id);
-            }
-            let (mut selection, other, physical, logical) = if seed_selected {
-                (seed_selection, full_selection, seed_plan, seed_logical)
-            } else {
-                (full_selection, seed_selection, full_plan, full_logical)
-            };
-            // Preserve the validated Pareto front from both searches.
-            selection.costs.extend(other.costs);
-            selection.accepted.extend(other.accepted);
-            let ids = selection.costs.keys().cloned().collect::<Vec<_>>();
-            let costs = ids
-                .iter()
-                .map(|id| &selection.costs[id])
-                .collect::<Vec<_>>();
-            let (_, front) = crate::choose(
-                crate::Ranking::of(&models.plan_selection.cost_model),
-                &costs,
-            )
-            .expect("two validated selections have costs");
-            selection.front = front.into_iter().map(|index| ids[index].clone()).collect();
-            selection.search = full_search;
-            // A phase-local runner-up need not be second across both catalogs.
-            selection.search.runner_up_cost_per_second = None;
-            selection.search.incumbent_cost = selection
-                .costs
-                .get(&physical.id)
-                .and_then(|cost| cost.cost_per_second);
-            (selection, physical, logical)
+            seed_selected = merged.0;
+            merged.1
         }
+
         (Ok(seed), Err(error)) => {
             // The outer report owns phase accounting; do not embed a stale
             // standalone complete-phase report inside its fallback reason.
@@ -208,7 +330,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
             seed
         }
         (_, Err(error)) => {
-            if full_progress.budget_stopped {
+            if full_progress.budget_stopped || full_progress.infeasible {
                 if let Some(mut report) = full_progress.report.take() {
                     if let Some(seed) = &seed_report {
                         add_phase_metrics(&mut report, seed);
@@ -219,10 +341,17 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
                     report.time_limit_ms = total_ms;
                     report.max_refinements = search.max_evaluations.unwrap_or(128);
                     report.full_catalog_completed = full_progress.catalog_completed;
+                    report.pane_width_rounds = rounds.clone();
+                    report.pane_widths_pending = !full_progress.catalog_completed;
                     let metrics = serde_json::to_string(&report)
                         .map_err(|error| SelectionError::Solver(error.to_string()))?;
+                    let reason = if full_progress.infeasible {
+                        "complete candidate catalog is infeasible under the configured model"
+                    } else {
+                        "planning budget ended before either seed or complete search found a validated incumbent"
+                    };
                     return Err(SelectionError::Solver(format!(
-                        "candidate-connections: planning budget ended before either seed or complete search found a validated incumbent. Search report: {metrics}"
+                        "candidate-connections: {reason}. Search report: {metrics}"
                     )));
                 }
             }
@@ -246,19 +375,22 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         report.seed_planning_ms = seed_elapsed.as_secs_f64() * 1_000.0;
         report.seed_selected = seed_selected;
         report.full_catalog_completed = full_progress.catalog_completed;
+        report.pane_width_rounds = rounds.clone();
+        report.pane_widths_pending = !full_progress.catalog_completed;
         report.seed_fallback_reason = fallback_reason;
         report.time_limit_ms = total_ms;
         report.local_candidate_generation_ms = local_candidate_generation_ms;
         report.max_refinements = search.max_evaluations.unwrap_or(128);
-        if report.seed_fallback_reason.is_some() {
+        if report.seed_fallback_reason.is_some() || !full_progress.catalog_completed {
             // The restricted seed's optimum is not a certificate for all widths.
-            report.status = "time_or_evaluation_limit_with_validated_seed".into();
+            report.status = "time_or_evaluation_limit_with_validated_incumbent".into();
             report.lower_bound = None;
             report.relative_gap = None;
             report.catalog_exhausted = Some(false);
             report.evaluation_complete = Some(false);
-        } else if seed_selected {
-            // A full-domain lower bound remains valid; avoid a stale incumbent gap.
+        } else {
+            // The selected incumbent may come from any earlier round. Recompute
+            // its gap against the complete-domain bound, not the last proposal.
             report.relative_gap =
                 report
                     .lower_bound
@@ -281,6 +413,112 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     result.0.search.candidates_checked =
         (seed_progress.refinements + full_progress.refinements) as u64;
     Ok(result)
+}
+
+type ValidatedRound = (
+    crate::Selection,
+    asap_physical_asap_optimization::PhysicalWorkloadPlan,
+    Vec<QueryRoot>,
+);
+
+/// Assign a readable phase identity once, before combining validated results.
+fn namespace_round(mut plan: ValidatedRound, namespace: &str) -> ValidatedRound {
+    let (selection, physical, _) = &mut plan;
+    physical.id = format!("{namespace}{}", physical.id);
+    physical.from_logical = format!("{namespace}{}", physical.from_logical);
+    selection.selected = format!("{namespace}{}", selection.selected);
+    selection.costs = std::mem::take(&mut selection.costs)
+        .into_iter()
+        .map(|(id, value)| (format!("{namespace}{id}"), value))
+        .collect();
+    selection.accepted = std::mem::take(&mut selection.accepted)
+        .into_iter()
+        .map(|(id, value)| (format!("{namespace}{id}"), value))
+        .collect();
+    for id in &mut selection.front {
+        *id = format!("{namespace}{id}");
+    }
+    for rejection in &mut selection.rejected {
+        rejection.id = format!("{namespace}{}", rejection.id);
+    }
+    plan
+}
+
+fn merge_validated_rounds(
+    seed: ValidatedRound,
+    full: ValidatedRound,
+    models: PlanningModels<'_>,
+) -> (bool, ValidatedRound) {
+    let (full_selection, full_plan, full_logical) = full;
+    let identifiers =
+        |selection: &crate::Selection,
+         plan: &asap_physical_asap_optimization::PhysicalWorkloadPlan| {
+            selection
+                .costs
+                .keys()
+                .chain(selection.accepted.keys())
+                .chain(selection.front.iter())
+                .chain(selection.rejected.iter().map(|rejection| &rejection.id))
+                .chain([&selection.selected, &plan.id, &plan.from_logical])
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        };
+    let occupied = identifiers(&full_selection, &full_plan);
+    let earlier_ids = identifiers(&seed.0, &seed.1);
+    // Production phases already have disjoint namespaces. Retain a defensive
+    // fallback for standalone callers combining unnamespaced results.
+    let seed = if earlier_ids.is_disjoint(&occupied) {
+        seed
+    } else {
+        let mut index = 1;
+        loop {
+            let namespace = format!("merged-round-{index}-");
+            if earlier_ids
+                .iter()
+                .all(|id| !occupied.contains(&format!("{namespace}{id}")))
+            {
+                break namespace_round(seed, &namespace);
+            }
+            index += 1;
+        }
+    };
+    let (seed_selection, seed_plan, seed_logical) = seed;
+    let ranking = crate::Ranking::of(&models.plan_selection.cost_model);
+    // Both plans were validated under the same frozen calibration. Use
+    // PlanSelector's ranking without another unbudgeted evaluator call.
+    let seed_selected = ranking.better(
+        &seed_selection.costs[&seed_selection.selected],
+        &full_selection.costs[&full_selection.selected],
+    );
+    let full_search = full_selection.search.clone();
+    let (mut selection, other, physical, logical) = if seed_selected {
+        (seed_selection, full_selection, seed_plan, seed_logical)
+    } else {
+        (full_selection, seed_selection, full_plan, full_logical)
+    };
+    // Preserve the validated Pareto front from both searches.
+    selection.costs.extend(other.costs);
+    selection.accepted.extend(other.accepted);
+    selection.rejected.extend(other.rejected);
+    let ids = selection.costs.keys().cloned().collect::<Vec<_>>();
+    let costs = ids
+        .iter()
+        .map(|id| &selection.costs[id])
+        .collect::<Vec<_>>();
+    let (_, front) = crate::choose(
+        crate::Ranking::of(&models.plan_selection.cost_model),
+        &costs,
+    )
+    .expect("two validated selections have costs");
+    selection.front = front.into_iter().map(|index| ids[index].clone()).collect();
+    selection.search = full_search;
+    // A phase-local runner-up need not be second across both catalogs.
+    selection.search.runner_up_cost_per_second = None;
+    selection.search.incumbent_cost = selection
+        .costs
+        .get(&physical.id)
+        .and_then(|cost| cost.cost_per_second);
+    (seed_selected, (selection, physical, logical))
 }
 
 /// An independently validated plan is a witness against a larger global lower
@@ -307,6 +545,35 @@ fn add_phase_metrics(
     report: &mut crate::CandidateConnectionReport,
     phase: &crate::CandidateConnectionReport,
 ) {
+    // All progressive rounds use one configured objective and frozen model.
+    // Preparation-only reports may lack this metadata without lacking an
+    // inventory snapshot (or vice versa); inherit it independently of counts.
+    if report.objective.is_empty() && !phase.objective.is_empty() {
+        report.objective = phase.objective.clone();
+    }
+    if report.calibration_scope.is_empty() && !phase.calibration_scope.is_empty() {
+        report.calibration_scope = phase.calibration_scope.clone();
+        report.calibration_factor = phase.calibration_factor;
+    }
+    // An early timeout has no inventory snapshot. Retain the latest complete
+    // one as a unit, with explicit provenance; never combine field-wise maxima.
+    // A genuine empty inventory still has Some(domain) and must replace older
+    // counts rather than inheriting them because they happen to be nonzero.
+    if report.inventory_pane_width_domain.is_none() && phase.inventory_pane_width_domain.is_some() {
+        report.inventory_pane_width_domain = phase.inventory_pane_width_domain.clone();
+        report.groups = phase.groups;
+        report.logical_candidates = phase.logical_candidates;
+        report.immediate_candidates = phase.immediate_candidates;
+        report.physical_configurations = phase.physical_configurations;
+        report.compatible_connections = phase.compatible_connections;
+        report.supplier_sets = phase.supplier_sets;
+        report.stored_supplier_ids = phase.stored_supplier_ids;
+        report.output_references = phase.output_references;
+        report.structurally_removed_candidates = phase.structurally_removed_candidates;
+        report.structurally_removed_connections = phase.structurally_removed_connections;
+        report.rounded_down_cost_bounds = phase.rounded_down_cost_bounds;
+        report.independent_components = phase.independent_components;
+    }
     report.memo_expansion_ms += phase.memo_expansion_ms;
     report.inventory_construction_ms += phase.inventory_construction_ms;
     report.search_and_validation_ms += phase.search_and_validation_ms;
@@ -314,6 +581,19 @@ fn add_phase_metrics(
     report.solver_ms += phase.solver_ms;
     report.validation_ms += phase.validation_ms;
     report.early_query_pruning_ms += phase.early_query_pruning_ms;
+    for (kind, count) in &phase.early_query_pruning_counts {
+        *report
+            .early_query_pruning_counts
+            .entry(kind.clone())
+            .or_default() += count;
+    }
+    for example in &phase.early_query_pruning_examples {
+        if report.early_query_pruning_examples.len() < 8
+            && !report.early_query_pruning_examples.contains(example)
+        {
+            report.early_query_pruning_examples.push(example.clone());
+        }
+    }
     report.solve_calls += phase.solve_calls;
     report.refinements += phase.refinements;
     report.certified_query_cuts += phase.certified_query_cuts;
@@ -405,6 +685,8 @@ fn search_domain<Id: Clone>(
             // measured generation time and budget; leave unfinished catalog
             // counts unset rather than inventing completed model statistics.
             let report = crate::CandidateConnectionReport {
+                pane_width_rounds: vec![format!("{domain:?}")],
+                pane_widths_pending: domain != asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::Complete,
                 status: "time_limit".into(),
                 catalog_scope: format!(
                     "planning stopped after {phase}, before solving; model statistics unavailable"
@@ -416,6 +698,7 @@ fn search_domain<Id: Clone>(
                 local_candidate_generation_ms,
                 ..Default::default()
             };
+            progress.report = Some(report.clone());
             let metrics =
                 serde_json::to_string(&report).map_err(|error| unsupported(&error.to_string()))?;
             Err(unsupported(&format!(
@@ -462,17 +745,25 @@ fn search_domain<Id: Clone>(
         ));
     }
     let started = Instant::now();
-    let pruned = crate::search::query_pruning::prune_query_candidates(
-        inventory,
-        entries,
-        data,
-        models,
-        if search.exhaustive { 0 } else { 64 },
-    )
-    .map_err(|error| unsupported(&error))?;
+    let pruned = if progress.local_memo.is_none() {
+        Some(
+            crate::search::query_pruning::prune_query_candidates(
+                inventory,
+                entries,
+                data,
+                models,
+                if search.exhaustive { 0 } else { 64 },
+            )
+            .map_err(|error| unsupported(&error))?,
+        )
+    } else {
+        None
+    };
     let early_query_pruning_ms = started.elapsed().as_secs_f64() * 1000.0;
     check_budget("early query pruning", progress)?;
-    let pruning = pruned.report;
+    let pruning = pruned.as_ref().map(|pruned| &pruned.report);
+    let empty_pruning = crate::search::query_pruning::QueryCandidatePruningReport::default();
+    let pruning = pruning.unwrap_or(&empty_pruning);
     let early_query_pruning_counts = [
         ("choices_checked".into(), pruning.choices_checked),
         ("choices_removed".into(), pruning.removed.len()),
@@ -507,15 +798,30 @@ fn search_domain<Id: Clone>(
         })
         .collect();
     let started = Instant::now();
-    let mut memo = try_populate_pass1(initial, &pruned.inventory)
-        .map_err(|error| unsupported(&error.to_string()))?;
+    let mut memo = match progress.local_memo.take() {
+        Some(memo) => memo,
+        None => try_populate_pass1(
+            initial,
+            &pruned.as_ref().expect("first round pruned").inventory,
+        )
+        .map_err(|error| unsupported(&error.to_string()))?,
+    };
     let deadline = Instant::now().checked_add(remaining());
-    asap_logical_asap_optimization::memo::window_candidates::try_add_local_window_composition_in_domain(
-        &mut memo, entries, domain, deadline,
-    ).map_err(|error| {
+    asap_logical_asap_optimization::memo::window_candidates::extend_local_window_composition(
+        &mut memo,
+        entries,
+        progress.previous_domain,
+        domain,
+        deadline,
+    )
+    .map_err(|error| {
         progress.budget_stopped = true;
         unsupported(&error.to_string())
     })?;
+    // State-group splitting is currently one-shot. Keep the unexpanded memo;
+    // later rounds append local widths, then rebuild the state/physical catalog.
+    progress.local_memo = Some(memo.clone());
+    progress.previous_domain = Some(domain);
     let memo = expand_concrete_summary_state_groups_before(memo, domain, deadline)
         .map_err(|error| {
             progress.budget_stopped =
@@ -701,7 +1007,14 @@ fn search_domain<Id: Clone>(
         result.status,
         CandidateSearchStatus::TimeLimit | CandidateSearchStatus::RefinementLimit
     );
+    let supplier_storage =
+        crate::search::candidates::suppliers::supplier_storage_metrics(&configured.inventory.graph);
     let report = crate::CandidateConnectionReport {
+        inventory_pane_width_domain: Some(format!("{domain:?}")),
+        supplier_sets: supplier_storage.unique_supplier_sets,
+        stored_supplier_ids: supplier_storage.stored_supplier_ids,
+        pane_width_rounds: vec![format!("{domain:?}")],
+        pane_widths_pending: domain != asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::Complete,
         rounded_down_cost_bounds: bound_metrics.rounded_down_candidates,
         seed_planning_ms: 0.0,
         full_planning_ms: planning_started.elapsed().as_secs_f64() * 1_000.0,
@@ -914,6 +1227,19 @@ mod tests {
         let kept = validated_seed_after_stop(seed, error, &full_progress).unwrap();
         assert_eq!(kept.0.selected, selected);
         kept.1.dag.validate().unwrap();
+        let infeasible = validated_seed_after_stop(
+            kept.clone(),
+            SelectionError::Solver("complete catalog infeasible".into()),
+            &DomainProgress {
+                infeasible: true,
+                catalog_completed: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(infeasible
+            .to_string()
+            .contains("complete catalog infeasible"));
         let error = validated_seed_after_stop(
             kept,
             SelectionError::Solver("internal reconstruction failure".into()),
@@ -970,7 +1296,7 @@ mod tests {
 
     // Joint phases retain valid frontier metadata under the exact configured ranking.
     #[test]
-    fn seed_and_complete_pareto_fronts_keep_distinct_ids_and_frozen_fit() {
+    fn pane_free_pareto_uses_complete_domain_and_frozen_fit() {
         let settings = crate::PlanSelectionSettings {
             frozen_calibration_factor: Some(3.0),
             cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
@@ -984,11 +1310,11 @@ mod tests {
         let run = scalar_run(&settings, Stage1ToStage3Search::default());
         let selection = run.stage3_plan_selection.unwrap();
         let report = selection.search.candidate_connections.as_ref().unwrap();
-        assert!(report.seed_planning_ms > 0.0);
+        assert_eq!(report.seed_planning_ms, 0.0);
         assert!(report.full_catalog_completed);
         assert_eq!(report.calibration_factor, 3.0);
         assert!(selection.front.contains(&selection.selected));
-        assert!(selection.front.iter().any(|id| id.starts_with("seed-")));
+        assert_eq!(report.pane_width_rounds, vec!["Complete"]);
         for id in &selection.front {
             assert!(selection.costs.contains_key(id));
             assert!(selection.accepted.contains_key(id));
@@ -1012,6 +1338,259 @@ mod tests {
         );
     }
 
+    #[test]
+    fn progressive_width_rounds_preserve_incumbent_without_global_certificate() {
+        let (roots, entries, data) = workload();
+        let run = run_stage1_to_stage3_with(
+            roots,
+            &entries,
+            &data,
+            PlanningModels::builtin(),
+            Stage1ToStage3Search {
+                max_evaluations: Some(4),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let selection = run.stage3_plan_selection.unwrap();
+        let report = selection.search.candidate_connections.as_ref().unwrap();
+        assert!(selection.accepted.contains_key(&selection.selected));
+        assert!(report.pane_width_rounds.len() >= 2);
+        assert!(report.pane_width_rounds[1].starts_with("Expanding"));
+        assert!(report.pane_widths_pending);
+        assert!(!report.full_catalog_completed);
+        assert_eq!(report.lower_bound, None);
+        assert_eq!(report.relative_gap, None);
+        assert_ne!(report.status, "optimal");
+        assert!(selection.search.candidates_checked <= 4);
+    }
+
+    #[test]
+    fn seed_fallback_report_preserves_model_without_inventing_inventory() {
+        let previous = crate::CandidateConnectionReport {
+            objective: "monetary_cost".into(),
+            calibration_scope: "not_required".into(),
+            calibration_factor: 1.0,
+            ..Default::default()
+        };
+        let mut interrupted = crate::CandidateConnectionReport {
+            status: "time_limit".into(),
+            pane_widths_pending: true,
+            ..Default::default()
+        };
+        add_phase_metrics(&mut interrupted, &previous);
+        assert_eq!(interrupted.objective, "monetary_cost");
+        assert_eq!(interrupted.calibration_scope, "not_required");
+        assert_eq!(interrupted.calibration_factor, 1.0);
+        assert_eq!(interrupted.inventory_pane_width_domain, None);
+        assert_eq!(interrupted.physical_configurations, 0);
+        assert!(!interrupted.full_catalog_completed);
+        assert!(interrupted.pane_widths_pending);
+        assert_eq!(interrupted.status, "time_limit");
+        assert_eq!(interrupted.lower_bound, None);
+        assert_eq!(interrupted.relative_gap, None);
+    }
+
+    #[test]
+    fn existing_model_metadata_is_not_overwritten_by_older_phases() {
+        let previous = crate::CandidateConnectionReport {
+            objective: "monetary_cost".into(),
+            calibration_scope: "not_required".into(),
+            calibration_factor: 1.0,
+            ..Default::default()
+        };
+        let mut current = crate::CandidateConnectionReport {
+            objective: "ParetoFront".into(),
+            calibration_scope: "frozen".into(),
+            calibration_factor: 3.0,
+            ..Default::default()
+        };
+        add_phase_metrics(&mut current, &previous);
+        assert_eq!(current.objective, "ParetoFront");
+        assert_eq!(current.calibration_scope, "frozen");
+        assert_eq!(current.calibration_factor, 3.0);
+    }
+
+    #[test]
+    fn interrupted_round_preserves_one_complete_inventory_snapshot() {
+        let previous = crate::CandidateConnectionReport {
+            inventory_pane_width_domain: Some("Expanding { max_parts: 32 }".into()),
+            groups: 7,
+            logical_candidates: 11,
+            immediate_candidates: 13,
+            physical_configurations: 17,
+            compatible_connections: 101,
+            supplier_sets: 3,
+            stored_supplier_ids: 19,
+            output_references: 2,
+            structurally_removed_candidates: 5,
+            structurally_removed_connections: 23,
+            rounded_down_cost_bounds: 2,
+            independent_components: 1,
+            lower_bound: Some(4.0),
+            relative_gap: Some(0.1),
+            full_catalog_completed: true,
+            ..Default::default()
+        };
+        let mut interrupted = crate::CandidateConnectionReport {
+            status: "pane_width_domain_incomplete".into(),
+            pane_widths_pending: true,
+            pane_width_rounds: vec!["Expanding { max_parts: 64 }".into()],
+            ..Default::default()
+        };
+        add_phase_metrics(&mut interrupted, &previous);
+        assert_eq!(
+            interrupted.inventory_pane_width_domain,
+            previous.inventory_pane_width_domain
+        );
+        assert_eq!(
+            (
+                interrupted.groups,
+                interrupted.logical_candidates,
+                interrupted.immediate_candidates
+            ),
+            (7, 11, 13)
+        );
+        assert_eq!(
+            (
+                interrupted.physical_configurations,
+                interrupted.compatible_connections,
+                interrupted.supplier_sets,
+                interrupted.stored_supplier_ids
+            ),
+            (17, 101, 3, 19)
+        );
+        assert_eq!(
+            (
+                interrupted.output_references,
+                interrupted.structurally_removed_candidates,
+                interrupted.structurally_removed_connections
+            ),
+            (2, 5, 23)
+        );
+        assert_eq!(interrupted.lower_bound, None);
+        assert_eq!(interrupted.relative_gap, None);
+        assert!(!interrupted.full_catalog_completed);
+        assert!(interrupted.pane_widths_pending);
+        assert_eq!(interrupted.status, "pane_width_domain_incomplete");
+        assert_eq!(
+            interrupted.pane_width_rounds,
+            vec!["Expanding { max_parts: 64 }"]
+        );
+
+        let mut empty = crate::CandidateConnectionReport {
+            inventory_pane_width_domain: Some("Complete".into()),
+            ..Default::default()
+        };
+        add_phase_metrics(&mut empty, &previous);
+        assert_eq!(
+            empty.inventory_pane_width_domain.as_deref(),
+            Some("Complete")
+        );
+        assert_eq!(
+            (
+                empty.physical_configurations,
+                empty.compatible_connections,
+                empty.supplier_sets,
+                empty.stored_supplier_ids
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn repeated_round_ids_preserve_all_cost_and_accuracy_records() {
+        let make = |price| {
+            let run = scalar_run(
+                &crate::PlanSelectionSettings::default(),
+                Stage1ToStage3Search {
+                    max_evaluations: Some(1),
+                    ..Default::default()
+                },
+            );
+            let mut selection = run.stage3_plan_selection.unwrap();
+            let physical = run.stage3_selected.unwrap();
+            selection
+                .costs
+                .get_mut(&selection.selected)
+                .unwrap()
+                .cost_per_second = Some(price);
+            let roots = physical.roots.clone();
+            (selection, physical, roots)
+        };
+        let first = make(1.0);
+        let second = make(2.0);
+        let initial = make(3.0);
+        assert_eq!(first.1.id, second.1.id);
+        assert_eq!(first.1.id, initial.1.id);
+        let (_, merged) = merge_validated_rounds(first, second, PlanningModels::builtin());
+        let (_, merged) = merge_validated_rounds(initial, merged, PlanningModels::builtin());
+        assert_eq!(merged.0.costs.len(), 3);
+        assert_eq!(merged.0.accepted.len(), 3);
+        let mut prices: Vec<_> = merged
+            .0
+            .costs
+            .values()
+            .map(|cost| cost.cost_per_second.unwrap())
+            .collect();
+        prices.sort_by(f64::total_cmp);
+        assert_eq!(prices, vec![1.0, 2.0, 3.0]);
+        assert_eq!(merged.0.selected, merged.1.id);
+        assert_eq!(merged.0.costs[&merged.1.id].cost_per_second, Some(1.0));
+        let settings = crate::PlanSelectionSettings {
+            cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
+                memory_bytes: 1_000_000,
+                disk_bytes: 1_000_000,
+                cpu_cores: Some(8),
+                objective: crate::ClusterObjective::ParetoFront,
+            }),
+            ..Default::default()
+        };
+        let models = PlanningModels {
+            plan_selection: &settings,
+            ..PlanningModels::builtin()
+        };
+        let (_, merged) = merge_validated_rounds(make(1.0), make(2.0), models);
+        let (_, merged) = merge_validated_rounds(make(0.5), merged, models);
+        assert_eq!(merged.0.costs.len(), 3);
+        assert_eq!(merged.0.front.len(), 3);
+        assert!(merged.0.front.contains(&merged.1.id));
+    }
+
+    #[test]
+    fn repeated_window_free_computation_searches_one_complete_catalog() {
+        let (_, entries, data) = workload();
+        let roots = vec![(
+            0,
+            QueryRoot::Operator(lower_promql("sum(latency)", AccuracyTarget::exact())),
+        )];
+        let run = run_stage1_to_stage3_with(
+            roots,
+            &entries[..1],
+            &data,
+            PlanningModels::builtin(),
+            Stage1ToStage3Search::default(),
+        )
+        .unwrap();
+        let selection = run.stage3_plan_selection.unwrap();
+        let report = selection.search.candidate_connections.unwrap();
+        assert_eq!(report.pane_width_rounds, vec!["Complete"]);
+        assert_eq!(report.seed_planning_ms, 0.0);
+        assert!(report.full_catalog_completed);
+    }
+
+    #[test]
+    fn literal_workload_does_not_repeat_identical_width_models() {
+        let run = scalar_run(
+            &crate::PlanSelectionSettings::default(),
+            Stage1ToStage3Search::default(),
+        );
+        let selection = run.stage3_plan_selection.unwrap();
+        let report = selection.search.candidate_connections.unwrap();
+        assert_eq!(report.pane_width_rounds, vec!["Complete"]);
+        assert!(report.full_catalog_completed);
+    }
+
     // A failed complete phase must not relabel seed work as initial generation.
     #[test]
     fn no_incumbent_report_preserves_seed_and_full_phase_accounting() {
@@ -1031,9 +1610,7 @@ mod tests {
         let (_, entries, data) = workload();
         let roots = vec![(
             0,
-            QueryRoot::Scalar(asap_types::ir::ScalarExpr::Literal(
-                asap_types::ir::scalar::ScalarValue::Float64(1.0),
-            )),
+            QueryRoot::Operator(lower_promql("latency[5m]", AccuracyTarget::exact())),
         )];
         let initial = LogicalMemo::from_roots(&roots);
         let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
@@ -1059,7 +1636,10 @@ mod tests {
         assert_eq!(report["local_candidate_generation_ms"], 17.0);
         assert!(report["seed_planning_ms"].as_f64().unwrap() > 0.0);
         assert!(report["full_planning_ms"].as_f64().unwrap() > 0.0);
-        assert_eq!(report["refinements"], 2);
+        assert_eq!(
+            report["refinements"].as_u64().unwrap() as usize,
+            report["pane_width_rounds"].as_array().unwrap().len()
+        );
         assert_eq!(report["time_limit_ms"], 30_000);
         assert_eq!(report["validation_rejection_counts"], serde_json::json!({}));
     }

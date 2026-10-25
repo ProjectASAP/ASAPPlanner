@@ -740,7 +740,7 @@ mod tests {
                     producer_requirements: inputs
                         .into_iter()
                         .map(|input| ProducerRequirement {
-                            compatible_producers: vec![PhysicalCandidateId(input)],
+                            compatible_producers: vec![PhysicalCandidateId(input)].into(),
                         })
                         .collect(),
                 });
@@ -776,7 +776,7 @@ mod tests {
         for candidate in &mut configured.inventory.graph.candidates {
             for input in &mut candidate.producer_requirements {
                 if chains.contains(&input.compatible_producers[0]) {
-                    input.compatible_producers = chains.clone();
+                    input.compatible_producers = chains.clone().into();
                 }
             }
         }
@@ -874,7 +874,7 @@ mod tests {
                         group: MemoGroupId(id.0 as u32),
                         local_cost: 0.0,
                         producer_requirements: vec![ProducerRequirement {
-                            compatible_producers: vec![producer],
+                            compatible_producers: vec![producer].into(),
                         }],
                     });
                 producer = id;
@@ -883,7 +883,7 @@ mod tests {
         }
         for chain in chains {
             configured.inventory.graph.candidates[chain].producer_requirements[0]
-                .compatible_producers = projects.clone();
+                .compatible_producers = projects.clone().into();
             let child = configured.inventory.templates[projects[0].0]
                 .as_ref()
                 .unwrap()
@@ -951,7 +951,7 @@ mod tests {
                     group: MemoGroupId(id.0 as u32),
                     local_cost: 0.0,
                     producer_requirements: vec![ProducerRequirement {
-                        compatible_producers: vec![*scan],
+                        compatible_producers: vec![*scan].into(),
                     }],
                 });
             projects.push(id);
@@ -966,7 +966,7 @@ mod tests {
                 // former arbitrary representative selection.
                 let mut suppliers = scans.clone();
                 suppliers.extend(projects.iter().copied());
-                input.compatible_producers = suppliers;
+                input.compatible_producers = suppliers.into();
             }
         }
         let models = PlanningModels::builtin();
@@ -1283,7 +1283,7 @@ mod tests {
                 node.as_ref().unwrap().asap(),
                 Some(ASAPOp::PaneChain { .. })
             ) {
-                candidate.producer_requirements[0].compatible_producers = scans.clone();
+                candidate.producer_requirements[0].compatible_producers = scans.clone().into();
             }
         }
         let context = CandidatePlanningContext {
