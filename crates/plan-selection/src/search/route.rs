@@ -75,8 +75,26 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     let total_ms = search.milp_time_limit_ms.unwrap_or(30_000);
     let prior_ms = local_candidate_generation_ms.unwrap_or(0.0);
     let calibration = CandidateCalibration::for_models(models).map_err(SelectionError::Solver)?;
+    // Pane rules require a temporal range below a summary build. Pass 1 may
+    // introduce the build, but cannot invent a missing positive Range window.
+    // Instant lookback selectors are not splittable panes. Existing pane
+    // chains also retain the width domain when callers provide lowered state.
+    // This conservative gate keeps SQL/PromQL windows regardless of arrival
+    // mode; recurrence alone does not make a window-free workload pane-capable.
+    let has_pane_window = initial.groups.iter().any(|group| {
+        matches!(
+            group.node.non_asap(),
+            Some(asap_types::ir::NonASAPOp::TimeRange {
+                kind: asap_types::ir::TimeRangeKind::Range, range, ..
+            }) if !range.is_zero()
+        ) || matches!(
+            group.node.asap(),
+            Some(asap_types::ir::ASAPOp::PaneChain { .. })
+        )
+    });
     // Exhaustive archives and complete-catalog calibration require one domain.
-    let seed_enabled = !search.exhaustive
+    let seed_enabled = has_pane_window
+        && !search.exhaustive
         && !search.keep_every_candidate
         && matches!(calibration, CandidateCalibration::Frozen(_))
         && prior_ms.is_finite()
@@ -223,9 +241,14 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
             (Ok(previous), Ok(next)) => Ok(merge_validated_rounds(previous, next, models).1),
             (_, Ok(next)) => Ok(next),
             (previous, Err(error)) => {
-                if (complete && round_progress.infeasible)
-                    || (!round_progress.budget_stopped && !round_progress.infeasible)
-                {
+                if complete && round_progress.infeasible {
+                    // The final catalog is infeasible, not a reason to return
+                    // an earlier plan. Preserve prior pruning diagnostics in
+                    // the aggregated failure report below.
+                    full = Err(error);
+                    break;
+                }
+                if !round_progress.budget_stopped && !round_progress.infeasible {
                     return Err(error);
                 }
                 match previous {
@@ -307,7 +330,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
             seed
         }
         (_, Err(error)) => {
-            if full_progress.budget_stopped {
+            if full_progress.budget_stopped || full_progress.infeasible {
                 if let Some(mut report) = full_progress.report.take() {
                     if let Some(seed) = &seed_report {
                         add_phase_metrics(&mut report, seed);
@@ -322,8 +345,13 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
                     report.pane_widths_pending = !full_progress.catalog_completed;
                     let metrics = serde_json::to_string(&report)
                         .map_err(|error| SelectionError::Solver(error.to_string()))?;
+                    let reason = if full_progress.infeasible {
+                        "complete candidate catalog is infeasible under the configured model"
+                    } else {
+                        "planning budget ended before either seed or complete search found a validated incumbent"
+                    };
                     return Err(SelectionError::Solver(format!(
-                        "candidate-connections: planning budget ended before either seed or complete search found a validated incumbent. Search report: {metrics}"
+                        "candidate-connections: {reason}. Search report: {metrics}"
                     )));
                 }
             }
@@ -517,6 +545,16 @@ fn add_phase_metrics(
     report: &mut crate::CandidateConnectionReport,
     phase: &crate::CandidateConnectionReport,
 ) {
+    // All progressive rounds use one configured objective and frozen model.
+    // Preparation-only reports may lack this metadata without lacking an
+    // inventory snapshot (or vice versa); inherit it independently of counts.
+    if report.objective.is_empty() && !phase.objective.is_empty() {
+        report.objective = phase.objective.clone();
+    }
+    if report.calibration_scope.is_empty() && !phase.calibration_scope.is_empty() {
+        report.calibration_scope = phase.calibration_scope.clone();
+        report.calibration_factor = phase.calibration_factor;
+    }
     // An early timeout has no inventory snapshot. Retain the latest complete
     // one as a unit, with explicit provenance; never combine field-wise maxima.
     // A genuine empty inventory still has Some(domain) and must replace older
@@ -1189,6 +1227,19 @@ mod tests {
         let kept = validated_seed_after_stop(seed, error, &full_progress).unwrap();
         assert_eq!(kept.0.selected, selected);
         kept.1.dag.validate().unwrap();
+        let infeasible = validated_seed_after_stop(
+            kept.clone(),
+            SelectionError::Solver("complete catalog infeasible".into()),
+            &DomainProgress {
+                infeasible: true,
+                catalog_completed: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(infeasible
+            .to_string()
+            .contains("complete catalog infeasible"));
         let error = validated_seed_after_stop(
             kept,
             SelectionError::Solver("internal reconstruction failure".into()),
@@ -1245,7 +1296,7 @@ mod tests {
 
     // Joint phases retain valid frontier metadata under the exact configured ranking.
     #[test]
-    fn seed_and_complete_pareto_fronts_keep_distinct_ids_and_frozen_fit() {
+    fn pane_free_pareto_uses_complete_domain_and_frozen_fit() {
         let settings = crate::PlanSelectionSettings {
             frozen_calibration_factor: Some(3.0),
             cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
@@ -1259,16 +1310,11 @@ mod tests {
         let run = scalar_run(&settings, Stage1ToStage3Search::default());
         let selection = run.stage3_plan_selection.unwrap();
         let report = selection.search.candidate_connections.as_ref().unwrap();
-        assert!(report.seed_planning_ms > 0.0);
+        assert_eq!(report.seed_planning_ms, 0.0);
         assert!(report.full_catalog_completed);
         assert_eq!(report.calibration_factor, 3.0);
         assert!(selection.front.contains(&selection.selected));
-        assert!(selection.front.iter().any(|id| id.starts_with("seed-")));
-        assert!(selection
-            .costs
-            .keys()
-            .all(|id| id.starts_with("seed-joint-") || id.starts_with("pane-round-1-joint-")));
-        assert!(selection.costs.keys().all(|id| !id.contains("seed-seed-")));
+        assert_eq!(report.pane_width_rounds, vec!["Complete"]);
         for id in &selection.front {
             assert!(selection.costs.contains_key(id));
             assert!(selection.accepted.contains_key(id));
@@ -1317,6 +1363,52 @@ mod tests {
         assert_eq!(report.relative_gap, None);
         assert_ne!(report.status, "optimal");
         assert!(selection.search.candidates_checked <= 4);
+    }
+
+    #[test]
+    fn seed_fallback_report_preserves_model_without_inventing_inventory() {
+        let previous = crate::CandidateConnectionReport {
+            objective: "monetary_cost".into(),
+            calibration_scope: "not_required".into(),
+            calibration_factor: 1.0,
+            ..Default::default()
+        };
+        let mut interrupted = crate::CandidateConnectionReport {
+            status: "time_limit".into(),
+            pane_widths_pending: true,
+            ..Default::default()
+        };
+        add_phase_metrics(&mut interrupted, &previous);
+        assert_eq!(interrupted.objective, "monetary_cost");
+        assert_eq!(interrupted.calibration_scope, "not_required");
+        assert_eq!(interrupted.calibration_factor, 1.0);
+        assert_eq!(interrupted.inventory_pane_width_domain, None);
+        assert_eq!(interrupted.physical_configurations, 0);
+        assert!(!interrupted.full_catalog_completed);
+        assert!(interrupted.pane_widths_pending);
+        assert_eq!(interrupted.status, "time_limit");
+        assert_eq!(interrupted.lower_bound, None);
+        assert_eq!(interrupted.relative_gap, None);
+    }
+
+    #[test]
+    fn existing_model_metadata_is_not_overwritten_by_older_phases() {
+        let previous = crate::CandidateConnectionReport {
+            objective: "monetary_cost".into(),
+            calibration_scope: "not_required".into(),
+            calibration_factor: 1.0,
+            ..Default::default()
+        };
+        let mut current = crate::CandidateConnectionReport {
+            objective: "ParetoFront".into(),
+            calibration_scope: "frozen".into(),
+            calibration_factor: 3.0,
+            ..Default::default()
+        };
+        add_phase_metrics(&mut current, &previous);
+        assert_eq!(current.objective, "ParetoFront");
+        assert_eq!(current.calibration_scope, "frozen");
+        assert_eq!(current.calibration_factor, 3.0);
     }
 
     #[test]
@@ -1466,6 +1558,28 @@ mod tests {
     }
 
     #[test]
+    fn repeated_window_free_computation_searches_one_complete_catalog() {
+        let (_, entries, data) = workload();
+        let roots = vec![(
+            0,
+            QueryRoot::Operator(lower_promql("sum(latency)", AccuracyTarget::exact())),
+        )];
+        let run = run_stage1_to_stage3_with(
+            roots,
+            &entries[..1],
+            &data,
+            PlanningModels::builtin(),
+            Stage1ToStage3Search::default(),
+        )
+        .unwrap();
+        let selection = run.stage3_plan_selection.unwrap();
+        let report = selection.search.candidate_connections.unwrap();
+        assert_eq!(report.pane_width_rounds, vec!["Complete"]);
+        assert_eq!(report.seed_planning_ms, 0.0);
+        assert!(report.full_catalog_completed);
+    }
+
+    #[test]
     fn literal_workload_does_not_repeat_identical_width_models() {
         let run = scalar_run(
             &crate::PlanSelectionSettings::default(),
@@ -1473,7 +1587,7 @@ mod tests {
         );
         let selection = run.stage3_plan_selection.unwrap();
         let report = selection.search.candidate_connections.unwrap();
-        assert_eq!(report.pane_width_rounds, vec!["SeedGrids", "Complete"]);
+        assert_eq!(report.pane_width_rounds, vec!["Complete"]);
         assert!(report.full_catalog_completed);
     }
 
@@ -1496,9 +1610,7 @@ mod tests {
         let (_, entries, data) = workload();
         let roots = vec![(
             0,
-            QueryRoot::Scalar(asap_types::ir::ScalarExpr::Literal(
-                asap_types::ir::scalar::ScalarValue::Float64(1.0),
-            )),
+            QueryRoot::Operator(lower_promql("latency[5m]", AccuracyTarget::exact())),
         )];
         let initial = LogicalMemo::from_roots(&roots);
         let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
