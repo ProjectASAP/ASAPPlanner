@@ -109,7 +109,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         &mut seed_archive,
         PaneWidthDomain::SeedGrids,
         &mut seed_progress,
-    );
+    )
+    .map(|plan| namespace_round(plan, "seed-"));
     let seed_elapsed = started.elapsed();
     if seed.is_err() && !seed_progress.budget_stopped && !seed_progress.infeasible {
         return seed;
@@ -203,7 +204,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
             archive,
             domain,
             &mut round_progress,
-        );
+        )
+        .map(|plan| namespace_round(plan, &format!("pane-round-{}-", rounds.len() - 1)));
         full_progress.local_memo = round_progress.local_memo.take();
         full_progress.previous_domain = round_progress.previous_domain;
         full_progress.refinements += round_progress.refinements;
@@ -391,12 +393,34 @@ type ValidatedRound = (
     Vec<QueryRoot>,
 );
 
+/// Assign a readable phase identity once, before combining validated results.
+fn namespace_round(mut plan: ValidatedRound, namespace: &str) -> ValidatedRound {
+    let (selection, physical, _) = &mut plan;
+    physical.id = format!("{namespace}{}", physical.id);
+    physical.from_logical = format!("{namespace}{}", physical.from_logical);
+    selection.selected = format!("{namespace}{}", selection.selected);
+    selection.costs = std::mem::take(&mut selection.costs)
+        .into_iter()
+        .map(|(id, value)| (format!("{namespace}{id}"), value))
+        .collect();
+    selection.accepted = std::mem::take(&mut selection.accepted)
+        .into_iter()
+        .map(|(id, value)| (format!("{namespace}{id}"), value))
+        .collect();
+    for id in &mut selection.front {
+        *id = format!("{namespace}{id}");
+    }
+    for rejection in &mut selection.rejected {
+        rejection.id = format!("{namespace}{}", rejection.id);
+    }
+    plan
+}
+
 fn merge_validated_rounds(
     seed: ValidatedRound,
     full: ValidatedRound,
     models: PlanningModels<'_>,
 ) -> (bool, ValidatedRound) {
-    let (seed_selection, mut seed_plan, seed_logical) = seed;
     let (full_selection, full_plan, full_logical) = full;
     let identifiers =
         |selection: &crate::Selection,
@@ -412,16 +436,25 @@ fn merge_validated_rounds(
                 .collect::<std::collections::HashSet<_>>()
         };
     let occupied = identifiers(&full_selection, &full_plan);
-    let earlier_ids = identifiers(&seed_selection, &seed_plan);
-    let mut namespace = "seed-".to_owned();
-    while earlier_ids
-        .iter()
-        .any(|id| occupied.contains(&format!("{namespace}{id}")))
-    {
-        namespace.insert_str(0, "seed-");
-    }
-    seed_plan.id = format!("{namespace}{}", seed_plan.id);
-    seed_plan.from_logical = format!("{namespace}{}", seed_plan.from_logical);
+    let earlier_ids = identifiers(&seed.0, &seed.1);
+    // Production phases already have disjoint namespaces. Retain a defensive
+    // fallback for standalone callers combining unnamespaced results.
+    let seed = if earlier_ids.is_disjoint(&occupied) {
+        seed
+    } else {
+        let mut index = 1;
+        loop {
+            let namespace = format!("merged-round-{index}-");
+            if earlier_ids
+                .iter()
+                .all(|id| !occupied.contains(&format!("{namespace}{id}")))
+            {
+                break namespace_round(seed, &namespace);
+            }
+            index += 1;
+        }
+    };
+    let (seed_selection, seed_plan, seed_logical) = seed;
     let ranking = crate::Ranking::of(&models.plan_selection.cost_model);
     // Both plans were validated under the same frozen calibration. Use
     // PlanSelector's ranking without another unbudgeted evaluator call.
@@ -430,21 +463,6 @@ fn merge_validated_rounds(
         &full_selection.costs[&full_selection.selected],
     );
     let full_search = full_selection.search.clone();
-    let mut seed_selection = seed_selection;
-    seed_selection.selected = seed_plan.id.clone();
-    seed_selection.costs = seed_selection
-        .costs
-        .into_iter()
-        .map(|(id, cost)| (format!("{namespace}{id}"), cost))
-        .collect();
-    seed_selection.accepted = seed_selection
-        .accepted
-        .into_iter()
-        .map(|(id, accuracy)| (format!("{namespace}{id}"), accuracy))
-        .collect();
-    for rejection in &mut seed_selection.rejected {
-        rejection.id = format!("{namespace}{}", rejection.id);
-    }
     let (mut selection, other, physical, logical) = if seed_selected {
         (seed_selection, full_selection, seed_plan, seed_logical)
     } else {
@@ -1226,6 +1244,11 @@ mod tests {
         assert_eq!(report.calibration_factor, 3.0);
         assert!(selection.front.contains(&selection.selected));
         assert!(selection.front.iter().any(|id| id.starts_with("seed-")));
+        assert!(selection
+            .costs
+            .keys()
+            .all(|id| id.starts_with("seed-joint-") || id.starts_with("pane-round-1-joint-")));
+        assert!(selection.costs.keys().all(|id| !id.contains("seed-seed-")));
         for id in &selection.front {
             assert!(selection.costs.contains_key(id));
             assert!(selection.accepted.contains_key(id));
