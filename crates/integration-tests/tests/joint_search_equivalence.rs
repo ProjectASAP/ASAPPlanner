@@ -267,33 +267,28 @@ fn bounded_search_matches_complete_tiny_catalog_under_every_objective() {
     }
 }
 
-// Repeated queries retain all outputs and per-query accounting without creating
-// additional implementation scopes or producer-to-consumer choices.
+// Bounded runs can stop at different progressive pane-width domains. Compare
+// validated output semantics here, not inventory sizes from different catalogs.
+// Fixed-catalog terminal/producer scaling is tested in candidates::scopes.
 #[test]
-fn repeated_queries_preserve_outputs_without_quadratic_candidate_growth() {
+fn repeated_queries_preserve_all_outputs_and_exact_guarantees() {
     let settings = PlanSelectionSettings::default();
     let deployment = DeploymentCapabilities::default();
-    let mut counts = Vec::new();
     for count in [2, 8] {
         let workload = workload_of(
             &vec![("sum_over_time(m[1m])", 60_000); count],
             AccuracyTarget::exact(),
         );
         let run = run_workload(&workload, &settings, &deployment);
-        let report = run
-            .stage3_plan_selection
-            .as_ref()
-            .unwrap()
-            .search
-            .candidate_connections
-            .as_ref()
-            .unwrap();
-        counts.push((
-            report.physical_configurations,
-            report.compatible_connections,
-        ));
+        let selection = run.stage3_plan_selection.as_ref().unwrap();
+        let accepted = &selection.accepted[&selection.selected];
+        assert_eq!(accepted.len(), count);
+        for accuracy in accepted {
+            assert!(!accuracy.accepted_regardless_of_guarantee);
+            assert_eq!(accuracy.guarantee_check_rejection, None);
+            assert_eq!(accuracy.accepted_metric, None, "every output remains exact");
+        }
     }
-    assert_eq!(counts[0], counts[1]);
 }
 
 // Different windows over the same source remain legal with retained raw data

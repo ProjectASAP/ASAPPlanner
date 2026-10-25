@@ -341,6 +341,64 @@ mod tests {
         }
     }
 
+    // Fix the producer catalog independently of planning budgets and progressive
+    // pane domains. Root-only readers need one optional binding per output;
+    // producers stay constant and producer connections grow exactly linearly.
+    // Output-to-copy assignment choices are intentionally N*N, not claimed linear.
+    #[test]
+    fn repeated_outputs_have_constant_producers_and_linear_reader_connections() {
+        for output_count in [2, 4, 8] {
+            let mut source = terminal_reader_inventory(false);
+            source.inventory.graph.query_roots = vec![
+                QueryRootCandidates {
+                    compatible_candidates: vec![PhysicalCandidateId(2)]
+                };
+                output_count
+            ];
+            let expanded =
+                expand_execution_scopes(source, &[1, 1, 1], &vec![0; output_count]).unwrap();
+            let graph = &expanded.inventory.graph;
+            let producer_count = expanded
+                .configurations
+                .iter()
+                .filter(|configuration| configuration.source_candidate.0 < 2)
+                .count();
+            let terminal_count = expanded
+                .configurations
+                .iter()
+                .filter(|configuration| configuration.source_candidate == PhysicalCandidateId(2))
+                .count();
+            let producer_connections: usize = graph
+                .candidates
+                .iter()
+                .flat_map(|candidate| &candidate.producer_requirements)
+                .map(|input| input.compatible_producers.len())
+                .sum();
+            assert_eq!(producer_count, 2);
+            assert_eq!(terminal_count, output_count);
+            assert_eq!(graph.candidates.len(), 2 + output_count);
+            assert_eq!(producer_connections, 2 * output_count);
+            assert_eq!(
+                graph
+                    .query_roots
+                    .iter()
+                    .map(|output| output.compatible_candidates.len())
+                    .sum::<usize>(),
+                output_count * output_count
+            );
+            let selected = select_candidates(graph).unwrap().unwrap();
+            assert_eq!(selected.query_roots.len(), output_count);
+            assert!(selected
+                .query_roots
+                .iter()
+                .all(|output| output.candidate == selected.query_roots[0].candidate));
+            assert_eq!(
+                selected.modeled_cost, 3.0,
+                "additional capacity does not force duplicate work"
+            );
+        }
+    }
+
     // Terminal-reader factoring must preserve independent bindings for two
     // output references of the same scalar query, not only distinct queries.
     #[test]
