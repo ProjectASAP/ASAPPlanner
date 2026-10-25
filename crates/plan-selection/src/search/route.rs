@@ -121,13 +121,21 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         previous_domain: seed_progress.previous_domain,
         ..Default::default()
     };
-    let max_grid = context
+    let global_deadline = started.checked_add(
+        std::time::Duration::from_millis(total_ms)
+            .saturating_sub(std::time::Duration::from_secs_f64(prior_ms / 1000.0)),
+    );
+    // A literal-only workload has no computation in which pane rules can fire.
+    let grids = context
         .entries
         .iter()
         .filter_map(|entry| entry.evaluation_grid_ms())
-        .max()
-        .unwrap_or(1);
-    let mut max_parts = 4_u64;
+        .filter(|_| !initial.groups.is_empty());
+    let mut frontier =
+        asap_logical_asap_optimization::memo::state_configurations::PaneWidthFrontier::new(
+            grids,
+            global_deadline,
+        );
     let mut rounds = vec!["SeedGrids".to_owned()];
     let mut full = Err(SelectionError::Solver(
         "pane-width expansion has not started".into(),
@@ -143,13 +151,31 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         if remaining_ms == 0 || remaining_evaluations == 0 {
             break;
         }
-        // Every divisor is grid/parts for an integer parts <= grid. Once this
-        // frontier covers all grids, use the efficient complete divisor rule.
-        let domain = if max_parts >= max_grid {
-            PaneWidthDomain::Complete
-        } else {
-            PaneWidthDomain::Expanding { max_parts }
+        let domain = match &mut frontier {
+            Ok(frontier) => match frontier.next_domain(global_deadline) {
+                Ok(Some(domain)) => domain,
+                Ok(None) => break,
+                Err(error) => {
+                    if full.is_err() {
+                        full = Err(SelectionError::Solver(error.to_string()));
+                    }
+                    break;
+                }
+            },
+            Err(error) => {
+                if full.is_err() {
+                    full = Err(SelectionError::Solver(error.to_string()));
+                }
+                break;
+            }
         };
+        // Frontier enumeration is part of the same global budget. Never pass
+        // the pre-enumeration remainder as a fresh per-round allowance.
+        let remaining_ms = total_ms
+            .saturating_sub((prior_ms + started.elapsed().as_secs_f64() * 1000.0).ceil() as u64);
+        if remaining_ms == 0 {
+            break;
+        }
         rounds.push(format!("{domain:?}"));
         let complete = domain == PaneWidthDomain::Complete;
         let mut round_progress = DomainProgress {
@@ -214,7 +240,6 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         if full_progress.local_memo.is_none() {
             break;
         }
-        max_parts = max_parts.saturating_mul(2);
     }
     full_progress.catalog_completed = completed_full_domain;
     if !completed_full_domain {
@@ -373,8 +398,30 @@ fn merge_validated_rounds(
 ) -> (bool, ValidatedRound) {
     let (seed_selection, mut seed_plan, seed_logical) = seed;
     let (full_selection, full_plan, full_logical) = full;
-    seed_plan.id = format!("seed-{}", seed_plan.id);
-    seed_plan.from_logical = format!("seed-{}", seed_plan.from_logical);
+    let identifiers =
+        |selection: &crate::Selection,
+         plan: &asap_physical_asap_optimization::PhysicalWorkloadPlan| {
+            selection
+                .costs
+                .keys()
+                .chain(selection.accepted.keys())
+                .chain(selection.front.iter())
+                .chain(selection.rejected.iter().map(|rejection| &rejection.id))
+                .chain([&selection.selected, &plan.id, &plan.from_logical])
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        };
+    let occupied = identifiers(&full_selection, &full_plan);
+    let earlier_ids = identifiers(&seed_selection, &seed_plan);
+    let mut namespace = "seed-".to_owned();
+    while earlier_ids
+        .iter()
+        .any(|id| occupied.contains(&format!("{namespace}{id}")))
+    {
+        namespace.insert_str(0, "seed-");
+    }
+    seed_plan.id = format!("{namespace}{}", seed_plan.id);
+    seed_plan.from_logical = format!("{namespace}{}", seed_plan.from_logical);
     let ranking = crate::Ranking::of(&models.plan_selection.cost_model);
     // Both plans were validated under the same frozen calibration. Use
     // PlanSelector's ranking without another unbudgeted evaluator call.
@@ -388,15 +435,15 @@ fn merge_validated_rounds(
     seed_selection.costs = seed_selection
         .costs
         .into_iter()
-        .map(|(id, cost)| (format!("seed-{id}"), cost))
+        .map(|(id, cost)| (format!("{namespace}{id}"), cost))
         .collect();
     seed_selection.accepted = seed_selection
         .accepted
         .into_iter()
-        .map(|(id, accuracy)| (format!("seed-{id}"), accuracy))
+        .map(|(id, accuracy)| (format!("{namespace}{id}"), accuracy))
         .collect();
     for rejection in &mut seed_selection.rejected {
-        rejection.id = format!("seed-{}", rejection.id);
+        rejection.id = format!("{namespace}{}", rejection.id);
     }
     let (mut selection, other, physical, logical) = if seed_selected {
         (seed_selection, full_selection, seed_plan, seed_logical)
@@ -406,6 +453,7 @@ fn merge_validated_rounds(
     // Preserve the validated Pareto front from both searches.
     selection.costs.extend(other.costs);
     selection.accepted.extend(other.accepted);
+    selection.rejected.extend(other.rejected);
     let ids = selection.costs.keys().cloned().collect::<Vec<_>>();
     let costs = ids
         .iter()
@@ -1203,13 +1251,18 @@ mod tests {
 
     #[test]
     fn progressive_width_rounds_preserve_incumbent_without_global_certificate() {
-        let run = scalar_run(
-            &crate::PlanSelectionSettings::default(),
+        let (roots, entries, data) = workload();
+        let run = run_stage1_to_stage3_with(
+            roots,
+            &entries,
+            &data,
+            PlanningModels::builtin(),
             Stage1ToStage3Search {
                 max_evaluations: Some(4),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let selection = run.stage3_plan_selection.unwrap();
         let report = selection.search.candidate_connections.as_ref().unwrap();
         assert!(selection.accepted.contains_key(&selection.selected));
@@ -1221,6 +1274,77 @@ mod tests {
         assert_eq!(report.relative_gap, None);
         assert_ne!(report.status, "optimal");
         assert!(selection.search.candidates_checked <= 4);
+    }
+
+    #[test]
+    fn repeated_round_ids_preserve_all_cost_and_accuracy_records() {
+        let make = |price| {
+            let run = scalar_run(
+                &crate::PlanSelectionSettings::default(),
+                Stage1ToStage3Search {
+                    max_evaluations: Some(1),
+                    ..Default::default()
+                },
+            );
+            let mut selection = run.stage3_plan_selection.unwrap();
+            let physical = run.stage3_selected.unwrap();
+            selection
+                .costs
+                .get_mut(&selection.selected)
+                .unwrap()
+                .cost_per_second = Some(price);
+            let roots = physical.roots.clone();
+            (selection, physical, roots)
+        };
+        let first = make(1.0);
+        let second = make(2.0);
+        let initial = make(3.0);
+        assert_eq!(first.1.id, second.1.id);
+        assert_eq!(first.1.id, initial.1.id);
+        let (_, merged) = merge_validated_rounds(first, second, PlanningModels::builtin());
+        let (_, merged) = merge_validated_rounds(initial, merged, PlanningModels::builtin());
+        assert_eq!(merged.0.costs.len(), 3);
+        assert_eq!(merged.0.accepted.len(), 3);
+        let mut prices: Vec<_> = merged
+            .0
+            .costs
+            .values()
+            .map(|cost| cost.cost_per_second.unwrap())
+            .collect();
+        prices.sort_by(f64::total_cmp);
+        assert_eq!(prices, vec![1.0, 2.0, 3.0]);
+        assert_eq!(merged.0.selected, merged.1.id);
+        assert_eq!(merged.0.costs[&merged.1.id].cost_per_second, Some(1.0));
+        let settings = crate::PlanSelectionSettings {
+            cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
+                memory_bytes: 1_000_000,
+                disk_bytes: 1_000_000,
+                cpu_cores: Some(8),
+                objective: crate::ClusterObjective::ParetoFront,
+            }),
+            ..Default::default()
+        };
+        let models = PlanningModels {
+            plan_selection: &settings,
+            ..PlanningModels::builtin()
+        };
+        let (_, merged) = merge_validated_rounds(make(1.0), make(2.0), models);
+        let (_, merged) = merge_validated_rounds(make(0.5), merged, models);
+        assert_eq!(merged.0.costs.len(), 3);
+        assert_eq!(merged.0.front.len(), 3);
+        assert!(merged.0.front.contains(&merged.1.id));
+    }
+
+    #[test]
+    fn literal_workload_does_not_repeat_identical_width_models() {
+        let run = scalar_run(
+            &crate::PlanSelectionSettings::default(),
+            Stage1ToStage3Search::default(),
+        );
+        let selection = run.stage3_plan_selection.unwrap();
+        let report = selection.search.candidate_connections.unwrap();
+        assert_eq!(report.pane_width_rounds, vec!["SeedGrids", "Complete"]);
+        assert!(report.full_catalog_completed);
     }
 
     // A failed complete phase must not relabel seed work as initial generation.
