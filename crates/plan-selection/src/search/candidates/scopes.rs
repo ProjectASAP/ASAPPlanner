@@ -44,6 +44,18 @@ pub(in crate::search) fn expand_execution_scopes_before(
             "execution-scope output contexts are incomplete".into(),
         ));
     }
+    let mut internally_consumed = vec![false; count];
+    for input in graph
+        .candidates
+        .iter()
+        .flat_map(|candidate| &candidate.producer_requirements)
+    {
+        super::check_deadline(deadline)?;
+        for producer in &input.compatible_producers {
+            super::check_deadline(deadline)?;
+            internally_consumed[producer.0] = true;
+        }
+    }
     let mut output_uses = vec![std::collections::HashSet::new(); count];
     let mut output_positions = vec![0usize; count];
     for (output, root) in graph.query_roots.iter().enumerate() {
@@ -104,6 +116,32 @@ pub(in crate::search) fn expand_execution_scopes_before(
             1
         } else {
             contexts.max(uses)
+        };
+        let terminal_unary_reader = !internally_consumed[id]
+            && candidate.producer_requirements.len() == 1
+            && source
+                .inventory
+                .templates
+                .get(id)
+                .and_then(Option::as_ref)
+                .is_some_and(|node| {
+                    matches!(
+                        node.asap(),
+                        Some(
+                            asap_types::ir::ASAPOp::SummaryEstimate { .. }
+                                | asap_types::ir::ASAPOp::FinalizeExactAccumulator { .. }
+                        )
+                    ) && node.children().len() == 1
+                });
+        // Factored terminal readouts may need a different binding per output
+        // reference, including two references in one scalar query. Every active
+        // terminal copy must serve a root, so the reference count supplies a
+        // finite sufficient capacity. Copies remain optional and can be shared.
+        // Internal consumers retain the original occurrence/context rule.
+        let multiplicity = if terminal_unary_reader {
+            multiplicity.max(output_positions[id])
+        } else {
+            multiplicity
         };
         for _ in 0..multiplicity {
             let copy = PhysicalCandidateId(result.configurations.len());
@@ -238,6 +276,145 @@ mod tests {
     use asap_logical_asap_optimization::memo::MemoGroupId;
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::physical::Materialization;
+
+    fn terminal_reader_inventory(separate_suppliers: bool) -> CandidateConfigurationInventory {
+        use asap_logical_asap_optimization::test_support::{cms_summary, estimate_over};
+        use asap_types::ir::properties::AccuracyGuarantee;
+        use std::rc::Rc;
+        let state = Rc::new(cms_summary("count(m)"));
+        let reader = estimate_over(state, AccuracyGuarantee::exact("scope fixture"));
+        let mut graph = CandidateDependencyGraph {
+            candidates: vec![
+                PhysicalCandidate {
+                    group: MemoGroupId(0),
+                    local_cost: 2.0,
+                    producer_requirements: vec![],
+                },
+                PhysicalCandidate {
+                    group: MemoGroupId(0),
+                    local_cost: 3.0,
+                    producer_requirements: vec![],
+                },
+                PhysicalCandidate {
+                    group: MemoGroupId(1),
+                    local_cost: 1.0,
+                    producer_requirements: vec![ProducerRequirement {
+                        compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]
+                            .into(),
+                    }],
+                },
+            ],
+            query_roots: vec![
+                QueryRootCandidates {
+                    compatible_candidates: vec![PhysicalCandidateId(2)]
+                };
+                2
+            ],
+            ..Default::default()
+        };
+        if separate_suppliers {
+            for output in 0..2 {
+                graph
+                    .reader_constraints
+                    .push(ReaderConstraint::AllowedOutputs {
+                        candidate: PhysicalCandidateId(output),
+                        outputs: vec![output],
+                    });
+            }
+        }
+        CandidateConfigurationInventory {
+            inventory: CandidateInventory {
+                graph,
+                templates: vec![None, None, Some(reader)],
+                group_candidates: vec![
+                    vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+                    vec![PhysicalCandidateId(2)],
+                ],
+            },
+            configurations: (0..3)
+                .map(|id| CandidateConfiguration {
+                    source_candidate: PhysicalCandidateId(id),
+                    materialization: Materialization::NotMaterialized,
+                    timing: ExecutionTiming::QueryTime,
+                })
+                .collect(),
+        }
+    }
+
+    // Terminal-reader factoring must preserve independent bindings for two
+    // output references of the same scalar query, not only distinct queries.
+    #[test]
+    fn terminal_reader_copies_preserve_same_query_independent_bindings() {
+        let source = terminal_reader_inventory(true);
+        assert!(select_candidates(&source.inventory.graph)
+            .unwrap()
+            .is_none());
+        let expanded = expand_execution_scopes(source, &[1, 1, 1], &[0, 0]).unwrap();
+        let selected = select_candidates(&expanded.inventory.graph)
+            .unwrap()
+            .expect("each root reference can bind a separate reader");
+        assert_ne!(
+            selected.query_roots[0].candidate,
+            selected.query_roots[1].candidate
+        );
+        let suppliers = selected
+            .connections
+            .iter()
+            .map(|edge| expanded.configurations[edge.producer.0].source_candidate)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            suppliers,
+            std::collections::HashSet::from([PhysicalCandidateId(0), PhysicalCandidateId(1)])
+        );
+        assert_eq!(selected.modeled_cost, 7.0);
+
+        // Capacity is optional: without conflicting eligibility, both root
+        // references may still consume one reader and pay its cost once.
+        let shared =
+            expand_execution_scopes(terminal_reader_inventory(false), &[1, 1, 1], &[0, 0]).unwrap();
+        let selected = select_candidates(&shared.inventory.graph).unwrap().unwrap();
+        assert_eq!(
+            selected.query_roots[0].candidate,
+            selected.query_roots[1].candidate
+        );
+        assert_eq!(selected.modeled_cost, 3.0);
+    }
+
+    // The terminal-readout bound does not alter capacity for a reader that
+    // supplies another candidate; that requires a separate dependency proof.
+    #[test]
+    fn terminal_capacity_rule_leaves_internal_readers_unchanged() {
+        let mut source = terminal_reader_inventory(false);
+        source.inventory.graph.candidates.push(PhysicalCandidate {
+            group: MemoGroupId(2),
+            local_cost: 1.0,
+            producer_requirements: vec![ProducerRequirement {
+                compatible_producers: vec![PhysicalCandidateId(2)].into(),
+            }],
+        });
+        source.inventory.templates.push(None);
+        source
+            .inventory
+            .group_candidates
+            .push(vec![PhysicalCandidateId(3)]);
+        source.configurations.push(CandidateConfiguration {
+            source_candidate: PhysicalCandidateId(3),
+            materialization: Materialization::NotMaterialized,
+            timing: ExecutionTiming::QueryTime,
+        });
+        for output in &mut source.inventory.graph.query_roots {
+            output.compatible_candidates = vec![PhysicalCandidateId(3)];
+        }
+        let expanded = expand_execution_scopes(source, &[1; 4], &[0, 0]).unwrap();
+        assert_eq!(
+            expanded
+                .configurations
+                .iter()
+                .filter(|configuration| configuration.source_candidate == PhysicalCandidateId(2))
+                .count(),
+            1
+        );
+    }
 
     // The unknown-phase query reads both states; the two known-phase queries
     // share different copies. Another independent state remains shared by all.
