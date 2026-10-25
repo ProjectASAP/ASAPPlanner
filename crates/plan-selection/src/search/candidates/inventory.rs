@@ -70,13 +70,15 @@ pub(in crate::search) fn build_candidate_inventory_before(
     node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
-    build_with_compatibility_memo(
+    let mut inventory = build_with_compatibility_memo(
         memo,
         output_groups,
         node_local_cost,
         deadline,
         &mut CompatibilityMemo::default(),
-    )
+    )?;
+    crate::search::candidates::factoring::factor_terminal_readers(&mut inventory, deadline)?;
+    Ok(inventory)
 }
 
 fn build_with_compatibility_memo(
@@ -1209,7 +1211,41 @@ mod tests {
         (try_populate_pass1(initial, &generated).unwrap(), outputs)
     }
 
+    #[test]
+    fn terminal_reader_factoring_reconstructs_the_same_minimum_cost_computation() {
+        let (memo, outputs) = nested_sum_memo(false);
+        let original = build_with_compatibility_memo(
+            &memo,
+            &outputs,
+            |_| Ok(1.0),
+            None,
+            &mut CompatibilityMemo::default(),
+        )
+        .unwrap();
+        let compact = build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)).unwrap();
+        assert!(compact.graph.candidates.len() < original.graph.candidates.len());
+        let before = select_candidates(&original.graph).unwrap().unwrap();
+        let after = select_candidates(&compact.graph).unwrap().unwrap();
+        assert_eq!(before.modeled_cost, after.modeled_cost);
+        for (inventory, selected) in [(&original, before), (&compact, after)] {
+            let roots =
+                reconstruct_candidate_outputs(&inventory.graph, &selected, &inventory.templates)
+                    .unwrap();
+            assert_eq!(roots.len(), 1);
+            roots[0].validate_structure().unwrap();
+            assert!(
+                crate::search::candidates::reconstruction::output_contract_satisfied(
+                    &memo.groups[outputs[0].0 as usize].node,
+                    &roots[0]
+                )
+                .unwrap()
+            );
+        }
+    }
+
     // Fusion owns its private work but does not publish another logical result.
+    // Inspect the uncompressed catalog here because the fixture identifies its
+    // particular fusion rule by its original memo ordinal.
     #[test]
     fn fused_nested_sum_activates_only_its_actual_input_groups() {
         let (memo, outputs) = nested_sum_memo(false);
@@ -1219,7 +1255,14 @@ mod tests {
             .position(|candidate| candidate.implements.len() > 1)
             .expect("nested sum has an absorbed computation");
         let absorbed = memo.candidates[owner][fused_index].implements[1];
-        let mut inventory = build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)).unwrap();
+        let mut inventory = build_with_compatibility_memo(
+            &memo,
+            &outputs,
+            |_| Ok(1.0),
+            None,
+            &mut CompatibilityMemo::default(),
+        )
+        .unwrap();
         let fused = inventory.group_candidates[owner][fused_index];
         assert!(!inventory.group_candidates[absorbed.0 as usize].contains(&fused));
         assert!(
@@ -1259,7 +1302,14 @@ mod tests {
                 candidate.node.contains_asap() && !candidate.children.contains(&inner)
             })
             .expect("fusion can privately recompute the shared inner work");
-        let mut inventory = build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)).unwrap();
+        let mut inventory = build_with_compatibility_memo(
+            &memo,
+            &outputs,
+            |_| Ok(1.0),
+            None,
+            &mut CompatibilityMemo::default(),
+        )
+        .unwrap();
         let fused = inventory.group_candidates[owner][fused_index];
         inventory.graph.query_roots[0].compatible_candidates = vec![fused];
         assert!(!inventory.graph.query_roots[1]
