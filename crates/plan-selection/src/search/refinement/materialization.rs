@@ -90,7 +90,7 @@ pub(super) fn restrict(
             if !requirement.compatible_producers.contains(&producer) {
                 return None;
             }
-            requirement.compatible_producers = vec![producer];
+            requirement.compatible_producers = vec![producer].into();
         }
     }
     for root in &selected.query_roots {
@@ -131,7 +131,8 @@ mod tests {
                 group: MemoGroupId(query as u32 + 1),
                 local_cost: 0.0,
                 producer_requirements: vec![ProducerRequirement {
-                    compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+                    compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]
+                        .into(),
                 }],
             });
             graph.query_roots.push(QueryRootCandidates {

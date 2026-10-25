@@ -328,7 +328,7 @@ mod tests {
                 group: MemoGroupId(1),
                 local_cost: 0.0,
                 producer_requirements: vec![ProducerRequirement {
-                    compatible_producers: vec![PhysicalCandidateId(0)],
+                    compatible_producers: vec![PhysicalCandidateId(0)].into(),
                 }],
             });
         }

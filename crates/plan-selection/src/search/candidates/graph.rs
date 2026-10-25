@@ -1,4 +1,5 @@
 //! Candidate dependency graph, declared constraints, and structural validation.
+use super::suppliers::SupplierCandidates;
 use asap_logical_asap_optimization::memo::MemoGroupId;
 use std::collections::HashSet;
 
@@ -9,7 +10,7 @@ pub(crate) struct PhysicalCandidateId(pub usize);
 /// One required input, distinct even when another input accepts the same producers.
 #[derive(Debug, Clone)]
 pub(crate) struct ProducerRequirement {
-    pub compatible_producers: Vec<PhysicalCandidateId>,
+    pub compatible_producers: SupplierCandidates,
 }
 
 /// One executable choice with costs already expressed over the same fixed horizon.

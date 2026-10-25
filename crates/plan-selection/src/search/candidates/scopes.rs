@@ -2,6 +2,7 @@
 //! Copies are interchangeable, not assigned to disjoint reader sets: one query
 //! may consume multiple copies while different subsets share other inputs.
 //! Activation-prefix constraints remove permutations of unused copies only.
+use super::suppliers::{SupplierCandidates, SupplierSetInterner};
 use crate::search::candidates::configurations::{
     CandidateConfigurationInventory, ConfigurationError,
 };
@@ -10,6 +11,7 @@ use crate::search::candidates::graph::{
     ReaderConstraint,
 };
 use crate::search::candidates::inventory::CandidateInventory;
+use std::collections::HashMap;
 
 #[cfg(test)]
 pub(in crate::search) fn expand_execution_scopes(
@@ -122,22 +124,34 @@ pub(in crate::search) fn expand_execution_scopes_before(
             result.inventory.graph.candidates.push(candidate.clone());
         }
     }
+    let mut supplier_sets = SupplierSetInterner::default();
+    let mut input_cache: HashMap<SupplierCandidates, SupplierCandidates> = HashMap::new();
     for (id, candidate) in graph.candidates.iter().enumerate() {
         super::check_deadline(deadline)?;
+        let mut requirements = Vec::new();
+        for input in &candidate.producer_requirements {
+            let compatible_producers =
+                if let Some(suppliers) = input_cache.get(&input.compatible_producers) {
+                    suppliers.clone()
+                } else {
+                    let mut compatible = Vec::new();
+                    for producer in &input.compatible_producers {
+                        super::check_deadline(deadline)?;
+                        compatible.extend(copies[producer.0].iter().copied());
+                    }
+                    let suppliers = supplier_sets.intern(compatible);
+                    input_cache.insert(input.compatible_producers.clone(), suppliers.clone());
+                    suppliers
+                };
+            requirements.push(ProducerRequirement {
+                compatible_producers,
+            });
+        }
+        // Consumer copies retain distinct requirement slots and MILP edges;
+        // only their immutable compatible-supplier storage is shared.
         for &copy in &copies[id] {
             super::check_deadline(deadline)?;
-            let mut requirements = Vec::new();
-            for input in &candidate.producer_requirements {
-                let mut compatible_producers = Vec::new();
-                for producer in &input.compatible_producers {
-                    super::check_deadline(deadline)?;
-                    compatible_producers.extend(copies[producer.0].iter().copied());
-                }
-                requirements.push(ProducerRequirement {
-                    compatible_producers,
-                });
-            }
-            result.inventory.graph.candidates[copy.0].producer_requirements = requirements;
+            result.inventory.graph.candidates[copy.0].producer_requirements = requirements.clone();
         }
     }
     result.inventory.graph.query_roots = graph
@@ -240,10 +254,10 @@ mod tests {
                 } else {
                     vec![
                         ProducerRequirement {
-                            compatible_producers: vec![id(0)],
+                            compatible_producers: vec![id(0)].into(),
                         },
                         ProducerRequirement {
-                            compatible_producers: vec![id(1)],
+                            compatible_producers: vec![id(1)].into(),
                         },
                     ]
                 },
@@ -263,6 +277,7 @@ mod tests {
                 right: 3,
             });
         assert!(select_candidates(&graph).unwrap().is_none());
+        let original_graph = graph.clone();
         let source = CandidateConfigurationInventory {
             inventory: CandidateInventory {
                 graph,
@@ -278,6 +293,43 @@ mod tests {
                 .collect(),
         };
         let expanded = expand_execution_scopes(source, &[2, 2, 2, 2], &[0, 1, 2, 3]).unwrap();
+        // Copy expansion must preserve every slot's complete ordered supplier
+        // mapping even though repeated copies share the backing allocation.
+        for (id, configuration) in expanded.configurations.iter().enumerate() {
+            let original = &original_graph.candidates[configuration.source_candidate.0];
+            let copied = &expanded.inventory.graph.candidates[id];
+            assert_eq!(
+                original.producer_requirements.len(),
+                copied.producer_requirements.len()
+            );
+            for (input, copied_input) in original
+                .producer_requirements
+                .iter()
+                .zip(&copied.producer_requirements)
+            {
+                let expected: Vec<_> = input
+                    .compatible_producers
+                    .iter()
+                    .flat_map(|producer| {
+                        expanded.configurations.iter().enumerate().filter_map(
+                            move |(id, configuration)| {
+                                (configuration.source_candidate == *producer)
+                                    .then_some(PhysicalCandidateId(id))
+                            },
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    copied_input.compatible_producers.as_slice(),
+                    expected.as_slice()
+                );
+            }
+        }
+        let metrics = super::super::suppliers::supplier_storage_metrics(&expanded.inventory.graph);
+        assert!(
+            metrics.stored_supplier_ids < metrics.logical_connections,
+            "{metrics:?}"
+        );
         let selected = select_candidates(&expanded.inventory.graph)
             .unwrap()
             .unwrap();

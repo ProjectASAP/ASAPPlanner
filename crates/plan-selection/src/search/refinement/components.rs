@@ -11,6 +11,7 @@ use crate::search::candidates::graph::{
     ProducerConsumerConnection, QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
 };
 use crate::search::candidates::inventory::CandidateInventory;
+use crate::search::candidates::suppliers::{SupplierCandidates, SupplierSetInterner};
 use crate::search::milp::model::CandidateSolveMetrics;
 #[cfg(test)]
 use crate::search::refinement::planner::evaluate_configured_candidate;
@@ -198,6 +199,8 @@ fn project(
         .map(|(local, &global)| (global, local))
         .collect();
     let graph = &configured.inventory.graph;
+    let mut supplier_sets = SupplierSetInterner::default();
+    let mut remapped: HashMap<SupplierCandidates, SupplierCandidates> = HashMap::new();
     let mut projected = CandidateDependencyGraph {
         candidates: component
             .candidates
@@ -205,9 +208,18 @@ fn project(
             .map(|&id| {
                 let mut candidate = graph.candidates[id].clone();
                 for input in &mut candidate.producer_requirements {
-                    for id in &mut input.compatible_producers {
-                        id.0 = candidates[&id.0];
-                    }
+                    input.compatible_producers = remapped
+                        .entry(input.compatible_producers.clone())
+                        .or_insert_with(|| {
+                            supplier_sets.intern(
+                                input
+                                    .compatible_producers
+                                    .iter()
+                                    .map(|id| PhysicalCandidateId(candidates[&id.0]))
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .clone();
                 }
                 candidate
             })

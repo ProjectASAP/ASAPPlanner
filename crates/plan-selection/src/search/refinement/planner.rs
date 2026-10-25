@@ -1340,7 +1340,7 @@ mod tests {
             let id = PhysicalCandidateId(configured.configurations.len());
             let mut candidate = configured.inventory.graph.candidates[supplier.0].clone();
             candidate.producer_requirements = vec![ProducerRequirement {
-                compatible_producers: vec![supplier],
+                compatible_producers: vec![supplier].into(),
             }];
             configured.inventory.group_candidates[candidate.group.0 as usize].push(id);
             configured.inventory.graph.candidates.push(candidate);

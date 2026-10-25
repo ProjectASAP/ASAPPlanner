@@ -918,7 +918,7 @@ mod tests {
         graph.candidates[1]
             .producer_requirements
             .push(ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(0)],
+                compatible_producers: vec![PhysicalCandidateId(0)].into(),
             });
         let result = search_candidates(&graph, limits(10), |selected| {
             Ok(Some(if selected.selected_candidates.len() == 1 {
@@ -976,7 +976,7 @@ mod tests {
         graph.candidates[2]
             .producer_requirements
             .push(ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+                compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
             });
         graph.query_roots = (0..3)
             .map(|id| QueryRootCandidates {
