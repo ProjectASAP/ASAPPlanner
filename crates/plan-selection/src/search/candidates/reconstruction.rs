@@ -299,7 +299,7 @@ mod tests {
             let producer_requirements = ordered_inputs(node)
                 .iter()
                 .map(|child| ProducerRequirement {
-                    compatible_producers: vec![add(child, graph, templates)],
+                    compatible_producers: vec![add(child, graph, templates)].into(),
                 })
                 .collect();
             let id = templates.len();
@@ -366,8 +366,9 @@ mod tests {
             template.operator.map_children(|_| Rc::clone(&child)),
             template.schema.clone(),
         )));
-        graph.candidates[root].producer_requirements[0].compatible_producers = vec![first];
-        graph.candidates[root].producer_requirements[1].compatible_producers = vec![duplicate];
+        graph.candidates[root].producer_requirements[0].compatible_producers = vec![first].into();
+        graph.candidates[root].producer_requirements[1].compatible_producers =
+            vec![duplicate].into();
         let selected = select_candidates(&graph).unwrap().unwrap();
         let outputs = reconstruct_candidate_outputs(&graph, &selected, &templates).unwrap();
         let children = outputs[0].children();

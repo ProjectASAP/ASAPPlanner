@@ -14,6 +14,7 @@ use asap_logical_asap_optimization::memo::MemoGroupId;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
 
+use crate::search::candidates::factoring::{CompatibilityKey, CompatibilityMemo};
 use crate::search::candidates::graph::{
     CandidateDependencyGraph, PhysicalCandidate, PhysicalCandidateId, ProducerRequirement,
     QueryRootCandidates,
@@ -66,8 +67,24 @@ pub(in crate::search) fn build_candidate_inventory(
 pub(in crate::search) fn build_candidate_inventory_before(
     memo: &CandidateMemo,
     output_groups: &[MemoGroupId],
+    node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
+    deadline: Option<std::time::Instant>,
+) -> Result<CandidateInventory, CandidateInventoryError> {
+    build_with_compatibility_memo(
+        memo,
+        output_groups,
+        node_local_cost,
+        deadline,
+        &mut CompatibilityMemo::default(),
+    )
+}
+
+fn build_with_compatibility_memo(
+    memo: &CandidateMemo,
+    output_groups: &[MemoGroupId],
     mut node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
+    compatibility: &mut CompatibilityMemo,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
     super::check_deadline(deadline)?;
     let invalid = |message: &str| CandidateInventoryError::InvalidMemo(message.into());
@@ -178,6 +195,7 @@ pub(in crate::search) fn build_candidate_inventory_before(
             }
             let mut builder = ImmediateCandidateBuilder {
                 inventory: &mut inventory,
+                compatibility: &mut *compatibility,
                 boundaries,
                 private_nodes: HashMap::new(),
                 used_boundaries: HashSet::new(),
@@ -228,6 +246,7 @@ pub(in crate::search) fn build_candidate_inventory_before(
 
 struct ImmediateCandidateBuilder<'a, F> {
     inventory: &'a mut CandidateInventory,
+    compatibility: &'a mut CompatibilityMemo,
     boundaries: HashMap<*const OperatorNode, MemoGroupId>,
     private_nodes: HashMap<*const OperatorNode, PhysicalCandidateId>,
     used_boundaries: HashSet<MemoGroupId>,
@@ -263,22 +282,30 @@ impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'
         for input in inputs {
             let producers = if let Some(&group) = self.boundaries.get(&Rc::as_ptr(&input)) {
                 self.used_boundaries.insert(group);
-                let mut compatible = Vec::new();
-                for &candidate in &self.inventory.group_candidates[group.0 as usize] {
-                    super::check_deadline(self.deadline)?;
-                    let template =
-                        self.inventory.templates[candidate.0]
-                            .as_ref()
-                            .ok_or_else(|| {
-                                CandidateInventoryError::InvalidMemo("missing root template".into())
-                            })?;
-                    if compatible_output(&input, template)? {
-                        compatible.push(candidate);
+                let key = CompatibilityKey::new(group, &input)
+                    .map_err(CandidateInventoryError::InvalidMemo)?;
+                if let Some(compatible) = self.compatibility.get(&key) {
+                    compatible
+                } else {
+                    let mut compatible = Vec::new();
+                    for &candidate in &self.inventory.group_candidates[group.0 as usize] {
+                        super::check_deadline(self.deadline)?;
+                        let template =
+                            self.inventory.templates[candidate.0]
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    CandidateInventoryError::InvalidMemo(
+                                        "missing root template".into(),
+                                    )
+                                })?;
+                        if compatible_output(&input, template)? {
+                            compatible.push(candidate);
+                        }
                     }
+                    self.compatibility.remember(key, compatible)
                 }
-                compatible
             } else {
-                vec![self.add(&input, None)?]
+                vec![self.add(&input, None)?].into()
             };
             requirements.push(ProducerRequirement {
                 compatible_producers: producers,
@@ -363,6 +390,44 @@ mod tests {
             expand_concrete_summary_state_groups(memo).unwrap().memo,
             output_groups,
         )
+    }
+
+    // Reusing a typed compatibility result must leave every activation and
+    // connection decision unchanged, including shared-producer cost ownership.
+    #[test]
+    fn compatibility_memo_preserves_complete_candidate_graph_and_optimum() {
+        let (memo, outputs) = quantile_memo();
+        let cost = |node: &OperatorNode| Ok(if is_kll(node) { 8.0 } else { 1.0 });
+        let mut compatibility = CompatibilityMemo::default();
+        let cached =
+            build_with_compatibility_memo(&memo, &outputs, cost, None, &mut compatibility).unwrap();
+        assert!(
+            compatibility.hits() > 0,
+            "repeated typed supplier checks were actually reused"
+        );
+        let uncached = build_with_compatibility_memo(
+            &memo,
+            &outputs,
+            cost,
+            None,
+            &mut CompatibilityMemo::disabled(),
+        )
+        .unwrap();
+        assert_eq!(
+            format!("{:?}", cached.graph),
+            format!("{:?}", uncached.graph)
+        );
+        assert_eq!(cached.group_candidates, uncached.group_candidates);
+        assert_eq!(cached.templates.len(), uncached.templates.len());
+        for (cached, uncached) in cached.templates.iter().zip(&uncached.templates) {
+            assert!(
+                Rc::ptr_eq(cached.as_ref().unwrap(), uncached.as_ref().unwrap())
+                    || cached.as_ref().unwrap() == uncached.as_ref().unwrap()
+            );
+        }
+        let cached_plan = select_candidates(&cached.graph).unwrap().unwrap();
+        let uncached_plan = select_candidates(&uncached.graph).unwrap().unwrap();
+        assert_eq!(cached_plan.modeled_cost, uncached_plan.modeled_cost);
     }
 
     fn is_kll(node: &OperatorNode) -> bool {
