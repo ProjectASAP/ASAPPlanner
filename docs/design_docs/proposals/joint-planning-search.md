@@ -218,6 +218,8 @@ For a nonmaterialized node, let `A` be its normalized average holding time, `r_q
 
 Common-step ranges compress to nested coverage counts, even for very long spans. Mixed-step ranges group identical reader-coverage sets. Small geometry domains use arithmetic intersections and exact inclusion/exclusion counts, so large spans need no timestamp expansion; larger domains use bounded offset construction. Excessive domains, ill-conditioned rates, or exhausted construction budgets report a fallback rather than coarsening the schedule. The evaluator uses the same exact intersection-count primitive when validating large mixed ranges. Unsupported contexts remain in the complete candidate catalog for validated evaluator refinement. Restricted-subspace bounds are not full-catalog optimum certificates. Reports expose direct-cost solve counts, validated costs and fallback reasons.
 
+A candidate whose evaluator cost overflows the representable range is skipped with a `cost_not_representable` diagnostic so scalar-price search can still find a validated plan. This is an unknown cost, not proof of infeasibility: if such assignments were excluded, the search reports a conservative zero lower bound and cannot claim a full-domain optimum or infeasibility. Invalid settings and other evaluator errors remain errors.
+
 Numerically ill-conditioned cost profiles, rate tables, or normalized latency terms also fall back explicitly rather than silently dropping charges. An optimal direct solve must additionally agree with an independently decoded selected-DAG cost before its restricted-domain certificate is accepted.
 
 Fixed query overhead can be omitted during minimization but must be restored in reported totals.

@@ -186,12 +186,26 @@ pub(in crate::search) fn optimize_configured_candidates(
                         ..Default::default()
                     });
                 }
+                Err(
+                    error @ SelectionError::Cost {
+                        error: crate::AnalyticalCostError::Overflow,
+                        ..
+                    },
+                ) => {
+                    let reason = error.to_string();
+                    rejections.record("cost_not_representable".into(), &reason);
+                    return Ok(CandidateEvaluation {
+                        unpriced_reason: Some(reason),
+                        ..Default::default()
+                    });
+                }
                 Err(error) => return Err(error.to_string()),
             }) else {
                 return Ok(CandidateEvaluation {
                     actual_cost: None,
                     rejected_queries,
                     budget_exhausted: false,
+                    unpriced_reason: None,
                 });
             };
             let cost = selection
