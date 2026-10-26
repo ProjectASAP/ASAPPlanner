@@ -26,6 +26,8 @@ use crate::search::milp::model::{
 #[derive(Debug, Default)]
 pub(in crate::search) struct CandidateEvaluation {
     pub actual_cost: Option<f64>,
+    /// Temporarily skip an unpriceable assignment without proving it infeasible.
+    pub unpriced_reason: Option<String>,
     /// A stopped evaluator must not emit any rejection/cost cut.
     pub budget_exhausted: bool,
     pub rejected_queries: Vec<RejectedQuerySubgraph>,
@@ -36,6 +38,7 @@ impl From<Option<f64>> for CandidateEvaluation {
         Self {
             actual_cost,
             budget_exhausted: false,
+            unpriced_reason: None,
             rejected_queries: Vec::new(),
         }
     }
@@ -90,7 +93,8 @@ struct SeedRestrictions<'a> {
 }
 
 /// The callback returns an actual total cost for a validated feasible plan, or
-/// `None` for a proven infeasible assignment. Errors stop search, preserving the
+/// `None` for a proven infeasible assignment. Explicit unpriced feedback skips
+/// one assignment and invalidates full-domain certificates. Errors stop search, preserving the
 /// incumbent. Its cost must include every configured cost component and must be
 /// deterministic for an assignment. Local graph costs are certified lower bounds,
 /// not estimates. A violated certification is an error, never silently repaired.
@@ -233,6 +237,7 @@ fn search_with_solver(
     graph.validate().map_err(|error| error.to_string())?;
     let started = Instant::now();
     let mut observations = Vec::new();
+    let mut unpriced_reason = None;
     let mut incumbent: Option<EvaluatedCandidate> = None;
     let mut lower_bound: f64 = 0.0;
     let mut refinements = 0;
@@ -592,6 +597,14 @@ fn search_with_solver(
         if feedback.budget_exhausted {
             break CandidateSearchStatus::TimeLimit;
         }
+        if let Some(reason) = feedback.unpriced_reason {
+            if feedback.actual_cost.is_some() || !feedback.rejected_queries.is_empty() {
+                return Err(
+                    "unpriceable feedback cannot contain a cost or certified query cut".into(),
+                );
+            }
+            unpriced_reason.get_or_insert(reason);
+        }
         let actual_cost = feedback.actual_cost;
         if actual_cost.is_some() && !feedback.rejected_queries.is_empty() {
             return Err("feasible evaluator result cannot reject query subgraphs".into());
@@ -648,6 +661,21 @@ fn search_with_solver(
         {
             break CandidateSearchStatus::Optimal;
         }
+    };
+    // Excluding an unpriceable assignment helps find a usable incumbent but
+    // does not prove infeasibility or a bound over the original candidate set.
+    let status = if let Some(reason) = unpriced_reason {
+        lower_bound = 0.0;
+        match status {
+            CandidateSearchStatus::Optimal | CandidateSearchStatus::Infeasible => {
+                CandidateSearchStatus::EvaluatorStopped(format!(
+                    "unpriceable assignments excluded: {reason}"
+                ))
+            }
+            other => other,
+        }
+    } else {
+        status
     };
     let relative_gap = incumbent.as_ref().map(|best| {
         if best.actual_cost == 0.0 {
@@ -719,6 +747,47 @@ mod tests {
         CandidateSearchLimits {
             max_refinements,
             wall_time: Duration::from_secs(10),
+        }
+    }
+
+    // An unpriceable candidate must not prevent a later validated plan, nor
+    // allow exclusions of unknown costs to certify a full-domain optimum.
+    #[test]
+    fn unpriceable_assignments_preserve_search_without_an_optimality_claim() {
+        for costs in [vec![1.0, 2.0], vec![1.0]] {
+            let graph = choices(&costs);
+            let result = search_candidates_with_direct_feedback(
+                &graph,
+                limits(8),
+                &costs,
+                &[],
+                &[],
+                &[],
+                |selected| {
+                    if selected
+                        .selected_candidates
+                        .contains(&PhysicalCandidateId(0))
+                    {
+                        Ok(CandidateEvaluation {
+                            unpriced_reason: Some("analytical arithmetic overflowed".into()),
+                            ..Default::default()
+                        })
+                    } else {
+                        Ok(Some(2.0).into())
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                result.incumbent.as_ref().map(|best| best.actual_cost),
+                (costs.len() == 2).then_some(2.0)
+            );
+            assert_eq!(result.lower_bound, 0.0);
+            assert!(matches!(
+                result.status,
+                CandidateSearchStatus::EvaluatorStopped(_)
+            ));
+            assert_eq!(result.relative_gap, (costs.len() == 2).then_some(1.0));
         }
     }
 
@@ -884,6 +953,7 @@ mod tests {
                         bad_evaluations += 1;
                         Ok(CandidateEvaluation {
                             budget_exhausted: false,
+                            unpriced_reason: None,
                             actual_cost: None,
                             rejected_queries: vec![RejectedQuerySubgraph::from_query_outputs(
                                 selected,
