@@ -419,6 +419,10 @@ fn accuracy_baseline(
     if output_queries.len() != graph.query_roots.len() {
         return Err("baseline output references do not match original query roots".into());
     }
+    let confidence_required = context
+        .entries
+        .iter()
+        .any(|entry| entry.requirements.accuracy.failure_probability.is_some());
     let dds_budgets = seed_dds_budgets(configured, context, &output_queries);
     let mut rank_requested = vec![false; graph.candidates.len()];
     let mut pending: Vec<_> = graph
@@ -563,7 +567,12 @@ fn accuracy_baseline(
                             crate::series_read(&root, context.data),
                             context.data,
                             &context.models,
-                        ).is_none_or(|guarantee| guarantee.spec.error.evaluate().is_none())
+                        ).is_none_or(|guarantee| {
+                            guarantee.spec.error.evaluate().is_none()
+                                || (confidence_required
+                                    && !guarantee.is_exact()
+                                    && guarantee.spec.failure_probability.evaluate().is_none())
+                        })
                     };
             let contract_risk = !context.models.plan_selection.ignore_accuracy_guarantees
                 && (unresolved_estimator_error || node.guarantee.as_ref().is_some_and(|guarantee| {
