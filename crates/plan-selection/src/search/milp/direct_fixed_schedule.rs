@@ -66,6 +66,7 @@ impl QueryScheduleRates {
                 .map(|q| 1000.0 / f64::from(q.interval_ms))
                 .collect(),
             materialized_subset_rates: Vec::new(),
+            general: None,
             compact_fixed: Some(FixedScheduleLattice {
                 queries,
                 weights: weights.into_iter().map(|w| w as usize).collect(),

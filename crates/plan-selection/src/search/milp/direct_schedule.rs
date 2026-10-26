@@ -16,6 +16,22 @@ pub(super) fn encode(
     divisor: f64,
     check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
 ) -> Result<Expression, CandidateSelectionError> {
+    if let Some(general) = &schedule.general {
+        return general_schedule::encode(
+            graph,
+            profile,
+            schedule,
+            general,
+            variables,
+            constraints,
+            active,
+            edges,
+            roots,
+            reach,
+            divisor,
+            check_deadline,
+        );
+    }
     if let Some(lattice) = &schedule.compact_fixed {
         return fixed_schedules::encode(
             graph,
@@ -211,6 +227,7 @@ mod tests {
             .unwrap()
         };
         QueryScheduleRates {
+            general: None,
             compact_fixed: None,
             per_query_rates: (0..queries.len()).map(|q| union(1 << q)).collect(),
             materialized_subset_rates: (0..1 << queries.len()).map(union).collect(),
@@ -262,6 +279,7 @@ mod tests {
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    per_request: false,
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
@@ -331,6 +349,7 @@ mod tests {
                 request_latency_seconds: 0.0,
                 request_cost: 0.0,
                 nodes: vec![NodeCostProfile {
+                    per_request: false,
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     execution_cost: 3.0,
@@ -385,6 +404,7 @@ mod tests {
             request_cost: 7.0,
             nodes: vec![
                 NodeCostProfile {
+                    per_request: false,
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     execution_cost: 10.0,
@@ -395,6 +415,7 @@ mod tests {
                     raw_retention: None,
                 },
                 NodeCostProfile {
+                    per_request: false,
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     execution_cost: 2.0,

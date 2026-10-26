@@ -1,6 +1,6 @@
 //! Exact objective encoding for certified query-time and ingestion profiles.
-//! Fixed evaluation schedules may be equal or use a bounded union-rate table;
-//! maintained and retained states carry separate standing resource charges.
+//! Equal schedules have a compact fast path; mixed recurrence/range demand
+//! uses exact evaluator atoms. Retained state carries separate standing charges.
 //! Profiles are supplied by physical costing; this module never infers prices
 //! from a logical template or treats accuracy as a monetary penalty.
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
@@ -8,9 +8,14 @@ use std::collections::BTreeMap;
 
 #[path = "direct_fixed_schedule.rs"]
 mod fixed_schedules;
+#[path = "general_schedule.rs"]
+mod general_schedule;
+#[path = "general_schedule_rates.rs"]
+mod general_schedule_rates;
 #[path = "direct_schedule.rs"]
 mod schedules;
-pub(crate) use fixed_schedules::{FixedQuerySchedule, FixedScheduleLattice};
+pub(crate) use fixed_schedules::FixedScheduleLattice;
+pub(crate) use general_schedule_rates::GeneralScheduleRates;
 
 use crate::search::candidates::graph::*;
 
@@ -28,6 +33,7 @@ const MINIMUM_NORMALIZED_LATENCY_TERM: f64 = 1e-6;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeCostProfile {
+    pub per_request: bool,
     pub execution_cost: f64,
     pub ingestion: bool,
     pub standing_cost_per_second: f64,
@@ -49,10 +55,11 @@ impl NodeCostProfile {
     }
 }
 
-/// Exact evaluator demand for each nonempty selected query subset. Only small
-/// heterogeneous domains are admitted; this is not a workload-plan product.
+/// Evaluator demand metadata. Production mixed schedules use general atoms;
+/// finite table/lattice encodings remain available for regression comparisons.
 #[derive(Debug, Clone)]
 pub(crate) struct QueryScheduleRates {
+    pub general: Option<GeneralScheduleRates>,
     pub per_query_rates: Vec<f64>,
     pub materialized_subset_rates: Vec<f64>,
     pub compact_fixed: Option<FixedScheduleLattice>,
@@ -81,6 +88,7 @@ impl DirectCostProfile {
             || !valid(self.request_cost)
             || self.nodes.iter().any(|n| {
                 !valid(n.execution_cost)
+                    || (n.per_request && (!n.materialized || n.ingestion))
                     || !valid(n.standing_cost_per_second)
                     || (n.ingestion && n.held_memory_cost_per_second != 0.0)
                     || !valid(n.compaction_seconds)
@@ -127,7 +135,16 @@ impl DirectCostProfile {
         }
         if let Some(schedule) = &self.schedules {
             let queries = graph.query_roots.len();
-            if let Some(lattice) = &schedule.compact_fixed {
+            if let Some(general) = &schedule.general {
+                general.validate(&schedule.per_query_rates, queries)?;
+                if schedule.compact_fixed.is_some()
+                    || !schedule.materialized_subset_rates.is_empty()
+                {
+                    return Err(CandidateSelectionError::UnsupportedDirectCost(
+                        "general demand requires one schedule representation".into(),
+                    ));
+                }
+            } else if let Some(lattice) = &schedule.compact_fixed {
                 lattice.validate(schedule, queries)?;
             } else {
                 if queries > 3 {
@@ -166,7 +183,7 @@ impl DirectCostProfile {
             if schedule
                 .per_query_rates
                 .iter()
-                .any(|rate| rate / total_rate < MINIMUM_QUERY_RATE_WEIGHT)
+                .any(|rate| *rate > 0.0 && rate / total_rate < MINIMUM_QUERY_RATE_WEIGHT)
             {
                 return Err(CandidateSelectionError::UnsupportedDirectCost(
                     "query-rate weights are below the supported weighted-lifetime numerical range"
@@ -212,6 +229,7 @@ impl DirectCostProfile {
                 schedule
                     .per_query_rates
                     .iter()
+                    .filter(|rate| **rate > 0.0)
                     .map(|rate| rate / total)
                     .fold(1.0, f64::min)
             });
@@ -277,6 +295,13 @@ impl DirectCostProfile {
             let Some(schedule) = &self.schedules else {
                 return self.query_rate;
             };
+            if let Some(general) = &schedule.general {
+                return if self.nodes[id].per_request {
+                    general.request_union_rate(reached.iter().map(|row| row[id]))
+                } else {
+                    general.union_rate(reached.iter().map(|row| row[id]))
+                };
+            }
             if let Some(lattice) = &schedule.compact_fixed {
                 return lattice.union_rate(reached.iter().map(|row| row[id]));
             }
@@ -335,7 +360,7 @@ impl DirectCostProfile {
                         .sum::<f64>()
                         / denominator
                 } else {
-                    0.0
+                    readers.iter().copied().fold(0.0, f64::max)
                 }
             };
             total += node.standing_cost_per_second
@@ -428,6 +453,9 @@ impl DirectCostProfile {
         let rates = self.schedules.as_ref().map_or_else(
             || vec![self.query_rate],
             |schedule| {
+                if let Some(general) = &schedule.general {
+                    return general.coefficient_rates();
+                }
                 if schedule.compact_fixed.is_some() {
                     return schedule.per_query_rates.clone();
                 }
@@ -863,6 +891,7 @@ mod tests {
             request_cost: 7.0,
             nodes: vec![
                 NodeCostProfile {
+                    per_request: false,
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
@@ -922,6 +951,7 @@ mod tests {
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    per_request: false,
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
@@ -970,6 +1000,7 @@ mod tests {
                 request_cost: 7.0,
                 nodes: vec![
                     NodeCostProfile {
+                        per_request: false,
                         ingestion: false,
                         standing_cost_per_second: 0.0,
                         execution_cost: materialized_build_cost,
@@ -1163,6 +1194,7 @@ mod tests {
         let (graph, mut profile) = ingestion_profile(true, 1.0);
         assert!((solve(&graph, &profile) - 29.4).abs() < 1e-6);
         profile.schedules = Some(QueryScheduleRates {
+            general: None,
             compact_fixed: None,
             per_query_rates: vec![1.0, 2.0],
             materialized_subset_rates: vec![0.0, 1.0, 2.0, 3.0],
@@ -1328,6 +1360,7 @@ mod tests {
         for (rates, union, expected) in [(vec![2.0, 2.0], 2.0, 74.4), (vec![1.0, 2.0], 3.0, 83.0)] {
             if rates[0] != rates[1] {
                 profile.schedules = Some(QueryScheduleRates {
+                    general: None,
                     compact_fixed: None,
                     per_query_rates: rates.clone(),
                     materialized_subset_rates: vec![0.0, rates[0], rates[1], union],
@@ -1459,6 +1492,7 @@ mod tests {
         for rates in [[1.0, 1.0], [1.0, 2.0]] {
             if rates[0] != rates[1] {
                 profile.schedules = Some(QueryScheduleRates {
+                    general: None,
                     compact_fixed: None,
                     per_query_rates: rates.to_vec(),
                     materialized_subset_rates: vec![0.0, rates[0], rates[1], rates[0] + rates[1]],

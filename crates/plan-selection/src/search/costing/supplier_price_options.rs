@@ -17,12 +17,20 @@ struct PriceClass<'a> {
     work: WorkBounds,
     workers: Option<u64>,
     compaction: f64,
-    bindings: Vec<SupplierPriceBinding>,
+    bindings: Vec<Vec<SupplierPriceBinding>>,
+    ancestor_work: std::collections::BTreeMap<usize, u64>,
+    sketch_ids: std::collections::BTreeSet<usize>,
+    sketch_sources: std::collections::BTreeMap<usize, Option<String>>,
+    range_span_ms: Option<u64>,
 }
 
 impl PriceClass<'_> {
     fn same_interface(&self, other: &Self) -> bool {
-        same_price(&self.priced, &other.priced)
+        self.ancestor_work == other.ancestor_work
+            && self.sketch_ids == other.sketch_ids
+            && self.sketch_sources == other.sketch_sources
+            && self.range_span_ms == other.range_span_ms
+            && same_price(&self.priced, &other.priced)
             && self.lookback == other.lookback
             && self.sketches == other.sketches
             && self.raw_source == other.raw_source
@@ -36,6 +44,45 @@ impl PriceClass<'_> {
 /// Exact scan-lookback equality remains required: max-width sharing needs an
 /// explicit selected-consumer witness. Cyclic catalogs use bounded local
 /// interface propagation; selected physical graphs must still be acyclic.
+struct InputTuples {
+    choices: Vec<Vec<SupplierPriceBinding>>,
+    indices: Vec<usize>,
+    done: bool,
+}
+impl InputTuples {
+    fn new(choices: Vec<Vec<SupplierPriceBinding>>) -> Self {
+        Self {
+            indices: vec![0; choices.len()],
+            done: choices.iter().any(Vec::is_empty),
+            choices,
+        }
+    }
+}
+impl Iterator for InputTuples {
+    type Item = Vec<SupplierPriceBinding>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let tuple = self
+            .choices
+            .iter()
+            .zip(&self.indices)
+            .map(|(choices, index)| choices[*index])
+            .collect();
+        self.done = true;
+        for position in (0..self.indices.len()).rev() {
+            self.indices[position] += 1;
+            if self.indices[position] < self.choices[position].len() {
+                self.done = false;
+                break;
+            }
+            self.indices[position] = 0;
+        }
+        Some(tuple)
+    }
+}
+
 pub(in crate::search) fn extract_price_options(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
@@ -104,6 +151,7 @@ pub(in crate::search) fn extract_price_options(
     let mut compactions = vec![0.0; count];
     let mut classes: Vec<Vec<PriceClass<'_>>> = vec![Vec::new(); count];
     let mut total = 0;
+    let mut total_bindings = 0usize;
     // Every legal unary DAG path has at most N candidates. N monotone passes
     // therefore cover every supported simple path even in a cyclic catalog.
     // Walk-derived bindings are harmless: the solver enforces original-node
@@ -115,110 +163,275 @@ pub(in crate::search) fn extract_price_options(
             if nodes[id].is_none() {
                 continue;
             }
-            let mut supplier_counts = Vec::new();
-            if let Some(input) = configured.inventory.graph.candidates[id]
-                .producer_requirements
-                .first()
-            {
+            let mut inputs = Vec::new();
+            for input in &configured.inventory.graph.candidates[id].producer_requirements {
+                let mut choices = Vec::new();
                 for producer in &input.compatible_producers {
                     check_deadline(context.deadline)?;
-                    if producer.0 != id {
-                        supplier_counts.push((Some(*producer), classes[producer.0].len()));
+                    if producer.0 == id {
+                        continue;
+                    }
+                    for price_option in 0..classes[producer.0].len() {
+                        choices.push(SupplierPriceBinding {
+                            producer: *producer,
+                            price_option,
+                        });
                     }
                 }
-            } else {
-                supplier_counts.push((None, 1));
+                inputs.push(choices);
             }
-            // Stream local bindings instead of allocating a potentially enormous
-            // supplier-by-option product before the deadline can be checked.
-            let inputs = supplier_counts.into_iter().flat_map(|(producer, count)| {
-                (0..count).map(move |price_option| {
-                    producer.map(|producer| SupplierPriceBinding {
-                        producer,
-                        price_option,
-                    })
-                })
-            });
-            for binding in inputs {
-                for &lookback in &all_lookbacks[id] {
-                    check_deadline(context.deadline)?;
-                    if let Some(binding) = binding {
-                        let supplier = binding.producer.0;
-                        let source = &classes[supplier][binding.price_option];
-                        cache[supplier] = Some(source.priced.clone());
-                        lookbacks[supplier] = source.lookback;
-                        sketch_counts[supplier] = source.sketches;
-                        raw_sources[supplier] = source.raw_source.clone();
-                        closure_work[supplier] = source.work;
-                        worker_counts[supplier] = source.workers;
-                        compactions[supplier] = source.compaction;
-                    }
-                    lookbacks[id] = lookback;
-                    cache[id] = None;
-                    visited[id] = false;
-                    suppliers[id].clear();
-                    sketch_counts[id] = 0;
-                    raw_sources[id] = None;
-                    closure_work[id] = WorkBounds::default();
-                    worker_counts[id] = None;
-                    compactions[id] = 0.0;
-                    price(
-                        id,
-                        configured,
-                        context,
-                        &nodes,
-                        &lookbacks,
-                        &mut cache,
-                        &mut visited,
-                        &mut visiting,
-                        &mut suppliers,
-                        &mut sketch_counts,
-                        &mut raw_sources,
-                        &mut closure_work,
-                        &mut worker_counts,
-                        &mut compactions,
-                        delta,
-                        binding.map(|binding| binding.producer),
-                    )?;
-                    let priced = cache[id].take();
-                    if let Some(binding) = binding {
-                        cache[binding.producer.0] = None;
-                    }
-                    let Some(priced) = priced else { continue };
-                    let candidate = PriceClass {
-                        priced,
-                        lookback,
-                        sketches: sketch_counts[id],
-                        raw_source: raw_sources[id].clone(),
-                        // Query-time closure work never determines an ingestion
-                        // worker count. Keeping it would distinguish every traversal
-                        // of an identity cycle despite identical local interfaces.
-                        work: if nodes[id].as_ref().unwrap().output_state.timing
-                            == ExecutionTiming::IngestionTime
-                        {
-                            closure_work[id]
-                        } else {
-                            WorkBounds::default()
-                        },
-                        workers: worker_counts[id],
-                        compaction: compactions[id],
-                        bindings: binding.into_iter().collect(),
-                    };
-                    if let Some(existing) = classes[id]
-                        .iter_mut()
-                        .find(|known| known.same_interface(&candidate))
-                    {
-                        for binding in candidate.bindings {
-                            if !existing.bindings.contains(&binding) {
-                                existing.bindings.push(binding);
+            let node = nodes[id].as_ref().unwrap();
+            let spans: Vec<Option<u64>> = if matches!(
+                node.payload,
+                asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { .. })
+            ) {
+                let mut spans: Vec<_> = context
+                    .entries
+                    .iter()
+                    .map(|entry| Some(entry.range_evaluation.map_or(0, |range| range.span_ms)))
+                    .collect();
+                spans.sort();
+                spans.dedup();
+                spans
+            } else {
+                vec![None]
+            };
+            for binding in InputTuples::new(inputs) {
+                for range_span_ms in &spans {
+                    for &lookback in &all_lookbacks[id] {
+                        check_deadline(context.deadline)?;
+                        let mut selected_sources = std::collections::BTreeMap::new();
+                        let mut ancestor_work = std::collections::BTreeMap::new();
+                        let mut sketch_ids = std::collections::BTreeSet::new();
+                        let mut sketch_sources = std::collections::BTreeMap::new();
+                        let mut compatible = true;
+                        for binding in &binding {
+                            if selected_sources
+                                .insert(binding.producer.0, binding.price_option)
+                                .is_some_and(|prior| prior != binding.price_option)
+                            {
+                                compatible = false;
+                                break;
+                            }
+                            let source = &classes[binding.producer.0][binding.price_option];
+                            for (ancestor, work) in &source.ancestor_work {
+                                if ancestor_work
+                                    .insert(*ancestor, *work)
+                                    .is_some_and(|prior| prior != *work)
+                                {
+                                    compatible = false;
+                                }
+                            }
+                            sketch_ids.extend(source.sketch_ids.iter().copied());
+                            for (sketch, proof) in &source.sketch_sources {
+                                if sketch_sources
+                                    .insert(*sketch, proof.clone())
+                                    .is_some_and(|prior| prior != *proof)
+                                {
+                                    compatible = false;
+                                }
                             }
                         }
-                    } else {
-                        total += 1;
-                        if total > MAXIMUM_PRICE_OPTIONS {
-                            return Err(DirectProfileError::Unsupported(format!("local pricing domain exceeds {MAXIMUM_PRICE_OPTIONS} interface options")));
+                        if !compatible || ancestor_work.contains_key(&id) {
+                            continue;
                         }
-                        classes[id].push(candidate);
+                        let upstream_sketches = sketch_ids.len();
+                        if matches!(
+                            &node.payload,
+                            asap_types::ir::Operator::ASAP(
+                                ASAPOp::SummaryAgg {
+                                    family: FieldDataType::Sketch(..),
+                                    ..
+                                } | ASAPOp::PaneChain {
+                                    family: FieldDataType::Sketch(..),
+                                    ..
+                                }
+                            )
+                        ) {
+                            sketch_ids.insert(id);
+                            sketch_sources.insert(
+                                id,
+                                binding.first().and_then(|input| {
+                                    classes[input.producer.0][input.price_option]
+                                        .raw_source
+                                        .clone()
+                                }),
+                            );
+                        }
+                        if !sketch_ids.is_empty() {
+                            let Some(delta) = delta else { continue };
+                            let divided = delta / sketch_ids.len() as f64;
+                            if !sketch_ids.iter().all(|sketch| {
+                                let template =
+                                    configured.inventory.templates[*sketch].as_ref().unwrap();
+                                if requires_source_sizing(template) {
+                                    let Some(source) =
+                                        sketch_sources.get(sketch).and_then(|s| s.as_ref())
+                                    else {
+                                        return false;
+                                    };
+                                    let Some(bound) = context
+                                        .data
+                                        .sources
+                                        .get(source)
+                                        .and_then(|facts| facts.max_distinct_per_evaluation)
+                                    else {
+                                        return false;
+                                    };
+                                    let Some(
+                                        ASAPOp::SummaryAgg {
+                                            family: FieldDataType::Sketch(kind, _),
+                                            ..
+                                        }
+                                        | ASAPOp::PaneChain {
+                                            family: FieldDataType::Sketch(kind, _),
+                                            ..
+                                        },
+                                    ) = template.asap()
+                                    else {
+                                        return false;
+                                    };
+                                    let SketchParams::Hll {
+                                        precision,
+                                        relative_error,
+                                    } = kind.params()
+                                    else {
+                                        return false;
+                                    };
+                                    hll_size_certified(*precision, *relative_error, divided, bound)
+                                } else {
+                                    stable_size(template, Some(divided))
+                                }
+                            }) {
+                                continue;
+                            }
+                        }
+                        let mut upstream_work = WorkBounds::default();
+                        for work in ancestor_work.values() {
+                            upstream_work.minimum = (upstream_work.minimum + f64::from_bits(*work))
+                                .next_down()
+                                .max(0.0);
+                            upstream_work.maximum =
+                                (upstream_work.maximum + f64::from_bits(*work)).next_up();
+                        }
+                        for binding in &binding {
+                            let supplier = binding.producer.0;
+                            let source = &classes[supplier][binding.price_option];
+                            cache[supplier] = Some(source.priced.clone());
+                            lookbacks[supplier] = source.lookback;
+                            sketch_counts[supplier] = source.sketches;
+                            raw_sources[supplier] = source.raw_source.clone();
+                            closure_work[supplier] = source.work;
+                            worker_counts[supplier] = source.workers;
+                            compactions[supplier] = source.compaction;
+                        }
+                        lookbacks[id] = lookback;
+                        cache[id] = None;
+                        visited[id] = false;
+                        suppliers[id].clear();
+                        sketch_counts[id] = 0;
+                        raw_sources[id] = None;
+                        closure_work[id] = WorkBounds::default();
+                        worker_counts[id] = None;
+                        compactions[id] = 0.0;
+                        let input_context = PriceInputs {
+                            suppliers: binding.iter().map(|binding| binding.producer).collect(),
+                            upstream_work,
+                            upstream_sketches,
+                            range_span_ms: *range_span_ms,
+                        };
+                        price(
+                            id,
+                            configured,
+                            context,
+                            &nodes,
+                            &lookbacks,
+                            &mut cache,
+                            &mut visited,
+                            &mut visiting,
+                            &mut suppliers,
+                            &mut sketch_counts,
+                            &mut raw_sources,
+                            &mut closure_work,
+                            &mut worker_counts,
+                            &mut compactions,
+                            delta,
+                            Some(&input_context),
+                        )?;
+                        let priced = cache[id].take();
+                        for binding in &binding {
+                            cache[binding.producer.0] = None;
+                        }
+                        let Some(priced) = priced else { continue };
+                        if matches!(
+                            &node.payload,
+                            asap_types::ir::Operator::ASAP(
+                                ASAPOp::SummaryAgg {
+                                    family: FieldDataType::Sketch(..),
+                                    ..
+                                } | ASAPOp::PaneChain {
+                                    family: FieldDataType::Sketch(..),
+                                    ..
+                                }
+                            )
+                        ) {
+                            sketch_ids.insert(id);
+                        }
+                        if node.output_state.timing == ExecutionTiming::IngestionTime {
+                            ancestor_work.insert(id, priced.work_ms.to_bits());
+                        } else {
+                            ancestor_work.clear();
+                        }
+                        let candidate = PriceClass {
+                            priced,
+                            lookback,
+                            sketches: sketch_counts[id],
+                            raw_source: raw_sources[id].clone(),
+                            // Query-time closure work never determines an ingestion
+                            // worker count. Keeping it would distinguish every traversal
+                            // of an identity cycle despite identical local interfaces.
+                            work: if nodes[id].as_ref().unwrap().output_state.timing
+                                == ExecutionTiming::IngestionTime
+                            {
+                                closure_work[id]
+                            } else {
+                                WorkBounds::default()
+                            },
+                            workers: worker_counts[id],
+                            compaction: compactions[id],
+                            bindings: vec![binding.clone()],
+                            ancestor_work,
+                            sketch_ids,
+                            sketch_sources,
+                            range_span_ms: *range_span_ms,
+                        };
+                        if let Some(existing) = classes[id]
+                            .iter_mut()
+                            .find(|known| known.same_interface(&candidate))
+                        {
+                            for binding in candidate.bindings {
+                                if !existing.bindings.contains(&binding) {
+                                    total_bindings += 1;
+                                    if total_bindings > 200_000 {
+                                        return Err(DirectProfileError::Unsupported("local pricing domain exceeds 200000 correlated input tuples".into()));
+                                    }
+                                    existing.bindings.push(binding);
+                                }
+                            }
+                        } else {
+                            total_bindings += candidate.bindings.len();
+                            if total_bindings > 200_000 {
+                                return Err(DirectProfileError::Unsupported(
+                                    "local pricing domain exceeds 200000 correlated input tuples"
+                                        .into(),
+                                ));
+                            }
+                            total += 1;
+                            if total > MAXIMUM_PRICE_OPTIONS {
+                                return Err(DirectProfileError::Unsupported(format!("local pricing domain exceeds {MAXIMUM_PRICE_OPTIONS} interface options")));
+                            }
+                            classes[id].push(candidate);
+                        }
                     }
                 }
             }
@@ -241,7 +454,8 @@ pub(in crate::search) fn extract_price_options(
                             class.compaction,
                             context,
                         )?,
-                        compatible_suppliers: class.bindings.clone(),
+                        compatible_input_tuples: class.bindings.clone(),
+                        required_range_span_ms: class.range_span_ms,
                     })
                 })
                 .collect::<Result<Vec<_>, DirectProfileError>>()
@@ -253,6 +467,11 @@ pub(in crate::search) fn extract_price_options(
     };
     let request_ms = settings.measured_operation_costs.ns_per_evaluation * 1e-6;
     Ok(Some(JointPriceProfile {
+        query_range_spans_ms: context
+            .entries
+            .iter()
+            .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
+            .collect(),
         schedules,
         query_rate: rate,
         request_latency_seconds: request_ms / 1000.0,

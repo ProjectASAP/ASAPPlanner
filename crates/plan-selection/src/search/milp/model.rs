@@ -812,6 +812,19 @@ pub(super) fn solve_with_objective(
         }
     }
     if let Some(projection) = projection {
+        projection.constrain_input_tuples(
+            &mut variables,
+            &candidate_selected,
+            &connections,
+            &mut constraints,
+            check_deadline,
+        )?;
+        projection.constrain_reader_contexts(
+            &candidate_selected,
+            &objective_reach,
+            &mut constraints,
+            check_deadline,
+        )?;
         projection.constrain_observations(
             &candidate_selected,
             &connections,

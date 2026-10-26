@@ -12,7 +12,8 @@ pub(crate) struct SupplierPriceBinding {
 #[derive(Debug, Clone)]
 pub(crate) struct CandidatePriceOption {
     pub profile: NodeCostProfile,
-    pub compatible_suppliers: Vec<SupplierPriceBinding>,
+    pub compatible_input_tuples: Vec<Vec<SupplierPriceBinding>>,
+    pub required_range_span_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,12 +23,13 @@ pub(crate) struct JointPriceProfile {
     pub request_latency_seconds: f64,
     pub request_cost: f64,
     pub candidates: Vec<Vec<CandidatePriceOption>>,
+    pub query_range_spans_ms: Vec<u64>,
 }
 
 use super::direct_cost::DirectCostProfile;
 use super::model::{CandidateProposal, CandidateSolveMetrics, ObservedAssignment};
 use crate::search::candidates::graph::*;
-use good_lp::{constraint, Constraint, Expression, Variable};
+use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 
 /// Internal option nodes share an original physical identity. At most one may
 /// activate, so two readers cannot obtain incompatible views of one producer.
@@ -36,6 +38,9 @@ pub(super) struct PriceOptionProjection<'a> {
     origins: Vec<PhysicalCandidateId>,
     options: Vec<Vec<PhysicalCandidateId>>,
     observations: &'a [ObservedAssignment],
+    input_tuples: Vec<(PhysicalCandidateId, Vec<Vec<PhysicalCandidateId>>)>,
+    range_contexts: Vec<(PhysicalCandidateId, u64)>,
+    query_spans: &'a [u64],
 }
 
 impl PriceOptionProjection<'_> {
@@ -79,6 +84,77 @@ impl PriceOptionProjection<'_> {
                 constraints.push(constraint!(sum(*candidate) <= sum(*required_candidate)));
             }
         }
+    }
+
+    pub(super) fn constrain_input_tuples(
+        &self,
+        variables: &mut ProblemVariables,
+        active: &[Variable],
+        edges: &[(ProducerConsumerConnection, Variable)],
+        constraints: &mut Vec<Constraint>,
+        check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
+    ) -> Result<(), CandidateSelectionError> {
+        let mut by_consumer = std::collections::BTreeMap::<_, Vec<_>>::new();
+        for (edge, selected) in edges {
+            check_deadline()?;
+            by_consumer
+                .entry(edge.consumer)
+                .or_default()
+                .push((edge, selected));
+        }
+        for (consumer, tuples) in &self.input_tuples {
+            check_deadline()?;
+            let mut selectors = Vec::new();
+            let mut support = std::collections::BTreeMap::<_, Expression>::new();
+            for tuple in tuples {
+                check_deadline()?;
+                let selector = variables.add(variable().binary());
+                selectors.push(selector);
+                for (position, producer) in tuple.iter().enumerate() {
+                    *support
+                        .entry((position, *producer))
+                        .or_insert_with(|| Expression::from(0.0)) += selector;
+                }
+            }
+            constraints.push(constraint!(
+                selectors.iter().copied().sum::<Expression>() == active[consumer.0]
+            ));
+            for (edge, selected) in by_consumer.get(consumer).into_iter().flatten() {
+                check_deadline()?;
+                let matches = support
+                    .get(&(edge.requirement, edge.producer))
+                    .cloned()
+                    .unwrap_or_else(|| Expression::from(0.0));
+                constraints.push(constraint!(**selected == matches));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn constrain_reader_contexts(
+        &self,
+        active: &[Variable],
+        reach: &[Vec<Option<Variable>>],
+        constraints: &mut Vec<Constraint>,
+        check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
+    ) -> Result<(), CandidateSelectionError> {
+        for (candidate, span) in &self.range_contexts {
+            check_deadline()?;
+            let mut witnesses = Expression::from(0.0);
+            for (query, row) in reach.iter().enumerate() {
+                check_deadline()?;
+                if let Some(reached) = row[candidate.0] {
+                    if self.query_spans[query] > *span {
+                        constraints.push(constraint!(reached == 0));
+                    }
+                    if self.query_spans[query] == *span {
+                        witnesses += reached;
+                    }
+                }
+            }
+            constraints.push(constraint!(active[candidate.0] <= witnesses));
+        }
+        Ok(())
     }
 
     /// A rejected physical DAG remains rejected across all of its price-option
@@ -163,6 +239,9 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
         origins: Vec::new(),
         options: Vec::new(),
         observations,
+        input_tuples: Vec::new(),
+        range_contexts: Vec::new(),
+        query_spans: &profile.query_range_spans_ms,
     };
     let mut expanded = CandidateDependencyGraph::default();
     let mut nodes = Vec::new();
@@ -186,37 +265,64 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
             ));
         }
         let required = &graph.candidates[id].producer_requirements;
-        if !options.is_empty() && required.len() > 1 {
-            return Err(invalid(
-                "joint unary price profile has multiple required inputs",
-            ));
-        }
         for (index, option) in options.iter().enumerate() {
-            if required.is_empty() && !option.compatible_suppliers.is_empty() {
-                return Err(invalid("source price option has supplier bindings"));
+            let consumer = projection.options[id][index];
+            if let Some(span) = option.required_range_span_ms {
+                if profile.query_range_spans_ms.len() != graph.query_roots.len() {
+                    return Err(invalid("range contexts do not match query roots"));
+                }
+                projection.range_contexts.push((consumer, span));
             }
-            if let Some(input) = required.first() {
-                let mut suppliers = Vec::new();
-                for binding in &option.compatible_suppliers {
-                    if !input.compatible_producers.contains(&binding.producer) {
-                        return Err(invalid("price option references incompatible supplier"));
+            let mut tuples = Vec::new();
+            for tuple in &option.compatible_input_tuples {
+                if tuple.len() != required.len() {
+                    return Err(invalid("price input tuple arity mismatch"));
+                }
+                let mut mapped = Vec::new();
+                for (position, binding) in tuple.iter().enumerate() {
+                    if !required[position]
+                        .compatible_producers
+                        .contains(&binding.producer)
+                    {
+                        return Err(invalid("price tuple references incompatible supplier"));
                     }
-                    let supplier = projection
-                        .options
-                        .get(binding.producer.0)
-                        .and_then(|options| options.get(binding.price_option))
-                        .ok_or_else(|| {
-                            invalid("price option references missing supplier option")
-                        })?;
-                    if !suppliers.contains(supplier) {
-                        suppliers.push(*supplier);
+                    mapped.push(
+                        *projection
+                            .options
+                            .get(binding.producer.0)
+                            .and_then(|options| options.get(binding.price_option))
+                            .ok_or_else(|| {
+                                invalid("price tuple references missing supplier option")
+                            })?,
+                    );
+                }
+                if !tuples.contains(&mapped) {
+                    tuples.push(mapped);
+                }
+            }
+            for position in 0..required.len() {
+                let mut suppliers = Vec::new();
+                for tuple in &tuples {
+                    if !suppliers.contains(&tuple[position]) {
+                        suppliers.push(tuple[position]);
                     }
                 }
-                expanded.candidates[projection.options[id][index].0]
+                expanded.candidates[consumer.0]
                     .producer_requirements
                     .push(ProducerRequirement {
                         compatible_producers: suppliers.into(),
                     });
+            }
+            // Unary choices and single tuples are already exact under the
+            // existing one-producer-per-input constraints; no extra binaries.
+            let cartesian_size = expanded.candidates[consumer.0]
+                .producer_requirements
+                .iter()
+                .try_fold(1usize, |size, input| {
+                    size.checked_mul(input.compatible_producers.len())
+                });
+            if required.len() > 1 && tuples.len() > 1 && cartesian_size != Some(tuples.len()) {
+                projection.input_tuples.push((consumer, tuples));
             }
         }
     }
@@ -390,11 +496,14 @@ mod tests {
                 materialized,
                 ..Default::default()
             },
-            compatible_suppliers: producer
+            required_range_span_ms: None,
+            compatible_input_tuples: producer
                 .into_iter()
-                .map(|(id, price_option)| SupplierPriceBinding {
-                    producer: PhysicalCandidateId(id),
-                    price_option,
+                .map(|(id, price_option)| {
+                    vec![SupplierPriceBinding {
+                        producer: PhysicalCandidateId(id),
+                        price_option,
+                    }]
                 })
                 .collect(),
         }
@@ -419,6 +528,7 @@ mod tests {
             ..Default::default()
         };
         let profile = JointPriceProfile {
+            query_range_spans_ms: vec![],
             schedules: None,
             query_rate: 1.0,
             request_latency_seconds: 0.0,
@@ -535,5 +645,55 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(proposal.direct_modeled_cost, Some(106.0));
+    }
+    // Tuple correlation forbids mixing the cheap first input from one tuple
+    // with the cheap second input of another tuple.
+    #[test]
+    fn correlated_inputs_cannot_form_an_unpriced_cartesian_combination() {
+        let mut consumer = candidate(&[0, 1]);
+        consumer
+            .producer_requirements
+            .push(consumer.producer_requirements[0].clone());
+        let graph = CandidateDependencyGraph {
+            candidates: vec![candidate(&[]), candidate(&[]), consumer],
+            query_roots: vec![QueryRootCandidates {
+                compatible_candidates: vec![PhysicalCandidateId(2)],
+            }],
+            ..Default::default()
+        };
+        let binding = |id| SupplierPriceBinding {
+            producer: PhysicalCandidateId(id),
+            price_option: 0,
+        };
+        let mut reader = option(1.0, false, None);
+        reader.compatible_input_tuples =
+            vec![vec![binding(0), binding(1)], vec![binding(1), binding(0)]];
+        let profile = JointPriceProfile {
+            candidates: vec![
+                vec![option(0.0, true, None)],
+                vec![option(10.0, true, None)],
+                vec![reader],
+            ],
+            schedules: None,
+            query_rate: 1.0,
+            request_latency_seconds: 0.0,
+            request_cost: 0.0,
+            query_range_spans_ms: vec![0],
+        };
+        let solved = solve_joint_price_proposal_with_metrics(
+            &graph,
+            &[],
+            None,
+            &mut Default::default(),
+            &profile,
+        )
+        .unwrap()
+        .unwrap();
+        assert!((solved.direct_modeled_cost.unwrap() - 11.0).abs() < 1e-9);
+        assert_eq!(solved.selected.connections.len(), 2);
+        assert_ne!(
+            solved.selected.connections[0].producer,
+            solved.selected.connections[1].producer
+        );
     }
 }

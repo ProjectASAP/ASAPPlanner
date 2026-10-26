@@ -292,3 +292,59 @@ fn independent_kll_cost(
     let result = asap_plan_selection::select_plan(&[plan], entries, data, models).unwrap();
     result.costs[&result.selected].cost_per_second.unwrap()
 }
+
+// Exercise multi-input operators through the production route under more than
+// three heterogeneous query schedules, not just the local pricing kernel.
+#[test]
+fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
+    use asap_types::workload::{DemandEstimate, Rate};
+    let accuracy = AccuracyTarget::exact();
+    let queries = ["m + n", "m + m", "m or n", "m * n", "m - n"];
+    let roots = queries
+        .iter()
+        .enumerate()
+        .map(|(id, query)| {
+            let root = lower_promql(query, accuracy.clone()).unwrap();
+            (
+                id,
+                QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap()),
+            )
+        })
+        .collect();
+    let mut entries: Vec<_> = [59_000, 61_000, 67_000, 71_000, 73_000]
+        .into_iter()
+        .map(|interval| entry(&accuracy, interval))
+        .collect();
+    entries[3].recurrence =
+        QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
+            expected_rate: Rate(0.137),
+            observed_at: None,
+            valid_for: None,
+        }));
+    entries[4].recurrence = QueryRecurrence::Unknown;
+    let data: DataWorkload = serde_json::from_value(serde_json::json!({
+        "arrival":{"ingesting":{"rows_per_second":16.0}},
+        "sources":{"m":{"rows_held":80,"series_count":8,"sample_interval":1000},
+                   "n":{"rows_held":80,"series_count":8,"sample_interval":1000}}
+    }))
+    .unwrap();
+    let run = production(roots, &entries, &data);
+    let selection = run
+        .stage3_plan_selection
+        .as_ref()
+        .expect("validated binary workload");
+    let report = selection.search.candidate_connections.as_ref().unwrap();
+    println!("mixed binary workload report={report:?}");
+    assert!(
+        report.joint_price_solve_calls > 0 && report.direct_cost_validated_plans > 0,
+        "{report:?}"
+    );
+    let accepted = &selection.accepted[&selection.selected];
+    assert_eq!(accepted.len(), queries.len());
+    assert!(accepted
+        .iter()
+        .all(|item| !item.accepted_regardless_of_guarantee));
+    assert!(selection.costs[&selection.selected]
+        .cost_per_second
+        .is_some_and(|cost| cost.is_finite() && cost >= 0.0));
+}
