@@ -17,7 +17,7 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_integration_tests::planning::logical_candidates;
+use asap_integration_tests::planning::explicit_local_candidates;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::summary_coverage::CoverageError;
@@ -241,16 +241,17 @@ fn rolled_up(coarse: &OperatorNode) -> Rc<OperatorNode> {
     .unwrap()
 }
 
-/// Every sketch candidate of `sql` (one build by `job`), each with its
+/// Every local sketch rule for `sql` (one build by `job`), each with its
 /// rollup from `(region, job)`: the family, the direct root and the
-/// rolled-up root.
+/// rolled-up root. Explicit rule fixtures keep this execution test independent
+/// of the search archive and its tighter, potentially much larger capacities.
 async fn direct_and_rolled_up(
     sql: &str,
     accuracy: AccuracyTarget,
 ) -> Vec<(SketchAlgorithm, Rc<OperatorNode>, Rc<OperatorNode>)> {
     let root = lower_sql(sql, &catalog(), accuracy.clone()).await.unwrap();
     let mut out = Vec::new();
-    for candidate in logical_candidates(root, accuracy) {
+    for candidate in explicit_local_candidates(root) {
         let Some(build) = build(&candidate) else {
             continue;
         };
@@ -355,7 +356,7 @@ async fn invalid_rollups_are_rejected() {
     )
     .await
     .unwrap();
-    let candidate = logical_candidates(root, accuracy)
+    let candidate = explicit_local_candidates(root)
         .into_iter()
         .find(|candidate| {
             build(candidate).is_some_and(|build| {
