@@ -171,6 +171,8 @@ pub(crate) struct CandidateSolveMetrics {
     pub solver_seconds: f64,
     pub solve_calls: usize,
     pub direct_cost_solve_calls: usize,
+    /// Direct solves jointly selecting supplier-dependent pricing options.
+    pub joint_price_solve_calls: usize,
     pub direct_cost_validated_plans: usize,
     pub direct_cost_best_validated_cost: Option<f64>,
     pub direct_cost_fallback_reasons: Vec<String>,
@@ -202,7 +204,7 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
     remaining_seconds: Option<f64>,
     metrics: &mut CandidateSolveMetrics,
 ) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
-    solve_with_objective(graph, observations, remaining_seconds, metrics, None)
+    solve_with_objective(graph, observations, remaining_seconds, metrics, None, None)
 }
 
 pub(crate) fn solve_direct_cost_proposal_with_metrics(
@@ -218,35 +220,14 @@ pub(crate) fn solve_direct_cost_proposal_with_metrics(
         remaining_seconds,
         metrics,
         Some(profile),
+        None,
     )
 }
 
-fn solve_with_objective(
+pub(super) fn validate_observations(
     graph: &CandidateDependencyGraph,
     observations: &[ObservedAssignment],
-    remaining_seconds: Option<f64>,
-    metrics: &mut CandidateSolveMetrics,
-    direct_profile: Option<&super::direct_cost::DirectCostProfile>,
-) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
-    let started = std::time::Instant::now();
-    graph.validate()?;
-    if let Some(profile) = direct_profile {
-        profile.validate(graph)?;
-    }
-    if remaining_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds <= 0.0) {
-        return Err(CandidateSelectionError::Solver(
-            "no positive solver time remains".into(),
-        ));
-    }
-    let check_deadline = || {
-        if remaining_seconds.is_some_and(|seconds| started.elapsed().as_secs_f64() >= seconds) {
-            Err(CandidateSelectionError::Solver(
-                "time budget exhausted constructing model".into(),
-            ))
-        } else {
-            Ok(())
-        }
-    };
+) -> Result<(), CandidateSelectionError> {
     for observation in observations {
         validate_selected_graph(graph, &observation.selected)
             .map_err(CandidateSelectionError::InvalidGraph)?;
@@ -269,6 +250,37 @@ fn solve_with_objective(
             ));
         }
     }
+    Ok(())
+}
+
+pub(super) fn solve_with_objective(
+    graph: &CandidateDependencyGraph,
+    observations: &[ObservedAssignment],
+    remaining_seconds: Option<f64>,
+    metrics: &mut CandidateSolveMetrics,
+    direct_profile: Option<&super::direct_cost::DirectCostProfile>,
+    projection: Option<&super::direct_price_options::PriceOptionProjection<'_>>,
+) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
+    let started = std::time::Instant::now();
+    graph.validate()?;
+    if let Some(profile) = direct_profile {
+        profile.validate(graph)?;
+    }
+    if remaining_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds <= 0.0) {
+        return Err(CandidateSelectionError::Solver(
+            "no positive solver time remains".into(),
+        ));
+    }
+    let check_deadline = || {
+        if remaining_seconds.is_some_and(|seconds| started.elapsed().as_secs_f64() >= seconds) {
+            Err(CandidateSelectionError::Solver(
+                "time budget exhausted constructing model".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    validate_observations(graph, observations)?;
     if graph.query_roots.is_empty() {
         if observations
             .iter()
@@ -332,6 +344,9 @@ fn solve_with_objective(
     let mut root_assignments = Vec::new();
     let mut constraints = Vec::new();
     let mut support = vec![Expression::from(0.0); count];
+    if let Some(projection) = projection {
+        projection.constrain_activation(&candidate_selected, &mut constraints);
+    }
 
     for (consumer, candidate) in graph.candidates.iter().enumerate() {
         check_deadline()?;
@@ -795,6 +810,14 @@ fn solve_with_objective(
             )),
             None => constraints.push(constraint!(mismatch >= 1.0)),
         }
+    }
+    if let Some(projection) = projection {
+        projection.constrain_observations(
+            &candidate_selected,
+            &connections,
+            &root_assignments,
+            &mut constraints,
+        );
     }
     if warm_start.is_some() && variables.initial_solution_len() != variables.len() {
         return Err(CandidateSelectionError::Solver(

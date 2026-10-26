@@ -105,6 +105,10 @@ fn check(
         selection.costs[&selection.selected].cost_per_second
     );
     assert!(
+        report.joint_price_solve_calls > 0,
+        "joint supplier prices were not solved: {report:?}"
+    );
+    assert!(
         report.direct_cost_validated_plans > 0,
         "no directly priced validated plan: {report:?}"
     );

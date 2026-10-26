@@ -1101,6 +1101,9 @@ pub struct CandidateConnectionReport {
     /// Restricted query-time proposals priced completely inside the MILP.
     #[serde(default)]
     pub direct_cost_solve_calls: usize,
+    /// Direct solves jointly selecting supplier-dependent pricing options.
+    #[serde(default)]
+    pub joint_price_solve_calls: usize,
     /// Feasible direct proposals whose objective agrees with the evaluator.
     #[serde(default)]
     pub direct_cost_validated_plans: usize,

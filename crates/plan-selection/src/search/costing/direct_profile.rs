@@ -1,10 +1,9 @@
-//! Exact local profiles for query-time plans and fixed-worker maintained panes.
+//! Local cost certification shared by fixed and supplier-dependent profiles.
 //!
-//! Each accepted input is priced from its actual recursively certified supplier.
-//! Different priced interfaces are excluded from this proposal, not the full
-//! catalog. No original-template child is used as workload statistics evidence.
-//! Ingestion support is limited to fixed-retention pane chains with certified
-//! unary input closures whose complete range certifies one worker-count bucket.
+//! Price each operation from its actual supplier output and state configuration.
+//! The fixed-profile adapter admits one interface; supplier_price_options keeps
+//! compatible interfaces as joint MILP choices. Ingestion worker counts require
+//! certified unary upstream work, never statistics from a template child.
 use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::candidates::graph::PhysicalCandidateId;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
@@ -25,6 +24,8 @@ pub(in crate::search) enum DirectProfileError {
     DeadlineExceeded(#[from] asap_logical_asap_optimization::memo::CandidateGenerationTimeout),
     #[error("direct cost profile: {0}")]
     Invalid(String),
+    #[error("direct cost profile unsupported: {0}")]
+    Unsupported(String),
 }
 
 pub(in crate::search) struct DirectProfileExtraction {
@@ -75,13 +76,23 @@ pub(in crate::search) fn extract_latest_panes(
     extract_scan_class(configured, context, true)
 }
 
-fn extract_scan_class(
+struct PreparedProfile {
+    nodes: Vec<Option<PhysicalASAPDAGNode>>,
+    lookbacks: Vec<Option<u64>>,
+    all_lookbacks: Vec<Vec<Option<u64>>>,
+    delta: Option<f64>,
+    schedules: Option<QueryScheduleRates>,
+    rate: f64,
+    request_rate: f64,
+}
+
+fn prepare_profile(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
     prefer_latest_pane: bool,
-) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
+) -> Result<Option<PreparedProfile>, DirectProfileError> {
     let settings = context.models.plan_selection;
-    let CostModel::UsageOverTime(prices) = &settings.cost_model else {
+    let CostModel::UsageOverTime(_prices) = &settings.cost_model else {
         return Ok(None);
     };
     let Some(first) = context.entries.first() else {
@@ -278,6 +289,7 @@ fn extract_scan_class(
     // Each scan keeps one explicit lookback class, not a maximum requiring an
     // optionally selected witness. Every admitted consumer edge must use it.
     let mut lookbacks = vec![None; count];
+    let mut all_lookbacks = vec![vec![None]; count];
     for id in 0..count {
         let Some(scan) = &nodes[id] else { continue };
         if scan.output_state.timing != ExecutionTiming::QueryTime
@@ -316,6 +328,10 @@ fn extract_scan_class(
             root.compatible_candidates
                 .contains(&PhysicalCandidateId(id))
         });
+        if !raw_output {
+            all_lookbacks[id] = ordinary.union(&kept).copied().collect();
+            all_lookbacks[id].sort();
+        }
         if raw_output {
             lookbacks[id] = None;
         } else {
@@ -337,6 +353,39 @@ fn extract_scan_class(
             }
         }
     }
+    Ok(Some(PreparedProfile {
+        nodes,
+        lookbacks,
+        all_lookbacks,
+        delta,
+        schedules,
+        rate,
+        request_rate,
+    }))
+}
+
+fn extract_scan_class(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    prefer_latest_pane: bool,
+) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
+    let Some(prepared) = prepare_profile(configured, context, prefer_latest_pane)? else {
+        return Ok(None);
+    };
+    let PreparedProfile {
+        nodes,
+        lookbacks,
+        delta,
+        schedules,
+        rate,
+        request_rate,
+        ..
+    } = prepared;
+    let count = nodes.len();
+    let settings = context.models.plan_selection;
+    let CostModel::UsageOverTime(prices) = &settings.cost_model else {
+        return Ok(None);
+    };
     let mut cache = vec![None; count];
     let mut visited = vec![false; count];
     let mut visiting = vec![false; count];
@@ -363,6 +412,7 @@ fn extract_scan_class(
             &mut worker_counts,
             &mut compaction_seconds,
             delta,
+            None,
         )?;
     }
     let supported: Vec<_> = cache.iter().map(Option::is_some).collect();
@@ -384,31 +434,12 @@ fn extract_scan_class(
             let Some(priced) = priced else {
                 return Ok(zero());
             };
-            let raw_retention = priced
-                .raw_scan
-                .map(|(source, bytes)| {
-                    serde_json::to_string(source)
-                        .map(|identity| (identity, bytes as f64 * prices.cost_per_disk_byte_second))
-                        .map_err(|error| DirectProfileError::Invalid(error.to_string()))
-                })
-                .transpose()?;
-            Ok(NodeCostProfile {
-                execution_cost: priced.cpu_ops_per_second * prices.cost_per_cpu_op
-                    + priced.scanned_bytes_per_second * prices.cost_per_scanned_byte,
-                ingestion: nodes[id].as_ref().unwrap().output_state.timing
-                    == ExecutionTiming::IngestionTime,
-                standing_cost_per_second: priced.average_memory_bytes
-                    * prices.cost_per_memory_byte_second
-                    + priced.disk_bytes as f64 * prices.cost_per_disk_byte_second,
-                work_seconds: priced.work_ms / 1000.0,
-                compaction_seconds: compaction_seconds[id],
-                held_memory_cost_per_second: priced.held.map_or(0.0, |(bytes, _, _)| {
-                    bytes as f64 * prices.cost_per_memory_byte_second
-                }),
-                materialized: nodes[id].as_ref().unwrap().materialization
-                    != Materialization::NotMaterialized,
-                raw_retention,
-            })
+            profile_for_priced(
+                priced,
+                nodes[id].as_ref().unwrap(),
+                compaction_seconds[id],
+                context,
+            )
         })
         .collect::<Result<Vec<_>, DirectProfileError>>()?;
     let request_ms = settings.measured_operation_costs.ns_per_evaluation * 1e-6;
@@ -425,6 +456,41 @@ fn extract_scan_class(
         supported,
         suppliers,
     }))
+}
+
+fn profile_for_priced(
+    priced: &PricedNode<'_>,
+    node: &PhysicalASAPDAGNode,
+    compaction_seconds: f64,
+    context: &CandidatePlanningContext<'_>,
+) -> Result<NodeCostProfile, DirectProfileError> {
+    let CostModel::UsageOverTime(prices) = &context.models.plan_selection.cost_model else {
+        return Err(DirectProfileError::Unsupported(
+            "non-usage objective".into(),
+        ));
+    };
+    let raw_retention = priced
+        .raw_scan
+        .map(|(source, bytes)| {
+            serde_json::to_string(source)
+                .map(|identity| (identity, bytes as f64 * prices.cost_per_disk_byte_second))
+                .map_err(|error| DirectProfileError::Invalid(error.to_string()))
+        })
+        .transpose()?;
+    Ok(NodeCostProfile {
+        execution_cost: priced.cpu_ops_per_second * prices.cost_per_cpu_op
+            + priced.scanned_bytes_per_second * prices.cost_per_scanned_byte,
+        ingestion: node.output_state.timing == ExecutionTiming::IngestionTime,
+        standing_cost_per_second: priced.average_memory_bytes * prices.cost_per_memory_byte_second
+            + priced.disk_bytes as f64 * prices.cost_per_disk_byte_second,
+        work_seconds: priced.work_ms / 1000.0,
+        compaction_seconds,
+        held_memory_cost_per_second: priced.held.map_or(0.0, |(bytes, _, _)| {
+            bytes as f64 * prices.cost_per_memory_byte_second
+        }),
+        materialized: node.materialization != Materialization::NotMaterialized,
+        raw_retention,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -444,6 +510,7 @@ fn price<'a>(
     worker_counts: &mut [Option<u64>],
     compaction_seconds: &mut [f64],
     delta: Option<f64>,
+    supplier_override: Option<PhysicalCandidateId>,
 ) -> Result<(), DirectProfileError> {
     check_deadline(context.deadline)?;
     if visited[id] || visiting[id] {
@@ -455,16 +522,21 @@ fn price<'a>(
     };
     visiting[id] = true;
     let requirements = &configured.inventory.graph.candidates[id].producer_requirements;
-    let options: Vec<_> = requirements.first().map_or_else(
-        || vec![None],
-        |input| {
-            input
-                .compatible_producers
-                .iter()
-                .copied()
-                .map(Some)
-                .collect()
+    let options: Vec<_> = supplier_override.map_or_else(
+        || {
+            requirements.first().map_or_else(
+                || vec![None],
+                |input| {
+                    input
+                        .compatible_producers
+                        .iter()
+                        .copied()
+                        .map(Some)
+                        .collect()
+                },
+            )
         },
+        |supplier| vec![Some(supplier)],
     );
     for supplier in options {
         let mut views = Vec::new();
@@ -488,6 +560,7 @@ fn price<'a>(
                 worker_counts,
                 compaction_seconds,
                 delta,
+                None,
             )?;
             let Some(priced) = &cache[supplier.0] else {
                 continue;
@@ -2180,3 +2253,11 @@ mod tests {
         ));
     }
 }
+
+#[path = "supplier_price_options.rs"]
+mod supplier_price_options;
+pub(in crate::search) use supplier_price_options::extract_price_options;
+
+#[cfg(test)]
+#[path = "direct_price_options_tests.rs"]
+mod price_options_tests;

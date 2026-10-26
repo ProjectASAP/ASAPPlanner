@@ -453,6 +453,7 @@ pub(in crate::search) fn optimize_independent_components(
         summary.solve_metrics.solver_seconds += metrics.solver_seconds;
         summary.solve_metrics.solve_calls += metrics.solve_calls;
         summary.solve_metrics.direct_cost_solve_calls += metrics.direct_cost_solve_calls;
+        summary.solve_metrics.joint_price_solve_calls += metrics.joint_price_solve_calls;
         summary.solve_metrics.direct_cost_validated_plans += metrics.direct_cost_validated_plans;
         // Component proposal costs are not complete workload costs; do not
         // expose their minimum as the price of a validated whole-workload plan.

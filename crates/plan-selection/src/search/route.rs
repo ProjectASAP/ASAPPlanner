@@ -596,6 +596,7 @@ fn add_phase_metrics(
     }
     report.solve_calls += phase.solve_calls;
     report.direct_cost_solve_calls += phase.direct_cost_solve_calls;
+    report.joint_price_solve_calls += phase.joint_price_solve_calls;
     report.direct_cost_validated_plans += phase.direct_cost_validated_plans;
     if let Some(cost) = phase.direct_cost_best_validated_cost {
         report.direct_cost_best_validated_cost = Some(
@@ -1068,6 +1069,7 @@ fn search_domain<Id: Clone>(
         validation_ms: result.validation_seconds * 1000.0,
         solve_calls: result.metrics.solve_calls,
         direct_cost_solve_calls: result.metrics.direct_cost_solve_calls,
+        joint_price_solve_calls: result.metrics.joint_price_solve_calls,
         direct_cost_validated_plans: result.metrics.direct_cost_validated_plans,
         direct_cost_best_validated_cost: result.metrics.direct_cost_best_validated_cost,
         direct_cost_fallback_reasons: result.metrics.direct_cost_fallback_reasons.clone(),
