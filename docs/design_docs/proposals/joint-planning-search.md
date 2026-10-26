@@ -208,6 +208,8 @@ Direct pane pricing covers query-time rebuilding, eligible state retained across
 
 Matching range requests on the same fixed schedule are directly priced for rebuilt and ingestion-maintained state: evaluation frequency includes every range step, request overhead remains per request, and maintained panes retain the required historical span. Query-kept range state, differing range contexts, uncertified supplier interfaces, and schedules outside the bounded encodings still require evaluator refinement. Unsupported configurations remain in the full candidate catalog and currently use evaluator-based refinement; these are implementation limitations to remove, not the intended final architecture. The restricted subspace's optimum is not a full-catalog optimum. Reports expose direct-cost solve counts, validated costs, and fallback reasons so a successful fallback cannot be mistaken for direct-model coverage.
 
+A candidate whose evaluator cost overflows the representable range is skipped with a `cost_not_representable` diagnostic so scalar-price search can still find a validated plan. This is an unknown cost, not proof of infeasibility: if such assignments were excluded, the search reports a conservative zero lower bound and cannot claim a full-domain optimum or infeasibility. Invalid settings and other evaluator errors remain errors.
+
 Numerically ill-conditioned cost profiles, rate tables, or normalized latency terms also fall back explicitly rather than silently dropping charges. An optimal direct solve must additionally agree with an independently decoded selected-DAG cost before its restricted-domain certificate is accepted.
 
 Fixed query overhead can be omitted during minimization but must be restored in reported totals.
