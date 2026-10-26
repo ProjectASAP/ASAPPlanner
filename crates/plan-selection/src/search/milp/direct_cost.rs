@@ -19,6 +19,9 @@ pub(super) const MINIMUM_DIRECT_RELATIVE_COEFFICIENT: f64 = 1e-12;
 // need a stronger guard than monetary objective coefficients, since absolute
 // LP feasibility tolerances can erase a rare reader's otherwise large cost.
 const MINIMUM_QUERY_RATE_WEIGHT: f64 = 1e-6;
+// Lifetime gates use unit-scale bounds. Smaller positive terms can disappear
+// within LP feasibility tolerances and then be amplified by a memory price.
+const MINIMUM_NORMALIZED_LATENCY_TERM: f64 = 1e-6;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeCostProfile {
@@ -26,6 +29,8 @@ pub(crate) struct NodeCostProfile {
     pub ingestion: bool,
     pub standing_cost_per_second: f64,
     pub work_seconds: f64,
+    /// Certified fixed-worker merge delay; the query pays the maximum reached delay.
+    pub compaction_seconds: f64,
     pub held_memory_cost_per_second: f64,
     pub materialized: bool,
     pub raw_retention: Option<(String, f64)>,
@@ -74,6 +79,8 @@ impl DirectCostProfile {
                 !valid(n.execution_cost)
                     || !valid(n.standing_cost_per_second)
                     || (n.ingestion && n.held_memory_cost_per_second != 0.0)
+                    || !valid(n.compaction_seconds)
+                    || (n.compaction_seconds > 0.0 && !(n.ingestion && n.materialized))
                     || !valid(n.work_seconds)
                     || !valid(n.held_memory_cost_per_second)
                     || n.raw_retention
@@ -92,7 +99,10 @@ impl DirectCostProfile {
                 .flat_map(|input| input.compatible_producers.iter())
             {
                 let source = &self.nodes[producer.0];
-                if (self.nodes[consumer].ingestion && !source.ingestion)
+                // Query latency stops at the first maintained ingestion state.
+                // This certified slice admits only raw upstream closures, not
+                // nested maintained states whose deeper compaction is hidden.
+                if (self.nodes[consumer].ingestion && (!source.ingestion || source.materialized))
                     || (!self.nodes[consumer].ingestion && source.ingestion && !source.materialized)
                 {
                     return Err(CandidateSelectionError::InvalidGraph(
@@ -156,14 +166,56 @@ impl DirectCostProfile {
                 ));
             }
         }
-        let maximum_latency = self.maximum_latency();
-        if self.coefficients().any(|cost| !cost.is_finite())
+        let maximum_latency = self.maximum_latency(graph);
+        if self.coefficients(graph).any(|cost| !cost.is_finite())
             || !maximum_latency.is_finite()
             || !(maximum_latency * graph.query_roots.len() as f64).is_finite()
         {
             return Err(CandidateSelectionError::InvalidGraph(
                 "direct-cost latency bound overflow".into(),
             ));
+        }
+        if self
+            .nodes
+            .iter()
+            .any(|node| node.held_memory_cost_per_second > 0.0)
+        {
+            let mut compaction_levels: Vec<_> = self
+                .nodes
+                .iter()
+                .map(|node| node.compaction_seconds)
+                .filter(|delay| *delay > 0.0)
+                .collect();
+            compaction_levels.sort_by(f64::total_cmp);
+            compaction_levels.dedup();
+            let mut previous = 0.0;
+            let increments = compaction_levels.into_iter().map(|delay| {
+                let increment = delay - previous;
+                previous = delay;
+                increment
+            });
+            let minimum = std::iter::once(self.request_latency_seconds)
+                .chain(self.nodes.iter().map(NodeCostProfile::query_work_seconds))
+                .chain(increments)
+                .filter(|term| *term > 0.0)
+                .reduce(f64::min);
+            let minimum_rate_weight = self.schedules.as_ref().map_or(1.0, |schedule| {
+                let total: f64 = schedule.per_query_rates.iter().sum();
+                schedule
+                    .per_query_rates
+                    .iter()
+                    .map(|rate| rate / total)
+                    .fold(1.0, f64::min)
+            });
+            // Heterogeneous mean-lifetime rows multiply these coefficients;
+            // checking each factor separately would miss their small product.
+            if minimum.is_some_and(|term| {
+                term / maximum_latency * minimum_rate_weight < MINIMUM_NORMALIZED_LATENCY_TERM
+            }) {
+                return Err(CandidateSelectionError::UnsupportedDirectCost(
+                    format!("normalized latency terms are below the supported held-memory numerical range: minimum={minimum:?}, maximum={maximum_latency:e}, rate_weight={minimum_rate_weight:e}, request={:e}", self.request_latency_seconds),
+                ));
+            }
         }
         Ok(())
     }
@@ -198,6 +250,12 @@ impl DirectCostProfile {
                         .filter(|(_, yes)| **yes)
                         .map(|(id, _)| self.nodes[id].query_work_seconds())
                         .sum::<f64>()
+                    + row
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, yes)| **yes)
+                        .map(|(id, _)| self.nodes[id].compaction_seconds)
+                        .fold(0.0, f64::max)
             })
             .collect();
         let rates = self.schedules.as_ref().map_or_else(
@@ -280,19 +338,82 @@ impl DirectCostProfile {
         total + raw.values().sum::<f64>()
     }
 
-    fn maximum_latency(&self) -> f64 {
+    /// Sum all required input roles, but take the maximum compatible supplier
+    /// for each role. This bounds every selected DAG (shared work may be counted
+    /// twice) without summing mutually exclusive catalog choices. Potential
+    /// cycles conservatively use the old all-node sum, never a cyclic DP value.
+    fn maximum_latency(&self, graph: &CandidateDependencyGraph) -> f64 {
+        let count = self.nodes.len();
+        let mut pending = vec![0usize; count];
+        let mut parents = vec![Vec::new(); count];
+        for (id, candidate) in graph.candidates.iter().enumerate() {
+            if self.nodes[id].ingestion {
+                continue;
+            }
+            for supplier in candidate
+                .producer_requirements
+                .iter()
+                .flat_map(|input| input.compatible_producers.iter())
+            {
+                pending[id] += 1;
+                parents[supplier.0].push(id);
+            }
+        }
+        let mut ready: Vec<_> = (0..count).filter(|id| pending[*id] == 0).collect();
+        let mut bounds = vec![0.0_f64; count];
+        let mut processed = 0;
+        while let Some(id) = ready.pop() {
+            processed += 1;
+            if !self.nodes[id].ingestion {
+                bounds[id] = self.nodes[id].query_work_seconds()
+                    + graph.candidates[id]
+                        .producer_requirements
+                        .iter()
+                        .map(|input| {
+                            input
+                                .compatible_producers
+                                .iter()
+                                .map(|supplier| bounds[supplier.0])
+                                .fold(0.0, f64::max)
+                        })
+                        .sum::<f64>();
+            }
+            for parent in &parents[id] {
+                pending[*parent] -= 1;
+                if pending[*parent] == 0 {
+                    ready.push(*parent);
+                }
+            }
+        }
+        let work = if processed == count {
+            graph
+                .query_roots
+                .iter()
+                .flat_map(|root| &root.compatible_candidates)
+                .map(|id| bounds[id.0])
+                .fold(0.0, f64::max)
+        } else {
+            self.nodes
+                .iter()
+                .map(NodeCostProfile::query_work_seconds)
+                .sum()
+        };
         self.request_latency_seconds
+            + work
             + self
                 .nodes
                 .iter()
-                .map(NodeCostProfile::query_work_seconds)
-                .sum::<f64>()
+                .map(|node| node.compaction_seconds)
+                .fold(0.0, f64::max)
     }
 
-    pub(crate) fn coefficients(&self) -> impl Iterator<Item = f64> + '_ {
+    pub(crate) fn coefficients<'a>(
+        &'a self,
+        graph: &CandidateDependencyGraph,
+    ) -> impl Iterator<Item = f64> + 'a {
         // Constant request fees cannot influence selection and need not limit
         // the coefficient range. Lifetimes use a dimensionless [0,1] scale.
-        let latency_scale = self.maximum_latency().max(f64::MIN_POSITIVE);
+        let latency_scale = self.maximum_latency(graph).max(f64::MIN_POSITIVE);
         let rates = self.schedules.as_ref().map_or_else(
             || vec![self.query_rate],
             |schedule| {
@@ -430,6 +551,60 @@ fn boundary_flows(
     Ok(flows)
 }
 
+/// Encode max compaction exactly, including when no memory cost prices latency.
+/// Descending threshold ORs are implied integral by binary query reach. Their
+/// telescoping weighted sum equals the largest reached delay, with O(N) rows.
+fn query_latency_expressions(
+    graph: &CandidateDependencyGraph,
+    profile: &DirectCostProfile,
+    variables: &mut ProblemVariables,
+    constraints: &mut Vec<Constraint>,
+    reach: &[Vec<Option<Variable>>],
+    check_deadline: &impl Fn() -> Result<(), CandidateSelectionError>,
+) -> Result<Vec<Expression>, CandidateSelectionError> {
+    let scale = profile.maximum_latency(graph).max(f64::MIN_POSITIVE);
+    let mut result = Vec::with_capacity(reach.len());
+    for row in reach {
+        check_deadline()?;
+        let mut latency = Expression::from(profile.request_latency_seconds / scale);
+        let mut delays = Vec::new();
+        for (id, reached) in row.iter().enumerate() {
+            if let Some(reached) = reached {
+                latency += profile.nodes[id].query_work_seconds() / scale * *reached;
+                let delay = profile.nodes[id].compaction_seconds;
+                if delay > 0.0 {
+                    delays.push((delay, *reached));
+                }
+            }
+        }
+        delays.sort_by(|left, right| right.0.total_cmp(&left.0));
+        let mut previous = None;
+        let mut index = 0;
+        while index < delays.len() {
+            check_deadline()?;
+            let delay = delays[index].0;
+            let threshold_reached = variables.add(variable().min(0.0).max(1.0));
+            let mut support = Expression::from(0.0);
+            if let Some(previous) = previous {
+                constraints.push(constraint!(threshold_reached >= previous));
+                support += previous;
+            }
+            while index < delays.len() && delays[index].0 == delay {
+                let reached = delays[index].1;
+                constraints.push(constraint!(threshold_reached >= reached));
+                support += reached;
+                index += 1;
+            }
+            constraints.push(constraint!(threshold_reached <= support));
+            let next_delay = delays.get(index).map_or(0.0, |entry| entry.0);
+            latency += (delay - next_delay) / scale * threshold_reached;
+            previous = Some(threshold_reached);
+        }
+        result.push(latency);
+    }
+    Ok(result)
+}
+
 /// Exact on integer activation/connection decisions. Reach variables are
 /// implied integral by the selected acyclic graph, as in the main model.
 #[allow(clippy::too_many_arguments)]
@@ -462,21 +637,16 @@ pub(super) fn encode(
     }
     let count = graph.candidates.len();
     let queries = graph.query_roots.len();
-    let latency_scale = profile.maximum_latency().max(f64::MIN_POSITIVE);
+    let latency_scale = profile.maximum_latency(graph).max(f64::MIN_POSITIVE);
     let maximum_latency = 1.0;
-    let latency: Vec<Expression> = reach
-        .iter()
-        .map(|row| {
-            Expression::from(profile.request_latency_seconds / latency_scale)
-                + row
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(id, reached)| {
-                        reached.map(|r| profile.nodes[id].query_work_seconds() / latency_scale * r)
-                    })
-                    .sum::<Expression>()
-        })
-        .collect();
+    let latency = query_latency_expressions(
+        graph,
+        profile,
+        variables,
+        constraints,
+        reach,
+        &check_deadline,
+    )?;
     let mut boundary_count = vec![Expression::from(0.0); count];
     let mut boundary_limit = vec![0usize; count];
     for flow in boundary_flows(
@@ -671,6 +841,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     work_seconds: 1.0,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 3.0,
                     materialized: true,
                     raw_retention: None,
@@ -680,6 +851,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 2.0,
+                    compaction_seconds: 0.0,
                     raw_retention: Some(("source".into(), 4.0)),
                     ..Default::default()
                 },
@@ -688,6 +860,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 3.0,
+                    compaction_seconds: 0.0,
                     raw_retention: Some(("source".into(), 6.0)),
                     ..Default::default()
                 },
@@ -718,6 +891,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     work_seconds: 1.0,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 3.0,
                     ..Default::default()
                 },
@@ -726,6 +900,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 2.0,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 4.0,
                     materialized: true,
                     raw_retention: None,
@@ -734,12 +909,14 @@ mod tests {
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     work_seconds: 3.0,
+                    compaction_seconds: 0.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     work_seconds: 4.0,
+                    compaction_seconds: 0.0,
                     ..Default::default()
                 },
             ],
@@ -771,6 +948,7 @@ mod tests {
                         standing_cost_per_second: 0.0,
                         execution_cost: materialized_build_cost,
                         work_seconds: 1.0,
+                        compaction_seconds: 0.0,
                         held_memory_cost_per_second: 3.0,
                         materialized: true,
                         raw_retention: None,
@@ -780,6 +958,7 @@ mod tests {
                         standing_cost_per_second: 0.0,
                         execution_cost: 2.0,
                         work_seconds: 0.5,
+                        compaction_seconds: 0.0,
                         held_memory_cost_per_second: 1.0,
                         ..Default::default()
                     },
@@ -788,6 +967,7 @@ mod tests {
                         standing_cost_per_second: 0.0,
                         execution_cost: 1.0,
                         work_seconds: 2.0,
+                        compaction_seconds: 0.0,
                         ..Default::default()
                     },
                     NodeCostProfile {
@@ -795,6 +975,7 @@ mod tests {
                         standing_cost_per_second: 0.0,
                         execution_cost: 1.0,
                         work_seconds: 3.0,
+                        compaction_seconds: 0.0,
                         ..Default::default()
                     },
                 ],
@@ -886,6 +1067,7 @@ mod tests {
                 ingestion: true,
                 execution_cost: 2.0,
                 work_seconds: 0.2,
+                compaction_seconds: 0.0,
                 ..Default::default()
             },
             NodeCostProfile {
@@ -894,6 +1076,7 @@ mod tests {
                 execution_cost: 3.0,
                 standing_cost_per_second: 7.0,
                 work_seconds: 0.4,
+                compaction_seconds: 0.0,
                 ..Default::default()
             },
         ];
@@ -906,6 +1089,7 @@ mod tests {
         nodes.extend((0..2).map(|_| NodeCostProfile {
             execution_cost: 1.0,
             work_seconds: 0.5,
+            compaction_seconds: 0.0,
             held_memory_cost_per_second: 2.0,
             ..Default::default()
         }));
@@ -1084,12 +1268,14 @@ mod tests {
                 NodeCostProfile {
                     execution_cost: 2.0,
                     work_seconds: 1.0,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 3.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
                     execution_cost: 1.0,
                     work_seconds: 2.0,
+                    compaction_seconds: 0.0,
                     materialized: true,
                     standing_cost_per_second: 7.0,
                     ..Default::default()
@@ -1097,12 +1283,14 @@ mod tests {
                 NodeCostProfile {
                     execution_cost: 1.0,
                     work_seconds: 0.5,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 2.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
                     execution_cost: 1.0,
                     work_seconds: 1.5,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 2.0,
                     ..Default::default()
                 },
@@ -1136,5 +1324,267 @@ mod tests {
             assert!((proposal.direct_modeled_cost.unwrap() - expected).abs() < 1e-8);
             assert!((proposal.model_lower_bound.unwrap() - expected).abs() < 1e-7 * expected);
         }
+    }
+    // Max is fixed by reach even without held-memory pricing: minimizing or
+    // maximizing the latency expression gives the same value for every mask.
+    #[test]
+    fn compaction_max_is_exact_without_a_held_memory_objective() {
+        let graph = CandidateDependencyGraph {
+            candidates: vec![node(None); 3],
+            query_roots: vec![root(0), root(1), root(2)],
+            ..Default::default()
+        };
+        use good_lp::{highs, Solution, SolverModel};
+        let profile = DirectCostProfile {
+            nodes: [2.0, 5.0, 5.0]
+                .into_iter()
+                .map(|delay| NodeCostProfile {
+                    ingestion: true,
+                    materialized: true,
+                    compaction_seconds: delay,
+                    ..Default::default()
+                })
+                .collect(),
+            query_rate: 1.0,
+            schedules: None,
+            request_latency_seconds: 1.0,
+            request_cost: 0.0,
+        };
+        for mask in 0..8 {
+            let expected = 1.0
+                + [2.0_f64, 5.0, 5.0]
+                    .iter()
+                    .enumerate()
+                    .filter(|(id, _)| mask & (1 << id) != 0)
+                    .map(|(_, delay)| *delay)
+                    .fold(0.0, f64::max);
+            for sign in [-1.0, 1.0] {
+                let mut variables = ProblemVariables::new();
+                let mut constraints = Vec::new();
+                let row = (0..3)
+                    .map(|id| {
+                        let reached = variables.add(variable().binary());
+                        constraints.push(constraint!(reached == f64::from(mask & (1 << id) != 0)));
+                        Some(reached)
+                    })
+                    .collect();
+                let latency = query_latency_expressions(
+                    &graph,
+                    &profile,
+                    &mut variables,
+                    &mut constraints,
+                    &[row],
+                    &|| Ok(()),
+                )
+                .unwrap()
+                .remove(0);
+                let solution = variables
+                    .minimise(sign * latency.clone())
+                    .using(highs)
+                    .with_all(constraints)
+                    .solve()
+                    .unwrap();
+                assert!(
+                    (solution.eval(&latency) * profile.maximum_latency(&graph) - expected).abs()
+                        < 1e-9
+                );
+            }
+        }
+    }
+
+    // Exhaustive reader bindings distinguish max compaction from summing
+    // delays, and preserve once-only standing/update costs for shared states.
+    #[test]
+    fn compaction_selection_matches_exhaustive_reader_bindings() {
+        let mut reader = node(Some(0));
+        reader.producer_requirements[0].compatible_producers =
+            vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
+        reader
+            .producer_requirements
+            .push(node(Some(2)).producer_requirements.remove(0));
+        let graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(None), node(None), reader.clone(), reader],
+            query_roots: vec![root(3), root(4)],
+            ..Default::default()
+        };
+        let mut profile = DirectCostProfile {
+            nodes: [(2.0, 4.0), (5.0, 1.0), (3.0, 2.0)]
+                .into_iter()
+                .map(|(delay, cost)| NodeCostProfile {
+                    ingestion: true,
+                    materialized: true,
+                    execution_cost: cost,
+                    compaction_seconds: delay,
+                    ..Default::default()
+                })
+                .chain((0..2).map(|_| NodeCostProfile {
+                    work_seconds: 1.0,
+                    held_memory_cost_per_second: 2.0,
+                    ..Default::default()
+                }))
+                .collect(),
+            query_rate: 1.0,
+            schedules: None,
+            request_latency_seconds: 0.0,
+            request_cost: 0.0,
+        };
+        for rates in [[1.0, 1.0], [1.0, 2.0]] {
+            if rates[0] != rates[1] {
+                profile.schedules = Some(QueryScheduleRates {
+                    per_query_rates: rates.to_vec(),
+                    materialized_subset_rates: vec![0.0, rates[0], rates[1], rates[0] + rates[1]],
+                });
+            }
+            let expected = (0..4)
+                .map(|mask| {
+                    let chosen = [mask & 1, (mask >> 1) & 1];
+                    let update = 2.0
+                        + if chosen.contains(&0) { 4.0 } else { 0.0 }
+                        + if chosen.contains(&1) { 1.0 } else { 0.0 };
+                    update
+                        + (0..2)
+                            .map(|q| {
+                                rates[q] * 2.0 * (1.0 + if chosen[q] == 0 { 3.0 } else { 5.0 })
+                            })
+                            .sum::<f64>()
+                })
+                .fold(f64::INFINITY, f64::min);
+            let proposal = solve_direct_cost_proposal_with_metrics(
+                &graph,
+                &[],
+                None,
+                &mut CandidateSolveMetrics::default(),
+                &profile,
+            )
+            .unwrap()
+            .unwrap();
+            assert!((proposal.direct_modeled_cost.unwrap() - expected).abs() < 1e-8);
+            assert!((proposal.model_lower_bound.unwrap() - expected).abs() < 1e-7);
+        }
+    }
+
+    // Hidden compaction below an already maintained state is not query-visible;
+    // reject that unsupported profile instead of charging all ancestor maxima.
+    #[test]
+    fn nested_maintained_ingestion_states_are_not_admitted() {
+        let graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(Some(0))],
+            query_roots: vec![root(1)],
+            ..Default::default()
+        };
+        let profile = DirectCostProfile {
+            nodes: (0..2)
+                .map(|_| NodeCostProfile {
+                    ingestion: true,
+                    materialized: true,
+                    compaction_seconds: 1.0,
+                    ..Default::default()
+                })
+                .collect(),
+            query_rate: 1.0,
+            schedules: None,
+            request_latency_seconds: 0.0,
+            request_cost: 0.0,
+        };
+        assert!(matches!(
+            profile.validate(&graph),
+            Err(CandidateSelectionError::InvalidGraph(_))
+        ));
+    }
+    // An inactive huge-delay candidate must not erase a selected tiny delay:
+    // its held-memory charge remains significant in actual currency units.
+    #[test]
+    fn extreme_unselected_latency_does_not_erase_selected_memory_cost() {
+        let mut graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(None), node(Some(0))],
+            query_roots: vec![root(2)],
+            ..Default::default()
+        };
+        graph.candidates[2].producer_requirements[0].compatible_producers =
+            vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
+        for tiny_compaction in [false, true] {
+            let profile = DirectCostProfile {
+                nodes: vec![
+                    NodeCostProfile {
+                        ingestion: true,
+                        materialized: true,
+                        compaction_seconds: if tiny_compaction { 1e-6 } else { 0.0 },
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        ingestion: true,
+                        materialized: true,
+                        compaction_seconds: 1e9,
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        work_seconds: if tiny_compaction { 0.0 } else { 1e-6 },
+                        held_memory_cost_per_second: 1e6,
+                        ..Default::default()
+                    },
+                ],
+                query_rate: 1.0,
+                schedules: None,
+                request_latency_seconds: 0.0,
+                request_cost: 0.0,
+            };
+            assert!(matches!(
+                solve_direct_cost_proposal_with_metrics(
+                    &graph,
+                    &[],
+                    None,
+                    &mut CandidateSolveMetrics::default(),
+                    &profile
+                ),
+                Err(CandidateSelectionError::UnsupportedDirectCost(_))
+            ));
+            // Ordinary microsecond-scale candidates remain admitted and priced;
+            // only the extreme dynamic range requires evaluator-based fallback.
+            let mut supported = profile.clone();
+            supported.nodes[1].compaction_seconds = 2e-6;
+            let proposal = solve_direct_cost_proposal_with_metrics(
+                &graph,
+                &[],
+                None,
+                &mut CandidateSolveMetrics::default(),
+                &supported,
+            )
+            .unwrap()
+            .unwrap();
+            assert!((proposal.direct_modeled_cost.unwrap() - 1.0).abs() < 1e-8);
+            assert!((proposal.model_lower_bound.unwrap() - 1.0).abs() < 1e-8);
+        }
+    }
+    // Supplier choices use max, required positions use sum, and potential
+    // cycles conservatively fall back instead of inventing a smaller bound.
+    #[test]
+    fn latency_bound_respects_choices_required_inputs_and_potential_cycles() {
+        let mut graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(None), node(Some(0))],
+            query_roots: vec![root(2)],
+            ..Default::default()
+        };
+        graph.candidates[2].producer_requirements[0].compatible_producers =
+            vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
+        let profile = DirectCostProfile {
+            nodes: [1.0, 3.0, 2.0]
+                .into_iter()
+                .map(|work_seconds| NodeCostProfile {
+                    work_seconds,
+                    ..Default::default()
+                })
+                .collect(),
+            query_rate: 1.0,
+            schedules: None,
+            request_latency_seconds: 0.0,
+            request_cost: 0.0,
+        };
+        assert_eq!(profile.maximum_latency(&graph), 5.0);
+        graph.candidates[2]
+            .producer_requirements
+            .push(node(Some(0)).producer_requirements.remove(0));
+        assert_eq!(profile.maximum_latency(&graph), 6.0);
+        graph.candidates[0].producer_requirements = node(Some(2)).producer_requirements;
+        assert_eq!(profile.maximum_latency(&graph), 6.0);
     }
 }

@@ -19,20 +19,15 @@ pub(super) fn encode(
     let count = graph.candidates.len();
     let queries = graph.query_roots.len();
     let subsets = 1usize << queries;
-    let latency_scale = profile.maximum_latency().max(f64::MIN_POSITIVE);
-    let latency: Vec<Expression> = reach
-        .iter()
-        .map(|row| {
-            Expression::from(profile.request_latency_seconds / latency_scale)
-                + row
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(id, reached)| {
-                        reached.map(|r| profile.nodes[id].query_work_seconds() / latency_scale * r)
-                    })
-                    .sum::<Expression>()
-        })
-        .collect();
+    let latency_scale = profile.maximum_latency(graph).max(f64::MIN_POSITIVE);
+    let latency = query_latency_expressions(
+        graph,
+        profile,
+        variables,
+        constraints,
+        reach,
+        &check_deadline,
+    )?;
     let mut masks = Vec::with_capacity(count);
     for id in 0..count {
         check_deadline()?;
@@ -245,6 +240,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     work_seconds: 1.0,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 3.0,
                     ..Default::default()
                 },
@@ -253,6 +249,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 2.0,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 4.0,
                     materialized: true,
                     raw_retention: None,
@@ -261,12 +258,14 @@ mod tests {
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     work_seconds: 3.0,
+                    compaction_seconds: 0.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     work_seconds: 4.0,
+                    compaction_seconds: 0.0,
                     ..Default::default()
                 },
             ],
@@ -319,6 +318,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 3.0,
                     work_seconds: 2.0,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 2.0,
                     materialized: true,
                     raw_retention: None,
@@ -372,6 +372,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 10.0,
                     work_seconds: 1.0,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 3.0,
                     materialized: true,
                     raw_retention: None,
@@ -381,6 +382,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     work_seconds: 0.5,
+                    compaction_seconds: 0.0,
                     held_memory_cost_per_second: 1.0,
                     materialized: true,
                     raw_retention: None,
@@ -390,6 +392,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 2.0,
+                    compaction_seconds: 0.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
@@ -397,6 +400,7 @@ mod tests {
                     standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 3.0,
+                    compaction_seconds: 0.0,
                     ..Default::default()
                 },
             ],
@@ -482,12 +486,14 @@ mod tests {
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     work_seconds: 1.0,
+                    compaction_seconds: 0.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
                     ingestion: false,
                     standing_cost_per_second: 0.0,
                     work_seconds: 1e9,
+                    compaction_seconds: 0.0,
                     ..Default::default()
                 },
             ],

@@ -577,7 +577,7 @@ fn solve_with_objective(
         .fold(0.0, f64::max);
     let maximum_cost = direct_profile
         .into_iter()
-        .flat_map(|profile| profile.coefficients())
+        .flat_map(|profile| profile.coefficients(graph))
         .fold(maximum_cost, f64::max);
     let maximum_cost = observations
         .iter()
@@ -599,7 +599,7 @@ fn solve_with_objective(
         .chain(
             direct_profile
                 .into_iter()
-                .flat_map(|profile| profile.coefficients()),
+                .flat_map(|profile| profile.coefficients(graph)),
         )
         .filter(|cost| *cost > 0.0)
         .reduce(f64::min)
@@ -625,7 +625,7 @@ fn solve_with_objective(
         .chain(
             direct_profile
                 .into_iter()
-                .flat_map(|profile| profile.coefficients()),
+                .flat_map(|profile| profile.coefficients(graph)),
         )
         .any(|cost| cost > 0.0 && cost / maximum_cost < relative_coefficient_limit)
     {
@@ -637,7 +637,7 @@ fn solve_with_objective(
             .reduce(f64::min);
         let direct_minimum = direct_profile
             .into_iter()
-            .flat_map(|profile| profile.coefficients())
+            .flat_map(|profile| profile.coefficients(graph))
             .filter(|cost| *cost > 0.0)
             .reduce(f64::min);
         let reason = format!("observed costs and objective coefficients exceed supported numerical range: min={divisor:e}, max={maximum_cost:e}, local_min={local_minimum:?}, direct_min={direct_minimum:?}");
@@ -811,13 +811,23 @@ fn solve_with_objective(
         modeled_cost,
     };
     let direct_modeled_cost = direct_profile.map(|profile| profile.selected_cost(graph, &selected));
-    decoded_proposal(
-        graph,
-        selected,
-        solution.status(),
-        solution.eval(&objective) * divisor,
-    )
-    .map(|mut proposal| {
+    let solved_objective = solution.eval(&objective) * divisor;
+    if matches!(solution.status(), SolutionStatus::Optimal) {
+        if let Some(decoded) = direct_modeled_cost {
+            // Decoding checks the selected graph independently of LP lifetime
+            // auxiliaries. A lost small term must not become a false certificate.
+            let tolerance = 1e-7 * decoded.abs().max(solved_objective.abs());
+            if !decoded.is_finite()
+                || !solved_objective.is_finite()
+                || (decoded - solved_objective).abs() > tolerance
+            {
+                return Err(CandidateSelectionError::UnsupportedDirectCost(format!(
+                    "direct solver objective disagrees with decoded cost: solver={solved_objective:e}, decoded={decoded:e}"
+                )));
+            }
+        }
+    }
+    decoded_proposal(graph, selected, solution.status(), solved_objective).map(|mut proposal| {
         proposal.direct_modeled_cost = direct_modeled_cost;
         Some(proposal)
     })

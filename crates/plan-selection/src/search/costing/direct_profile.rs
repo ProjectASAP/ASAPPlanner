@@ -1,10 +1,10 @@
-//! Exact local profiles for query-time plans and single-worker maintained panes.
+//! Exact local profiles for query-time plans and fixed-worker maintained panes.
 //!
 //! Each accepted input is priced from its actual recursively certified supplier.
 //! Different priced interfaces are excluded from this proposal, not the full
 //! catalog. No original-template child is used as workload statistics evidence.
 //! Ingestion support is limited to fixed-retention pane chains with certified
-//! single-worker unary input closures; multiworker compaction remains excluded.
+//! unary input closures whose complete range certifies one worker-count bucket.
 use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::candidates::graph::PhysicalCandidateId;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
@@ -292,7 +292,9 @@ fn extract_scan_class(
     let mut suppliers = vec![Vec::new(); count];
     let mut sketch_counts = vec![0; count];
     let mut raw_sources = vec![None; count];
-    let mut closure_work_ms = vec![0.0; count];
+    let mut closure_work_ms = vec![WorkBounds::default(); count];
+    let mut worker_counts = vec![None; count];
+    let mut compaction_seconds = vec![0.0; count];
     for id in 0..count {
         price(
             id,
@@ -307,6 +309,8 @@ fn extract_scan_class(
             &mut sketch_counts,
             &mut raw_sources,
             &mut closure_work_ms,
+            &mut worker_counts,
+            &mut compaction_seconds,
             delta,
         )?;
     }
@@ -315,6 +319,7 @@ fn extract_scan_class(
     let zero = || NodeCostProfile {
         execution_cost: 0.0,
         work_seconds: 0.0,
+        compaction_seconds: 0.0,
         held_memory_cost_per_second: 0.0,
         materialized: false,
         ingestion: false,
@@ -345,6 +350,7 @@ fn extract_scan_class(
                     * prices.cost_per_memory_byte_second
                     + priced.disk_bytes as f64 * prices.cost_per_disk_byte_second,
                 work_seconds: priced.work_ms / 1000.0,
+                compaction_seconds: compaction_seconds[id],
                 held_memory_cost_per_second: priced.held.map_or(0.0, |(bytes, _, _)| {
                     bytes as f64 * prices.cost_per_memory_byte_second
                 }),
@@ -383,7 +389,9 @@ fn price<'a>(
     suppliers: &mut [Vec<PhysicalCandidateId>],
     sketch_counts: &mut [usize],
     raw_sources: &mut [Option<String>],
-    closure_work_ms: &mut [f64],
+    closure_work_ms: &mut [WorkBounds],
+    worker_counts: &mut [Option<u64>],
+    compaction_seconds: &mut [f64],
     delta: Option<f64>,
 ) -> Result<(), DirectProfileError> {
     check_deadline(context.deadline)?;
@@ -426,6 +434,8 @@ fn price<'a>(
                 sketch_counts,
                 raw_sources,
                 closure_work_ms,
+                worker_counts,
+                compaction_seconds,
                 delta,
             )?;
             let Some(priced) = &cache[supplier.0] else {
@@ -444,7 +454,8 @@ fn price<'a>(
 
             let consumer_ingests = node.output_state.timing == ExecutionTiming::IngestionTime;
             let producer_ingests = producer.output_state.timing == ExecutionTiming::IngestionTime;
-            if (consumer_ingests && !producer_ingests)
+            if (consumer_ingests && producer.materialization != Materialization::NotMaterialized)
+                || (consumer_ingests && !producer_ingests)
                 || (!consumer_ingests
                     && producer_ingests
                     && producer.materialization != Materialization::MatAtIngestion(Medium::Memory))
@@ -460,10 +471,16 @@ fn price<'a>(
                 unchanged_columns: priced.unchanged_columns.clone(),
             });
         }
-        if let asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
-            family: FieldDataType::Sketch(kind, _),
-            ..
-        }) = &node.payload
+        if let asap_types::ir::Operator::ASAP(
+            ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _),
+                ..
+            }
+            | ASAPOp::PaneChain {
+                family: FieldDataType::Sketch(kind, _),
+                ..
+            },
+        ) = &node.payload
         {
             if let SketchParams::Hll {
                 precision,
@@ -541,14 +558,35 @@ fn price<'a>(
         ) else {
             continue;
         };
-        let closure_work = (supplier.map_or(0.0, |supplier| closure_work_ms[supplier.0])
-            + priced.work_ms)
-            .next_up();
-        // With a unary closure this is the evaluator's distinct upstream sum.
-        // A larger worker count introduces compaction work and state copies.
-        if node.output_state.timing == ExecutionTiming::IngestionTime
-            && !single_worker(closure_work, nodes.len())
+        let prior = supplier.map_or(WorkBounds::default(), |supplier| {
+            closure_work_ms[supplier.0]
+        });
+        let closure_work = WorkBounds {
+            minimum: (prior.minimum + priced.work_ms).next_down().max(0.0),
+            maximum: (prior.maximum + priced.work_ms).next_up(),
+        };
+        if !closure_work.maximum.is_finite() {
+            continue;
+        }
+        let workers = if node.output_state.timing == ExecutionTiming::IngestionTime
+            && node.materialization == Materialization::MatAtIngestion(Medium::Memory)
         {
+            let Some(workers) = certified_workers(closure_work, nodes.len()) else {
+                continue;
+            };
+            // Same local price does not imply the same upstream worker count.
+            // Restrict this producer to one proven bucket of supplier bindings.
+            if worker_counts[id].is_some_and(|prior| prior != workers) {
+                continue;
+            }
+            Some(workers)
+        } else {
+            None
+        };
+        let compaction = workers.map_or(0.0, |workers| {
+            state_compaction_seconds(node, &priced, workers, context)
+        });
+        if !compaction.is_finite() {
             continue;
         }
         // Compare the actual evaluator outputs, including every piece of the
@@ -573,7 +611,16 @@ fn price<'a>(
             suppliers[id].push(supplier);
         }
         sketch_counts[id] = sketch_counts[id].max(sketches);
-        closure_work_ms[id] = closure_work_ms[id].max(closure_work);
+        closure_work_ms[id] = if cache[id].is_none() {
+            closure_work
+        } else {
+            WorkBounds {
+                minimum: closure_work_ms[id].minimum.min(closure_work.minimum),
+                maximum: closure_work_ms[id].maximum.max(closure_work.maximum),
+            }
+        };
+        worker_counts[id] = workers;
+        compaction_seconds[id] = compaction;
         if cache[id].is_none() {
             cache[id] = Some(priced);
             raw_sources[id] = raw_source;
@@ -641,7 +688,7 @@ fn failure_budget(context: &CandidatePlanningContext<'_>) -> Option<Option<f64>>
 }
 
 fn requires_source_sizing(node: &asap_types::ir::OperatorNode) -> bool {
-    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
         if matches!(kind.params(), SketchParams::Hll { .. }))
 }
 
@@ -719,12 +766,46 @@ fn scan_consumer_lookback(node: &PhysicalASAPDAGNode) -> Option<u64> {
     }
 }
 
-// Include a bound on roundoff when the evaluator sums the same positive work
-// in reverse traversal order. Outward rounding of our path sum bounds the real
-// sum; gamma_n bounds the evaluator's finite-precision accumulation.
-fn single_worker(upper_work_ms: f64, node_count: usize) -> bool {
+#[derive(Clone, Copy, Default)]
+struct WorkBounds {
+    minimum: f64,
+    maximum: f64,
+}
+
+// Outward path sums bound every admitted binding. Account also for the
+// evaluator summing those positive values in a different traversal order.
+fn certified_workers(work: WorkBounds, node_count: usize) -> Option<u64> {
     let error = node_count as f64 * f64::EPSILON;
-    upper_work_ms.is_finite() && error < 0.5 && (upper_work_ms / (1.0 - error)).next_up() < 1000.0
+    if error >= 0.5 || !work.maximum.is_finite() {
+        return None;
+    }
+    let lower = (work.minimum * (1.0 - error)).next_down().max(0.0);
+    let upper = (work.maximum / (1.0 - error)).next_up();
+    let first = (lower / 1000.0).ceil().max(1.0);
+    let last = (upper / 1000.0).ceil().max(1.0);
+    (first == last && last < (1_u64 << 53) as f64).then_some(last as u64)
+}
+
+fn state_compaction_seconds(
+    node: &PhysicalASAPDAGNode,
+    priced: &PricedNode<'_>,
+    workers: u64,
+    context: &CandidatePlanningContext<'_>,
+) -> f64 {
+    let settings = context.models.plan_selection;
+    let measured = crate::lookup(
+        &settings.measured_operation_costs,
+        crate::OperatorKind::SummaryMerge,
+        ExecutionTiming::QueryTime,
+        priced.family,
+        |params| crate::sketch_shape(params, crate::StateInputRows::UNKNOWN).1 as f64,
+    );
+    let merge_ms = measured.map_or(
+        settings.resource_speed.ms_per_cpu_op * context.calibration.factor(),
+        |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
+    );
+    let states = priced.output.rows / crate::panes_of(node);
+    (workers - 1) as f64 * states as f64 * merge_ms / 1000.0
 }
 
 fn check_deadline(deadline: Option<std::time::Instant>) -> Result<(), DirectProfileError> {
@@ -777,10 +858,14 @@ fn same_price(a: &PricedNode<'_>, b: &PricedNode<'_>) -> bool {
 mod tests {
     #[test]
     fn ingestion_worker_bound_accounts_for_summation_roundoff() {
-        assert!(super::single_worker(999.0, 100));
-        assert!(!super::single_worker(1000.0, 100));
-        assert!(!super::single_worker(1000.0_f64.next_down(), 100));
-        assert!(!super::single_worker(1001.0, 1));
+        let workers = |minimum, maximum| {
+            super::certified_workers(super::WorkBounds { minimum, maximum }, 100)
+        };
+        assert_eq!(workers(999.0, 999.0), Some(1));
+        assert_eq!(workers(1000.0, 1000.0), None);
+        assert_eq!(workers(1000.0_f64.next_down(), 1000.0), None);
+        assert_eq!(workers(1001.0, 1999.0), Some(2));
+        assert_eq!(workers(999.0, 1001.0), None);
     }
 
     #[test]
@@ -1232,9 +1317,21 @@ mod tests {
         }
         for (series_count, rows_per_second, speed_multiplier) in
             [(2_u64, 100_u64, 1.0), (100, 1000, 1.0), (2, 100, 1000.0)]
+                .into_iter()
+                .chain(
+                    (mode == Materialization::MatAtIngestion(Medium::Memory)).then_some((
+                        2,
+                        100,
+                        12_345_670.0,
+                    )),
+                )
         {
             for width in [60_000, 30_000] {
-                for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
+                for algorithm in [
+                    SketchAlgorithm::Kll,
+                    SketchAlgorithm::DDSketch,
+                    SketchAlgorithm::Hll,
+                ] {
                     let scope = AccuracyScope::PerValue;
                     let target = AccuracyTarget::max_error(0.05)
                         .failure_probability(0.01)
@@ -1443,20 +1540,87 @@ mod tests {
                         assert!(extracted.profile.nodes[chain].held_memory_cost_per_second > 0.0);
                     }
                     if mode == Materialization::MatAtIngestion(Medium::Memory) {
-                        let mut overloaded = data.clone();
-                        overloaded.arrival = serde_json::from_value(
-                            serde_json::json!({"ingesting":{"rows_per_second":1e12}}),
-                        )
-                        .unwrap();
-                        let overloaded_context = CandidatePlanningContext {
-                            data: &overloaded,
+                        if speed_multiplier > 1e6 {
+                            assert!(extracted.profile.nodes[chain].compaction_seconds > 0.0);
+                        }
+                        let work_ms: f64 = extracted
+                            .profile
+                            .nodes
+                            .iter()
+                            .filter(|node| node.ingestion)
+                            .map(|node| node.work_seconds * 1000.0)
+                            .sum();
+                        let mut boundary_settings = settings.clone();
+                        boundary_settings.resource_speed.ms_per_cpu_op *= 1000.0 / work_ms;
+                        boundary_settings.resource_speed.ms_per_scanned_byte *= 1000.0 / work_ms;
+                        let boundary_context = CandidatePlanningContext {
+                            models: crate::PlanningModels {
+                                plan_selection: &boundary_settings,
+                                ..context.models
+                            },
                             ..context
                         };
-                        let rejected = extract(&configured, &overloaded_context).unwrap().unwrap();
                         assert!(
-                            !rejected.supported[chain],
-                            "multiworker compaction is outside this certified slice"
+                            !extract(&configured, &boundary_context)
+                                .unwrap()
+                                .unwrap()
+                                .supported[chain],
+                            "a worker threshold cannot certify one fixed bucket"
                         );
+                        if speed_multiplier > 1e6 {
+                            let FieldDataType::Sketch(kind, _) = family else {
+                                unreachable!()
+                            };
+                            let mut measured = settings.clone();
+                            measured.measured_operation_costs.operators.push(
+                                crate::cost::measured::OperatorCost {
+                                    operator: crate::OperatorKind::SummaryMerge,
+                                    phase: Some(ExecutionTiming::QueryTime),
+                                    sketch: Some(kind.params().clone()),
+                                    exact: None,
+                                    measure: None,
+                                    ns_per_unit: 2_000_000.0,
+                                    ns_per_invocation: 500_000.0,
+                                    memory_bytes_per_state: None,
+                                },
+                            );
+                            let measured_context = CandidatePlanningContext {
+                                models: crate::PlanningModels {
+                                    plan_selection: &measured,
+                                    ..context.models
+                                },
+                                ..context
+                            };
+                            let profile = extract(&configured, &measured_context)
+                                .unwrap()
+                                .unwrap()
+                                .profile;
+                            assert!(profile.nodes[chain].compaction_seconds > 0.0);
+                            assert_ne!(
+                                profile.nodes[chain].compaction_seconds,
+                                extracted.profile.nodes[chain].compaction_seconds
+                            );
+                            let measured_plan =
+                                crate::search::refinement::planner::evaluate_configured_candidate(
+                                    &configured,
+                                    &measured_context,
+                                    &proposal.selected,
+                                    2,
+                                    &mut Default::default(),
+                                    &mut Vec::new(),
+                                )
+                                .unwrap()
+                                .unwrap();
+                            let actual = measured_plan.0.costs[&measured_plan.0.selected]
+                                .cost_per_second
+                                .unwrap();
+                            let modeled = profile
+                                .selected_cost(&configured.inventory.graph, &proposal.selected);
+                            assert!(
+                                (actual - modeled).abs() <= 1e-9 * actual.max(1e-15),
+                                "measured compaction: {actual} vs {modeled}"
+                            );
+                        }
                     }
                     if mode == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory) {
                         // The same physical scan may feed either a full-window
@@ -1559,6 +1723,25 @@ mod tests {
                                 .unwrap()
                                 .unwrap()
                                 .supported[chain]
+                        );
+                    }
+                    if algorithm == SketchAlgorithm::Hll {
+                        let mut unsupported = data.clone();
+                        unsupported
+                            .sources
+                            .get_mut("latency")
+                            .unwrap()
+                            .max_distinct_per_evaluation = Some(1_000_000);
+                        let outside_certificate = CandidatePlanningContext {
+                            data: &unsupported,
+                            ..context
+                        };
+                        assert!(
+                            !extract(&configured, &outside_certificate)
+                                .unwrap()
+                                .unwrap()
+                                .supported[chain],
+                            "unchanged HLL precision cannot certify an unsupported population"
                         );
                     }
                     if scope == AccuracyScope::WholeResult {
