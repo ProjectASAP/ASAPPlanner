@@ -423,33 +423,8 @@ fn accuracy_baseline(
             let node = template
                 .as_ref()
                 .ok_or("baseline candidate has no operator template")?;
-            let penalty = if context.models.plan_selection.ignore_accuracy_guarantees {
-                // The configured policy accepts approximate outputs without a
-                // guarantee; preferring exact contracts would hide cheaper builds.
-                0.0
-            } else if let Some(family) = node.asap().and_then(ASAPOp::produced_state) {
-                if matches!(family, FieldDataType::ExactAggregate(..)) {
-                    0.0
-                } else {
-                    preference
-                }
-            } else if let Some(guarantee) = &node.guarantee {
-                if guarantee.is_exact() {
-                    0.0
-                } else if guarantee.spec.accuracy_metric == AccuracyMetric::Rank
-                    && !rank_requested[id]
-                {
-                    preference * preference
-                } else {
-                    preference
-                }
-            } else if matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. })) {
-                preference * preference
-            } else {
-                // Exact operators may have no template guarantee until their
-                // selected input contracts are recomposed; do not penalize that.
-                0.0
-            };
+            // Accuracy determines admissibility through composition and validation.
+            // It must not add a price surcharge to an approximate implementation.
             let cost_priority = if reference_cost > 0.0 {
                 let relative = proposal_costs[id] / reference_cost;
                 // Preserve ordering beyond the normal linear range, without
@@ -510,7 +485,7 @@ fn accuracy_baseline(
                         if matches!(kind.params(), asap_types::ir::schema::SketchParams::DDSketch { alpha }
                             if *alpha > dds_budgets[id])));
             Ok((
-                1.0 + penalty + cost_priority + unknown_work_priority,
+                1.0 + cost_priority + unknown_work_priority,
                 contract_risk || contextual_materialization || projected_raw_source || insufficient_composed_budget,
             ))
         })
@@ -1388,10 +1363,10 @@ mod tests {
         );
     }
 
-    // Ignoring accuracy guarantees removes exact/sketch preference penalties;
+    // Accuracy policy changes feasibility, not the price of a summary candidate;
     // costs and final evaluation still determine which implementation is kept.
     #[test]
-    fn ignored_accuracy_does_not_penalize_summary_candidates() {
+    fn accuracy_policy_does_not_penalize_summary_candidates() {
         let (configured, roots, entries, data) = fixture();
         let settings = crate::PlanSelectionSettings {
             ignore_accuracy_guarantees: true,
@@ -1433,9 +1408,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            ignored[id] < enforced[id],
-            "ignored guarantees must not retain an exactness penalty"
+        assert_eq!(
+            ignored[id], enforced[id],
+            "enforcing accuracy must not add an exactness penalty"
         );
     }
 
@@ -1637,7 +1612,7 @@ mod tests {
 
         assert!(rank_nodes
             .iter()
-            .all(|&id| rank_weights[id] < value_weights[id]));
+            .all(|&id| rank_weights[id] == value_weights[id]));
         assert!(configured
             .inventory
             .graph
