@@ -6,3 +6,5 @@ pub(crate) mod calibration;
 pub(crate) mod demand;
 pub(crate) mod lower_bounds;
 pub(crate) mod proposals;
+
+pub(crate) mod direct_profile;

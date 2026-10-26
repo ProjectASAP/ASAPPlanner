@@ -56,6 +56,12 @@ pub(crate) enum ReaderConstraint {
         query_outputs: Vec<Vec<usize>>,
         minimum: usize,
     },
+    /// A non-summary query materialization must be a root or have an
+    /// immediate selected consumer reached by at most one query (Stage 2).
+    HighestSharedQueryMaterialization {
+        candidate: PhysicalCandidateId,
+        query_outputs: Vec<Vec<usize>>,
+    },
     AllowedOutputs {
         candidate: PhysicalCandidateId,
         outputs: Vec<usize>,
@@ -100,6 +106,8 @@ pub(crate) struct SelectedCandidateGraph {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CandidateSelectionError {
+    #[error("direct cost model is not representable: {0}")]
+    UnsupportedDirectCost(String),
     #[error("invalid candidate dependency graph: {0}")]
     InvalidGraph(String),
     #[error("candidate selection solver: {0}")]
@@ -186,6 +194,10 @@ impl CandidateDependencyGraph {
                     candidate,
                     query_outputs,
                     ..
+                }
+                | ReaderConstraint::HighestSharedQueryMaterialization {
+                    candidate,
+                    query_outputs,
                 } => {
                     let outputs: Vec<_> = query_outputs.iter().flatten().copied().collect();
                     let unique: HashSet<_> = outputs.iter().copied().collect();
@@ -470,6 +482,28 @@ pub(crate) fn validate_selected_graph(
                         })
                         .count()
                         < *minimum
+            }
+            ReaderConstraint::HighestSharedQueryMaterialization {
+                candidate,
+                query_outputs,
+            } => {
+                active.contains(candidate)
+                    && !selected
+                        .query_roots
+                        .iter()
+                        .any(|root| root.candidate == *candidate)
+                    && !selected.connections.iter().any(|edge| {
+                        edge.producer == *candidate
+                            && query_outputs
+                                .iter()
+                                .filter(|outputs| {
+                                    outputs
+                                        .iter()
+                                        .any(|output| output_reaches(*output, edge.consumer))
+                                })
+                                .count()
+                                <= 1
+                    })
             }
             ReaderConstraint::AllowedOutputs { candidate, outputs } => (0..graph.query_roots.len())
                 .any(|output| !outputs.contains(&output) && output_reaches(output, *candidate)),

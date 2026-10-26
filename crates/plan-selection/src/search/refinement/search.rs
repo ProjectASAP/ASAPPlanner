@@ -2,6 +2,7 @@
 //! complete plans up front. Certified query cuts reuse size-independent accuracy
 //! failures; full-assignment cuts remain a correctness fallback;
 //! they make no claim of scalable demand modeling or support for every cost model.
+use crate::search::milp::direct_cost::DirectCostProfile;
 use std::time::{Duration, Instant};
 
 use crate::search::candidates::graph::{
@@ -9,13 +10,15 @@ use crate::search::candidates::graph::{
     SelectedCandidateGraph,
 };
 use crate::search::milp::model::{
-    solve_candidate_proposal_with_metrics, CandidateProposal, CandidateSolveMetrics,
-    ObservedAssignment,
+    solve_candidate_proposal_with_metrics, solve_direct_cost_proposal_with_metrics,
+    CandidateProposal, CandidateSolveMetrics, ObservedAssignment,
 };
 
 #[derive(Debug, Default)]
 pub(in crate::search) struct CandidateEvaluation {
     pub actual_cost: Option<f64>,
+    /// Temporarily skip an unpriceable assignment without proving it infeasible.
+    pub unpriced_reason: Option<String>,
     /// A stopped evaluator must not emit any rejection/cost cut.
     pub budget_exhausted: bool,
     pub rejected_queries: Vec<RejectedQuerySubgraph>,
@@ -26,6 +29,7 @@ impl From<Option<f64>> for CandidateEvaluation {
         Self {
             actual_cost,
             budget_exhausted: false,
+            unpriced_reason: None,
             rejected_queries: Vec::new(),
         }
     }
@@ -76,10 +80,12 @@ pub(in crate::search) struct CandidateSearchResult {
 struct SeedRestrictions<'a> {
     excluded: &'a [PhysicalCandidateId],
     materialization_changes: &'a [(PhysicalCandidateId, PhysicalCandidateId)],
+    direct: &'a [(&'a CandidateDependencyGraph, &'a DirectCostProfile)],
 }
 
 /// The callback returns an actual total cost for a validated feasible plan, or
-/// `None` for a proven infeasible assignment. Errors stop search, preserving the
+/// `None` for a proven infeasible assignment. Explicit unpriced feedback skips
+/// one assignment and invalidates full-domain certificates. Errors stop search, preserving the
 /// incumbent. Its cost must include every configured cost component and must be
 /// deterministic for an assignment. Local graph costs are certified lower bounds,
 /// not estimates. A violated certification is an error, never silently repaired.
@@ -143,12 +149,33 @@ pub(in crate::search) fn search_candidates_with_feedback(
     )
 }
 
+#[cfg(test)]
 pub(in crate::search) fn search_candidates_with_restricted_feedback(
     graph: &CandidateDependencyGraph,
     limits: CandidateSearchLimits,
     weights: &[f64],
     excluded_from_seed: &[PhysicalCandidateId],
     materialization_changes: &[(PhysicalCandidateId, PhysicalCandidateId)],
+    evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
+) -> Result<CandidateSearchResult, String> {
+    search_candidates_with_direct_feedback(
+        graph,
+        limits,
+        weights,
+        excluded_from_seed,
+        materialization_changes,
+        &[],
+        evaluate,
+    )
+}
+
+pub(in crate::search) fn search_candidates_with_direct_feedback(
+    graph: &CandidateDependencyGraph,
+    limits: CandidateSearchLimits,
+    weights: &[f64],
+    excluded_from_seed: &[PhysicalCandidateId],
+    materialization_changes: &[(PhysicalCandidateId, PhysicalCandidateId)],
+    direct: &[(&CandidateDependencyGraph, &DirectCostProfile)],
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_structural_baseline(
@@ -159,6 +186,7 @@ pub(in crate::search) fn search_candidates_with_restricted_feedback(
         SeedRestrictions {
             excluded: excluded_from_seed,
             materialization_changes,
+            direct,
         },
         evaluate,
     )
@@ -200,6 +228,7 @@ fn search_with_solver(
     graph.validate().map_err(|error| error.to_string())?;
     let started = Instant::now();
     let mut observations = Vec::new();
+    let mut unpriced_reason = None;
     let mut incumbent: Option<EvaluatedCandidate> = None;
     let mut lower_bound: f64 = 0.0;
     let mut refinements = 0;
@@ -276,6 +305,13 @@ fn search_with_solver(
     // capped at two seconds; stop the baseline once it supplies an incumbent.
     let baseline_budget = (limits.wall_time / 5).min(Duration::from_secs(2));
     let mut baseline_attempts = 0;
+    let mut baseline_started: Option<Instant> = None;
+    let mut direct_attempts = 0;
+    let mut direct_finished = false;
+    let mut direct_index = 0;
+    let direct_budget = (limits.wall_time / 3).min(Duration::from_secs(2));
+    let per_direct_budget = direct_budget / restrictions.direct.len().max(1) as u32;
+    let mut direct_started = Instant::now();
     // Each local proposal uses the same solver and evaluator. Limit the phase
     // to four validations and one fifth of this domain's existing wall budget.
     let neighborhood_budget = (limits.wall_time / 5).min(Duration::from_secs(1));
@@ -290,15 +326,36 @@ fn search_with_solver(
         if refinements >= limits.max_refinements {
             break CandidateSearchStatus::RefinementLimit;
         }
-        let use_baseline = heuristic_graph.is_some()
-            && incumbent.is_none()
+        if direct_index < restrictions.direct.len()
+            && (direct_finished
+                || direct_attempts >= 3
+                || direct_started.elapsed() >= per_direct_budget)
+        {
+            direct_index += 1;
+            direct_attempts = 0;
+            direct_finished = false;
+            direct_started = Instant::now();
+        }
+        let use_direct =
+            direct_index < restrictions.direct.len() && started.elapsed() < direct_budget;
+        if !use_direct {
+            baseline_started.get_or_insert_with(Instant::now);
+        }
+        let baseline_elapsed = baseline_started.map_or(Duration::ZERO, |start| start.elapsed());
+        let use_baseline = !use_direct
+            && heuristic_graph.is_some()
+            && (incumbent.is_none() || solve_metrics.direct_cost_validated_plans > 0)
             && baseline_attempts < 3
-            && started.elapsed() < baseline_budget;
+            && baseline_elapsed < baseline_budget;
         let neighborhood_started = Instant::now();
         let neighborhood_deadline = neighborhood_started
             + remaining.min(neighborhood_budget.saturating_sub(neighborhood_spent));
         let mut neighborhood = None;
-        if !use_baseline && neighborhood_attempts < 4 && neighborhood_spent < neighborhood_budget {
+        if !use_direct
+            && !use_baseline
+            && neighborhood_attempts < 4
+            && neighborhood_spent < neighborhood_budget
+        {
             if let Some(best) = &incumbent {
                 for &(from, to) in restrictions.materialization_changes {
                     if Instant::now() >= neighborhood_deadline {
@@ -331,58 +388,111 @@ fn search_with_solver(
         if remaining.is_zero() {
             break CandidateSearchStatus::TimeLimit;
         }
-        let (proposal_graph, proposal_observations, solve_budget) =
-            if let Some(restricted) = &neighborhood {
-                (
-                    restricted,
-                    Vec::new(),
-                    remaining.min(neighborhood_deadline.saturating_duration_since(Instant::now())),
-                )
-            } else if use_baseline {
-                baseline_attempts += 1;
-                // A structural proposal is never repriced by monetary observations.
-                // Tried assignments are skipped here only; their validated costs
-                // remain in the certified model used after this heuristic phase.
-                let skipped = observations
-                    .iter()
-                    .map(|observation: &ObservedAssignment| {
-                        let mut selected = observation.selected.clone();
-                        selected.modeled_cost = selected
-                            .selected_candidates
-                            .iter()
-                            .map(|id| {
-                                heuristic_graph
-                                    .as_ref()
-                                    .expect("baseline graph exists")
-                                    .candidates[id.0]
-                                    .local_cost
-                            })
-                            .sum();
-                        ObservedAssignment {
-                            selected,
-                            exact_cost: None,
-                            rejected_queries: observation.rejected_queries.clone(),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                (
-                    heuristic_graph.as_ref().expect("baseline graph exists"),
-                    skipped,
-                    remaining.min(baseline_budget.saturating_sub(started.elapsed())),
-                )
-            } else {
-                (graph, observations.clone(), remaining)
-            };
+        let (proposal_graph, proposal_observations, solve_budget) = if use_direct {
+            direct_attempts += 1;
+            let restricted = restrictions.direct[direct_index].0;
+            // A different scan-price class may forbid earlier bindings. Keep
+            // their observations for the full graph, not this restricted model.
+            let admitted = observations
+                .iter()
+                .filter(|observation: &&ObservedAssignment| {
+                    crate::search::candidates::graph::validate_selected_graph(
+                        restricted,
+                        &observation.selected,
+                    )
+                    .is_ok()
+                })
+                .cloned()
+                .collect();
+            (
+                restricted,
+                admitted,
+                remaining
+                    .min(direct_budget.saturating_sub(started.elapsed()))
+                    .min(per_direct_budget.saturating_sub(direct_started.elapsed())),
+            )
+        } else if let Some(restricted) = &neighborhood {
+            (
+                restricted,
+                Vec::new(),
+                remaining.min(neighborhood_deadline.saturating_duration_since(Instant::now())),
+            )
+        } else if use_baseline {
+            baseline_attempts += 1;
+            // A structural proposal is never repriced by monetary observations.
+            // Tried assignments are skipped here only; their validated costs
+            // remain in the certified model used after this heuristic phase.
+            let skipped = observations
+                .iter()
+                .map(|observation: &ObservedAssignment| {
+                    let mut selected = observation.selected.clone();
+                    selected.modeled_cost = selected
+                        .selected_candidates
+                        .iter()
+                        .map(|id| {
+                            heuristic_graph
+                                .as_ref()
+                                .expect("baseline graph exists")
+                                .candidates[id.0]
+                                .local_cost
+                        })
+                        .sum();
+                    ObservedAssignment {
+                        selected,
+                        exact_cost: None,
+                        rejected_queries: observation.rejected_queries.clone(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            (
+                heuristic_graph.as_ref().expect("baseline graph exists"),
+                skipped,
+                remaining.min(baseline_budget.saturating_sub(baseline_elapsed)),
+            )
+        } else {
+            (graph, observations.clone(), remaining)
+        };
         if use_neighborhood && solve_budget.is_zero() {
             neighborhood_spent += neighborhood_started.elapsed();
             continue;
         }
-        let mut proposal = match propose(
-            proposal_graph,
-            &proposal_observations,
-            Some(solve_budget.as_secs_f64()),
-            &mut solve_metrics,
-        ) {
+        let proposed = if use_direct {
+            solve_direct_cost_proposal_with_metrics(
+                proposal_graph,
+                &proposal_observations,
+                Some(solve_budget.as_secs_f64()),
+                &mut solve_metrics,
+                restrictions.direct[direct_index].1,
+            )
+        } else {
+            propose(
+                proposal_graph,
+                &proposal_observations,
+                Some(solve_budget.as_secs_f64()),
+                &mut solve_metrics,
+            )
+        };
+        let mut proposal = match proposed {
+            Ok(None) if use_direct => {
+                direct_finished = true;
+                continue;
+            }
+            Err(CandidateSelectionError::UnsupportedDirectCost(reason)) if use_direct => {
+                if solve_metrics.direct_cost_fallback_reasons.len() < 8 {
+                    solve_metrics.direct_cost_fallback_reasons.push(reason);
+                }
+                direct_finished = true;
+                continue;
+            }
+            Err(CandidateSelectionError::Solver(reason)) if use_direct => {
+                if solve_metrics.direct_cost_fallback_reasons.len() < 8 {
+                    solve_metrics
+                        .direct_cost_fallback_reasons
+                        .push(format!("direct solver stopped: {reason}"));
+                }
+                direct_finished = true;
+                continue;
+            }
             Ok(Some(proposal)) => proposal,
             Ok(None) if use_neighborhood => {
                 neighborhood_spent += neighborhood_started.elapsed();
@@ -399,7 +509,8 @@ fn search_with_solver(
                 break CandidateSearchStatus::Infeasible;
             }
             Err(CandidateSelectionError::Solver(_))
-                if use_baseline && started.elapsed() >= baseline_budget =>
+                if use_baseline
+                    && baseline_started.is_some_and(|start| start.elapsed() >= baseline_budget) =>
             {
                 heuristic_graph = None;
                 continue;
@@ -418,7 +529,8 @@ fn search_with_solver(
                 };
             }
         };
-        if use_baseline {
+        let direct_modeled_cost = proposal.direct_modeled_cost;
+        if use_baseline || use_direct {
             proposal.selected.modeled_cost = proposal
                 .selected
                 .selected_candidates
@@ -443,6 +555,10 @@ fn search_with_solver(
         if observations.iter().any(|observation: &ObservedAssignment| {
             same_assignment(&observation.selected, &proposal.selected)
         }) {
+            if use_direct {
+                direct_finished = true;
+                continue;
+            }
             if use_neighborhood {
                 neighborhood_spent += neighborhood_started.elapsed();
                 continue;
@@ -462,6 +578,14 @@ fn search_with_solver(
         };
         if feedback.budget_exhausted {
             break CandidateSearchStatus::TimeLimit;
+        }
+        if let Some(reason) = feedback.unpriced_reason {
+            if feedback.actual_cost.is_some() || !feedback.rejected_queries.is_empty() {
+                return Err(
+                    "unpriceable feedback cannot contain a cost or certified query cut".into(),
+                );
+            }
+            unpriced_reason.get_or_insert(reason);
         }
         let actual_cost = feedback.actual_cost;
         if actual_cost.is_some() && !feedback.rejected_queries.is_empty() {
@@ -490,6 +614,21 @@ fn search_with_solver(
                 });
             }
         }
+        if let (Some(modeled), Some(actual)) = (direct_modeled_cost, actual_cost) {
+            let tolerance = 1e-7 * modeled.abs().max(actual.abs()).max(1e-15);
+            if (modeled - actual).abs() > tolerance {
+                return Err(format!(
+                    "direct-cost objective {modeled} disagrees with evaluator {actual}"
+                ));
+            }
+            direct_finished = true;
+            solve_metrics.direct_cost_validated_plans += 1;
+            solve_metrics.direct_cost_best_validated_cost = Some(
+                solve_metrics
+                    .direct_cost_best_validated_cost
+                    .map_or(actual, |previous| previous.min(actual)),
+            );
+        }
         observations.push(ObservedAssignment {
             selected: proposal.selected,
             exact_cost: actual_cost,
@@ -504,6 +643,21 @@ fn search_with_solver(
         {
             break CandidateSearchStatus::Optimal;
         }
+    };
+    // Excluding an unpriceable assignment helps find a usable incumbent but
+    // does not prove infeasibility or a bound over the original candidate set.
+    let status = if let Some(reason) = unpriced_reason {
+        lower_bound = 0.0;
+        match status {
+            CandidateSearchStatus::Optimal | CandidateSearchStatus::Infeasible => {
+                CandidateSearchStatus::EvaluatorStopped(format!(
+                    "unpriceable assignments excluded: {reason}"
+                ))
+            }
+            other => other,
+        }
+    } else {
+        status
     };
     let relative_gap = incumbent.as_ref().map(|best| {
         if best.actual_cost == 0.0 {
@@ -578,6 +732,131 @@ mod tests {
         }
     }
 
+    // An unpriceable candidate must not prevent a later validated plan, nor
+    // allow exclusions of unknown costs to certify a full-domain optimum.
+    #[test]
+    fn unpriceable_assignments_preserve_search_without_an_optimality_claim() {
+        for costs in [vec![1.0, 2.0], vec![1.0]] {
+            let graph = choices(&costs);
+            let result = search_candidates_with_direct_feedback(
+                &graph,
+                limits(8),
+                &costs,
+                &[],
+                &[],
+                &[],
+                |selected| {
+                    if selected
+                        .selected_candidates
+                        .contains(&PhysicalCandidateId(0))
+                    {
+                        Ok(CandidateEvaluation {
+                            unpriced_reason: Some("analytical arithmetic overflowed".into()),
+                            ..Default::default()
+                        })
+                    } else {
+                        Ok(Some(2.0).into())
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                result.incumbent.as_ref().map(|best| best.actual_cost),
+                (costs.len() == 2).then_some(2.0)
+            );
+            assert_eq!(result.lower_bound, 0.0);
+            assert!(matches!(
+                result.status,
+                CandidateSearchStatus::EvaluatorStopped(_)
+            ));
+            assert_eq!(result.relative_gap, (costs.len() == 2).then_some(1.0));
+        }
+    }
+
+    // A restricted direct-cost seed supplies an incumbent, never a full-domain bound.
+    #[test]
+    fn direct_cost_seed_validates_price_without_claiming_global_optimum() {
+        use crate::search::milp::direct_cost::NodeCostProfile;
+        let graph = choices(&[0.0, 0.0]);
+        let mut restricted = graph.clone();
+        restricted.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(1)];
+        let profile = DirectCostProfile {
+            schedules: None,
+            nodes: vec![
+                NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
+                    execution_cost: 1.0,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
+                    execution_cost: 2.0,
+                    ..Default::default()
+                },
+            ],
+            query_rate: 1.0,
+            request_latency_seconds: 0.0,
+            request_cost: 0.0,
+        };
+        let result = search_candidates_with_direct_feedback(
+            &graph,
+            limits(1),
+            &[1.0, 1.0],
+            &[],
+            &[],
+            &[(&restricted, &profile)],
+            |selected| Ok(Some(profile.selected_cost(&restricted, selected)).into()),
+        )
+        .unwrap();
+        assert_eq!(result.incumbent.unwrap().actual_cost, 2.0);
+        assert_eq!(result.lower_bound, 0.0);
+        assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
+        assert_eq!(result.solve_metrics.direct_cost_validated_plans, 1);
+    }
+
+    // Separate scan-price classes share one budget and retain the best validated DAG.
+    #[test]
+    fn direct_price_classes_preserve_the_best_incumbent() {
+        use crate::search::milp::direct_cost::NodeCostProfile;
+        let graph = choices(&[0.0, 0.0]);
+        let mut first = graph.clone();
+        first.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(0)];
+        let mut second = graph.clone();
+        second.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(1)];
+        let profile = DirectCostProfile {
+            schedules: None,
+            nodes: vec![
+                NodeCostProfile {
+                    execution_cost: 1.0,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    execution_cost: 2.0,
+                    ..Default::default()
+                },
+            ],
+            query_rate: 1.0,
+            request_latency_seconds: 0.0,
+            request_cost: 0.0,
+        };
+        let result = search_candidates_with_direct_feedback(
+            &graph,
+            limits(2),
+            &[1.0, 1.0],
+            &[],
+            &[],
+            &[(&first, &profile), (&second, &profile)],
+            |selected| Ok(Some(profile.selected_cost(&graph, selected)).into()),
+        )
+        .unwrap();
+        assert_eq!(result.incumbent.unwrap().actual_cost, 1.0);
+        assert_eq!(result.solve_metrics.direct_cost_validated_plans, 2);
+        assert_eq!(result.lower_bound, 0.0);
+        assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
+    }
+
     // A later unproven solve can improve the validated incumbent without replacing
     // the earlier certified bound or falsely closing the optimality gap.
     #[test]
@@ -616,6 +895,7 @@ mod tests {
                 Ok(Some(CandidateProposal {
                     selected,
                     model_lower_bound,
+                    direct_modeled_cost: None,
                 }))
             },
         )
@@ -652,6 +932,7 @@ mod tests {
                         bad_evaluations += 1;
                         Ok(CandidateEvaluation {
                             budget_exhausted: false,
+                            unpriced_reason: None,
                             actual_cost: None,
                             rejected_queries: vec![RejectedQuerySubgraph::from_query_outputs(
                                 selected,

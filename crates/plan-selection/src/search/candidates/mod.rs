@@ -1,4 +1,5 @@
 //! Candidate graph representation and physical implementation construction.
+pub(crate) mod accuracy_configurations;
 pub(crate) mod configurations;
 mod factoring;
 pub(crate) mod graph;

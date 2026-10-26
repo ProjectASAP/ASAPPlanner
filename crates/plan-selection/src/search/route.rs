@@ -595,6 +595,22 @@ fn add_phase_metrics(
         }
     }
     report.solve_calls += phase.solve_calls;
+    report.direct_cost_solve_calls += phase.direct_cost_solve_calls;
+    report.direct_cost_validated_plans += phase.direct_cost_validated_plans;
+    if let Some(cost) = phase.direct_cost_best_validated_cost {
+        report.direct_cost_best_validated_cost = Some(
+            report
+                .direct_cost_best_validated_cost
+                .map_or(cost, |previous| previous.min(cost)),
+        );
+    }
+    for reason in &phase.direct_cost_fallback_reasons {
+        if report.direct_cost_fallback_reasons.len() < 8
+            && !report.direct_cost_fallback_reasons.contains(reason)
+        {
+            report.direct_cost_fallback_reasons.push(reason.clone());
+        }
+    }
     report.refinements += phase.refinements;
     report.certified_query_cuts += phase.certified_query_cuts;
     report.peak_milp_variables = report.peak_milp_variables.max(phase.peak_milp_variables);
@@ -800,11 +816,21 @@ fn search_domain<Id: Clone>(
     let started = Instant::now();
     let mut memo = match progress.local_memo.take() {
         Some(memo) => memo,
-        None => try_populate_pass1(
-            initial,
-            &pruned.as_ref().expect("first round pruned").inventory,
-        )
-        .map_err(|error| unsupported(&error.to_string()))?,
+        None => {
+            let mut memo = try_populate_pass1(
+                initial,
+                &pruned.as_ref().expect("first round pruned").inventory,
+            )
+            .map_err(|error| unsupported(&error.to_string()))?;
+            crate::search::candidates::accuracy_configurations::add_scoped_candidates(
+                &mut memo,
+                entries,
+                data,
+                Instant::now().checked_add(remaining()),
+            )
+            .map_err(|error| unsupported(&error))?;
+            memo
+        }
     };
     let deadline = Instant::now().checked_add(remaining());
     asap_logical_asap_optimization::memo::window_candidates::extend_local_window_composition(
@@ -1041,6 +1067,10 @@ fn search_domain<Id: Clone>(
         solver_ms: result.metrics.solver_seconds * 1000.0,
         validation_ms: result.validation_seconds * 1000.0,
         solve_calls: result.metrics.solve_calls,
+        direct_cost_solve_calls: result.metrics.direct_cost_solve_calls,
+        direct_cost_validated_plans: result.metrics.direct_cost_validated_plans,
+        direct_cost_best_validated_cost: result.metrics.direct_cost_best_validated_cost,
+        direct_cost_fallback_reasons: result.metrics.direct_cost_fallback_reasons.clone(),
         peak_milp_variables: result.metrics.peak_variables,
         peak_milp_constraints: result.metrics.peak_constraints,
         validation_rejection_counts: result.rejections.counts,

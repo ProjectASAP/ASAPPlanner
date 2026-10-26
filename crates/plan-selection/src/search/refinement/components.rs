@@ -242,6 +242,7 @@ fn project(
             ReaderConstraint::ActivationRequires { candidate, .. }
             | ReaderConstraint::AllowedOutputs { candidate, .. }
             | ReaderConstraint::IncompatibleOutputs { candidate, .. }
+            | ReaderConstraint::HighestSharedQueryMaterialization { candidate, .. }
             | ReaderConstraint::MinimumQueryReaders { candidate, .. } => candidate.0,
         };
         let Some(&candidate) = candidates.get(&id) else {
@@ -272,6 +273,20 @@ fn project(
                     candidate,
                     left,
                     right,
+                }
+            }
+            ReaderConstraint::HighestSharedQueryMaterialization { query_outputs, .. } => {
+                ReaderConstraint::HighestSharedQueryMaterialization {
+                    candidate,
+                    query_outputs: query_outputs
+                        .iter()
+                        .map(|bucket| {
+                            bucket
+                                .iter()
+                                .filter_map(|id| outputs.get(id).copied())
+                                .collect()
+                        })
+                        .collect(),
                 }
             }
             ReaderConstraint::MinimumQueryReaders {
@@ -437,6 +452,23 @@ pub(in crate::search) fn optimize_independent_components(
         summary.solve_metrics.model_construction_seconds += metrics.model_construction_seconds;
         summary.solve_metrics.solver_seconds += metrics.solver_seconds;
         summary.solve_metrics.solve_calls += metrics.solve_calls;
+        summary.solve_metrics.direct_cost_solve_calls += metrics.direct_cost_solve_calls;
+        summary.solve_metrics.direct_cost_validated_plans += metrics.direct_cost_validated_plans;
+        // Component proposal costs are not complete workload costs; do not
+        // expose their minimum as the price of a validated whole-workload plan.
+        for reason in &metrics.direct_cost_fallback_reasons {
+            if summary.solve_metrics.direct_cost_fallback_reasons.len() < 8
+                && !summary
+                    .solve_metrics
+                    .direct_cost_fallback_reasons
+                    .contains(reason)
+            {
+                summary
+                    .solve_metrics
+                    .direct_cost_fallback_reasons
+                    .push(reason.clone());
+            }
+        }
         summary.solve_metrics.peak_variables = summary
             .solve_metrics
             .peak_variables

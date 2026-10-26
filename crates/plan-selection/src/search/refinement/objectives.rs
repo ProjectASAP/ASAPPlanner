@@ -1,7 +1,7 @@
 //! Exact evaluator ranking over a bounded traversal of the candidate graph.
 //! Traversal priorities are not an objective scalarization: PlanSelector owns
 //! cluster lexicographic priorities, Pareto dominance, constraints and tie policy.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
@@ -135,6 +135,7 @@ pub(in crate::search) fn optimize_objective_candidates_with_options(
     let mut observations = Vec::new();
     let mut physical_catalog = Vec::new();
     let mut evaluated_plans = Vec::new();
+    let mut completed_offers = BTreeSet::new();
     let mut stage2_rejected_assignments = Vec::new();
     let mut selected_by_id = BTreeMap::new();
     let mut metrics = CandidateSolveMetrics::default();
@@ -224,9 +225,11 @@ pub(in crate::search) fn optimize_objective_candidates_with_options(
                             Err(error) => Err(error),
                         }
                     }
-                    CandidateCalibration::Frozen(_) => {
-                        selector.offer_before(&physical, context.deadline)
-                    }
+                    CandidateCalibration::Frozen(_) => selector
+                        .offer_before(&physical, context.deadline)
+                        .map(|()| {
+                            completed_offers.insert(physical.id.clone());
+                        }),
                 }
             }
             Ok(None) => Ok(()),
@@ -284,7 +287,9 @@ pub(in crate::search) fn optimize_objective_candidates_with_options(
                     break;
                 }
                 match selector.offer_before(physical, context.deadline) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        completed_offers.insert(physical.id.clone());
+                    }
                     Err(SelectionError::EvaluationDeadlineExceeded) => {
                         status = CandidateSearchStatus::TimeLimit;
                         evaluation_complete = false;
@@ -315,6 +320,10 @@ pub(in crate::search) fn optimize_objective_candidates_with_options(
         }
         CandidateCalibration::Frozen(_) => "not_required",
     };
+    // Reconstruction and calibration do not complete evaluation. In particular,
+    // a compiler deadline must not leave an archived plan with neither a cost
+    // nor a rejection. Keep every completed offer, including rejected plans.
+    evaluated_plans.retain(|(_, physical)| completed_offers.contains(&physical.id));
     let mut evaluation_rejections = Vec::new();
     let best = match selector.finish() {
         Ok(best) => {
@@ -896,17 +905,25 @@ mod tests {
             models,
             calibration: CalibrationFit::default(),
         };
-        let result = optimize_objective_candidates(
+        let result = optimize_objective_candidates_with_options(
             &configured,
             &context,
             limits(10),
             CandidateCalibration::Frozen(CalibrationFit::default()),
+            ObjectiveSearchOptions {
+                keep_every_candidate: true,
+                exhaustive: true,
+            },
         )
         .unwrap();
         assert_eq!(result.status, CandidateSearchStatus::TimeLimit);
         assert_eq!(result.refinements, 1);
         assert!(!result.catalog_exhausted);
         assert!(result.best.is_none());
+        assert!(
+            result.evaluated_plans.is_empty(),
+            "interrupted offers are not evaluated archive entries"
+        );
         assert!(result.evaluation_rejections.is_empty());
         assert!(result.rejections.counts.is_empty());
         assert_eq!(result.certified_query_cuts, 0);
@@ -942,7 +959,7 @@ mod tests {
             models,
             calibration: CalibrationFit::default(),
         };
-        let result = optimize_objective_candidates(
+        let result = optimize_objective_candidates_with_options(
             &configured,
             &context,
             CandidateSearchLimits {
@@ -950,6 +967,10 @@ mod tests {
                 wall_time: Duration::from_secs(2),
             },
             CandidateCalibration::CompleteCatalog,
+            ObjectiveSearchOptions {
+                keep_every_candidate: true,
+                exhaustive: true,
+            },
         )
         .unwrap();
         assert!(result.catalog_exhausted);
@@ -958,6 +979,7 @@ mod tests {
         assert_eq!(result.calibration_scope, "complete_catalog");
         assert!(result.calibration.factor() > 1.0);
         assert!(result.best.is_none());
+        assert!(result.evaluated_plans.is_empty());
         assert!(result.evaluation_rejections.is_empty());
         assert_eq!(check.0.get(), 1);
     }

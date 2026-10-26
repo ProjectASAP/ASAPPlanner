@@ -125,6 +125,8 @@ G_KLL += MergeLatest15(G_panes)
 
 ### Stage 2: expand physical candidates
 
+Non-summary query-time materialization must be a query output or have a selected immediate consumer used by only one query; the materialized node itself must have multiple query readers. These connection-dependent constraints match Stage 2's highest-shared-node rule and are enforced in MILP. Summary-state eligibility remains separate.
+
 Physical rules provide executable operators, configurations, and materialization assignments for the generated computations. For example, a supported pane implementation can maintain state at ingestion and merge it at evaluation. This introduces two timing decisions within the same query, rather than one materialization choice for the whole query. Eligibility that depends on consumers is checked against the selected connections; considering every potential consumer at once could incorrectly reject a useful candidate.
 
 For the running example, assume evaluations occur at aligned minute boundaries and the deployment supports ingestion-time pane maintenance. Stage 2 can expand the state groups as follows; `s` is a generated KLL capacity:
@@ -196,7 +198,28 @@ The following cases make the accounting concrete. Let `B` be the cost of one who
 
 Memory-time and capacity answer different questions. A state occupying `m` bytes for duration `t` contributes `m × t` to memory-time. A capacity limit instead considers simultaneous residency, including temporary allocations; it cannot be inferred from memory-time alone.
 
+### Direct modeled cost in the MILP
+
+The direct-cost objective computes the total modeled cost of the selected execution DAG. It does not precompute one fixed total cost for each candidate or enumerate every complete DAG. Before solving, the planner computes each supported candidate's local cost parameters from its configuration and compatible suppliers. Inside MILP, the selected nodes and connections determine execution frequency and repeated work, consumer-specific operations, state holding costs, shared raw retention, and query overhead. A shared producer owns its charge once, including every required execution; its consumers' work is charged separately. **Local candidate cost parameters are precomputed; the complete selected DAG's cost is determined jointly by MILP.**
+
+Direct pricing currently covers certified query-time exact and fixed sketch configurations, including KMV, KLL, DDS, Count-Min, CountSketch, Theta, and source-certified HLL. Capacity must already satisfy the applicable failure-probability sizing: a later resize would invalidate precomputed prices. Whole-result targets therefore add conservatively sized capacity candidates before physical costing, preserving the original candidates. Matching schedules use a compact demand model. Larger sets of fixed-interval schedules use phase activation and bounded integer rate totals, avoiding enumeration of every reader subset; rates follow the evaluator's accounting policy, including unknown phases. The normalized rate total is bounded at 4,096; small heterogeneous workloads can also use evaluator-derived subset tables. The model includes raw retention, request overhead, and latency-dependent temporary state, and checks the decoded total against the complete DAG evaluator. Accuracy still requires full output validation.
+
+Direct pane pricing covers query-time rebuilding, eligible state retained across evaluations, and fixed-retention ingestion maintenance when every admitted unary supplier binding certifies the same ingest-worker count. Source-certified HLL panes use the same population and failure-probability checks as HLL whole-window builds. Rebuilt state pays for its execution demand and temporary lifetime; retained query-time state pays for resident panes and required refreshes. Ingestion updates run at ingestion demand, resident state is charged once, and ingestion update work is excluded from query latency. Ordinary full-window scans and latest-pane refresh scans use separate restricted pricing classes: a consumer can connect only to suppliers with the matching scan context. These classes share the planning budget and preserve the best validated plan; they do not enumerate every mixed-context DAG. For multiple ingest workers, the model includes the maximum compaction delay among the ingestion states reached by each query; this affects query-time state holding cost. Worker counts crossing a configuration boundary remain unsupported in that pricing class.
+
+Matching range requests on the same fixed schedule are directly priced for rebuilt and ingestion-maintained state: evaluation frequency includes every range step, request overhead remains per request, and maintained panes retain the required historical span. Query-kept range state, differing range contexts, uncertified supplier interfaces, and schedules outside the bounded encodings still require evaluator refinement. Unsupported configurations remain in the full candidate catalog and currently use evaluator-based refinement; these are implementation limitations to remove, not the intended final architecture. The restricted subspace's optimum is not a full-catalog optimum. Reports expose direct-cost solve counts, validated costs, and fallback reasons so a successful fallback cannot be mistaken for direct-model coverage.
+
+A candidate whose evaluator cost overflows the representable range is skipped with a `cost_not_representable` diagnostic so scalar-price search can still find a validated plan. This is an unknown cost, not proof of infeasibility: if such assignments were excluded, the search reports a conservative zero lower bound and cannot claim a full-domain optimum or infeasibility. Invalid settings and other evaluator errors remain errors.
+
+Numerically ill-conditioned cost profiles, rate tables, or normalized latency terms also fall back explicitly rather than silently dropping charges. An optimal direct solve must additionally agree with an independently decoded selected-DAG cost before its restricted-domain certificate is accepted.
+
+Fixed query overhead can be omitted during minimization but must be restored in reported totals.
+
+For a shared KMV rollup, charge one build at each required common evaluation, one fine-group extraction, the coarse regrouping merge, and its extraction. Two independent builds incur two build charges. Different consumer schedules change the union of execution demand, not merely the number of activated nodes. Supplier-dependent cardinality, state size, and lifetime require explicit finite contexts or connection-dependent variables; do not replace an unknown coefficient with zero and report the objective as complete.
+
+Within a supported cost context, the decoded MILP objective plus omitted constants must agree with the independent physical-plan evaluator within numerical tolerance. Runtime measurements calibrate this model; neither solver optimality nor evaluator agreement establishes actual runtime cost. Contexts not yet fully encoded must report evaluator-refinement costing and must not claim a direct complete-cost formulation.
+
 The configured Stage 3 objective and evaluators remain authoritative. The candidate-connection route supports usage-over-time and provisioned-price objectives, and cluster-capacity latency/memory priorities and Pareto traversal. Scalar cost bounds apply only where certified; bounded objective/frontier traversal reports incompleteness. Accuracy is an output requirement, since locally acceptable errors may compose into an unacceptable query result. Latency and resource limits likewise depend on the configured timing and capacity assumptions.
+
 
 ## 5. MILP Formulation
 
@@ -430,6 +453,8 @@ Consumer-dependent freshness, invalidation, and lifetime checks may involve seve
 
 For each query `q`, the configured accuracy contract specifies an error metric and target, and, when probabilistic, a failure-probability target. A plan is feasible only if its composed output error and failure probability satisfy those targets. These are end-to-end checks, not a sum of arbitrary local sketch errors. Primitive contracts also carry their data-domain conditions. For example, an interior DDSketch quantile using interpolation cannot assume a relative-error bound across zero; a supported nonnegative-source proof can discharge that condition. Bind declared data facts before recovering dependent arithmetic guarantees, and leave unproved contracts unknown.
 
+Accuracy is a feasibility condition, not an approximate-candidate surcharge. Exact and approximate candidates satisfying the requested contract compete on resource cost without an exactness penalty. Prune a candidate or connection combination only when its incompatibility is established; local uncertainty is not proof that every completion fails. If accuracy depends on suppliers or downstream composition, constrain that combination. In strict mode, an uncertified plan cannot be returned as satisfying the target, and the user's failure probability must not be silently ignored.
+
 When proven composition rules exist, encode their bounds directly. Otherwise use the exact finite-assignment exclusion below for each plan whose validated accuracy fails. For example, if a selected P99 estimator and its small KLL producer violate the target regardless of all other choices, the following focused cut is sound:
 
 ```text
@@ -522,6 +547,77 @@ The first two reductions preserve the represented choices under their stated con
 
 Within the seed budget, the same MILP can also hold a validated plan's computations and producer connections fixed and try supported query-time materializations. The normal evaluator measures whether retaining a shared result avoids enough repeated upstream work to reduce cost. These limited proposals use the existing solve/evaluation budgets; their bounds and infeasibility apply only to the restricted proposal, never to the full search. This does not create another selector or an optimality claim for the seed.
 
+### Conditional optimal substructure
+
+Memo groups alone do not make the workload separable. A group's cheapest candidate can depend on which other consumers share its producers. However, a region has optimal substructure when its interaction with the rest of the plan is completely described by fixed **boundary conditions**. These include exposed inputs and outputs, producer identity/configuration, accuracy and freshness contracts, execution demand, and any resource or latency information needed outside the region. Given the same boundary conditions, replacing the interior with a cheaper feasible implementation must preserve every external cost and constraint.
+
+For a region without shared internal work, additive costs permit the familiar dynamic program (DP):
+
+```text
+Best(group, requirements) = min over compatible candidates c:
+    LocalCost(c, requirements)
+    + sum over required inputs i: Best(input_group(i), input_requirements(c, i))
+```
+
+The requirements must include relevant physical properties and execution context. This recurrence applies only when input subproblems are independent: summing their costs is invalid if they share a paid producer. Potential candidate cycles also require care; apply this simple recurrence to acyclic subproblems rather than recursively following cyclic memo references. Regions that do not meet these conditions remain in joint selection.
+
+For example, P95 and P99 can share one KLL producer. Once its configuration, materialization, supplied guarantees, and consumer execution demand are fixed, their downstream extraction regions can be optimized independently if no other constraints couple them. The shared build cost belongs to the joint selection problem and is excluded from both local costs. With evaluations every 1m and 5m, the shared producer's demand is their compatible evaluation-time union. Frequencies alone do not determine that union: alignment and freshness also matter. A boundary must preserve the required schedule information or an exact equivalent representation.
+
+### Local DP with joint MILP selection
+
+Use DP to compress only regions with a proven sufficient boundary. A local result stores its boundary contract, incremental cost, resource/accuracy/latency profile, and enough information to reconstruct the selected candidates and connections. If global budgets can distinguish local plans, retain their Pareto frontier rather than only the cheapest one. Dominance comparisons require equivalent external sharing interfaces and no weaker guarantees; a cheaper plan with fewer reuse opportunities does not dominate another plan.
+
+DP can reduce the candidates and connections passed to MILP without reducing the candidates initially generated. These are distinct mechanisms:
+
+| Mechanism | What it reduces |
+| --- | --- |
+| Memo interning and rule-generation caching | Duplicate candidate derivation and repeated exploration. |
+| DP caching under identical boundary conditions | Repeated solution of the same local optimization subproblem. |
+| DP with safe dominance pruning and region compression | Local choices and internal connections that the MILP must explicitly select. |
+
+For example, a local region may have 20 implementations with equivalent external interfaces, sharing opportunities, and guarantees. If there are no remaining resource or other external tradeoffs, DP can retain its cheapest implementation as one representative local plan. The MILP then selects that plan through its boundary rather than selecting its internal implementation. If one plan costs 3 and uses 8 GB while another costs 5 and uses 2 GB, both may be needed under a global memory budget. Likewise, a locally more expensive candidate cannot be removed if it offers a distinct sharing opportunity. DP alone does not guarantee a smaller candidate inventory: compression comes from proving that discarded choices cannot improve any relevant external decision.
+
+The proposed workflow is:
+
+```text
+Generate memo candidates and compatible connections
+    → Identify independent components and shared boundaries
+    → Optimize eligible local regions with DP
+    → Retain boundary-compatible local plans / Pareto frontiers
+    → MILP selects local plans, shared candidates, and connections jointly
+    → Expand selected local plans and validate the execution DAG
+```
+
+The MILP retains shared producer activation, configuration, consumer assignment, connection-dependent demand, and global resource constraints. Local plans can replace their internal decisions only if boundary compatibility, cost ownership, and all cross-region constraints are preserved, including acyclicity after expansion. Shared raw retention is a boundary decision even when the computation regions otherwise appear independent. Nonseparable pricing or scheduling interactions must likewise remain represented jointly.
+
+Pane width follows the same rule. A pane chain used exclusively inside a region can be optimized locally over its generated legal widths. A chain potentially shared across regions must expose its width, coverage, materialization, and guarantees as boundary configurations. Fixing each query's locally cheapest width before joint selection can discard the globally cheapest shared chain.
+
+### Independent components and global budgets
+
+Components may be solved and combined independently only when both the feasible set and objective separate. No possible selected connection, shared resource, pricing term, or global constraint may couple them. Inspect the candidate dependency and constraint structure, not just one provisional selected plan.
+
+When only global budgets couple otherwise independent components, local optimization can still reduce the master problem. For example:
+
+| Component | Local plan | Cost | Resident memory |
+| --- | --- | ---: | ---: |
+| A | A1 | 3 | 8 GB |
+| A | A2 | 5 | 2 GB |
+| B | B1 | 3 | 8 GB |
+| B | B2 | 5 | 2 GB |
+
+Under a 10 GB budget, independently choosing A1 and B1 is infeasible. Retaining both local choices lets a small MILP select A1+B2 or A2+B1 at cost 8. This example assumes additive simultaneous residency and identical external contracts. More complex peak-memory or latency interactions require a sufficient profile rather than a single scalar.
+
+### Exactness and expected benefit
+
+Decomposition preserves the finite-model optimum only if every relevant boundary state and nondominated local choice is retained, local subproblems are solved exactly, and the joint selection is solved to optimality. Restricting boundary configurations, capping frontiers, discretizing resources approximately, or stopping early requires a corresponding qualified result; final validation establishes feasibility, not optimality.
+
+DP does not remove the worst-case combinatorial difficulty. Boundary states can grow exponentially with the number of shared producers, consumer subsets, and demand patterns. The useful case is a large amount of local computation connected through a small boundary. Dense sharing may offer little compression, and frontier construction itself may cost more than it saves.
+
+Complete and validate the current MILP implementation before implementing DP compression; use the uncompressed MILP as a correctness baseline. For subsequent DP work, implement strict independent-component splitting and acyclic, unshared local DP first. Extend to shared-boundary DP only where measurements justify the larger state space. This is a proposed acceleration of the same candidate-selection problem, not a requirement to use LBBD or a claim that DP compression is already implemented.
+
+### Reconstruction and validation
+
+
 After selection, the planner reconstructs the DAG and evaluates accuracy, latency, and resource cost. A complete MILP does not require LBBD. Lazy refinement is useful when difficult checks are left outside the initial model, provided the resulting feasibility or cost cuts are sound. The report includes the validated cost, solver status and gap, and generation limits; validating one solution alone does not prove a relaxed model optimal.
 
 ## 8. Implementation and Evaluation
@@ -531,6 +627,8 @@ The implementation uses `LogicalMemo` and `MemoGroup` for initial identities, an
 Logical memo rules belong in `logical-asap-optimization`; physical eligibility remains authoritative in `physical-asap-optimization`. Within selection, candidate inventory/reconstruction, MILP construction, evaluator refinement, pricing support, and route orchestration have separate scopes. State-local choices belong in candidates; cross-candidate decisions use connections and constraints. The retired `CouplingSite` selector representation and legacy search routes are removed rather than retained under new names.
 
 Evaluation must distinguish generation coverage from selection correctness. Small workloads are exhaustively enumerated over candidate subsets and compatible connections under the same inventory, then compared with MILP results. Cases include multiple selected candidates in one group, shared build costs, separate execution scopes, fusion outputs, and composed accuracy/resource requirements. Scaling experiments measure candidate and connection counts, generation and solve time, planner memory, and validated execution savings. Together these measurements establish whether the representation avoids repeated search work and whether joint selection justifies its planning cost.
+
+For decomposition, compare the original MILP, DP-compressed MILP, and exhaustive enumeration on small inventories. They must agree on feasible optima under the same models. Include shared build ownership, differing evaluation alignments, global memory budgets, competing pane widths, external reuse opportunities, and expansion-time acyclicity. Measure local DP time, boundary-state/frontier sizes, candidate and connection counts before/after compression, and total planning time; fewer MILP variables alone do not establish a speedup.
 
 ### Expected planning performance and execution benefits
 

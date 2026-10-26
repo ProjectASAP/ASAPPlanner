@@ -13,7 +13,7 @@ use crate::search::candidates::physical::{
     materialize_selected_candidates, PhysicalCandidateError,
 };
 use crate::search::refinement::search::{
-    search_candidates_with_restricted_feedback, CandidateEvaluation, CandidateSearchLimits,
+    search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
     CandidateSearchResult,
 };
 use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
@@ -122,7 +122,33 @@ pub(in crate::search) fn optimize_configured_candidates(
     } else {
         Vec::new()
     };
-    let search = search_candidates_with_restricted_feedback(
+    let mut direct = Vec::new();
+    if let Some(seed) = direct_cost_seed(configured, context, &exclusions, false)? {
+        direct.push(seed);
+    }
+    if configured.configurations.iter().any(|configuration| {
+        matches!(
+            configuration.materialization,
+            asap_types::physical::Materialization::MatAtQueryKeptAcrossEvaluations(_)
+        )
+    }) || configured.inventory.templates.iter().flatten().any(|node| {
+        matches!(
+            node.non_asap(),
+            Some(asap_types::ir::NonASAPOp::TimeRange {
+                kind: asap_types::ir::TimeRangeKind::Instant,
+                ..
+            })
+        )
+    }) {
+        if let Some(seed) = direct_cost_seed(configured, context, &exclusions, true)? {
+            direct.push(seed);
+        }
+    }
+    let direct_refs: Vec<_> = direct
+        .iter()
+        .map(|(graph, profile)| (graph, profile))
+        .collect();
+    let search = search_candidates_with_direct_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
             wall_time: limits.wall_time.saturating_sub(weighting_started.elapsed()),
@@ -131,6 +157,7 @@ pub(in crate::search) fn optimize_configured_candidates(
         &weights,
         &exclusions,
         &changes,
+        &direct_refs,
         |selected| {
             evaluation_number += 1;
             let mut rejected_queries = Vec::new();
@@ -150,12 +177,26 @@ pub(in crate::search) fn optimize_configured_candidates(
                         ..Default::default()
                     });
                 }
+                Err(
+                    error @ SelectionError::Cost {
+                        error: crate::AnalyticalCostError::Overflow,
+                        ..
+                    },
+                ) => {
+                    let reason = error.to_string();
+                    rejections.record("cost_not_representable".into(), &reason);
+                    return Ok(CandidateEvaluation {
+                        unpriced_reason: Some(reason),
+                        ..Default::default()
+                    });
+                }
                 Err(error) => return Err(error.to_string()),
             }) else {
                 return Ok(CandidateEvaluation {
                     actual_cost: None,
                     rejected_queries,
                     budget_exhausted: false,
+                    unpriced_reason: None,
                 });
             };
             let cost = selection
@@ -183,9 +224,90 @@ pub(in crate::search) fn optimize_configured_candidates(
     })
 }
 
-/// Prefer contracts that can survive downstream value computations. These are
-/// proposal priorities, not feasibility rules: recomposition and evaluation
-/// still decide the selected graph's actual accuracy.
+/// Restrict only the direct-price proposal. Unsupported configurations and
+/// supplier interfaces remain available in the full evaluator-refined search.
+fn direct_cost_seed(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    seed_exclusions: &[crate::search::candidates::graph::PhysicalCandidateId],
+    latest_panes: bool,
+) -> Result<
+    Option<(
+        crate::search::candidates::graph::CandidateDependencyGraph,
+        crate::search::milp::direct_cost::DirectCostProfile,
+    )>,
+    String,
+> {
+    use crate::search::candidates::graph::{PhysicalCandidateId, ReaderConstraint};
+    use crate::search::costing::direct_profile::{
+        extract, extract_latest_panes, DirectProfileError,
+    };
+    let extracted = if latest_panes {
+        extract_latest_panes(configured, context)
+    } else {
+        extract(configured, context)
+    };
+    let mut extracted = match extracted {
+        Ok(Some(extracted)) => extracted,
+        Ok(None) | Err(DirectProfileError::DeadlineExceeded(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if context
+        .deadline
+        .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    {
+        return Ok(None);
+    }
+    let mut graph = configured.inventory.graph.clone();
+    let mut supported = extracted.supported;
+    // One interchangeable execution-scope copy is sufficient for this seed.
+    // Keep all copies in the full graph, where independent input bindings may
+    // require them; avoiding their permutations bounds the direct-price solve.
+    for constraint in &graph.reader_constraints {
+        if let ReaderConstraint::ActivationRequires { candidate, .. } = constraint {
+            supported[candidate.0] = false;
+        }
+    }
+    for excluded in seed_exclusions {
+        supported[excluded.0] = false;
+    }
+    for (id, candidate) in graph.candidates.iter_mut().enumerate() {
+        if context
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return Ok(None);
+        }
+        if !supported[id] {
+            extracted.profile.nodes[id] = Default::default();
+            candidate.local_cost = 0.0;
+            candidate.producer_requirements.clear();
+            graph
+                .reader_constraints
+                .push(ReaderConstraint::AllowedOutputs {
+                    candidate: PhysicalCandidateId(id),
+                    outputs: Vec::new(),
+                });
+        } else {
+            for input in &mut candidate.producer_requirements {
+                input.compatible_producers.retain(|supplier| {
+                    supported[supplier.0] && extracted.suppliers[id].contains(supplier)
+                });
+            }
+        }
+    }
+    for root in &mut graph.query_roots {
+        root.compatible_candidates
+            .retain(|candidate| supported[candidate.0]);
+        if root.compatible_candidates.is_empty() {
+            return Ok(None);
+        }
+    }
+    Ok(Some((graph, extracted.profile)))
+}
+
+/// Price work and state for proposal ordering without an exactness surcharge.
+/// Recomposition and validation still decide the selected graph's accuracy.
 pub(in crate::search) fn accuracy_baseline_weights(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
@@ -311,6 +433,10 @@ fn accuracy_baseline(
     if output_queries.len() != graph.query_roots.len() {
         return Err("baseline output references do not match original query roots".into());
     }
+    let confidence_required = context
+        .entries
+        .iter()
+        .any(|entry| entry.requirements.accuracy.failure_probability.is_some());
     let dds_budgets = seed_dds_budgets(configured, context, &output_queries);
     let mut rank_requested = vec![false; graph.candidates.len()];
     let mut pending: Vec<_> = graph
@@ -423,33 +549,8 @@ fn accuracy_baseline(
             let node = template
                 .as_ref()
                 .ok_or("baseline candidate has no operator template")?;
-            let penalty = if context.models.plan_selection.ignore_accuracy_guarantees {
-                // The configured policy accepts approximate outputs without a
-                // guarantee; preferring exact contracts would hide cheaper builds.
-                0.0
-            } else if let Some(family) = node.asap().and_then(ASAPOp::produced_state) {
-                if matches!(family, FieldDataType::ExactAggregate(..)) {
-                    0.0
-                } else {
-                    preference
-                }
-            } else if let Some(guarantee) = &node.guarantee {
-                if guarantee.is_exact() {
-                    0.0
-                } else if guarantee.spec.accuracy_metric == AccuracyMetric::Rank
-                    && !rank_requested[id]
-                {
-                    preference * preference
-                } else {
-                    preference
-                }
-            } else if matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. })) {
-                preference * preference
-            } else {
-                // Exact operators may have no template guarantee until their
-                // selected input contracts are recomposed; do not penalize that.
-                0.0
-            };
+            // Accuracy determines admissibility through composition and validation.
+            // It must not add a price surcharge to an approximate implementation.
             let cost_priority = if reference_cost > 0.0 {
                 let relative = proposal_costs[id] / reference_cost;
                 // Preserve ordering beyond the normal linear range, without
@@ -467,8 +568,28 @@ fn accuracy_baseline(
             } else {
                 0.0
             };
+            // A strict feasibility seed must not spend its limited attempts on
+            // estimators whose error still needs unavailable workload facts.
+            // This is seed-only: another supplier may repair the contract, so
+            // the complete graph retains these candidates and validates them.
+            let unresolved_estimator_error =
+                matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. }))
+                    && {
+                        let root = QueryRoot::Operator(std::rc::Rc::clone(node));
+                        crate::bound_root_guarantee(
+                            &root,
+                            crate::series_read(&root, context.data),
+                            context.data,
+                            &context.models,
+                        ).is_none_or(|guarantee| {
+                            guarantee.spec.error.evaluate().is_none()
+                                || (confidence_required
+                                    && !guarantee.is_exact()
+                                    && guarantee.spec.failure_probability.evaluate().is_none())
+                        })
+                    };
             let contract_risk = !context.models.plan_selection.ignore_accuracy_guarantees
-                && (node.guarantee.as_ref().is_some_and(|guarantee| {
+                && (unresolved_estimator_error || node.guarantee.as_ref().is_some_and(|guarantee| {
                     !guarantee.is_exact()
                         && guarantee.spec.accuracy_metric == AccuracyMetric::Rank
                         && !rank_requested[id]
@@ -510,7 +631,7 @@ fn accuracy_baseline(
                         if matches!(kind.params(), asap_types::ir::schema::SketchParams::DDSketch { alpha }
                             if *alpha > dds_budgets[id])));
             Ok((
-                1.0 + penalty + cost_priority + unknown_work_priority,
+                1.0 + cost_priority + unknown_work_priority,
                 contract_risk || contextual_materialization || projected_raw_source || insufficient_composed_budget,
             ))
         })
@@ -1388,10 +1509,10 @@ mod tests {
         );
     }
 
-    // Ignoring accuracy guarantees removes exact/sketch preference penalties;
+    // Accuracy policy changes feasibility, not the price of a summary candidate;
     // costs and final evaluation still determine which implementation is kept.
     #[test]
-    fn ignored_accuracy_does_not_penalize_summary_candidates() {
+    fn accuracy_policy_does_not_penalize_summary_candidates() {
         let (configured, roots, entries, data) = fixture();
         let settings = crate::PlanSelectionSettings {
             ignore_accuracy_guarantees: true,
@@ -1433,9 +1554,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            ignored[id] < enforced[id],
-            "ignored guarantees must not retain an exactness penalty"
+        assert_eq!(
+            ignored[id], enforced[id],
+            "enforcing accuracy must not add an exactness penalty"
         );
     }
 
@@ -1637,7 +1758,7 @@ mod tests {
 
         assert!(rank_nodes
             .iter()
-            .all(|&id| rank_weights[id] < value_weights[id]));
+            .all(|&id| rank_weights[id] == value_weights[id]));
         assert!(configured
             .inventory
             .graph
