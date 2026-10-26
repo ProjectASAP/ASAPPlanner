@@ -12,8 +12,8 @@ use crate::summary_kernels::hll_sketch::HLL_PRECISIONS;
 use crate::summary_kernels::weighted_frequency::{self, FrequencyAlgorithm};
 use crate::Error;
 use planner_types::ir::schema::{
-    ExactKind, ExactParams, FieldDataType as SummaryFamilyType, GroupingStrategy, SketchAlgorithm,
-    SketchParams, SketchStatistic, SummaryUpdate,
+    ExactKind, ExactParams, FamilyCapability, FieldDataType as SummaryFamilyType, GroupingStrategy,
+    SketchAlgorithm, SketchParams, SketchStatistic, StatisticKind, SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
@@ -341,66 +341,83 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     .map_err(Error::Invalid)
 }
 
-/// A sketch evaluation is native only for the families Planner can read directly.
+/// The families the executor builds per instance and reads, in
+/// `SketchAlgorithm` order. A family it builds but reads nothing from
+/// (plain Count Sketch) and one it does not build (Theta) are absent.
+pub(crate) const EVALUATED_FAMILIES: [SketchAlgorithm; 8] = [
+    SketchAlgorithm::UnivMon,
+    SketchAlgorithm::Kll,
+    SketchAlgorithm::Cms,
+    SketchAlgorithm::Hll,
+    SketchAlgorithm::DDSketch,
+    SketchAlgorithm::CmsWithHeap,
+    SketchAlgorithm::Kmv,
+    SketchAlgorithm::CountSketchWithHeap,
+];
+
+/// The readouts the family-capability table lists for an evaluated family
+/// that the executor does not evaluate yet: a per-instance Count-Min's item
+/// frequency (the executor answers an item's frequency only from a Hydra
+/// grid, which Stage 2 does not produce yet; `SupportedSummary` gains a
+/// grouping dimension when it does).
+pub(crate) const UNEVALUATED_READOUTS: [(SketchAlgorithm, StatisticKind); 1] =
+    [(SketchAlgorithm::Cms, StatisticKind::ItemFrequency)];
+
+/// Whether the executor reads `readout` from a state of `family` whose
+/// family-capability table row answers it.
+fn evaluates(family: &SummaryFamilyType, readout: StatisticKind) -> bool {
+    use planner_types::ir::schema::HydraKind;
+    match family {
+        SummaryFamilyType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
+            let algorithm = kind.algorithm();
+            EVALUATED_FAMILIES.contains(algorithm)
+                && !UNEVALUATED_READOUTS.contains(&(algorithm.clone(), readout))
+        }
+        SummaryFamilyType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
+            matches!(kind, HydraKind::HydraCms | HydraKind::HydraKll)
+        }
+        _ => false,
+    }
+}
+
+/// A sketch evaluation is native when the family-capability table says the
+/// family answers the statistic and the executor evaluates that readout.
+/// Top-k is a keyed evaluation (`Operator::keyed_evaluation`), not a sketch
+/// evaluation.
 pub fn validate_sketch_evaluation(
     family: &SummaryFamilyType,
     query: &SketchStatistic,
 ) -> Result<(), Error> {
     validate_native_family(family)?;
-    use planner_types::ir::schema::SketchAlgorithm as A;
-    // A point count without an item value reads the total count.
-    let bare_count = matches!(query, SketchStatistic::PointCount { value: None, .. });
-    let supported = match family {
-        SummaryFamilyType::Sketch(kind, _) => match (kind.algorithm(), query) {
-            (A::Kll, SketchStatistic::Quantile { q })
-            | (A::DDSketch, SketchStatistic::Quantile { q }) => {
-                if !(0.0..=1.0).contains(q) {
-                    return Err(Error::Invalid(
-                        "quantile evaluation requires quantile in [0,1]".into(),
-                    ));
-                }
-                true
-            }
-            (A::DDSketch, _) => bare_count,
-            (A::Hll, SketchStatistic::Cardinality) => true,
-            (A::Hll, _) => bare_count,
-            // HydraCms answers a group's item frequency. A group's total
-            // needs a group-mass query asap_sketchlib's Hydra lacks.
-            (A::Cms, SketchStatistic::PointCount { value, .. })
-                if matches!(family, SummaryFamilyType::Sketch(_, grouping)
-                    if grouping != &GroupingStrategy::PerSubpopulationInstance) =>
-            {
-                if value.is_none() {
-                    return Err(Error::Invalid(
-                        "HydraCms does not answer a group total: asap_sketchlib's Hydra has no \
-                         group-mass query; only an item's point count within a group is answered"
-                            .into(),
-                    ));
-                }
-                true
-            }
-            (A::Kmv, SketchStatistic::Cardinality) => true,
-            (A::Kmv, _) => bare_count,
-            // One frequency state answers its total, distinct count, L2 norm
-            // and entropy.
-            (
-                A::UnivMon,
-                SketchStatistic::Cardinality
-                | SketchStatistic::FrequencyL2
-                | SketchStatistic::FrequencyEntropy,
-            ) => true,
-            (A::UnivMon, _) => bare_count,
-            // Only count intents read a Count-Min bare count, and their
-            // updates have unit weight; the evaluation is typed Int64 on that basis.
-            (A::Cms, _) => bare_count,
-            _ => false,
-        },
-        _ => false,
-    };
-    if !supported {
+    let readout = query.kind();
+    // HydraCms answers a group's item frequency. A group's total needs a
+    // group-mass query asap_sketchlib's Hydra lacks.
+    if readout == StatisticKind::Total
+        && matches!(
+            family,
+            SummaryFamilyType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. })
+        )
+    {
+        return Err(Error::Invalid(
+            "HydraCms does not answer a group total: asap_sketchlib's Hydra has no group-mass \
+             query; only an item's point count within a group is answered"
+                .into(),
+        ));
+    }
+    if readout == StatisticKind::TopK
+        || !FamilyCapability::of(family).answers(query)
+        || !evaluates(family, readout)
+    {
         return Err(Error::Invalid(
             "evaluation is not implemented for this summary family".into(),
         ));
+    }
+    if let SketchStatistic::Quantile { q } = query {
+        if !(0.0..=1.0).contains(q) {
+            return Err(Error::Invalid(
+                "quantile evaluation requires quantile in [0,1]".into(),
+            ));
+        }
     }
     Ok(())
 }

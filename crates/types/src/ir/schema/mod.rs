@@ -27,9 +27,8 @@ pub use family_capability::{
 pub use sketch::{
     default_hydra_params, hydra_kind_for, EntityIdentity, ExactKind, ExactParams, GroupingStrategy,
     HydraKind, HydraParams, NonNegativeWeightProof, SamplingKind, SamplingParams, SketchAlgorithm,
-    SketchCategory, SketchKind, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
-    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
-    EXACT_ACCUMULATOR_STATE_BYTES,
+    SketchKind, SketchParams, SketchStatistic, StatModelKind, StatModelParams, SummaryInputExpr,
+    SummaryUpdate, WaveletKind, WaveletParams, WeightDomain, EXACT_ACCUMULATOR_STATE_BYTES,
 };
 
 use serde::{Deserialize, Serialize};

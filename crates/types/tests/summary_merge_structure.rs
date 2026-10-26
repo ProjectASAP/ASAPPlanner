@@ -210,7 +210,7 @@ fn family_capability_table() {
                 SketchParams::DDSketch { alpha: 0.01 },
             ),
             Some(Disjoint),
-            vec![(Quantile, Union), (Total, Union)],
+            vec![(Quantile, Union)],
         ),
         (hll(), Some(MayOverlap), vec![(Distinct, Union)]),
         (
@@ -224,7 +224,7 @@ fn family_capability_table() {
                 SketchParams::CountSketch { width, depth },
             ),
             Some(Disjoint),
-            vec![(ItemFrequency, Union), (FrequencyL2, Union)],
+            vec![(ItemFrequency, Union), (Total, Union)],
         ),
         (
             sketch(
@@ -263,11 +263,7 @@ fn family_capability_table() {
             None,
             vec![(Distinct, Approximate)],
         ),
-        (
-            cms_with_heap(),
-            Some(Disjoint),
-            vec![(TopK, Approximate), (ItemFrequency, Union)],
-        ),
+        (cms_with_heap(), Some(Disjoint), vec![(TopK, Approximate)]),
         (
             sketch(
                 SketchAlgorithm::CountSketchWithHeap,
@@ -278,7 +274,7 @@ fn family_capability_table() {
                 },
             ),
             Some(Disjoint),
-            vec![(TopK, Approximate), (ItemFrequency, Union)],
+            vec![(TopK, Approximate)],
         ),
         // Hydra over a linear sketch is a grid of linear sketches; Hydra
         // over KLL has no accuracy model and fails closed.
@@ -383,15 +379,13 @@ fn family_capability_table() {
                 row.is_some(),
                 "{family:?} {statistic:?}"
             );
-            // An answered statistic's merged error is its row's; the
-            // default for the others is pinned below.
-            if row.is_some() || merge_inputs.is_none() {
-                assert_eq!(
-                    capability.merged_error(statistic),
-                    merge_inputs.and(row),
-                    "{family:?} {statistic:?}"
-                );
-            }
+            // A merged state's error is its row's; none for a statistic
+            // the family does not answer.
+            assert_eq!(
+                capability.merged_error(statistic),
+                merge_inputs.and(row),
+                "{family:?} {statistic:?}"
+            );
         }
     }
 }
@@ -400,9 +394,8 @@ fn family_capability_table() {
 /// part's heaps keep only that part's heavy items. UnivMon's L2 reads layer
 /// 0's Count Sketch, which adds, and its distinct count's bound holds for
 /// any heap that keeps `min(|S_j|, k)` of a layer's keys, as the merge's
-/// does, so both keep the guarantee of one build over the union. Counter
-/// readouts of a heap family (item frequencies) keep their guarantee. A
-/// statistic the family does not answer takes the family's default.
+/// does, so both keep the guarantee of one build over the union. A
+/// statistic the family does not answer has no merged error.
 #[test]
 fn merged_error_depends_on_the_readout() {
     use SketchStatistic::{Cardinality, FrequencyEntropy, FrequencyL2, TopK};
@@ -428,33 +421,15 @@ fn merged_error_depends_on_the_readout() {
     ] {
         assert_eq!(univmon.merged_error(&readout), Some(error), "{readout:?}");
     }
-    // A statistic the family does not answer takes its default: a heavy
-    // item readout of a family with heaps is approximate.
-    assert_eq!(
-        univmon.merged_error(&TopK { k: 5 }),
-        Some(MergedError::Approximate)
-    );
+    assert_eq!(univmon.merged_error(&TopK { k: 5 }), None);
     let heap = FamilyCapability::of(&cms_with_heap());
     assert_eq!(
         heap.merged_error(&TopK { k: 5 }),
         Some(MergedError::Approximate)
     );
-    let item = SketchStatistic::PointCount {
-        key: ColumnRef::Named("k".into()),
-        value: Some("a".into()),
-    };
-    assert_eq!(
-        heap.merged_error(&item),
-        Some(MergedError::AsIfBuiltOverUnion)
-    );
-    // A CMS with a heap answers item frequencies, not its total, whose
-    // default is the guarantee of one build over the union.
-    assert_eq!(
-        heap.merged_error(&point()),
-        Some(MergedError::AsIfBuiltOverUnion)
-    );
-    // Pass 1 offers CountSketch for a count (a bare point count), which
-    // its row does not answer: merged panes keep one build's guarantee.
+    assert_eq!(heap.merged_error(&point()), None);
+    // Pass 1 offers Count Sketch for a count (a bare point count): merged
+    // panes keep one build's guarantee.
     let count_sketch = FamilyCapability::of(&sketch(
         SketchAlgorithm::CountSketch,
         SketchParams::CountSketch {
@@ -462,17 +437,13 @@ fn merged_error_depends_on_the_readout() {
             depth: 5,
         },
     ));
-    assert!(!count_sketch.answers(&point()));
     assert_eq!(
         count_sketch.merged_error(&point()),
         Some(MergedError::AsIfBuiltOverUnion)
     );
-    // An exact accumulator's merged state is exact.
+    // An exact accumulator is read as its finalized value, not a readout.
     let sum = exact(ExactKind::Sum, ExactParams::Sum);
-    assert_eq!(
-        FamilyCapability::of(&sum).merged_error(&point()),
-        Some(MergedError::Exact)
-    );
+    assert_eq!(FamilyCapability::of(&sum).merged_error(&point()), None);
     assert_eq!(
         FamilyCapability::of(&hll()).merged_error(&Cardinality),
         Some(MergedError::AsIfBuiltOverUnion)
@@ -483,6 +454,205 @@ fn merged_error_depends_on_the_readout() {
     );
     let irate = exact(ExactKind::IRate, ExactParams::IRate);
     assert_eq!(FamilyCapability::of(&irate).merged_error(&point()), None);
+}
+
+/// A structurally validated `SummaryEstimate` of `query` over a `family`
+/// state.
+fn estimate(family: FieldDataType, query: SketchStatistic) -> Result<Rc<OperatorNode>, String> {
+    let node = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: family_state(family, "us"),
+        query,
+    }))
+    .map_err(|e| e.to_string())?;
+    node.validate_structure().map_err(|e| e.to_string())?;
+    Ok(node)
+}
+
+/// A statistic the family does not answer is rejected: a DDSketch's or an
+/// HLL's total, a quantile over a Count-Min, top-k over a KLL, and any
+/// readout of an exact accumulator. What the table answers builds.
+#[test]
+fn a_statistic_the_family_does_not_answer_is_rejected() {
+    let cms = sketch(
+        SketchAlgorithm::Cms,
+        SketchParams::Cms {
+            width: 64,
+            depth: 4,
+        },
+    );
+    let ddsketch = sketch(
+        SketchAlgorithm::DDSketch,
+        SketchParams::DDSketch { alpha: 0.01 },
+    );
+    let total = || SketchStatistic::PointCount {
+        key: ColumnRef::SampleValue,
+        value: None,
+    };
+    for (family, query) in [
+        (ddsketch.clone(), total()),
+        (hll(), total()),
+        (cms.clone(), SketchStatistic::Quantile { q: 0.9 }),
+        (kll(), SketchStatistic::TopK { k: 5 }),
+        (exact(ExactKind::Count, ExactParams::Count), total()),
+    ] {
+        let error = estimate(family.clone(), query.clone()).unwrap_err();
+        assert!(
+            error.contains("evaluation does not match its summary family"),
+            "{family:?} {query:?}: {error}"
+        );
+    }
+    estimate(cms, total()).unwrap();
+    estimate(ddsketch, SketchStatistic::Quantile { q: 0.9 }).unwrap();
+    estimate(hll(), SketchStatistic::Cardinality).unwrap();
+}
+
+/// What the `SummaryEstimate` validation accepted before it read the
+/// family-capability table: a match on the algorithm's category, with
+/// Hydra classified by its inner algorithm.
+fn accepted_by_category(algorithm: &SketchAlgorithm, query: &SketchStatistic) -> bool {
+    use SketchAlgorithm as A;
+    use SketchStatistic as Q;
+    match algorithm {
+        A::Kll | A::DDSketch => matches!(query, Q::Quantile { .. }),
+        A::Hll | A::Theta | A::Kmv => matches!(query, Q::Cardinality),
+        A::Cms | A::CountSketch => matches!(query, Q::PointCount { .. }),
+        A::CmsWithHeap | A::CountSketchWithHeap => matches!(query, Q::TopK { .. }),
+        A::UnivMon => !matches!(query, Q::Quantile { .. }),
+    }
+}
+
+/// Reading the family-capability table changes what the `SummaryEstimate`
+/// validation accepts only where the table and the executor agree the old
+/// category match was wrong: a UnivMon answers no item frequency or top-k,
+/// and a Hydra grid answers an item's frequency within a group, not the
+/// group's total. Every other (family, statistic) pair keeps its answer.
+#[test]
+fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
+    let (width, depth) = (64, 4);
+    let mut families: Vec<FieldDataType> = [
+        SketchParams::Kll {
+            k: 200,
+            failure_probability: None,
+        },
+        SketchParams::DDSketch { alpha: 0.01 },
+        SketchParams::Hll {
+            precision: 12,
+            relative_error: None,
+        },
+        SketchParams::Theta { k: 1024 },
+        SketchParams::Kmv {
+            k: 1024,
+            relative_error: None,
+        },
+        SketchParams::Cms { width, depth },
+        SketchParams::CountSketch { width, depth },
+        SketchParams::CmsWithHeap {
+            width,
+            depth,
+            heap_size: 10,
+        },
+        SketchParams::CountSketchWithHeap {
+            width,
+            depth,
+            heap_size: 10,
+        },
+        SketchParams::UnivMon {
+            heap_size: 10,
+            sketch_rows: depth,
+            sketch_cols: width,
+            layers: 8,
+            distinct_failure_probability: None,
+        },
+    ]
+    .into_iter()
+    .map(|params| {
+        use SketchAlgorithm as A;
+        let algorithm = match &params {
+            SketchParams::Kll { .. } => A::Kll,
+            SketchParams::DDSketch { .. } => A::DDSketch,
+            SketchParams::Hll { .. } => A::Hll,
+            SketchParams::Theta { .. } => A::Theta,
+            SketchParams::Kmv { .. } => A::Kmv,
+            SketchParams::Cms { .. } => A::Cms,
+            SketchParams::CountSketch { .. } => A::CountSketch,
+            SketchParams::CmsWithHeap { .. } => A::CmsWithHeap,
+            SketchParams::CountSketchWithHeap { .. } => A::CountSketchWithHeap,
+            SketchParams::UnivMon { .. } => A::UnivMon,
+        };
+        sketch(algorithm, params)
+    })
+    .collect();
+    families.extend([
+        hydra(
+            SketchAlgorithm::Cms,
+            SketchParams::Cms { width, depth },
+            HydraKind::HydraCms,
+            HydraParams::HydraCms {
+                width,
+                depth,
+                shared_rows: depth,
+                shared_columns: width,
+            },
+        ),
+        hydra(
+            SketchAlgorithm::CountSketch,
+            SketchParams::CountSketch { width, depth },
+            HydraKind::HydraCountSketch,
+            HydraParams::HydraCountSketch {
+                width,
+                depth,
+                shared_rows: depth,
+                shared_columns: width,
+            },
+        ),
+        hydra(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+            HydraKind::HydraKll,
+            HydraParams::HydraKll {
+                k: 200,
+                shared_buckets: width,
+            },
+        ),
+    ]);
+    let statistics = [
+        SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        },
+        SketchStatistic::PointCount {
+            key: ColumnRef::Named("item".into()),
+            value: Some("a".into()),
+        },
+        SketchStatistic::Quantile { q: 0.99 },
+        SketchStatistic::Cardinality,
+        SketchStatistic::FrequencyL2,
+        SketchStatistic::FrequencyEntropy,
+        SketchStatistic::TopK { k: 5 },
+    ];
+    for family in families {
+        let FieldDataType::Sketch(kind, grouping) = &family else {
+            unreachable!()
+        };
+        let hydra = *grouping != GroupingStrategy::PerSubpopulationInstance;
+        for query in &statistics {
+            let fixed = match (kind.algorithm(), query.kind()) {
+                (SketchAlgorithm::UnivMon, StatisticKind::ItemFrequency | StatisticKind::TopK) => {
+                    true
+                }
+                (SketchAlgorithm::Cms | SketchAlgorithm::CountSketch, StatisticKind::Total) => {
+                    hydra
+                }
+                _ => false,
+            };
+            let before = accepted_by_category(kind.algorithm(), query);
+            let after = estimate(family.clone(), query.clone()).is_ok();
+            assert_eq!(after, before != fixed, "{family:?} {query:?}");
+        }
+    }
 }
 
 /// The IR does not reject a merge by family: exact IRate has no sound

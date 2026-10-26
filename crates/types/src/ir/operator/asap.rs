@@ -9,7 +9,7 @@ use super::node::{OperatorNode, OperatorResultKind};
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
 use crate::ir::operator::operator_properties::Reduction;
 use crate::ir::schema::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
-use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
+use crate::ir::schema::{ColumnId, DataType, FamilyCapability, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
 
 /// Why an ASAP operator cannot be used yet.
@@ -634,7 +634,8 @@ impl ASAPOp {
                 query,
             } => {
                 needs_state(summary_input, "SummaryEstimate")?;
-                use crate::ir::schema::sketch::SketchCategory as C;
+                // The family-capability table is the one source of which
+                // statistic a state's family answers.
                 let states: Vec<_> = summary_input
                     .schema
                     .fields
@@ -643,21 +644,9 @@ impl ASAPOp {
                     .collect();
                 let valid = match states.as_slice() {
                     [field] => match &field.dtype {
-                        FieldDataType::Sketch(kind, _) => matches!(
-                            (kind.category(), query),
-                            (C::Quantile, SketchStatistic::Quantile { .. })
-                                | (C::Cardinality | C::Universal, SketchStatistic::Cardinality)
-                                | (
-                                    C::Frequency | C::Universal,
-                                    SketchStatistic::PointCount { .. }
-                                )
-                                | (
-                                    C::Universal,
-                                    SketchStatistic::FrequencyL2
-                                        | SketchStatistic::FrequencyEntropy
-                                )
-                                | (C::TopK | C::Universal, SketchStatistic::TopK { .. })
-                        ),
+                        family @ FieldDataType::Sketch(..) => {
+                            FamilyCapability::of(family).answers(query)
+                        }
                         _ => false,
                     },
                     _ => false,
