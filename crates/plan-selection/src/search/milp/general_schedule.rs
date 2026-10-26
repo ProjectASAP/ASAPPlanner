@@ -19,7 +19,6 @@ pub(super) fn encode(
     graph: &CandidateDependencyGraph,
     profile: &DirectCostProfile,
     schedule: &QueryScheduleRates,
-    general: &GeneralScheduleRates,
     variables: &mut ProblemVariables,
     constraints: &mut Vec<Constraint>,
     active: &[Variable],
@@ -47,7 +46,7 @@ pub(super) fn encode(
             materialized[id] = if node.ingestion {
                 vec![(active[id], 1.0)]
             } else {
-                general.encode_terms(
+                schedule.encode_terms(
                     id,
                     reach,
                     variables,
@@ -73,8 +72,8 @@ pub(super) fn encode(
             check_deadline()?;
             let Some(reached) = reached else { continue };
             if flow.boundary < queries {
-                if schedule.per_query_rates[flow.boundary] > 0.0 {
-                    demands[id].push((reached, schedule.per_query_rates[flow.boundary]));
+                if schedule.per_query_rates()[flow.boundary] > 0.0 {
+                    demands[id].push((reached, schedule.per_query_rates()[flow.boundary]));
                 }
             } else {
                 for (used, rate) in &materialized[flow.boundary - queries] {
@@ -110,14 +109,14 @@ pub(super) fn encode(
             // D*A=N is linear after gating A and each query latency by binary
             // reach: sum(w_q * reached_q * A) = sum(w_q * reached_q * L_q).
             // No reciprocal, LCM, or enumeration of selected reader subsets.
-            let total: f64 = schedule.per_query_rates.iter().sum();
+            let total: f64 = schedule.per_query_rates().iter().sum();
             let mut left = Expression::from(0.0);
             let mut right = Expression::from(0.0);
             if total > 0.0 {
                 for (q, row) in reach.iter().enumerate() {
                     check_deadline()?;
                     if let Some(reached) = row[id] {
-                        let weight = schedule.per_query_rates[q] / total;
+                        let weight = schedule.per_query_rates()[q] / total;
                         if weight == 0.0 {
                             continue;
                         }
@@ -129,11 +128,11 @@ pub(super) fn encode(
                 }
             }
             constraints.push(constraint!(left == right));
-            if schedule.per_query_rates.contains(&0.0) {
+            if schedule.per_query_rates().contains(&0.0) {
                 let positive: Vec<_> = reach
                     .iter()
                     .enumerate()
-                    .filter(|(q, _)| schedule.per_query_rates[*q] > 0.0)
+                    .filter(|(q, _)| schedule.per_query_rates()[*q] > 0.0)
                     .filter_map(|(_, row)| row[id])
                     .collect();
                 let has_positive = variables.add(variable().min(0).max(1));

@@ -6,16 +6,14 @@
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 use std::collections::BTreeMap;
 
-#[path = "direct_fixed_schedule.rs"]
-mod fixed_schedules;
 #[path = "general_schedule.rs"]
 mod general_schedule;
 #[path = "general_schedule_rates.rs"]
 mod general_schedule_rates;
-#[path = "direct_schedule.rs"]
-mod schedules;
-pub(crate) use fixed_schedules::FixedScheduleLattice;
-pub(crate) use general_schedule_rates::GeneralScheduleRates;
+#[cfg(test)]
+#[path = "schedule_selection_tests.rs"]
+mod schedule_selection_tests;
+pub(crate) use general_schedule_rates::QueryScheduleRates;
 
 use crate::search::candidates::graph::*;
 
@@ -53,16 +51,6 @@ impl NodeCostProfile {
             self.work_seconds
         }
     }
-}
-
-/// Evaluator demand metadata. Production mixed schedules use general atoms;
-/// finite table/lattice encodings remain available for regression comparisons.
-#[derive(Debug, Clone)]
-pub(crate) struct QueryScheduleRates {
-    pub general: Option<GeneralScheduleRates>,
-    pub per_query_rates: Vec<f64>,
-    pub materialized_subset_rates: Vec<f64>,
-    pub compact_fixed: Option<FixedScheduleLattice>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,54 +122,12 @@ impl DirectCostProfile {
             ));
         }
         if let Some(schedule) = &self.schedules {
-            let queries = graph.query_roots.len();
-            if let Some(general) = &schedule.general {
-                general.validate(&schedule.per_query_rates, queries)?;
-                if schedule.compact_fixed.is_some()
-                    || !schedule.materialized_subset_rates.is_empty()
-                {
-                    return Err(CandidateSelectionError::UnsupportedDirectCost(
-                        "general demand requires one schedule representation".into(),
-                    ));
-                }
-            } else if let Some(lattice) = &schedule.compact_fixed {
-                lattice.validate(schedule, queries)?;
-            } else {
-                if queries > 3 {
-                    return Err(CandidateSelectionError::UnsupportedDirectCost(
-                        "heterogeneous query schedule table supports at most three output queries"
-                            .into(),
-                    ));
-                }
-                if !schedule.per_query_rates.iter().sum::<f64>().is_finite()
-                    || schedule.per_query_rates.len() != queries
-                    || schedule.materialized_subset_rates.len() != (1usize << queries)
-                    || schedule.materialized_subset_rates[0] != 0.0
-                    || schedule
-                        .per_query_rates
-                        .iter()
-                        .any(|rate| !rate.is_finite() || *rate <= 0.0)
-                    || schedule
-                        .materialized_subset_rates
-                        .iter()
-                        .skip(1)
-                        .any(|rate| !rate.is_finite() || *rate <= 0.0)
-                    || schedule
-                        .per_query_rates
-                        .iter()
-                        .enumerate()
-                        .any(|(q, rate)| *rate != schedule.materialized_subset_rates[1 << q])
-                {
-                    return Err(CandidateSelectionError::InvalidGraph(
-                        "invalid direct query-schedule rates".into(),
-                    ));
-                }
-            }
+            schedule.validate(graph.query_roots.len())?;
         }
         if let Some(schedule) = &self.schedules {
-            let total_rate: f64 = schedule.per_query_rates.iter().sum();
+            let total_rate: f64 = schedule.per_query_rates().iter().sum();
             if schedule
-                .per_query_rates
+                .per_query_rates()
                 .iter()
                 .any(|rate| *rate > 0.0 && rate / total_rate < MINIMUM_QUERY_RATE_WEIGHT)
             {
@@ -225,9 +171,9 @@ impl DirectCostProfile {
                 .filter(|term| *term > 0.0)
                 .reduce(f64::min);
             let minimum_rate_weight = self.schedules.as_ref().map_or(1.0, |schedule| {
-                let total: f64 = schedule.per_query_rates.iter().sum();
+                let total: f64 = schedule.per_query_rates().iter().sum();
                 schedule
-                    .per_query_rates
+                    .per_query_rates()
                     .iter()
                     .filter(|rate| **rate > 0.0)
                     .map(|rate| rate / total)
@@ -286,7 +232,7 @@ impl DirectCostProfile {
             .collect();
         let rates = self.schedules.as_ref().map_or_else(
             || vec![self.query_rate; graph.query_roots.len()],
-            |schedule| schedule.per_query_rates.clone(),
+            |schedule| schedule.per_query_rates().to_vec(),
         );
         let union_rate = |id: usize| {
             if self.nodes[id].ingestion {
@@ -295,22 +241,11 @@ impl DirectCostProfile {
             let Some(schedule) = &self.schedules else {
                 return self.query_rate;
             };
-            if let Some(general) = &schedule.general {
-                return if self.nodes[id].per_request {
-                    general.request_union_rate(reached.iter().map(|row| row[id]))
-                } else {
-                    general.union_rate(reached.iter().map(|row| row[id]))
-                };
+            if self.nodes[id].per_request {
+                schedule.request_union_rate(reached.iter().map(|row| row[id]))
+            } else {
+                schedule.union_rate(reached.iter().map(|row| row[id]))
             }
-            if let Some(lattice) = &schedule.compact_fixed {
-                return lattice.union_rate(reached.iter().map(|row| row[id]));
-            }
-            let mask = reached
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| row[id])
-                .fold(0usize, |mask, (q, _)| mask | (1 << q));
-            schedule.materialized_subset_rates[mask]
         };
         let mut execution_rates = vec![0.0; self.nodes.len()];
         let boundaries = selected
@@ -452,26 +387,8 @@ impl DirectCostProfile {
         let latency_scale = self.maximum_latency(graph).max(f64::MIN_POSITIVE);
         let rates = self.schedules.as_ref().map_or_else(
             || vec![self.query_rate],
-            |schedule| {
-                if let Some(general) = &schedule.general {
-                    return general.coefficient_rates();
-                }
-                if schedule.compact_fixed.is_some() {
-                    return schedule.per_query_rates.clone();
-                }
-                schedule
-                    .materialized_subset_rates
-                    .iter()
-                    .copied()
-                    .filter(|rate| *rate > 0.0)
-                    .collect()
-            },
+            |schedule| schedule.coefficient_rates(),
         );
-        let denominator_scale = self
-            .schedules
-            .as_ref()
-            .and_then(|s| s.compact_fixed.as_ref())
-            .map_or(1.0, FixedScheduleLattice::maximum_denominator_scale);
         self.nodes.iter().flat_map(move |node| {
             let mut coefficients = Vec::with_capacity(rates.len() * 2 + 1);
             let node_rates = if node.ingestion {
@@ -484,13 +401,6 @@ impl DirectCostProfile {
                     node.execution_cost * rate,
                     node.held_memory_cost_per_second * rate * latency_scale,
                 ]);
-                // Compact mean-lifetime selectors multiply by total weight /
-                // selected weight; include that largest possible coefficient.
-                if !node.materialized && denominator_scale > 1.0 {
-                    coefficients.push(
-                        node.held_memory_cost_per_second * rate * latency_scale * denominator_scale,
-                    );
-                }
             }
             coefficients.push(node.standing_cost_per_second);
             coefficients.push(node.raw_retention.as_ref().map_or(0.0, |(_, cost)| *cost));
@@ -675,7 +585,7 @@ pub(super) fn encode(
     check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
 ) -> Result<Expression, CandidateSelectionError> {
     if let Some(schedule) = &profile.schedules {
-        return schedules::encode(
+        return general_schedule::encode(
             graph,
             profile,
             schedule,
@@ -1193,12 +1103,7 @@ mod tests {
     fn two_ingestion_boundaries_recompute_their_shared_input() {
         let (graph, mut profile) = ingestion_profile(true, 1.0);
         assert!((solve(&graph, &profile) - 29.4).abs() < 1e-6);
-        profile.schedules = Some(QueryScheduleRates {
-            general: None,
-            compact_fixed: None,
-            per_query_rates: vec![1.0, 2.0],
-            materialized_subset_rates: vec![0.0, 1.0, 2.0, 3.0],
-        });
+        profile.schedules = Some(schedule_selection_tests::rate_schedule(&[1.0, 2.0]));
         let proposal = solve_direct_cost_proposal_with_metrics(
             &graph,
             &[],
@@ -1359,12 +1264,7 @@ mod tests {
         // refresh; distinct fixed intervals add under the evaluator's policy.
         for (rates, union, expected) in [(vec![2.0, 2.0], 2.0, 74.4), (vec![1.0, 2.0], 3.0, 83.0)] {
             if rates[0] != rates[1] {
-                profile.schedules = Some(QueryScheduleRates {
-                    general: None,
-                    compact_fixed: None,
-                    per_query_rates: rates.clone(),
-                    materialized_subset_rates: vec![0.0, rates[0], rates[1], union],
-                });
+                profile.schedules = Some(schedule_selection_tests::rate_schedule(&rates));
             }
             let weighted_latency = rates[0] * 3.6 + rates[1] * 4.6;
             let rate_sum: f64 = rates.iter().sum();
@@ -1491,12 +1391,7 @@ mod tests {
         };
         for rates in [[1.0, 1.0], [1.0, 2.0]] {
             if rates[0] != rates[1] {
-                profile.schedules = Some(QueryScheduleRates {
-                    general: None,
-                    compact_fixed: None,
-                    per_query_rates: rates.to_vec(),
-                    materialized_subset_rates: vec![0.0, rates[0], rates[1], rates[0] + rates[1]],
-                });
+                profile.schedules = Some(schedule_selection_tests::rate_schedule(&rates));
             }
             let expected = (0..4)
                 .map(|mask| {

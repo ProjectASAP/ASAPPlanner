@@ -37,7 +37,7 @@ struct DemandAtoms {
     horizon: f64,
 }
 #[derive(Debug, Clone)]
-pub(crate) struct GeneralScheduleRates {
+pub(crate) struct QueryScheduleRates {
     queries: Vec<(QueryRecurrence, Option<RangeEvaluation>)>,
     rates: Vec<f64>,
     evaluations: DemandAtoms,
@@ -277,7 +277,7 @@ impl DemandAtoms {
     }
 }
 
-impl GeneralScheduleRates {
+impl QueryScheduleRates {
     pub(crate) fn new(
         entries: &[QueryWorkloadEntry],
         horizon: f64,
@@ -325,12 +325,8 @@ impl GeneralScheduleRates {
             requests,
         })
     }
-    pub(crate) fn validate(
-        &self,
-        rates: &[f64],
-        queries: usize,
-    ) -> Result<(), CandidateSelectionError> {
-        if queries != self.queries.len() || rates != self.rates {
+    pub(crate) fn validate(&self, queries: usize) -> Result<(), CandidateSelectionError> {
+        if queries != self.queries.len() {
             return Err(CandidateSelectionError::InvalidGraph(
                 "inconsistent general schedule rates".into(),
             ));
@@ -591,7 +587,7 @@ mod tests {
         )
     }
     fn compare_all_subsets(entries: &[QueryWorkloadEntry]) {
-        let schedule = GeneralScheduleRates::new(entries, 60.0, None).unwrap();
+        let schedule = QueryScheduleRates::new(entries, 60.0, None).unwrap();
         for per_request in [false, true] {
             for mask in 0..(1usize << entries.len()) {
                 let mut variables = ProblemVariables::new();
@@ -701,7 +697,7 @@ mod tests {
             fixed(1000, None, Some((1_000_000_000, 1))),
             fixed(1000, None, Some((500_000_000, 1))),
         ];
-        let schedule = GeneralScheduleRates::new(&entries, 60.0, None).unwrap();
+        let schedule = QueryScheduleRates::new(&entries, 60.0, None).unwrap();
         assert_eq!(schedule.evaluations.fixed[0].unknown_atoms.len(), 2);
         assert_eq!(
             schedule.union_rate([true, true].into_iter()),
@@ -715,7 +711,7 @@ mod tests {
             fixed(1000, None, Some((1_000_000_000, 2))),
             fixed(1000, None, Some((1_000_000_000, 3))),
         ];
-        let schedule = GeneralScheduleRates::new(&entries, 60.0, None).unwrap();
+        let schedule = QueryScheduleRates::new(&entries, 60.0, None).unwrap();
         assert_eq!(schedule.evaluations.fixed[0].unknown_atoms.len(), 3);
         assert_eq!(schedule.union_rate([true, true].into_iter()), 666_666_668.0);
         assert_eq!(
@@ -764,11 +760,11 @@ mod tests {
             .map(|step| fixed(1000, None, Some((10_000_000, step))))
             .collect();
         assert!(matches!(
-            GeneralScheduleRates::new(&entries, 60.0, None),
+            QueryScheduleRates::new(&entries, 60.0, None),
             Err(CandidateSelectionError::UnsupportedDirectCost(_))
         ));
         assert!(matches!(
-            GeneralScheduleRates::new(&entries, 60.0, Some(Instant::now())),
+            QueryScheduleRates::new(&entries, 60.0, Some(Instant::now())),
             Err(CandidateSelectionError::Solver(_))
         ));
     }

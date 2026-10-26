@@ -199,13 +199,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             tiers.contains(&Some(120_000)) && tiers.contains(&Some(600_000)),
             "{mode:?}: {tiers:?}"
         );
-        let general = profile
-            .schedules
-            .as_ref()
-            .unwrap()
-            .general
-            .as_ref()
-            .unwrap();
+        let general = profile.schedules.as_ref().unwrap();
         let kept = mode == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory);
         assert!(
             (general.union_rate([true, true].into_iter()) - if kept { 2.9 } else { 0.45 }).abs()

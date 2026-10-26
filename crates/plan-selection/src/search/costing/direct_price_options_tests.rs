@@ -819,7 +819,7 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
     let profile = extract_price_options(&configured, &context)
         .unwrap()
         .unwrap();
-    assert!(profile.schedules.as_ref().unwrap().general.is_some());
+    assert!(profile.schedules.is_some());
     let proposal =
         crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
             &configured.inventory.graph,

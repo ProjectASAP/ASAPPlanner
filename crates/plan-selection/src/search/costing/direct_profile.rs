@@ -158,18 +158,13 @@ fn prepare_profile(
     let schedules = if equal_fixed && !has_range {
         None
     } else {
-        let general = crate::search::milp::direct_cost::GeneralScheduleRates::new(
+        let general = crate::search::milp::direct_cost::QueryScheduleRates::new(
             context.entries,
             settings.non_repeating_query_horizon_seconds,
             context.deadline,
         )
         .map_err(|error| DirectProfileError::Unsupported(error.to_string()))?;
-        Some(QueryScheduleRates {
-            per_query_rates: general.per_query_rates().to_vec(),
-            materialized_subset_rates: Vec::new(),
-            compact_fixed: None,
-            general: Some(general),
-        })
+        Some(general)
     };
     let delta = match failure_budget(context)? {
         Some(delta) => delta,
@@ -2157,20 +2152,11 @@ mod tests {
                             .schedules
                             .as_ref()
                             .unwrap()
-                            .general
-                            .as_ref()
-                            .unwrap()
                             .union_rate([true, true].into_iter()),
                         if phases { 2.0 } else { 3.0 }
                     );
                 } else {
-                    assert!(extracted
-                        .profile
-                        .schedules
-                        .as_ref()
-                        .unwrap()
-                        .general
-                        .is_some());
+                    assert!(extracted.profile.schedules.is_some());
                 }
                 let proposal = crate::search::milp::model::solve_direct_cost_proposal_with_metrics(
                     &configured.inventory.graph,

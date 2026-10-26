@@ -45,16 +45,11 @@ fn check_cost(
     expected_union: f64,
     per_request: bool,
 ) {
-    let general = GeneralScheduleRates::new(entries, 60.0, None).unwrap();
+    let general = QueryScheduleRates::new(entries, 60.0, None).unwrap();
     for (actual, expected) in general.per_query_rates().iter().zip(expected_rates) {
         assert!((actual - expected).abs() < 1e-12);
     }
-    let schedule = QueryScheduleRates {
-        general: Some(general),
-        per_query_rates: expected_rates.to_vec(),
-        materialized_subset_rates: vec![],
-        compact_fixed: None,
-    };
+    let schedule = general;
     let mut candidates = vec![node(0, None), node(1, Some(0))];
     candidates.extend((0..entries.len()).map(|q| node(q + 2, Some(1))));
     let graph = CandidateDependencyGraph {
@@ -184,7 +179,7 @@ fn zero_rate_readers_preserve_materialized_and_unmaterialized_lifetimes() {
                 )
             })
             .collect();
-        let general = GeneralScheduleRates::new(&entries, 60.0, None).unwrap();
+        let general = QueryScheduleRates::new(&entries, 60.0, None).unwrap();
         let graph = CandidateDependencyGraph {
             candidates: vec![
                 node(0, None),
@@ -228,12 +223,7 @@ fn zero_rate_readers_preserve_materialized_and_unmaterialized_lifetimes() {
                     ..Default::default()
                 },
             ],
-            schedules: Some(QueryScheduleRates {
-                general: Some(general),
-                per_query_rates: rates.to_vec(),
-                materialized_subset_rates: vec![],
-                compact_fixed: None,
-            }),
+            schedules: Some(general),
             query_rate: 1.0,
             request_latency_seconds: 0.0,
             request_cost: 0.0,
