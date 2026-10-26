@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::logical_candidates;
+use asap_integration_tests::planning::explicit_summary_candidate;
 use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::ScalarValue;
@@ -23,20 +23,17 @@ fn accuracy() -> AccuracyTarget {
     AccuracyTarget::max_error(0.01).failure_probability(0.01)
 }
 
-/// The single KLL `SummaryAgg` among the logical candidates for `pre`.
+/// The single KLL `SummaryAgg` in an explicit KLL rule fixture for `pre`.
+/// Coverage semantics do not depend on the capacities visited by search.
 fn kll_state(pre: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    let mut states: Vec<Rc<OperatorNode>> = Vec::new();
-    for dag in logical_candidates(pre, accuracy()) {
-        for node in OperatorNode::reachable(&dag) {
-            let is_kll = matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                if kind.algorithm() == &SketchAlgorithm::Kll);
-            // Each candidate is composed on its own: the same state is
-            // structurally equal across candidates.
-            if is_kll && !states.iter().any(|s| **s == *node) {
-                states.push(node);
-            }
-        }
-    }
+    let dag = explicit_summary_candidate(pre, SketchAlgorithm::Kll);
+    let mut states: Vec<_> = OperatorNode::reachable(&dag)
+        .into_iter()
+        .filter(|node| {
+            matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+                if kind.algorithm() == &SketchAlgorithm::Kll)
+        })
+        .collect();
     assert_eq!(
         states.len(),
         1,
