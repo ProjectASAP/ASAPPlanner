@@ -255,54 +255,62 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
         )
         .expect("lower temporal Top-K");
-        let candidate = candidates_using(
+        let candidates = candidates_using(
             &pre,
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
             expected_family.clone(),
-        )
-        .into_iter()
-        .next()
-        .expect("heap-backed temporal Top-K candidate");
-        let Some(ASAPOp::SummaryEstimate {
-            summary_input,
-            query: SketchStatistic::TopK { k, .. },
-        }) = candidate.asap()
-        else {
-            panic!("expected Top-K estimate, got {:?}", candidate.operator)
-        };
-        assert_eq!(
-            *k, 5,
-            "the requested Top-K cardinality must survive binding"
         );
-        let Some(ASAPOp::SummaryAgg {
-            input: state_input,
-            family,
-            child,
-            ..
-        }) = summary_input.asap()
-        else {
-            panic!("expected structured Top-K state input")
-        };
-        let FieldDataType::Sketch(kind, _) = family else {
-            panic!("expected a heap-backed sketch family, got {family:?}")
-        };
-        assert_eq!(kind.algorithm(), &expected_family);
-        let heap_size = match kind.params() {
-            SketchParams::CmsWithHeap { heap_size, .. }
-            | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
-            params => panic!("expected heap-bearing Top-K parameters, got {params:?}"),
-        };
-        assert_eq!(heap_size, 100u32.max(*k as u32));
-        assert_eq!(
-            state_input.item.as_ref(),
-            Some(&SummaryInputExpr::EntityIdentity(
-                EntityIdentity::PromqlLabelSet {
-                    excluding: excluded_labels
-                }
-            ))
+        assert!(
+            !candidates.is_empty(),
+            "heap-backed temporal Top-K candidate"
         );
-        assert_eq!(state_input.weight, expected_update);
-        assert!(!child.contains_asap());
+        // The search archive may visit tighter local error allocations first.
+        // Every visited configuration must preserve the same update contract.
+        for candidate in candidates {
+            let Some(ASAPOp::SummaryEstimate {
+                summary_input,
+                query: SketchStatistic::TopK { k, .. },
+            }) = candidate.asap()
+            else {
+                panic!("expected Top-K estimate, got {:?}", candidate.operator)
+            };
+            assert_eq!(
+                *k, 5,
+                "the requested Top-K cardinality must survive binding"
+            );
+            let Some(ASAPOp::SummaryAgg {
+                input: state_input,
+                family,
+                child,
+                ..
+            }) = summary_input.asap()
+            else {
+                panic!("expected structured Top-K state input")
+            };
+            let FieldDataType::Sketch(kind, _) = family else {
+                panic!("expected a heap-backed sketch family, got {family:?}")
+            };
+            assert_eq!(kind.algorithm(), &expected_family);
+            let heap_size = match kind.params() {
+                SketchParams::CmsWithHeap { heap_size, .. }
+                | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
+                params => panic!("expected heap-bearing Top-K parameters, got {params:?}"),
+            };
+            assert!(
+                heap_size >= 100u32.max(*k as u32),
+                "a tighter local error budget may increase, never reduce, capacity"
+            );
+            assert_eq!(
+                state_input.item.as_ref(),
+                Some(&SummaryInputExpr::EntityIdentity(
+                    EntityIdentity::PromqlLabelSet {
+                        excluding: excluded_labels.clone()
+                    }
+                ))
+            );
+            assert_eq!(state_input.weight, expected_update);
+            assert!(!child.contains_asap());
+        }
     }
 }
 
