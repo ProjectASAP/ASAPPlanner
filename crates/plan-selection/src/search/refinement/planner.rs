@@ -138,13 +138,15 @@ pub(in crate::search) fn optimize_configured_candidates(
         &mut joint_fallback_reasons,
     )?;
     let mut direct = Vec::new();
-    // Keep the older restricted profile only as a bounded fallback when the
+    // Use a fixed-interface profile as a bounded fallback when the
     // joint interface catalog cannot be certified within the planning budget.
+    // Both adapters share the same construction deadline, preserving time for
+    // the feasibility search even when direct pricing is unsupported.
     if joint.is_none() {
-        if let Some(seed) = direct_cost_seed(configured, context, &exclusions, false)? {
+        if let Some(seed) = direct_cost_seed(configured, &joint_context, &exclusions, false)? {
             direct.push(seed);
         }
-        if let Some(seed) = direct_cost_seed(configured, context, &exclusions, true)? {
+        if let Some(seed) = direct_cost_seed(configured, &joint_context, &exclusions, true)? {
             direct.push(seed);
         }
     }
@@ -303,7 +305,9 @@ fn direct_cost_seed(
     };
     let mut extracted = match extracted {
         Ok(Some(extracted)) => extracted,
-        Ok(None) | Err(DirectProfileError::DeadlineExceeded(_)) => return Ok(None),
+        Ok(None)
+        | Err(DirectProfileError::DeadlineExceeded(_))
+        | Err(DirectProfileError::Unsupported(_)) => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
     if context
@@ -1099,6 +1103,46 @@ mod tests {
             entries,
             data,
         )
+    }
+
+    // An optional direct-price proposal must not abort planning when its
+    // schedule construction budget expires; the ordinary search remains usable.
+    #[test]
+    fn unsupported_schedule_profiles_leave_both_seed_fallbacks_available() {
+        let (configured, roots, mut entries, data) = fixture();
+        entries[1].recurrence = QueryRecurrence::Unknown;
+        let context = CandidatePlanningContext {
+            deadline: Some(std::time::Instant::now()),
+            refine_materialization: false,
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models: PlanningModels::builtin(),
+            calibration: CalibrationFit::default(),
+        };
+        let mut reasons = Vec::new();
+        assert!(joint_cost_seed(&configured, &context, &[], &mut reasons)
+            .unwrap()
+            .is_none());
+        assert!(!reasons.is_empty());
+        for latest_panes in [false, true] {
+            assert!(direct_cost_seed(&configured, &context, &[], latest_panes)
+                .unwrap()
+                .is_none());
+        }
+        // Malformed demand is a real input error, not an unsupported model.
+        let mut invalid_entries = entries.clone();
+        invalid_entries[1].recurrence =
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(0)));
+        let invalid_context = CandidatePlanningContext {
+            deadline: None,
+            entries: &invalid_entries,
+            ..context
+        };
+        assert!(joint_cost_seed(&configured, &invalid_context, &[], &mut reasons).is_err());
+        for latest_panes in [false, true] {
+            assert!(direct_cost_seed(&configured, &invalid_context, &[], latest_panes).is_err());
+        }
     }
 
     // One logical group can serve a repeated reader through panes and an
