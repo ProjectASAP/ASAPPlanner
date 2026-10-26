@@ -162,7 +162,19 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
 /// the selection made over all candidates.
 #[test]
 fn display_cap_is_recorded_and_keeps_the_selection() {
-    let document = generate(&["--max-displayed", "1"]);
+    // Instant quantiles provide several implementations without expanding a
+    // pane-width domain. Exhaustive mode ensures the display cap is exercised.
+    let document = document_of(&[
+        "--promql",
+        "quantile(0.5, data)",
+        "--promql",
+        "quantile(0.9, data)",
+        "--sample-interval-ms",
+        "15000",
+        "--exhaustive",
+        "--max-displayed",
+        "1",
+    ]);
     let logical = &document["stage1_logical_asap_optimization"];
     assert_eq!(logical["capped"], true);
     // Logical parents of displayed physical plans are always retained; the
@@ -171,7 +183,12 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
     assert!(logical["combinations"].as_u64().unwrap() > 1);
     let selected = document["stage3_plan_selection"]["selected"]
         .as_str()
-        .expect("selection survives display cap");
+        .unwrap_or_else(|| {
+            panic!(
+                "selection survives display cap: {}",
+                document["stage3_plan_selection"]
+            )
+        });
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
@@ -1889,11 +1906,17 @@ fn the_memo_search_document_names_the_selected_logical_candidate() {
 /// without `plan_installable`. Report-only: prices are unchanged.
 #[test]
 fn per_node_costs_show_operator_timing_and_predicted_cpu() {
-    let document = generate(&[]);
+    // The selected plan supplies the serialization evidence; exhaustive
+    // candidate coverage is tested separately by the archive tests.
+    let document = generate_bounded_example("planner-layering-1", &[]);
     let costs = document["stage3_plan_selection"]["costs"]
         .as_object()
         .unwrap();
-    assert!(!costs.is_empty());
+    assert!(
+        !costs.is_empty(),
+        "missing evaluated costs: {}",
+        document["stage3_plan_selection"]
+    );
     let mut timings = HashSet::new();
     for (id, cost) in costs {
         let per_node = cost["per_node"].as_object().unwrap();
