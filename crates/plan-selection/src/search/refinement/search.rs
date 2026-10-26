@@ -686,10 +686,14 @@ mod tests {
             schedules: None,
             nodes: vec![
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     ..Default::default()
                 },

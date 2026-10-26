@@ -21,10 +21,22 @@ const MINIMUM_QUERY_RATE_WEIGHT: f64 = 1e-6;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeCostProfile {
     pub execution_cost: f64,
+    pub ingestion: bool,
+    pub standing_cost_per_second: f64,
     pub work_seconds: f64,
     pub held_memory_cost_per_second: f64,
     pub materialized: bool,
     pub raw_retention: Option<(String, f64)>,
+}
+
+impl NodeCostProfile {
+    fn query_work_seconds(&self) -> f64 {
+        if self.ingestion {
+            0.0
+        } else {
+            self.work_seconds
+        }
+    }
 }
 
 /// Exact evaluator demand for each nonempty selected query subset. Only small
@@ -58,6 +70,8 @@ impl DirectCostProfile {
             || !valid(self.request_cost)
             || self.nodes.iter().any(|n| {
                 !valid(n.execution_cost)
+                    || !valid(n.standing_cost_per_second)
+                    || (n.ingestion && n.held_memory_cost_per_second != 0.0)
                     || !valid(n.work_seconds)
                     || !valid(n.held_memory_cost_per_second)
                     || n.raw_retention
@@ -67,6 +81,32 @@ impl DirectCostProfile {
         {
             return Err(CandidateSelectionError::InvalidGraph(
                 "invalid direct-cost profile".into(),
+            ));
+        }
+        for (consumer, candidate) in graph.candidates.iter().enumerate() {
+            for producer in candidate
+                .producer_requirements
+                .iter()
+                .flat_map(|input| input.compatible_producers.iter())
+            {
+                let source = &self.nodes[producer.0];
+                if (self.nodes[consumer].ingestion && !source.ingestion)
+                    || (!self.nodes[consumer].ingestion && source.ingestion && !source.materialized)
+                {
+                    return Err(CandidateSelectionError::InvalidGraph(
+                        "direct-cost edge crosses an unsupported ingestion boundary".into(),
+                    ));
+                }
+            }
+        }
+        if graph
+            .query_roots
+            .iter()
+            .flat_map(|root| &root.compatible_candidates)
+            .any(|id| self.nodes[id.0].ingestion && !self.nodes[id.0].materialized)
+        {
+            return Err(CandidateSelectionError::InvalidGraph(
+                "query output cannot directly read unmaterialized ingestion work".into(),
             ));
         }
         if let Some(schedule) = &self.schedules {
@@ -154,7 +194,7 @@ impl DirectCostProfile {
                         .iter()
                         .enumerate()
                         .filter(|(_, yes)| **yes)
-                        .map(|(id, _)| self.nodes[id].work_seconds)
+                        .map(|(id, _)| self.nodes[id].query_work_seconds())
                         .sum::<f64>()
             })
             .collect();
@@ -163,6 +203,9 @@ impl DirectCostProfile {
             |schedule| schedule.per_query_rates.clone(),
         );
         let union_rate = |id: usize| {
+            if self.nodes[id].ingestion {
+                return 1.0;
+            }
             let Some(schedule) = &self.schedules else {
                 return self.query_rate;
             };
@@ -224,8 +267,9 @@ impl DirectCostProfile {
                     0.0
                 }
             };
-            total += execution_rate
-                * (node.execution_cost + node.held_memory_cost_per_second * lifetime);
+            total += node.standing_cost_per_second
+                + execution_rate
+                    * (node.execution_cost + node.held_memory_cost_per_second * lifetime);
             if let Some((source, cost)) = &node.raw_retention {
                 let value = raw.entry(source).or_default();
                 *value = value.max(*cost);
@@ -235,7 +279,12 @@ impl DirectCostProfile {
     }
 
     fn maximum_latency(&self) -> f64 {
-        self.request_latency_seconds + self.nodes.iter().map(|n| n.work_seconds).sum::<f64>()
+        self.request_latency_seconds
+            + self
+                .nodes
+                .iter()
+                .map(NodeCostProfile::query_work_seconds)
+                .sum::<f64>()
     }
 
     pub(crate) fn coefficients(&self) -> impl Iterator<Item = f64> + '_ {
@@ -255,12 +304,18 @@ impl DirectCostProfile {
         );
         self.nodes.iter().flat_map(move |node| {
             let mut coefficients = Vec::with_capacity(rates.len() * 2 + 1);
-            for rate in &rates {
+            let node_rates = if node.ingestion {
+                &[1.0][..]
+            } else {
+                &rates[..]
+            };
+            for rate in node_rates {
                 coefficients.extend([
                     node.execution_cost * rate,
                     node.held_memory_cost_per_second * rate * latency_scale,
                 ]);
             }
+            coefficients.push(node.standing_cost_per_second);
             coefficients.push(node.raw_retention.as_ref().map_or(0.0, |(_, cost)| *cost));
             coefficients
         })
@@ -415,7 +470,7 @@ pub(super) fn encode(
                     .iter()
                     .enumerate()
                     .filter_map(|(id, reached)| {
-                        reached.map(|r| profile.nodes[id].work_seconds / latency_scale * r)
+                        reached.map(|r| profile.nodes[id].query_work_seconds() / latency_scale * r)
                     })
                     .sum::<Expression>()
         })
@@ -448,7 +503,13 @@ pub(super) fn encode(
         } else {
             boundary_count[id].clone()
         };
-        objective += node.execution_cost * profile.query_rate / divisor * executions.clone();
+        let execution_rate = if node.ingestion {
+            1.0
+        } else {
+            profile.query_rate
+        };
+        objective += node.standing_cost_per_second / divisor * active[id];
+        objective += node.execution_cost * execution_rate / divisor * executions.clone();
         if let Some((source, cost)) = &node.raw_retention {
             retained.entry(source).or_default().push((id, *cost));
         }
@@ -604,6 +665,8 @@ mod tests {
             request_cost: 7.0,
             nodes: vec![
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     work_seconds: 1.0,
                     held_memory_cost_per_second: 3.0,
@@ -611,12 +674,16 @@ mod tests {
                     raw_retention: None,
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 2.0,
                     raw_retention: Some(("source".into(), 4.0)),
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 3.0,
                     raw_retention: Some(("source".into(), 6.0)),
@@ -645,12 +712,16 @@ mod tests {
             request_cost: 7.0,
             nodes: vec![
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     work_seconds: 1.0,
                     held_memory_cost_per_second: 3.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 2.0,
                     held_memory_cost_per_second: 4.0,
@@ -658,10 +729,14 @@ mod tests {
                     raw_retention: None,
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     work_seconds: 3.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     work_seconds: 4.0,
                     ..Default::default()
                 },
@@ -690,6 +765,8 @@ mod tests {
                 request_cost: 7.0,
                 nodes: vec![
                     NodeCostProfile {
+                        ingestion: false,
+                        standing_cost_per_second: 0.0,
                         execution_cost: materialized_build_cost,
                         work_seconds: 1.0,
                         held_memory_cost_per_second: 3.0,
@@ -697,17 +774,23 @@ mod tests {
                         raw_retention: None,
                     },
                     NodeCostProfile {
+                        ingestion: false,
+                        standing_cost_per_second: 0.0,
                         execution_cost: 2.0,
                         work_seconds: 0.5,
                         held_memory_cost_per_second: 1.0,
                         ..Default::default()
                     },
                     NodeCostProfile {
+                        ingestion: false,
+                        standing_cost_per_second: 0.0,
                         execution_cost: 1.0,
                         work_seconds: 2.0,
                         ..Default::default()
                     },
                     NodeCostProfile {
+                        ingestion: false,
+                        standing_cost_per_second: 0.0,
                         execution_cost: 1.0,
                         work_seconds: 3.0,
                         ..Default::default()
@@ -758,10 +841,14 @@ mod tests {
             schedules: None,
             nodes: vec![
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 7.1e-13,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 7.1e-13 * 2.2e9,
                     ..Default::default()
                 },
@@ -786,5 +873,194 @@ mod tests {
         let expected = 7.1e-13 + 1.2e-15;
         assert!((proposal.direct_modeled_cost.unwrap() / expected - 1.0).abs() < 1e-9);
         assert!((proposal.model_lower_bound.unwrap() / expected - 1.0).abs() < 1e-9);
+    }
+    fn ingestion_profile(
+        two_states: bool,
+        query_rate: f64,
+    ) -> (CandidateDependencyGraph, DirectCostProfile) {
+        let mut candidates = vec![node(None), node(Some(0))];
+        let mut nodes = vec![
+            NodeCostProfile {
+                ingestion: true,
+                execution_cost: 2.0,
+                work_seconds: 0.2,
+                ..Default::default()
+            },
+            NodeCostProfile {
+                ingestion: true,
+                materialized: true,
+                execution_cost: 3.0,
+                standing_cost_per_second: 7.0,
+                work_seconds: 0.4,
+                ..Default::default()
+            },
+        ];
+        if two_states {
+            candidates.push(node(Some(0)));
+            nodes.push(nodes[1].clone());
+        }
+        let first_reader = candidates.len();
+        candidates.extend([node(Some(1)), node(Some(if two_states { 2 } else { 1 }))]);
+        nodes.extend((0..2).map(|_| NodeCostProfile {
+            execution_cost: 1.0,
+            work_seconds: 0.5,
+            held_memory_cost_per_second: 2.0,
+            ..Default::default()
+        }));
+        (
+            CandidateDependencyGraph {
+                candidates,
+                query_roots: vec![root(first_reader), root(first_reader + 1)],
+                ..Default::default()
+            },
+            DirectCostProfile {
+                nodes,
+                schedules: None,
+                query_rate,
+                request_latency_seconds: 0.1,
+                request_cost: 1.0,
+            },
+        )
+    }
+
+    // Update work and standing state are charged once regardless of query
+    // frequency; ingestion work contributes no query-held evaluation latency.
+    #[test]
+    fn maintained_state_cost_is_independent_of_reader_frequency() {
+        for rate in [1.0, 5.0] {
+            let (graph, profile) = ingestion_profile(false, rate);
+            let expected = 13.0 + 4.4 * rate;
+            let proposal = solve_direct_cost_proposal_with_metrics(
+                &graph,
+                &[],
+                None,
+                &mut CandidateSolveMetrics::default(),
+                &profile,
+            )
+            .unwrap()
+            .unwrap();
+            assert!((proposal.direct_modeled_cost.unwrap() - expected).abs() < 1e-8);
+            assert!((proposal.model_lower_bound.unwrap() - expected).abs() < 1e-6);
+        }
+    }
+
+    // Two maintained states independently update a shared unmaterialized scan.
+    // Both equal and heterogeneous query schedules leave that ingestion rate2.
+    #[test]
+    fn two_ingestion_boundaries_recompute_their_shared_input() {
+        let (graph, mut profile) = ingestion_profile(true, 1.0);
+        assert!((solve(&graph, &profile) - 29.4).abs() < 1e-6);
+        profile.schedules = Some(QueryScheduleRates {
+            per_query_rates: vec![1.0, 2.0],
+            materialized_subset_rates: vec![0.0, 1.0, 2.0, 3.0],
+        });
+        let proposal = solve_direct_cost_proposal_with_metrics(
+            &graph,
+            &[],
+            None,
+            &mut CandidateSolveMetrics::default(),
+            &profile,
+        )
+        .unwrap()
+        .unwrap();
+        assert!((proposal.direct_modeled_cost.unwrap() - 31.6).abs() < 1e-8);
+        assert!((proposal.model_lower_bound.unwrap() - 31.6).abs() < 1e-6);
+    }
+
+    // Enumerate shared or separate state choices without charging a shared
+    // producer twice; standing memory can change which choice wins.
+    #[test]
+    fn ingestion_selection_matches_shared_state_cost_oracle() {
+        let graph = CandidateDependencyGraph {
+            candidates: vec![
+                node(None),
+                node(Some(0)),
+                node(Some(0)),
+                node(Some(0)),
+                PhysicalCandidate {
+                    group: MemoGroupId(1),
+                    local_cost: 0.0,
+                    producer_requirements: vec![ProducerRequirement {
+                        compatible_producers: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)]
+                            .into(),
+                    }],
+                },
+                PhysicalCandidate {
+                    group: MemoGroupId(1),
+                    local_cost: 0.0,
+                    producer_requirements: vec![ProducerRequirement {
+                        compatible_producers: vec![PhysicalCandidateId(1), PhysicalCandidateId(3)]
+                            .into(),
+                    }],
+                },
+            ],
+            query_roots: vec![root(4), root(5)],
+            ..Default::default()
+        };
+        for shared_standing in [1.0, 20.0] {
+            let profile = DirectCostProfile {
+                query_rate: 5.0,
+                schedules: None,
+                request_latency_seconds: 0.0,
+                request_cost: 0.0,
+                nodes: vec![
+                    NodeCostProfile {
+                        ingestion: true,
+                        execution_cost: 2.0,
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        ingestion: true,
+                        materialized: true,
+                        execution_cost: 3.0,
+                        standing_cost_per_second: shared_standing,
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        ingestion: true,
+                        materialized: true,
+                        execution_cost: 3.0,
+                        standing_cost_per_second: 7.0,
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        ingestion: true,
+                        materialized: true,
+                        execution_cost: 3.0,
+                        standing_cost_per_second: 7.0,
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        execution_cost: 1.0,
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        execution_cost: 1.0,
+                        ..Default::default()
+                    },
+                ],
+            };
+            let expected = [[1, 1], [1, 3], [2, 1], [2, 3]]
+                .into_iter()
+                .map(|assignment| {
+                    let states: std::collections::HashSet<_> = assignment.into_iter().collect();
+                    10.0 + states
+                        .iter()
+                        .map(|state| 2.0 + 3.0 + if *state == 1 { shared_standing } else { 7.0 })
+                        .sum::<f64>()
+                })
+                .fold(f64::INFINITY, f64::min);
+            let proposal = solve_direct_cost_proposal_with_metrics(
+                &graph,
+                &[],
+                None,
+                &mut CandidateSolveMetrics::default(),
+                &profile,
+            )
+            .unwrap()
+            .unwrap();
+            assert!((proposal.direct_modeled_cost.unwrap() - expected).abs() < 1e-8);
+            assert!((proposal.model_lower_bound.unwrap() - expected).abs() < 1e-6);
+        }
     }
 }

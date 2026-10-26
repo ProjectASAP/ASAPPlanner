@@ -28,7 +28,7 @@ pub(super) fn encode(
                     .iter()
                     .enumerate()
                     .filter_map(|(id, reached)| {
-                        reached.map(|r| profile.nodes[id].work_seconds / latency_scale * r)
+                        reached.map(|r| profile.nodes[id].query_work_seconds() / latency_scale * r)
                     })
                     .sum::<Expression>()
         })
@@ -85,6 +85,8 @@ pub(super) fn encode(
             let Some(reaches) = reaches else { continue };
             if boundary < queries {
                 demands[id].push((reaches, schedule.per_query_rates[boundary]));
+            } else if profile.nodes[boundary - queries].ingestion {
+                demands[id].push((reaches, 1.0));
             } else {
                 for (mask, selector) in masks[boundary - queries].iter().enumerate().skip(1) {
                     let Some(selector) = selector else { continue };
@@ -101,7 +103,9 @@ pub(super) fn encode(
     let mut retained = BTreeMap::<&str, Vec<(usize, f64)>>::new();
     for (id, node) in profile.nodes.iter().enumerate() {
         check_deadline()?;
-        let executions: Expression = if node.materialized {
+        let executions: Expression = if node.materialized && node.ingestion {
+            active[id].into()
+        } else if node.materialized {
             masks[id]
                 .iter()
                 .enumerate()
@@ -113,6 +117,7 @@ pub(super) fn encode(
         } else {
             demands[id].iter().map(|(used, rate)| *rate * *used).sum()
         };
+        objective += node.standing_cost_per_second / divisor * active[id];
         objective += node.execution_cost / divisor * executions;
         if let Some((source, cost)) = &node.raw_retention {
             retained.entry(source).or_default().push((id, *cost));
@@ -236,12 +241,16 @@ mod tests {
             request_cost: 7.0,
             nodes: vec![
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     work_seconds: 1.0,
                     held_memory_cost_per_second: 3.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 2.0,
                     held_memory_cost_per_second: 4.0,
@@ -249,10 +258,14 @@ mod tests {
                     raw_retention: None,
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     work_seconds: 3.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     work_seconds: 4.0,
                     ..Default::default()
                 },
@@ -302,6 +315,8 @@ mod tests {
                 request_latency_seconds: 0.0,
                 request_cost: 0.0,
                 nodes: vec![NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 3.0,
                     work_seconds: 2.0,
                     held_memory_cost_per_second: 2.0,
@@ -353,6 +368,8 @@ mod tests {
             request_cost: 7.0,
             nodes: vec![
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 10.0,
                     work_seconds: 1.0,
                     held_memory_cost_per_second: 3.0,
@@ -360,6 +377,8 @@ mod tests {
                     raw_retention: None,
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     work_seconds: 0.5,
                     held_memory_cost_per_second: 1.0,
@@ -367,11 +386,15 @@ mod tests {
                     raw_retention: None,
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 2.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     work_seconds: 3.0,
                     ..Default::default()
@@ -442,20 +465,28 @@ mod tests {
             request_cost: 0.0,
             nodes: vec![
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 1.0,
                     held_memory_cost_per_second: 1e6,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     execution_cost: 2.0,
                     held_memory_cost_per_second: 1e6,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     work_seconds: 1.0,
                     ..Default::default()
                 },
                 NodeCostProfile {
+                    ingestion: false,
+                    standing_cost_per_second: 0.0,
                     work_seconds: 1e9,
                     ..Default::default()
                 },

@@ -1,8 +1,10 @@
-//! Exact local profiles for a restricted query-time proposal domain.
+//! Exact local profiles for query-time plans and single-worker maintained panes.
 //!
 //! Each accepted input is priced from its actual recursively certified supplier.
 //! Different priced interfaces are excluded from this proposal, not the full
 //! catalog. No original-template child is used as workload statistics evidence.
+//! Ingestion support is limited to fixed-retention pane chains with certified
+//! single-worker unary input closures; multiworker compaction remains excluded.
 use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::candidates::graph::PhysicalCandidateId;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
@@ -46,6 +48,7 @@ fn supported_node(node: &asap_types::ir::OperatorNode) -> bool {
         node.asap(),
         Some(
             ASAPOp::SummaryAgg { .. }
+                | ASAPOp::PaneChain { .. }
                 | ASAPOp::SummaryEstimate { .. }
                 | ASAPOp::FinalizeExactAccumulator { .. }
                 | ASAPOp::SummaryMerge { .. }
@@ -143,13 +146,41 @@ pub(in crate::search) fn extract(
         nodes.push(
             node.filter(|node| {
                 supported_node(node)
+                    && !(configuration.timing == ExecutionTiming::IngestionTime
+                        && configuration.materialization == Materialization::NotMaterialized
+                        && configured.inventory.graph.query_roots.iter().any(|root| {
+                            root.compatible_candidates
+                                .contains(&PhysicalCandidateId(id))
+                        }))
                     && (requires_source_sizing(node) || stable_size(node, delta))
-                    && configuration.timing == ExecutionTiming::QueryTime
-                    && matches!(
-                        configuration.materialization,
-                        Materialization::NotMaterialized
-                            | Materialization::MatAtQuery(Medium::Memory)
-                    )
+                    && match configuration.timing {
+                        ExecutionTiming::QueryTime => {
+                            !matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                                && matches!(
+                                    configuration.materialization,
+                                    Materialization::NotMaterialized
+                                        | Materialization::MatAtQuery(Medium::Memory)
+                                )
+                        }
+                        ExecutionTiming::IngestionTime => match node.asap() {
+                            Some(ASAPOp::PaneChain { .. }) => {
+                                configuration.materialization
+                                    == Materialization::MatAtIngestion(Medium::Memory)
+                            }
+                            _ => {
+                                matches!(
+                                    node.non_asap(),
+                                    Some(
+                                        NonASAPOp::Scan { .. }
+                                            | NonASAPOp::Filter { .. }
+                                            | NonASAPOp::Project { .. }
+                                            | NonASAPOp::TimeRange { .. }
+                                    )
+                                ) && configuration.materialization
+                                    == Materialization::NotMaterialized
+                            }
+                        },
+                    }
                     && configured.inventory.graph.candidates[id]
                         .producer_requirements
                         .len()
@@ -165,7 +196,7 @@ pub(in crate::search) fn extract(
                         current
                     }),
                     output_state: ExecutionDataState {
-                        timing: ExecutionTiming::QueryTime,
+                        timing: configuration.timing,
                         primitive: if node.asap().and_then(ASAPOp::produced_state).is_some() {
                             DataPrimitive::SummaryState
                         } else {
@@ -228,6 +259,7 @@ pub(in crate::search) fn extract(
     let mut suppliers = vec![Vec::new(); count];
     let mut sketch_counts = vec![0; count];
     let mut raw_sources = vec![None; count];
+    let mut closure_work_ms = vec![0.0; count];
     for id in 0..count {
         price(
             id,
@@ -241,6 +273,7 @@ pub(in crate::search) fn extract(
             &mut suppliers,
             &mut sketch_counts,
             &mut raw_sources,
+            &mut closure_work_ms,
             delta,
         )?;
     }
@@ -251,6 +284,8 @@ pub(in crate::search) fn extract(
         work_seconds: 0.0,
         held_memory_cost_per_second: 0.0,
         materialized: false,
+        ingestion: false,
+        standing_cost_per_second: 0.0,
         raw_retention: None,
     };
     let profiles = cache
@@ -269,7 +304,13 @@ pub(in crate::search) fn extract(
                 })
                 .transpose()?;
             Ok(NodeCostProfile {
-                execution_cost: priced.cost.cost_per_second.unwrap(),
+                execution_cost: priced.cpu_ops_per_second * prices.cost_per_cpu_op
+                    + priced.scanned_bytes_per_second * prices.cost_per_scanned_byte,
+                ingestion: nodes[id].as_ref().unwrap().output_state.timing
+                    == ExecutionTiming::IngestionTime,
+                standing_cost_per_second: priced.average_memory_bytes
+                    * prices.cost_per_memory_byte_second
+                    + priced.disk_bytes as f64 * prices.cost_per_disk_byte_second,
                 work_seconds: priced.work_ms / 1000.0,
                 held_memory_cost_per_second: priced.held.map_or(0.0, |(bytes, _, _)| {
                     bytes as f64 * prices.cost_per_memory_byte_second
@@ -309,6 +350,7 @@ fn price<'a>(
     suppliers: &mut [Vec<PhysicalCandidateId>],
     sketch_counts: &mut [usize],
     raw_sources: &mut [Option<String>],
+    closure_work_ms: &mut [f64],
     delta: Option<f64>,
 ) -> Result<(), DirectProfileError> {
     check_deadline(context.deadline)?;
@@ -350,12 +392,22 @@ fn price<'a>(
                 suppliers,
                 sketch_counts,
                 raw_sources,
+                closure_work_ms,
                 delta,
             )?;
             let Some(priced) = &cache[supplier.0] else {
                 continue;
             };
             let producer = nodes[supplier.0].as_ref().unwrap();
+            let consumer_ingests = node.output_state.timing == ExecutionTiming::IngestionTime;
+            let producer_ingests = producer.output_state.timing == ExecutionTiming::IngestionTime;
+            if (consumer_ingests && !producer_ingests)
+                || (!consumer_ingests
+                    && producer_ingests
+                    && producer.materialization != Materialization::MatAtIngestion(Medium::Memory))
+            {
+                continue;
+            }
             views.push(ProducerOutput {
                 payload: &producer.payload,
                 output_schema: &producer.output_schema,
@@ -407,29 +459,55 @@ fn price<'a>(
         let sketches = supplier.map_or(0, |supplier| sketch_counts[supplier.0])
             + usize::from(matches!(
                 &node.payload,
-                asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(..),
-                    ..
-                })
+                asap_types::ir::Operator::ASAP(
+                    ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(..),
+                        ..
+                    } | ASAPOp::PaneChain {
+                        family: FieldDataType::Sketch(..),
+                        ..
+                    }
+                )
             ));
         // Failure-budget sizing splits delta across approximate inputs. This
         // slice admits at most one sketch build along each unary output path.
         if sketches > 1 {
             continue;
         }
+        let (retained_panes, ingestion_window) = match &node.payload {
+            asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
+                pane_count,
+                pane_width_ms,
+                ..
+            }) => (
+                u64::from(*pane_count),
+                pane_width_ms.checked_mul(u64::from(*pane_count)),
+            ),
+            _ => (1, None),
+        };
         let Ok(priced) = crate::price_node(
             node,
             &views,
             (1, 1.0),
             lookbacks[id],
-            1,
-            None,
+            retained_panes,
+            ingestion_window,
             context.data,
             context.models.plan_selection,
             context.calibration.factor(),
         ) else {
             continue;
         };
+        let closure_work = (supplier.map_or(0.0, |supplier| closure_work_ms[supplier.0])
+            + priced.work_ms)
+            .next_up();
+        // With a unary closure this is the evaluator's distinct upstream sum.
+        // A larger worker count introduces compaction work and state copies.
+        if node.output_state.timing == ExecutionTiming::IngestionTime
+            && !single_worker(closure_work, nodes.len())
+        {
+            continue;
+        }
         // Compare the actual evaluator outputs, including every piece of the
         // downstream pricing interface. This is not a template-row equivalence.
         if cache[id]
@@ -439,9 +517,10 @@ fn price<'a>(
             continue;
         }
         if priced.cost.cost_per_second.is_none()
-            || priced.average_memory_bytes != 0.0
-            || priced.disk_bytes != 0
-            || priced.maintained.is_some()
+            || (node.output_state.timing == ExecutionTiming::QueryTime
+                && (priced.average_memory_bytes != 0.0
+                    || priced.disk_bytes != 0
+                    || priced.maintained.is_some()))
         {
             continue;
         }
@@ -449,6 +528,7 @@ fn price<'a>(
             suppliers[id].push(supplier);
         }
         sketch_counts[id] = sketch_counts[id].max(sketches);
+        closure_work_ms[id] = closure_work_ms[id].max(closure_work);
         if cache[id].is_none() {
             cache[id] = Some(priced);
             raw_sources[id] = raw_source;
@@ -535,10 +615,16 @@ fn hll_size_certified(
 }
 
 fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool {
-    let Some(ASAPOp::SummaryAgg {
-        family: FieldDataType::Sketch(kind, _),
-        ..
-    }) = node.asap()
+    let Some(
+        ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(kind, _),
+            ..
+        }
+        | ASAPOp::PaneChain {
+            family: FieldDataType::Sketch(kind, _),
+            ..
+        },
+    ) = node.asap()
     else {
         return true;
     };
@@ -564,6 +650,14 @@ fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool 
         (Ok(before), Ok(after)) => before == after,
         _ => false,
     }
+}
+
+// Include a bound on roundoff when the evaluator sums the same positive work
+// in reverse traversal order. Outward rounding of our path sum bounds the real
+// sum; gamma_n bounds the evaluator's finite-precision accumulation.
+fn single_worker(upper_work_ms: f64, node_count: usize) -> bool {
+    let error = node_count as f64 * f64::EPSILON;
+    upper_work_ms.is_finite() && error < 0.5 && (upper_work_ms / (1.0 - error)).next_up() < 1000.0
 }
 
 fn check_deadline(deadline: Option<std::time::Instant>) -> Result<(), DirectProfileError> {
@@ -614,6 +708,14 @@ fn same_price(a: &PricedNode<'_>, b: &PricedNode<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ingestion_worker_bound_accounts_for_summation_roundoff() {
+        assert!(super::single_worker(999.0, 100));
+        assert!(!super::single_worker(1000.0, 100));
+        assert!(!super::single_worker(1000.0_f64.next_down(), 100));
+        assert!(!super::single_worker(1001.0, 1));
+    }
+
     #[test]
     fn hll_admission_requires_stable_precision_and_a_supported_population() {
         assert!(super::hll_size_certified(15, Some(0.05), 0.05, 1000));
@@ -987,6 +1089,288 @@ mod tests {
                             |node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
                                 && !stable_size(node, Some(delta))
                         ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ingestion_pane_profiles_match_the_real_evaluator_and_reject_extra_workers() {
+        use asap_logical_asap_optimization::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        };
+        use asap_types::ir::schema::SketchAlgorithm;
+        use std::rc::Rc;
+        fn append(
+            node: Rc<OperatorNode>,
+            configured: &mut CandidateConfigurationInventory,
+            ingestion: bool,
+        ) -> PhysicalCandidateId {
+            let ingestion = ingestion || matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+            let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+            let mut inputs = Vec::new();
+            node.operator
+                .map_children(|child| inputs.push(append(child.clone(), configured, ingestion)));
+            let id = PhysicalCandidateId(configured.configurations.len());
+            configured.configurations.push(CandidateConfiguration {
+                source_candidate: id,
+                materialization: if pane {
+                    Materialization::MatAtIngestion(Medium::Memory)
+                } else {
+                    Materialization::NotMaterialized
+                },
+                timing: if ingestion {
+                    ExecutionTiming::IngestionTime
+                } else {
+                    ExecutionTiming::QueryTime
+                },
+            });
+            configured.inventory.templates.push(Some(node));
+            configured
+                .inventory
+                .graph
+                .candidates
+                .push(PhysicalCandidate {
+                    group: MemoGroupId(id.0 as u32),
+                    local_cost: 0.0,
+                    producer_requirements: inputs
+                        .into_iter()
+                        .map(|supplier| ProducerRequirement {
+                            compatible_producers: vec![supplier].into(),
+                        })
+                        .collect(),
+                });
+            id
+        }
+        for (series_count, rows_per_second, speed_multiplier) in
+            [(2_u64, 100_u64, 1.0), (100, 1000, 1.0), (2, 100, 1000.0)]
+        {
+            for width in [60_000, 30_000] {
+                for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
+                    let scope = AccuracyScope::PerValue;
+                    let target = AccuracyTarget::max_error(0.05)
+                        .failure_probability(0.01)
+                        .accuracy_scope(scope);
+                    let query = if algorithm == SketchAlgorithm::Hll {
+                        "distinct_over_time(latency[5m])"
+                    } else {
+                        "quantile_over_time(0.95, latency[5m])"
+                    };
+                    let original = lower_promql(query, target.clone());
+                    let generated = generate_per_computation_candidates(vec![(
+                        0,
+                        QueryRoot::Operator(original.clone()),
+                    )])
+                    .unwrap();
+                    let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
+                    matches!(candidate, ComputationCandidate::Summary(found) if *found == algorithm)).unwrap();
+                    let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
+                        .unwrap()
+                        .into_iter()
+                        .map(|(_, root)| root)
+                        .collect();
+                    let pane_rules =
+                        asap_logical_asap_optimization::asap_aware_cse::pane_candidates(
+                            &roots,
+                            &[Some(width)],
+                        );
+                    let roots = asap_logical_asap_optimization::asap_aware_cse::window_composition_pass2_candidates(&roots, &pane_rules).unwrap().pop().unwrap().roots.unwrap();
+                    let data: DataWorkload = serde_json::from_value(serde_json::json!({
+                    "arrival":{"ingesting":{"rows_per_second":rows_per_second}},
+                    "sources":{"latency":{"series_count":series_count,"rows_held":rows_per_second * 300,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
+                })).unwrap();
+                    // A legal finite configuration is sized before direct pricing.
+                    let sized = crate::resize_for_failure_probability(
+                        &roots,
+                        std::slice::from_ref(&target),
+                        &data,
+                    )
+                    .unwrap();
+                    let mut configured = CandidateConfigurationInventory {
+                        inventory: CandidateInventory {
+                            graph: CandidateDependencyGraph::default(),
+                            templates: vec![],
+                            group_candidates: vec![],
+                        },
+                        configurations: vec![],
+                    };
+                    let QueryRoot::Operator(root) = &sized[0] else {
+                        panic!("operator")
+                    };
+                    let id = append(root.clone(), &mut configured, false);
+                    configured
+                        .inventory
+                        .graph
+                        .query_roots
+                        .push(QueryRootCandidates {
+                            compatible_candidates: vec![id],
+                        });
+                    let originals = vec![QueryRoot::Operator(original)];
+                    let entries = vec![QueryWorkloadEntry {
+                        query: Query(query.into()),
+                        requirements: QueryRequirements {
+                            accuracy: target,
+                            max_latency_ms: None,
+                        },
+                        predictability: Predictability::Predictable { known_at: None },
+                        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                            RepetitionInterval(60_000),
+                        )),
+                        range_evaluation: None,
+                    }];
+                    let mut settings = crate::PlanSelectionSettings::default();
+                    settings.resource_speed.ms_per_cpu_op *= speed_multiplier;
+                    settings.resource_speed.ms_per_scanned_byte *= speed_multiplier;
+                    let context = CandidatePlanningContext {
+                        deadline: None,
+                        refine_materialization: false,
+                        original_roots: &originals,
+                        entries: &entries,
+                        data: &data,
+                        models: crate::PlanningModels::builtin().with_plan_selection(&settings),
+                        calibration: crate::CalibrationFit::default(),
+                    };
+                    let extracted = extract(&configured, &context).unwrap().unwrap();
+                    assert!(
+                        extracted.supported.iter().all(|supported| *supported),
+                        "{algorithm:?} {scope:?}"
+                    );
+                    let direct_proposal =
+                        crate::search::milp::model::solve_direct_cost_proposal_with_metrics(
+                            &configured.inventory.graph,
+                            &[],
+                            None,
+                            &mut Default::default(),
+                            &extracted.profile,
+                        );
+                    let proposal = if speed_multiplier == 1.0 {
+                        // Default nanosecond operation latency gives sub-threshold
+                        // held-memory terms. Keep the explicit unsupported outcome;
+                        // fixed-binding profile/evaluator parity remains meaningful.
+                        assert!(matches!(direct_proposal, Err(crate::search::candidates::graph::CandidateSelectionError::UnsupportedDirectCost(_))));
+                        crate::search::milp::model::solve_candidate_proposal(
+                            &configured.inventory.graph,
+                            &[],
+                            None,
+                        )
+                        .unwrap()
+                        .unwrap()
+                    } else {
+                        // An explicit microsecond operation calibration fits
+                        // the same guard, with unchanged prices.
+                        direct_proposal.unwrap().unwrap()
+                    };
+                    let mut rejections =
+                        crate::search::refinement::planner::CandidateRejectionSummary::default();
+                    let evaluated =
+                        crate::search::refinement::planner::evaluate_configured_candidate(
+                            &configured,
+                            &context,
+                            &proposal.selected,
+                            0,
+                            &mut rejections,
+                            &mut Vec::new(),
+                        )
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("{algorithm:?} {scope:?}: {rejections:?}"));
+                    let cost = evaluated.0.costs[&evaluated.0.selected]
+                        .cost_per_second
+                        .unwrap();
+                    let direct = extracted
+                        .profile
+                        .selected_cost(&configured.inventory.graph, &proposal.selected);
+                    assert!(
+                        (cost - direct).abs() <= 1e-9 * cost.max(1e-15),
+                        "{algorithm:?} {scope:?}: {direct} vs {cost}"
+                    );
+                    let chain = configured
+                        .inventory
+                        .templates
+                        .iter()
+                        .position(|node| {
+                            node.as_ref().is_some_and(|node| {
+                                matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                            })
+                        })
+                        .unwrap();
+                    let Some(ASAPOp::PaneChain {
+                        family, pane_count, ..
+                    }) = configured.inventory.templates[chain]
+                        .as_ref()
+                        .unwrap()
+                        .asap()
+                    else {
+                        unreachable!()
+                    };
+                    let (_, state_bytes) = crate::summary_shape(
+                        family,
+                        crate::StateInputRows {
+                            rows_per_state: Some(
+                                (width * rows_per_second)
+                                    .div_ceil(1000)
+                                    .div_ceil(series_count),
+                            ),
+                            non_negative: true,
+                        },
+                    );
+                    let CostModel::UsageOverTime(prices) =
+                        &context.models.plan_selection.cost_model
+                    else {
+                        unreachable!()
+                    };
+                    let expected_residency =
+                        (u64::from(*pane_count) + 1) * series_count * state_bytes;
+                    let expected_standing =
+                        expected_residency as f64 * prices.cost_per_memory_byte_second;
+                    assert!(
+                        (extracted.profile.nodes[chain].standing_cost_per_second
+                            - expected_standing)
+                            .abs()
+                            <= 1e-12 * expected_standing.max(1e-15)
+                    );
+                    assert_eq!(
+                        extracted.profile.nodes[chain].held_memory_cost_per_second,
+                        0.0
+                    );
+                    let mut overloaded = data.clone();
+                    overloaded.arrival = serde_json::from_value(
+                        serde_json::json!({"ingesting":{"rows_per_second":1e12}}),
+                    )
+                    .unwrap();
+                    let overloaded_context = CandidatePlanningContext {
+                        data: &overloaded,
+                        ..context
+                    };
+                    let rejected = extract(&configured, &overloaded_context).unwrap().unwrap();
+                    assert!(
+                        !rejected.supported[chain],
+                        "multiworker compaction is outside this certified slice"
+                    );
+                    if scope == AccuracyScope::WholeResult {
+                        let mut unknown = data.clone();
+                        unknown.sources.get_mut("latency").unwrap().series_count = None;
+                        let unproved = CandidatePlanningContext {
+                            data: &unknown,
+                            ..context
+                        };
+                        assert!(
+                            extract(&configured, &unproved).unwrap().is_none(),
+                            "unknown population cannot certify a whole-result sizing budget"
+                        );
+                    }
+                    let too_small_delta = match algorithm {
+                        SketchAlgorithm::Kll => Some(1e-12),
+                        _ => None,
+                    };
+                    if let Some(delta) = too_small_delta {
+                        assert!(configured
+                            .inventory
+                            .templates
+                            .iter()
+                            .flatten()
+                            .any(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                                && !stable_size(node, Some(delta))));
+                    }
                 }
             }
         }
