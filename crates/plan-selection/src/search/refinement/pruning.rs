@@ -84,6 +84,7 @@ pub(in crate::search) fn prune(
         .filter_map(|mut constraint| {
             let id = match &mut constraint {
                 ReaderConstraint::AllowedOutputs { candidate, .. }
+                | ReaderConstraint::HighestSharedQueryMaterialization { candidate, .. }
                 | ReaderConstraint::MinimumQueryReaders { candidate, .. }
                 | ReaderConstraint::IncompatibleOutputs { candidate, .. }
                 | ReaderConstraint::ActivationRequires { candidate, .. } => candidate,

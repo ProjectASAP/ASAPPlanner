@@ -242,6 +242,7 @@ fn project(
             ReaderConstraint::ActivationRequires { candidate, .. }
             | ReaderConstraint::AllowedOutputs { candidate, .. }
             | ReaderConstraint::IncompatibleOutputs { candidate, .. }
+            | ReaderConstraint::HighestSharedQueryMaterialization { candidate, .. }
             | ReaderConstraint::MinimumQueryReaders { candidate, .. } => candidate.0,
         };
         let Some(&candidate) = candidates.get(&id) else {
@@ -272,6 +273,20 @@ fn project(
                     candidate,
                     left,
                     right,
+                }
+            }
+            ReaderConstraint::HighestSharedQueryMaterialization { query_outputs, .. } => {
+                ReaderConstraint::HighestSharedQueryMaterialization {
+                    candidate,
+                    query_outputs: query_outputs
+                        .iter()
+                        .map(|bucket| {
+                            bucket
+                                .iter()
+                                .filter_map(|id| outputs.get(id).copied())
+                                .collect()
+                        })
+                        .collect(),
                 }
             }
             ReaderConstraint::MinimumQueryReaders {

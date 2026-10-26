@@ -71,6 +71,13 @@ fn required_reader_reach(
         check_deadline()?;
         match constraint {
             ReaderConstraint::ActivationRequires { .. } => {}
+            ReaderConstraint::HighestSharedQueryMaterialization { candidate, .. } => {
+                for (output, reachable) in potential.iter().enumerate() {
+                    if reachable[candidate.0] {
+                        pending.push((output, candidate.0));
+                    }
+                }
+            }
             ReaderConstraint::AllowedOutputs { candidate, outputs } => {
                 for (output, reachable) in potential.iter().enumerate() {
                     if reachable[candidate.0] && !outputs.contains(&output) {
@@ -523,6 +530,69 @@ fn solve_with_objective(
                     constraints.push(constraint!(
                         readers >= *minimum as f64 * candidate_selected[candidate.0]
                     ));
+                }
+                ReaderConstraint::HighestSharedQueryMaterialization {
+                    candidate,
+                    query_outputs,
+                } => {
+                    let mut witnesses: Expression = root_assignments
+                        .iter()
+                        .filter(|(root, _)| root.candidate == *candidate)
+                        .map(|(_, value)| *value)
+                        .sum();
+                    for (edge, connected) in &connections {
+                        if edge.producer != *candidate {
+                            continue;
+                        }
+                        let witness = variables.add(initialized(
+                            variable().binary(),
+                            warm_start.as_ref().map(|start| {
+                                f64::from(
+                                    start.selected.connections.contains(edge)
+                                        && query_outputs
+                                            .iter()
+                                            .filter(|outputs| {
+                                                outputs.iter().any(|output| {
+                                                    start.reached[*output].contains(&edge.consumer)
+                                                })
+                                            })
+                                            .count()
+                                            <= 1,
+                                )
+                            }),
+                        ));
+                        constraints.push(constraint!(witness <= *connected));
+                        let mut readers = Expression::from(0.0);
+                        for outputs in query_outputs {
+                            let reached: Vec<_> = outputs
+                                .iter()
+                                .filter_map(|output| reach[*output][edge.consumer.0])
+                                .collect();
+                            if reached.is_empty() {
+                                continue;
+                            }
+                            let query = variables.add(initialized(
+                                variable().min(0).max(1),
+                                warm_start.as_ref().map(|start| {
+                                    f64::from(outputs.iter().any(|output| {
+                                        start.reached[*output].contains(&edge.consumer)
+                                    }))
+                                }),
+                            ));
+                            for value in &reached {
+                                constraints.push(constraint!(query >= *value));
+                            }
+                            constraints.push(constraint!(
+                                query <= reached.into_iter().sum::<Expression>()
+                            ));
+                            readers += query;
+                        }
+                        constraints.push(constraint!(
+                            readers <= 1.0 + query_outputs.len() as f64 * (1.0 - witness)
+                        ));
+                        witnesses += witness;
+                    }
+                    constraints.push(constraint!(candidate_selected[candidate.0] <= witnesses));
                 }
                 ReaderConstraint::AllowedOutputs { candidate, outputs } => {
                     for (output, reachable) in reach.iter().enumerate() {
@@ -1347,6 +1417,41 @@ mod tests {
             .is_none());
     }
 
+    // Stage 2 permits non-summary materialization only at the highest shared
+    // node: a shared parent blocks it, while distinct private parents allow it.
+    #[test]
+    fn highest_shared_materialization_matches_selected_connections() {
+        let mut graph = dependency_graph(
+            vec![
+                candidate(0, 1.0, &[]),
+                candidate(0, 5.0, &[]),
+                candidate(1, 1.0, &[&[0, 1]]),
+                candidate(2, 1.0, &[&[0, 1]]),
+            ],
+            &[&[2], &[2]],
+        );
+        graph
+            .reader_constraints
+            .push(ReaderConstraint::HighestSharedQueryMaterialization {
+                candidate: PhysicalCandidateId(0),
+                query_outputs: vec![vec![0], vec![1]],
+            });
+        assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 6.0);
+        graph.query_roots[1].compatible_candidates = vec![PhysicalCandidateId(3)];
+        assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 3.0);
+        graph.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(0)];
+        let selected = compare_with_oracle(&graph).unwrap();
+        assert_eq!(selected.modeled_cost, 2.0);
+        let observation = ObservedAssignment {
+            selected,
+            exact_cost: Some(2.0),
+            rejected_queries: vec![],
+        };
+        assert!(solve_candidate_proposal(&graph, &[observation], None)
+            .unwrap()
+            .is_some());
+    }
+
     fn candidate(group: u32, cost: f64, inputs: &[&[usize]]) -> PhysicalCandidate {
         PhysicalCandidate {
             group: MemoGroupId(group),
@@ -1503,6 +1608,31 @@ mod tests {
                         candidate,
                         required_candidate,
                     } => marks[candidate.0] == 2 && marks[required_candidate.0] != 2,
+                    ReaderConstraint::HighestSharedQueryMaterialization {
+                        candidate,
+                        query_outputs,
+                    } => {
+                        marks[candidate.0] == 2
+                            && !selected_roots.iter().any(|(_, root)| *root == candidate.0)
+                            && !dependencies
+                                .iter()
+                                .enumerate()
+                                .any(|(consumer, producers)| {
+                                    marks[consumer] == 2
+                                        && producers
+                                            .iter()
+                                            .any(|(_, producer)| *producer == candidate.0)
+                                        && query_outputs
+                                            .iter()
+                                            .filter(|outputs| {
+                                                outputs.iter().any(|q| {
+                                                    reaches(*q, PhysicalCandidateId(consumer))
+                                                })
+                                            })
+                                            .count()
+                                            <= 1
+                                })
+                    }
                     ReaderConstraint::MinimumQueryReaders {
                         candidate,
                         query_outputs,

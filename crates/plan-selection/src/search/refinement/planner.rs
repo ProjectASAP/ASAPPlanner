@@ -131,6 +131,14 @@ pub(in crate::search) fn optimize_configured_candidates(
             configuration.materialization,
             asap_types::physical::Materialization::MatAtQueryKeptAcrossEvaluations(_)
         )
+    }) || configured.inventory.templates.iter().flatten().any(|node| {
+        matches!(
+            node.non_asap(),
+            Some(asap_types::ir::NonASAPOp::TimeRange {
+                kind: asap_types::ir::TimeRangeKind::Instant,
+                ..
+            })
+        )
     }) {
         if let Some(seed) = direct_cost_seed(configured, context, &exclusions, true)? {
             direct.push(seed);

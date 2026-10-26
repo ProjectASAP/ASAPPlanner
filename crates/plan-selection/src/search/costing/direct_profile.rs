@@ -88,13 +88,9 @@ fn extract_scan_class(
         return Ok(None);
     };
     if context
-        .entries
+        .original_roots
         .iter()
-        .any(|entry| entry.range_evaluation.is_some())
-        || context
-            .original_roots
-            .iter()
-            .any(|root| !matches!(root, QueryRoot::Operator(_)))
+        .any(|root| !matches!(root, QueryRoot::Operator(_)))
         || context.original_roots.len() != context.entries.len()
         || context.original_roots.len() != configured.inventory.graph.query_roots.len()
     {
@@ -109,7 +105,17 @@ fn extract_scan_class(
         .entries
         .iter()
         .all(|entry| entry.recurrence == first.recurrence);
-    if !equal_fixed && context.entries.len() > 3 {
+    let has_range = context
+        .entries
+        .iter()
+        .any(|entry| entry.range_evaluation.is_some());
+    if has_range
+        && (!equal_fixed
+            || context
+                .entries
+                .iter()
+                .any(|entry| entry.range_evaluation != first.range_evaluation))
+    {
         return Ok(None);
     }
     let rates: Vec<_> = context
@@ -117,7 +123,7 @@ fn extract_scan_class(
         .iter()
         .map(|entry| {
             crate::cost::execution_demand::evaluation_rate(
-                [(&entry.recurrence, None)],
+                [(&entry.recurrence, entry.range_evaluation)],
                 settings.non_repeating_query_horizon_seconds,
             )
             .map_err(|error| DirectProfileError::Invalid(error.to_string()))
@@ -127,9 +133,51 @@ fn extract_scan_class(
         return Ok(None);
     }
     let rate = rates[0];
-    let request_rate: f64 = rates.iter().sum();
+    let request_rate: f64 = context
+        .entries
+        .iter()
+        .map(|entry| {
+            crate::cost::execution_demand::evaluation_rate(
+                [(&entry.recurrence, None)],
+                settings.non_repeating_query_horizon_seconds,
+            )
+            .map_err(|error| DirectProfileError::Invalid(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .sum();
     let schedules = if equal_fixed {
         None
+    } else if context.entries.len() > 3 {
+        use crate::search::milp::direct_cost::FixedQuerySchedule;
+        let fixed: Option<Vec<_>> = context
+            .entries
+            .iter()
+            .map(|entry| match &entry.recurrence {
+                QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+                    Some(FixedQuerySchedule {
+                        interval_ms: interval.0,
+                        phase_ms: None,
+                    })
+                }
+                QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                    interval,
+                    evaluation_phase,
+                }) => Some(FixedQuerySchedule {
+                    interval_ms: interval.0,
+                    phase_ms: Some(evaluation_phase.0),
+                }),
+                _ => None,
+            })
+            .collect();
+        let Some(fixed) = fixed else { return Ok(None) };
+        match QueryScheduleRates::from_fixed_schedules(fixed) {
+            Ok(schedule) => Some(schedule),
+            Err(
+                crate::search::candidates::graph::CandidateSelectionError::UnsupportedDirectCost(_),
+            ) => return Ok(None),
+            Err(error) => return Err(DirectProfileError::Invalid(error.to_string())),
+        }
     } else {
         let mut materialized_subset_rates = Vec::with_capacity(1 << context.entries.len());
         for mask in 0..(1usize << context.entries.len()) {
@@ -147,6 +195,7 @@ fn extract_scan_class(
             );
         }
         Some(QueryScheduleRates {
+            compact_fixed: None,
             per_query_rates: rates,
             materialized_subset_rates,
         })
@@ -173,7 +222,7 @@ fn extract_scan_class(
                     && match configuration.timing {
                         ExecutionTiming::QueryTime => {
                             matches!(configuration.materialization, Materialization::NotMaterialized | Materialization::MatAtQuery(Medium::Memory))
-                                || (configuration.materialization == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+                                || (!has_range && configuration.materialization == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
                                     && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
                                     && context.models.deployment_capabilities.query_time_results_retained
                                     && (0..context.entries.len()).any(|reader| asap_physical_asap_optimization::summary_materialization_eligibility(node, &[reader], context.entries, context.data, context.models.deployment_capabilities).is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)))
@@ -279,7 +328,9 @@ fn extract_scan_class(
             };
             if choices.is_empty() {
                 nodes[id] = None;
-            } else if choices.contains(&None) {
+            } else if choices.contains(&None)
+                && !(prefer_latest_pane && choices.iter().any(Option::is_some))
+            {
                 lookbacks[id] = None;
             } else {
                 lookbacks[id] = choices.iter().copied().max().flatten();
@@ -539,10 +590,19 @@ fn price<'a>(
                 pane_count,
                 pane_width_ms,
                 ..
-            }) => (
-                u64::from(*pane_count),
-                pane_width_ms.checked_mul(u64::from(*pane_count)),
-            ),
+            }) => {
+                let window = pane_width_ms.checked_mul(u64::from(*pane_count));
+                let span = context
+                    .entries
+                    .first()
+                    .and_then(|entry| entry.range_evaluation)
+                    .map_or(0, |range| range.span_ms);
+                let Some(retention) = window.and_then(|window| window.checked_add(span)) else {
+                    continue;
+                };
+                let retained = (retention / (*pane_width_ms).max(1)).max(u64::from(*pane_count));
+                (retained, window)
+            }
             _ => (1, None),
         };
         let Ok(priced) = crate::price_node(
@@ -1265,6 +1325,28 @@ mod tests {
     }
 
     fn check_pane_profile(mode: Materialization) {
+        check_pane_profile_with_range(mode, None);
+    }
+
+    #[test]
+    fn identical_range_pane_profiles_match_the_real_evaluator() {
+        let range = Some(asap_types::workload::RangeEvaluation {
+            span_ms: 3_600_000,
+            step_ms: 60_000,
+        });
+        for mode in [
+            Materialization::NotMaterialized,
+            Materialization::MatAtQuery(Medium::Memory),
+            Materialization::MatAtIngestion(Medium::Memory),
+        ] {
+            check_pane_profile_with_range(mode, range);
+        }
+    }
+
+    fn check_pane_profile_with_range(
+        mode: Materialization,
+        range_evaluation: Option<asap_types::workload::RangeEvaluation>,
+    ) {
         use asap_logical_asap_optimization::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
         };
@@ -1409,10 +1491,13 @@ mod tests {
                         recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
                             RepetitionInterval(width as u32),
                         )),
-                        range_evaluation: None,
+                        range_evaluation,
                     }];
                     entries.push(entries[0].clone());
                     let mut settings = crate::PlanSelectionSettings::default();
+                    if range_evaluation.is_some() {
+                        settings.measured_operation_costs.ns_per_evaluation = 1_000_000.0;
+                    }
                     settings.resource_speed.ms_per_cpu_op *= speed_multiplier;
                     settings.resource_speed.ms_per_scanned_byte *= speed_multiplier;
                     let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
@@ -1512,7 +1597,11 @@ mod tests {
                         unreachable!()
                     };
                     let expected_residency = match mode {
-                        Materialization::MatAtIngestion(_) => u64::from(*pane_count) + 1,
+                        Materialization::MatAtIngestion(_) => {
+                            u64::from(*pane_count)
+                                + range_evaluation.map_or(0, |range| range.span_ms / width)
+                                + 1
+                        }
                         Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
                             u64::from(*pane_count) - 1
                         }
@@ -1831,12 +1920,13 @@ mod tests {
             id
         }
         for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
-            for phases in [false, true] {
+            for (phases, query_count) in [(false, 2), (true, 2), (false, 5), (true, 5)] {
                 let target = AccuracyTarget::max_error(0.05)
                     .failure_probability(0.01)
                     .accuracy_scope(AccuracyScope::PerValue);
-                let originals: Vec<_> = [0.95, 0.99]
+                let originals: Vec<_> = [0.95, 0.99, 0.5, 0.7, 0.9]
                     .iter()
+                    .take(query_count as usize)
                     .map(|q| {
                         QueryRoot::Operator(lower_promql(
                             &format!("quantile_over_time({q}, latency[5m])"),
@@ -1889,7 +1979,7 @@ mod tests {
                         .count(),
                     1
                 );
-                let entries: Vec<_> = (0..2)
+                let entries: Vec<_> = (0..query_count)
                     .map(|q| QueryWorkloadEntry {
                         query: Query(format!("quantile {q}")),
                         requirements: QueryRequirements {
@@ -1924,15 +2014,25 @@ mod tests {
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
                 assert!(extracted.supported.iter().all(|supported| *supported));
-                assert_eq!(
-                    extracted
+                if query_count == 2 {
+                    assert_eq!(
+                        extracted
+                            .profile
+                            .schedules
+                            .as_ref()
+                            .unwrap()
+                            .materialized_subset_rates[3],
+                        if phases { 2.0 } else { 3.0 }
+                    );
+                } else {
+                    assert!(extracted
                         .profile
                         .schedules
                         .as_ref()
                         .unwrap()
-                        .materialized_subset_rates[3],
-                    if phases { 2.0 } else { 3.0 }
-                );
+                        .compact_fixed
+                        .is_some());
+                }
                 let proposal = crate::search::milp::model::solve_direct_cost_proposal_with_metrics(
                     &configured.inventory.graph,
                     &[],

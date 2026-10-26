@@ -234,6 +234,14 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                 producer_requirements: Vec::new(),
             });
             if materialization == Materialization::MatAtQuery(Medium::Memory) {
+                if !summary {
+                    result.inventory.graph.reader_constraints.push(
+                        ReaderConstraint::HighestSharedQueryMaterialization {
+                            candidate: id,
+                            query_outputs: query_outputs.clone(),
+                        },
+                    );
+                }
                 result.inventory.graph.reader_constraints.push(
                     ReaderConstraint::MinimumQueryReaders {
                         candidate: id,
@@ -383,6 +391,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
             }
             ReaderConstraint::AllowedOutputs { candidate, .. }
             | ReaderConstraint::IncompatibleOutputs { candidate, .. }
+            | ReaderConstraint::HighestSharedQueryMaterialization { candidate, .. }
             | ReaderConstraint::MinimumQueryReaders { candidate, .. } => candidate,
         };
         for &candidate in &source_configurations[source_candidate.0] {
@@ -409,6 +418,12 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                             right: *right,
                         }
                     }
+                    ReaderConstraint::HighestSharedQueryMaterialization {
+                        query_outputs, ..
+                    } => ReaderConstraint::HighestSharedQueryMaterialization {
+                        candidate,
+                        query_outputs: query_outputs.clone(),
+                    },
                     ReaderConstraint::MinimumQueryReaders {
                         query_outputs,
                         minimum,

@@ -816,11 +816,21 @@ fn search_domain<Id: Clone>(
     let started = Instant::now();
     let mut memo = match progress.local_memo.take() {
         Some(memo) => memo,
-        None => try_populate_pass1(
-            initial,
-            &pruned.as_ref().expect("first round pruned").inventory,
-        )
-        .map_err(|error| unsupported(&error.to_string()))?,
+        None => {
+            let mut memo = try_populate_pass1(
+                initial,
+                &pruned.as_ref().expect("first round pruned").inventory,
+            )
+            .map_err(|error| unsupported(&error.to_string()))?;
+            crate::search::candidates::accuracy_configurations::add_scoped_candidates(
+                &mut memo,
+                entries,
+                data,
+                Instant::now().checked_add(remaining()),
+            )
+            .map_err(|error| unsupported(&error))?;
+            memo
+        }
     };
     let deadline = Instant::now().checked_add(remaining());
     asap_logical_asap_optimization::memo::window_candidates::extend_local_window_composition(

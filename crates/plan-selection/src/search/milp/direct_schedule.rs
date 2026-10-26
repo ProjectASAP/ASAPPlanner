@@ -16,6 +16,22 @@ pub(super) fn encode(
     divisor: f64,
     check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
 ) -> Result<Expression, CandidateSelectionError> {
+    if let Some(lattice) = &schedule.compact_fixed {
+        return fixed_schedules::encode(
+            graph,
+            profile,
+            schedule,
+            lattice,
+            variables,
+            constraints,
+            active,
+            edges,
+            roots,
+            reach,
+            divisor,
+            check_deadline,
+        );
+    }
     let count = graph.candidates.len();
     let queries = graph.query_roots.len();
     let subsets = 1usize << queries;
@@ -195,6 +211,7 @@ mod tests {
             .unwrap()
         };
         QueryScheduleRates {
+            compact_fixed: None,
             per_query_rates: (0..queries.len()).map(|q| union(1 << q)).collect(),
             materialized_subset_rates: (0..1 << queries.len()).map(union).collect(),
         }

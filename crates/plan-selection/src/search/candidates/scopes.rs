@@ -224,6 +224,7 @@ pub(in crate::search) fn expand_execution_scopes_before(
             }
             ReaderConstraint::AllowedOutputs { candidate, .. }
             | ReaderConstraint::IncompatibleOutputs { candidate, .. }
+            | ReaderConstraint::HighestSharedQueryMaterialization { candidate, .. }
             | ReaderConstraint::MinimumQueryReaders { candidate, .. } => candidate,
         };
         for &candidate in &copies[owner.0] {
@@ -246,6 +247,12 @@ pub(in crate::search) fn expand_execution_scopes_before(
                             right: *right,
                         }
                     }
+                    ReaderConstraint::HighestSharedQueryMaterialization {
+                        query_outputs, ..
+                    } => ReaderConstraint::HighestSharedQueryMaterialization {
+                        candidate,
+                        query_outputs: query_outputs.clone(),
+                    },
                     ReaderConstraint::MinimumQueryReaders {
                         query_outputs,
                         minimum,
