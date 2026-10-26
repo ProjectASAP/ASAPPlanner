@@ -1,0 +1,134 @@
+# Plan a workload with stage_pipeline
+
+`stage_pipeline` plans queries through Stages 0–3 and writes a JSON document
+for the [Stage Viewer](stage-viewer.md). It reports candidate selection,
+modeled costs and accuracy checks; it does not deploy or execute the plan.
+
+## Build and run
+
+Run from an up-to-date ASAPPlanner repository root. You need Rust/Cargo,
+a C/C++ toolchain, CMake, and the libclang shared library. HiGHS is built as a
+native dependency; its Rust bindings use libclang.
+
+On Ubuntu/Debian, install the native build dependencies with:
+
+```sh
+sudo apt-get update
+sudo apt-get install build-essential cmake libclang-dev
+```
+
+Use Cargo to build and run the command; a checkout does not install
+`stage_pipeline` on your shell's `PATH`:
+
+```sh
+cargo run --release -p asap-devtools --bin stage_pipeline -- \
+  --promql 'sum_over_time(requests[5m])' \
+  --series-count 1000 --sample-interval-ms 15000 \
+  --enforce-accuracy-guarantees \
+  --milp-time-limit-s 30 \
+  --out plan.json
+```
+
+The `--` separates Cargo options from planner options. `--out` is required.
+Release builds are recommended for planning-performance measurements. Initial
+compilation can take several minutes and is separate from the planning budget.
+
+Alternatively, build once and run the binary directly:
+
+```sh
+cargo build --release -p asap-devtools --bin stage_pipeline
+"${CARGO_TARGET_DIR:-target}/release/stage_pipeline" \
+  --example planner-layering-1 --enforce-accuracy-guarantees --out example.json
+```
+
+## Plan a workload file
+
+Use a `PlanningWorkload` JSON file containing query requirements, recurrence
+and data-source facts. Replace the input path below with your file; the
+`rh8-q1h60.json` name is an example, not a bundled fixture.
+
+```sh
+cargo run --release -p asap-devtools --bin stage_pipeline -- \
+  --workload /path/to/rh8-q1h60.json \
+  --deployment-capabilities '{"raw_data_retained":true,"query_time_results_retained":false}' \
+  --cost-model aws-fargate-us-east-1 \
+  --enforce-accuracy-guarantees \
+  --search candidate-connections \
+  --milp-time-limit-s 280 \
+  --out rh8-q1h60-plan.json
+```
+
+`candidate-connections` is the default engine; the explicit `--search` option
+can be omitted. `memo-milp` is not an accepted CLI value.
+
+The deployment declaration allows retained raw data but does not allow query-time
+results to be kept across evaluations. Set capabilities to match your deployment.
+For file inputs, accuracy targets come from the workload file, not the inline
+query flags `--max-error`, `--failure-probability`, or `--accuracy-metric`.
+
+`--workload` can repeat to jointly plan multiple files, including separate
+PromQL and SQL workloads. Shared-source facts must agree; SQL inputs also need
+appropriate `--table` declarations. See [Run and inspect a query](run-a-query.md)
+for workload, source-fact, and SQL examples.
+
+## Search, accuracy, and costs
+
+| Option | Meaning |
+| --- | --- |
+| `--enforce-accuracy-guarantees` | Enforce the queries' accuracy requirements. Without it, this inspection tool ignores accuracy guarantees, although executability checks still apply. |
+| `--milp-time-limit-s 280` | Set the planning time budget in seconds. A timeout may return a validated incumbent or no selected plan; it does not establish optimality. |
+| `--cost-model aws-fargate-us-east-1` | Compare plans using the configured AWS Fargate pricing model. Other supported names are `usage-over-time`, `provisioned-capacity`, and `cluster-capacity`. |
+| `--max-displayed 64` | Limit candidates shown in the document; this is not a search budget. |
+| `--exhaustive --max-combinations 10000` | Archive evaluated plans and rejections using the same engine, with an assignment budget. This does not guarantee enumeration of all candidates before a time or assignment limit. Do not combine with `--search`. |
+| `--plan-selection-settings settings.json` | Load selection settings instead of `--cost-model`, cluster flags, or `--measured-operation-costs`. |
+
+For inline queries, supply the data facts needed for pricing: for example,
+`--series-count` and `--sample-interval-ms`, or `--rows-per-second`.
+`--rows-held` describes retained rows for scans that need that bound.
+Workload files carry these facts in their data workload. Missing facts are not
+interpreted as zero cost.
+
+## Inspect the result
+
+Open the generated JSON file in the [Stage Viewer](stage-viewer.md), or inspect
+Stage 3 directly:
+
+```sh
+python3 - <<'PY'
+import json
+with open('plan.json') as source:
+    document = json.load(source)
+print('Format:', document['format'])
+print(json.dumps(document['stage3_plan_selection'], indent=2))
+PY
+```
+
+The document format is `asap-stage-pipeline/v1`. Check `selected`, `costs`,
+`search`, and any `error` or rejection information in `stage3_plan_selection`.
+A written JSON document alone does not mean planning succeeded: `selected` may
+be null. A selected plan is not necessarily a proven optimum; inspect the search
+status and reported gap/bounds. Costs are model predictions, not measured
+execution times or an actual cloud bill.
+
+## Troubleshooting
+
+- **`stage_pipeline: command not found`:** use `cargo run ... -- ...`, or the
+  binary's explicit path after building. Building does not add it to `PATH`.
+- **`unknown argument` / `expected candidate-connections`:** check that your
+  branch and binary are current. Use `candidate-connections`, not `memo-milp`.
+- **`--out is required`:** supply an output JSON path; create its parent directory
+  first if needed.
+- **Cannot read the workload:** paths are relative to your working directory;
+  an absolute input path avoids ambiguity.
+- **`Unable to find libclang`:** install `libclang-dev`, or point
+  `LIBCLANG_PATH` at the directory containing an existing `libclang.so`:
+
+  ```sh
+  export LIBCLANG_PATH=/path/to/llvm/lib
+  # Re-run the original cargo command; cargo clean is not needed.
+  ```
+
+  The value is a directory, not the library filename. For example, if libclang
+  is supplied by the Python `libclang` package, its directory may be
+  `.../site-packages/clang/native`. Confirm that `libclang.so` exists there.
+  CMake's unused-variable warnings are not the cause of this bindgen failure.
