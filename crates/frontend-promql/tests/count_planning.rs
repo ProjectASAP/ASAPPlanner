@@ -58,7 +58,8 @@ fn exact_counts_select_count_accumulators() {
     }
 }
 
-// CMS/CountSketch count updates must stay +1 even for zero or negative samples.
+// CMS/UnivMon count updates stay +1 even for zero or negative samples.
+// CountSketch cannot answer totals and must not be offered for count.
 #[test]
 fn frequency_count_candidates_use_unit_weights() {
     for query in ["count_over_time(up[5m])", "count(up)"] {
@@ -88,12 +89,15 @@ fn frequency_count_candidates_use_unit_weights() {
                 continue;
             };
             assert!(
-                !matches!(kind.algorithm(), SketchAlgorithm::Hll),
+                !matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::Hll | SketchAlgorithm::CountSketch
+                ),
                 "{query}: {node:?}"
             );
             if !matches!(
                 kind.algorithm(),
-                SketchAlgorithm::Cms | SketchAlgorithm::CountSketch
+                SketchAlgorithm::Cms | SketchAlgorithm::UnivMon
             ) {
                 continue;
             }
@@ -124,7 +128,7 @@ fn frequency_count_candidates_use_unit_weights() {
             "{query}: {candidates:?}"
         );
         assert!(
-            algorithms.contains(&SketchAlgorithm::CountSketch),
+            algorithms.contains(&SketchAlgorithm::UnivMon),
             "{query}: {candidates:?}"
         );
     }

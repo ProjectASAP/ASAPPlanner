@@ -155,13 +155,10 @@ impl AggregateCore for HllSketchAccumulator {
         Ok(Box::new(merged))
     }
 
-    /// Distinct count, rounded down to an integer. A bare `PointCount` over
-    /// an HLL also reads the distinct count.
+    /// Distinct count, rounded down to an integer.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            SketchStatistic::Cardinality | SketchStatistic::PointCount { value: None, .. } => {
-                Ok(self.inner.estimate() as f64)
-            }
+            SketchStatistic::Cardinality => Ok(self.inner.estimate() as f64),
             other => Err(format!("HLL does not answer {other:?}").into()),
         }
     }

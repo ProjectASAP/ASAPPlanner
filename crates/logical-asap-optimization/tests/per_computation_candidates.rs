@@ -406,11 +406,7 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
     );
     assert_eq!(
         algorithms(&candidates[1].choices.candidates),
-        vec![
-            SketchAlgorithm::Cms,
-            SketchAlgorithm::CountSketch,
-            SketchAlgorithm::UnivMon
-        ]
+        vec![SketchAlgorithm::Cms, SketchAlgorithm::UnivMon]
     );
 }
 

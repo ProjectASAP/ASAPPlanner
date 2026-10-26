@@ -68,17 +68,16 @@ Based on our requirement, each field should contain the following information.
 1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcirschemamodrs) (`crates/types/src/ir/schema/mod.rs`). A column is either a raw value or a summary state:
 
    - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
-   - **Summary state**: described from coarse to fine by four levels:
+   - **Summary state**: described from coarse to fine by three levels:
 
    | Level | Code | Values | KLL example |
    |---|---|---|---|
    | Family | `FieldDataType` variant | `ExactAggregate`, `Sketch`, `SummarySample`, `Wavelet`, `StatModel` | `Sketch` |
-   | Category (sketches only) | `SketchCategory` | `Quantile`, `Frequency`, `Cardinality`, `TopK`, `Universal` | `Quantile` |
    | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
    | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
 
-   - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcirschemasketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
-   - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, PerSubpopulationInstance)`.
+   - For a sketch, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcirschemasketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
+   - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Kll, Kll { k: 200 } }, PerSubpopulationInstance)`. Which statistics a family answers is the family-capability table's (`FamilyCapability`), not part of the type.
 
 2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
 
@@ -88,7 +87,7 @@ Based on our requirement, each field should contain the following information.
      |---|---|---|
      | `Quantile` | `Sketch`: `Kll`, `DDSketch` | `SummaryEstimate(Quantile { q })` |
      | `Cardinality` | `Sketch`: `Hll`, `Kmv`, `UnivMon` (one column only) | `SummaryEstimate(Cardinality)` |
-     | `Count` (approximate) | `Sketch`: `Cms`, `CountSketch`, `UnivMon` | `SummaryEstimate(PointCount { .. })` |
+     | `Count` (approximate) | `Sketch`: `Cms`, `UnivMon` | `SummaryEstimate(PointCount { .. })` |
      | `TopK` | `Sketch`: `CmsWithHeap`, `CountSketchWithHeap` | `SummaryEstimate(TopK { k })` |
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
@@ -834,12 +833,12 @@ input groups                       output groups
 | Exact `Sum`, `Count`, `Min`, `Max` | adds, or keeps the extremum | exact |
 | KMV | keeps the `k` smallest distinct hashes of the union (one shared hash seed) | the same state as a direct build: relative error of the distinct count |
 | HLL | keeps each register's maximum | the same state as a direct build: relative error of the distinct count |
-| DDSketch | adds the bucket counts (one shared bucket mapping) | the same state as a direct build: relative error of every quantile; its total count |
+| DDSketch | adds the bucket counts (one shared bucket mapping) | the same state as a direct build: relative error of every quantile |
 | KLL | concatenates and compacts the levels | not the same state (compactions are randomized), but the same rank error bound and failure probability as a direct build of that `k` |
 | Count-Min | adds the counters (shared hashes) | the same state as a direct build: item frequency and total, the error relative to the coarse group's total, `ε·‖group‖₁` |
-| Count Sketch | adds the counters (shared hashes) | the same state as a direct build: item frequency, the error relative to the coarse group's L2 norm, `ε·‖group‖₂`; the L2 estimate |
+| Count Sketch | adds the counters (shared hashes) | the same state as a direct build: item frequency, the error relative to the coarse group's L2 norm, `ε·‖group‖₂` |
 | UnivMon | adds the layer counters and re-ranks the union of the heap keys | total, L2 and distinct count as a direct build; entropy approximate |
-| Count-Min or Count Sketch with heap | adds the counters | item frequencies as a direct build; top-k approximate (an item heavy in the coarse group may be in no finer group's heap) |
+| Count-Min or Count Sketch with heap | adds the counters | top-k approximate (an item heavy in the coarse group may be in no finer group's heap) |
 
 Rejected: counter states (`Rate`, `Increase`), which merge consecutive windows of one series, not different series; `IRate` and Theta, which have no merge; Hydra, whose groups share one state, so they are no `group_by` columns.
 
@@ -886,7 +885,7 @@ OperatorNode                                         §6.1
 ├── schema: Schema                               │   §6.3
 │     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
 │           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
-│                 └── category, algorithm, params    §6.4
+│                 └── algorithm, params              §6.4
 ├── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 └── coverage() → SummaryCoverage                     §6.6
       └── definition: OperatorNode   (again a node, so the same structure)
@@ -1118,7 +1117,7 @@ pub enum FieldDataType {
     Plain(DataType),
     /// Exact accumulator state: which accumulator, and its parameters.
     ExactAggregate(ExactKind, ExactParams),
-    /// Sketch state: the chosen sketch (category, algorithm, parameters), and
+    /// Sketch state: the chosen sketch (algorithm, parameters), and
     /// whether each group has its own sketch or all groups share one.
     Sketch(SketchKind, GroupingStrategy),
     /// Summary sample state: the sampling method, and its parameters.
@@ -1158,33 +1157,25 @@ pub enum DataType {
 pub enum ExactKind   { Sum, Count, Min, Max, Increase, Rate, IRate }
 pub enum ExactParams { Sum, Count, Min, Max, Increase, Rate, IRate }
 
-/// A chosen sketch. Built only through `new`, so the three fields always agree.
+/// A chosen sketch. Built only through `new`, so the two fields always agree.
+/// Which statistics it answers is its family's row of the family-capability
+/// table (`FamilyCapability`).
 pub struct SketchKind {
-    /// Which aggregation intents the sketch answers: `Quantile` (quantiles),
-    /// `Cardinality` (distinct counts), `Frequency` (item counts), `TopK`
-    /// (heavy hitters), or `Universal` (frequency moments such as L2 and
-    /// entropy, plus counts, distinct counts and top-k). Derived from `algorithm`.
-    category: SketchCategory,
     /// Which sketch algorithm.
     algorithm: SketchAlgorithm,
     /// That algorithm's size parameters; must match `algorithm`.
     params: SketchParams,
 }
 impl SketchKind {
-    /// The only constructor. Derives the category from the algorithm, and
-    /// panics if `params` belong to a different algorithm.
+    /// The only constructor. Panics if `params` belong to a different
+    /// algorithm.
     pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self;
-    /// Which aggregation intents the sketch answers (see the `category` field).
-    pub fn category(&self) -> SketchCategory;
     /// The sketch algorithm.
     pub fn algorithm(&self) -> &SketchAlgorithm;
     /// The algorithm's size parameters.
     pub fn params(&self) -> &SketchParams;
 }
-pub enum SketchCategory { Universal, Quantile, Cardinality, Frequency, TopK }
-// Universal: UnivMon | Quantile: Kll, DDSketch | Cardinality: Hll, Theta, Kmv
-// (Theta is not offered as a candidate until asap_sketchlib has a Theta sketch)
-// Frequency: Cms, CountSketch | TopK: CmsWithHeap, CountSketchWithHeap
+// Theta is not offered as a candidate until asap_sketchlib has a Theta sketch.
 pub enum SketchAlgorithm { UnivMon, Kll, Cms, Hll, DDSketch, CmsWithHeap, Kmv, Theta, CountSketch, CountSketchWithHeap }
 
 /// Size parameters of each algorithm. Larger values: more memory, less error.

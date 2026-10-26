@@ -62,12 +62,10 @@ impl AggregateCore for KmvAccumulator {
         Ok(Box::new(merged))
     }
 
-    /// Distinct count. A bare `PointCount` over a KMV also reads the distinct count.
+    /// Distinct count.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            SketchStatistic::Cardinality | SketchStatistic::PointCount { value: None, .. } => {
-                Ok(self.inner.estimate())
-            }
+            SketchStatistic::Cardinality => Ok(self.inner.estimate()),
             other => Err(format!("KMV does not answer {other:?}").into()),
         }
     }
@@ -150,14 +148,6 @@ mod tests {
     fn counts_fewer_than_k_distinct_items_exactly() {
         let kmv = build(1024, (0..500).chain(0..500));
         assert_eq!(cardinality(&kmv), 500.0);
-        assert_eq!(
-            kmv.estimate(&SketchStatistic::PointCount {
-                key: planner_types::ir::scalar::ColumnRef::SampleValue,
-                value: None,
-            })
-            .unwrap(),
-            500.0
-        );
     }
 
     // Above k the estimate is within ten times KMV's relative standard

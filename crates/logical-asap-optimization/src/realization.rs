@@ -54,11 +54,9 @@ pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
             SketchAlgorithm::CmsWithHeap,
             SketchAlgorithm::CountSketchWithHeap,
         ],
-        AggIntent::Count { .. } => &[
-            SketchAlgorithm::Cms,
-            SketchAlgorithm::CountSketch,
-            SketchAlgorithm::UnivMon,
-        ],
+        // Count Sketch's signed counters give no total, so it serves no
+        // count.
+        AggIntent::Count { .. } => &[SketchAlgorithm::Cms, SketchAlgorithm::UnivMon],
         _ => &[],
     }
 }
