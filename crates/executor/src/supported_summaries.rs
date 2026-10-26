@@ -3,39 +3,24 @@
 //! `DeploymentCapabilities::supported_summaries`, so the Planner offers no
 //! summary the executor would reject when it binds the plan.
 
-use planner_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
+use crate::capability::{EVALUATED_FAMILIES, UNEVALUATED_READOUTS};
+use planner_types::ir::schema::{FamilyCapability, SupportedSummary};
 
 /// Every sketch family this executor builds from rows and the statistics it
-/// answers from one state of it, in `SketchAlgorithm` order. A family the
-/// executor builds but reads nothing from (plain Count Sketch) and one it
-/// does not build (Theta) are absent. Exact accumulators are always
-/// supported and are not listed.
-///
-/// Per-instance states only: Count-Min answers its total (an item's
-/// frequency only from a Hydra grid, which Stage 2 does not produce yet;
-/// `SupportedSummary` gains a grouping dimension when it does), and the
-/// heap families answer top-k only.
+/// answers from one state of it: the family-capability table's row of each
+/// family it evaluates, less the readouts it does not evaluate yet. Exact
+/// accumulators are always supported and are not listed.
 pub fn supported_summary_families() -> Vec<SupportedSummary> {
-    use SketchAlgorithm as A;
-    use StatisticKind::*;
-    let families: [(A, &[StatisticKind]); 8] = [
-        (
-            A::UnivMon,
-            &[Total, Distinct, FrequencyL2, FrequencyEntropy],
-        ),
-        (A::Kll, &[Quantile]),
-        (A::Cms, &[Total]),
-        (A::Hll, &[Total, Distinct]),
-        (A::DDSketch, &[Total, Quantile]),
-        (A::CmsWithHeap, &[TopK]),
-        (A::Kmv, &[Total, Distinct]),
-        (A::CountSketchWithHeap, &[TopK]),
-    ];
-    families
+    EVALUATED_FAMILIES
         .into_iter()
-        .map(|(family, readouts)| SupportedSummary {
+        .map(|family| SupportedSummary {
+            readouts: FamilyCapability::of_per_instance_sketch(&family)
+                .readouts
+                .iter()
+                .map(|&(readout, _)| readout)
+                .filter(|readout| !UNEVALUATED_READOUTS.contains(&(family.clone(), *readout)))
+                .collect(),
             family,
-            readouts: readouts.to_vec(),
         })
         .collect()
 }
@@ -46,11 +31,13 @@ mod tests {
     use crate::capability::validate_sketch_evaluation;
     use crate::factory::create_planner_accumulator;
     use crate::summary_kernels::weighted_frequency::WeightedFrequency;
+    use planner_types::ir::operator::operator_properties::{Reduction, Source};
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::ir::schema::{
-        FieldDataType, GroupingStrategy, SketchKind, SketchParams, SketchStatistic,
-        SummaryInputExpr, SummaryUpdate,
+        DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
+        SketchParams, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate,
     };
+    use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 
     const ALGORITHMS: [SketchAlgorithm; 10] = [
         SketchAlgorithm::UnivMon,
@@ -132,7 +119,11 @@ mod tests {
     fn statistic(readout: StatisticKind) -> SketchStatistic {
         let key = ColumnRef::Named("item".into());
         match readout {
-            StatisticKind::Total => SketchStatistic::PointCount { key, value: None },
+            // Pass 1 reads a total keyed by the sample value.
+            StatisticKind::Total => SketchStatistic::PointCount {
+                key: ColumnRef::SampleValue,
+                value: None,
+            },
             StatisticKind::ItemFrequency => SketchStatistic::PointCount {
                 key,
                 value: Some("a".into()),
@@ -162,18 +153,90 @@ mod tests {
 
     /// Whether the executor answers `readout` from `family`'s state: top-k
     /// through the keyed heap evaluation, every other readout through the
-    /// sketch evaluation.
+    /// sketch evaluation, whose kernel must then read it from a built state.
     fn evaluation_answers(family: &FieldDataType, readout: StatisticKind) -> bool {
         match (readout, family) {
             (StatisticKind::TopK, FieldDataType::Sketch(kind, _)) => {
                 WeightedFrequency::configuration(kind).is_ok()
             }
-            _ => validate_sketch_evaluation(family, &statistic(readout)).is_ok(),
+            _ => {
+                let accepted = validate_sketch_evaluation(family, &statistic(readout)).is_ok();
+                if accepted {
+                    assert!(kernel_answers(family, readout), "{family:?} {readout:?}");
+                }
+                accepted
+            }
         }
     }
 
+    /// Whether the kernel of a per-instance `family` state built from one
+    /// update reads `readout`.
+    fn kernel_answers(family: &FieldDataType, readout: StatisticKind) -> bool {
+        let FieldDataType::Sketch(_, grouping) = family else {
+            return false;
+        };
+        let value = SummaryUpdate::column(ColumnRef::SampleValue);
+        let keyed = SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
+            ..value.clone()
+        };
+        let Ok(mut updater) = create_planner_accumulator(family, &value, grouping)
+            .or_else(|_| create_planner_accumulator(family, &keyed, grouping))
+        else {
+            return false;
+        };
+        let updated = if updater.is_keyed() {
+            updater.update_keyed(
+                &crate::KeyByLabelValues::new_with_labels(vec!["a".into()]),
+                1.0,
+                0,
+            )
+        } else {
+            updater.update_single(1.0, 0)
+        };
+        updated.is_ok()
+            && updater
+                .snapshot_accumulator()
+                .estimate(&statistic(readout))
+                .is_ok()
+    }
+
+    /// Whether the IR builds a structurally valid `SummaryEstimate` of
+    /// `readout` over a `family` state.
+    fn ir_builds_estimate(family: &FieldDataType, readout: StatisticKind) -> bool {
+        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "t".into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![
+                Field::plain("item", DataType::Utf8, false),
+                Field::plain("value", DataType::Float64, false),
+            ]),
+        }))
+        .unwrap();
+        let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: scan,
+            family: family.clone(),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::by(vec![]),
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        }))
+        .unwrap();
+        OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: state,
+            query: statistic(readout),
+        }))
+        .is_ok_and(|estimate| estimate.validate_structure().is_ok())
+    }
+
     /// The list holds exactly the (family, readout) pairs the factory builds
-    /// per instance and an evaluation answers from that state.
+    /// per instance and an evaluation answers from that state, and the
+    /// IR's `SummaryEstimate` validation accepts exactly what the
+    /// family-capability table answers. A listed family's readouts are its
+    /// table row less the ones named not evaluated, each of which the table
+    /// answers and the executor does not.
     #[test]
     fn supported_summary_families_match_the_factory_and_evaluations() {
         let listed = supported_summary_families();
@@ -187,6 +250,17 @@ mod tests {
                     .iter()
                     .any(|s| &s.family == algorithm && s.readouts.contains(&readout));
                 assert_eq!(declared, executed, "{algorithm:?} {readout:?}");
+                let answered = FamilyCapability::of(&family).answers(&statistic(readout));
+                assert_eq!(
+                    ir_builds_estimate(&family, readout),
+                    answered,
+                    "IR: {algorithm:?} {readout:?}"
+                );
+                if UNEVALUATED_READOUTS.contains(&(algorithm.clone(), readout)) {
+                    assert!(answered && !executed, "{algorithm:?} {readout:?}");
+                } else if EVALUATED_FAMILIES.contains(algorithm) {
+                    assert_eq!(answered, executed, "table: {algorithm:?} {readout:?}");
+                }
             }
         }
         assert!(listed.iter().all(|s| !s.readouts.is_empty()));
