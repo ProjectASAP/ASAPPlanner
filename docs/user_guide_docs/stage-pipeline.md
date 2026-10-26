@@ -44,18 +44,19 @@ cargo build --release -p asap-devtools --bin stage_pipeline
 ## Plan a workload file
 
 Use a `PlanningWorkload` JSON file containing query requirements, recurrence
-and data-source facts. Replace the input path below with your file; the
-`rh8-q1h60.json` name is an example, not a bundled fixture.
+and data-source facts. The example below uses the checked-in
+[range-heavy workload](../../tools/dag-viewer/memo-examples/promql/rangeheavy-t8-t5-1h.json).
+Run it from the repository root; no input file needs to be created.
 
 ```sh
 cargo run --release -p asap-devtools --bin stage_pipeline -- \
-  --workload /path/to/rh8-q1h60.json \
+  --workload tools/dag-viewer/memo-examples/promql/rangeheavy-t8-t5-1h.json \
   --deployment-capabilities '{"raw_data_retained":true,"query_time_results_retained":false}' \
   --cost-model aws-fargate-us-east-1 \
   --enforce-accuracy-guarantees \
   --search candidate-connections \
   --milp-time-limit-s 280 \
-  --out rh8-q1h60-plan.json
+  --out rangeheavy-plan.json
 ```
 
 `candidate-connections` is the default engine; the explicit `--search` option
