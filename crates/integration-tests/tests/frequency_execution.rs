@@ -12,7 +12,7 @@ use asap_executor::physical_planner::{
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::logical_candidates;
+use asap_integration_tests::planning::explicit_local_candidates;
 use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOperatorPayload};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -128,7 +128,9 @@ fn standin_exact_and_univmon_candidates_execute() {
         let root = lower_promql(query, accuracy.clone()).unwrap();
         let root = promql_rows::with_series_identity(&root).unwrap();
         let mut executed = Vec::new();
-        for candidate in logical_candidates(root, accuracy) {
+        // This is an operator execution test. Enumerate each local rule once,
+        // not an arbitrary sized configuration visited by a budgeted search.
+        for candidate in explicit_local_candidates(root) {
             let family = built_family(&candidate);
             let name = match &family {
                 None => "exact".to_string(),
@@ -139,6 +141,18 @@ fn standin_exact_and_univmon_candidates_execute() {
                 }
                 _ => continue,
             };
+            if query.starts_with("distinct_over_time") {
+                if let Some(FieldDataType::Sketch(kind, _)) = &family {
+                    let asap_types::ir::schema::SketchParams::UnivMon {
+                        distinct_failure_probability,
+                        ..
+                    } = kind.params()
+                    else {
+                        unreachable!("family filtered above")
+                    };
+                    assert_eq!(*distinct_failure_probability, Some(delta));
+                }
+            }
             let values = execute(&candidate);
             assert!(
                 matches!(values.as_slice(), [value] if (value - expected).abs() < 1e-9),
