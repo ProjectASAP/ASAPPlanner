@@ -224,7 +224,7 @@ fn family_capability_table() {
                 SketchParams::CountSketch { width, depth },
             ),
             Some(Disjoint),
-            vec![(ItemFrequency, Union), (Total, Union)],
+            vec![(ItemFrequency, Union)],
         ),
         (
             sketch(
@@ -428,8 +428,8 @@ fn merged_error_depends_on_the_readout() {
         Some(MergedError::Approximate)
     );
     assert_eq!(heap.merged_error(&point()), None);
-    // Pass 1 offers Count Sketch for a count (a bare point count): merged
-    // panes keep one build's guarantee.
+    // Count Sketch's signed counters give no total: no merged error for a
+    // bare point count, and one build's guarantee for an item's frequency.
     let count_sketch = FamilyCapability::of(&sketch(
         SketchAlgorithm::CountSketch,
         SketchParams::CountSketch {
@@ -437,8 +437,14 @@ fn merged_error_depends_on_the_readout() {
             depth: 5,
         },
     ));
+    assert!(!count_sketch.answers(&point()));
+    assert_eq!(count_sketch.merged_error(&point()), None);
+    let item = SketchStatistic::PointCount {
+        key: ColumnRef::Named("k".into()),
+        value: Some("a".into()),
+    };
     assert_eq!(
-        count_sketch.merged_error(&point()),
+        count_sketch.merged_error(&item),
         Some(MergedError::AsIfBuiltOverUnion)
     );
     // An exact accumulator is read as its finalized value, not a readout.
@@ -522,10 +528,11 @@ fn accepted_by_category(algorithm: &SketchAlgorithm, query: &SketchStatistic) ->
 }
 
 /// Reading the family-capability table changes what the `SummaryEstimate`
-/// validation accepts only where the table and the executor agree the old
-/// category match was wrong: a UnivMon answers no item frequency or top-k,
-/// and a Hydra grid answers an item's frequency within a group, not the
-/// group's total. Every other (family, statistic) pair keeps its answer.
+/// validation accepts only where the old category match was wrong: a
+/// UnivMon answers no item frequency or top-k, a Count Sketch's signed
+/// counters give no total, and a Hydra grid answers an item's frequency
+/// within a group, not the group's total. Every other (family, statistic)
+/// pair keeps its answer.
 #[test]
 fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
     let (width, depth) = (64, 4);
@@ -643,9 +650,8 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
                 (SketchAlgorithm::UnivMon, StatisticKind::ItemFrequency | StatisticKind::TopK) => {
                     true
                 }
-                (SketchAlgorithm::Cms | SketchAlgorithm::CountSketch, StatisticKind::Total) => {
-                    hydra
-                }
+                (SketchAlgorithm::CountSketch, StatisticKind::Total) => true,
+                (SketchAlgorithm::Cms, StatisticKind::Total) => hydra,
                 _ => false,
             };
             let before = accepted_by_category(kind.algorithm(), query);

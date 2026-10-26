@@ -147,7 +147,7 @@ impl FamilyCapability {
     /// The capability of a per-subpopulation state of `algorithm`, whatever
     /// its parameters: the table row the IR and a deployment's executor
     /// read for that family.
-    pub fn of_sketch(algorithm: &SketchAlgorithm) -> Self {
+    pub fn of_per_instance_sketch(algorithm: &SketchAlgorithm) -> Self {
         use MergeInputRule::{Disjoint, MayOverlap};
         use MergedError::{Approximate, AsIfBuiltOverUnion as Union};
         use SketchAlgorithm as S;
@@ -157,8 +157,10 @@ impl FamilyCapability {
             // A quantile sketch answers every rank.
             S::Kll | S::DDSketch => (Some(Disjoint), &[(Quantile, Union)]),
             // Linear sketches: counters add, so a merged state's
-            // point counts are the union's.
-            S::Cms | S::CountSketch => (Some(Disjoint), &[(ItemFrequency, Union), (Total, Union)]),
+            // point counts are the union's. Count-Min's unsigned counters
+            // also give its total; Count Sketch's signed counters do not.
+            S::Cms => (Some(Disjoint), &[(ItemFrequency, Union), (Total, Union)]),
+            S::CountSketch => (Some(Disjoint), &[(ItemFrequency, Union)]),
             // Top-k reads the heap, which keeps only the heavy
             // items of its own part: an item heavy over the window
             // but in no single part is lost.
@@ -230,7 +232,7 @@ impl FamilyCapability {
                 }
             }
             FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
-                return Self::of_sketch(kind.algorithm())
+                return Self::of_per_instance_sketch(kind.algorithm())
             }
             FieldDataType::Plain(_)
             | FieldDataType::SummarySample(..)
@@ -302,8 +304,8 @@ mod tests {
     }
 
     /// A quantile sketch answers every rank, not its total; heap sketches
-    /// answer top-k; Count Sketch answers point counts; HLL answers the
-    /// distinct count, not its total.
+    /// answer top-k; Count Sketch answers item frequencies, not its total;
+    /// HLL answers the distinct count, not its total.
     #[test]
     fn summary_capability_facts() {
         let kll = sketch(
@@ -355,8 +357,9 @@ mod tests {
             ),
             (
                 &count_sketch,
-                vec![total(), item()],
+                vec![item()],
                 vec![
+                    total(),
                     SketchStatistic::FrequencyL2,
                     SketchStatistic::FrequencyEntropy,
                     SketchStatistic::TopK { k: 3 },

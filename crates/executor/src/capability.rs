@@ -395,7 +395,13 @@ pub fn validate_sketch_evaluation(
     if readout == StatisticKind::Total
         && matches!(
             family,
-            SummaryFamilyType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. })
+            SummaryFamilyType::Sketch(
+                _,
+                GroupingStrategy::SharedMultiSubpopulation {
+                    kind: planner_types::ir::schema::HydraKind::HydraCms,
+                    ..
+                }
+            )
         )
     {
         return Err(Error::Invalid(

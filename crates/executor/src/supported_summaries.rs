@@ -14,7 +14,7 @@ pub fn supported_summary_families() -> Vec<SupportedSummary> {
     EVALUATED_FAMILIES
         .into_iter()
         .map(|family| SupportedSummary {
-            readouts: FamilyCapability::of_sketch(&family)
+            readouts: FamilyCapability::of_per_instance_sketch(&family)
                 .readouts
                 .iter()
                 .map(|&(readout, _)| readout)
