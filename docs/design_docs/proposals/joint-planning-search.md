@@ -194,6 +194,14 @@ The following cases make the accounting concrete. Let `B` be the cost of one who
 
 Memory-time and capacity answer different questions. A state occupying `m` bytes for duration `t` contributes `m × t` to memory-time. A capacity limit instead considers simultaneous residency, including temporary allocations; it cannot be inferred from memory-time alone.
 
+### Direct modeled cost in the MILP
+
+The selection objective must express the modeled cost of the selected complete DAG, rather than rank plans with an exactness preference and discover their prices only after selection. This does not require enumerating complete plans. Factor the objective into node activation and state, execution demand, consumer connections and reads, shared resources, and query overhead. Each term has one owner; execution-dependent costs use the selected consumers' compatible evaluation schedules. Raw retention is charged once per source and storage scope at the maximum required horizon. Fixed query overhead can be omitted during minimization but must be restored in reported totals.
+
+For a shared KMV rollup, charge one build at each required common evaluation, one fine-group extraction, the coarse regrouping merge, and its extraction. Two independent builds incur two build charges. Different consumer schedules change the union of execution demand, not merely the number of activated nodes. Supplier-dependent cardinality, state size, and lifetime require explicit finite contexts or connection-dependent variables; do not replace an unknown coefficient with zero and report the objective as complete.
+
+Within a supported cost context, the decoded MILP objective plus omitted constants must agree with the independent physical-plan evaluator within numerical tolerance. Runtime measurements calibrate this model; neither solver optimality nor evaluator agreement establishes actual runtime cost. Contexts not yet fully encoded must report evaluator-refinement costing and must not claim a direct complete-cost formulation.
+
 The configured Stage 3 objective and evaluators remain authoritative. Current memo MILP supports usage-over-time pricing; broader cost-model support is an extension. Accuracy is an output requirement, since locally acceptable errors may compose into an unacceptable query result. Latency and resource limits likewise depend on the configured timing and capacity assumptions.
 
 ## 5. MILP Formulation
@@ -415,6 +423,8 @@ Consumer-dependent freshness, invalidation, and lifetime checks may involve seve
 #### Every query meets its accuracy target
 
 For each query `q`, the configured accuracy contract specifies an error metric and target, and, when probabilistic, a failure-probability target. A plan is feasible only if its composed output error and failure probability satisfy those targets. These are end-to-end checks, not a sum of arbitrary local sketch errors.
+
+Accuracy is a feasibility condition, not an approximate-candidate surcharge. Exact and approximate candidates satisfying the requested contract compete on resource cost without an exactness penalty. Prune a candidate or connection combination only when its incompatibility is established; local uncertainty is not proof that every completion fails. If accuracy depends on suppliers or downstream composition, constrain that combination. In strict mode, an uncertified plan cannot be returned as satisfying the target, and the user's failure probability must not be silently ignored.
 
 When proven composition rules exist, encode their bounds directly. Otherwise use the exact finite-assignment exclusion below for each plan whose validated accuracy fails. For example, if a selected P99 estimator and its small KLL producer violate the target regardless of all other choices, the following focused cut is sound:
 
