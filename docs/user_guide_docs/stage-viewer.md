@@ -2,7 +2,7 @@
 
 The Stage Viewer shows, in a browser, what ASAPPlanner does with one workload
 at each of its planning stages, and why it selects the plan it selects. Use it
-to check a plan by hand, to compare the alternatives the planner considered,
+to check a plan by hand, to compare the candidates the planner considered,
 and to see how the deployment's cost model and the query requirements
 change the choice.
 
@@ -19,18 +19,17 @@ The stages are those of
 The viewer reads one JSON document per workload, written by the
 `stage_pipeline` command. It does not run the plans.
 
-`stage_pipeline` plans with the planner's default search, the one a
-deployment runtime gets from `plan_installable`: it checks each query's own
-candidates first, searches queries over disjoint sources separately, and keeps
-only the best plan, so it plans workloads with many queries in seconds. It
-also plans with the models `plan_installable` uses: when the deployment
-declares no supported summaries, only the summaries the Planner's executor
-runs are offered, and every plan must compile with the executor (a SQL
-plan's table scans compile as the data sources a runtime binds them to). The
-document then shows the selected plan, the rejections the search recorded and
-what it checked. With `--exhaustive` it instead composes and prices every
-candidate and the document lists them all, for small workloads or to compare;
-the tabs' examples are written that way.
+For build dependencies and CLI examples, see
+[Plan a workload with stage_pipeline](stage-pipeline.md).
+
+`stage_pipeline` uses the joint candidate-connection search engine. It selects
+and connects physical candidates across the workload and checks executability
+with the Planner's executor. By default the document keeps the selected plan
+and search diagnostics. `--exhaustive` archives evaluated plans and rejections
+from the same engine for inspection; time and assignment budgets may prevent
+complete enumeration. Check the search report before interpreting a result as
+optimal. `--max-displayed` controls display truncation independently of those
+budgets.
 
 Unlike `plan_installable` with its default settings, `stage_pipeline`
 ignores accuracy guarantees unless you pass `--enforce-accuracy-guarantees`:

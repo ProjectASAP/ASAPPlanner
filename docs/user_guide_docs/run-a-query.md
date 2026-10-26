@@ -24,6 +24,9 @@ tool on first use.
 
 ## Plan a workload
 
+For build dependencies, workload-file commands, search budgets, and troubleshooting,
+see [Plan a workload with stage_pipeline](stage-pipeline.md).
+
 `stage_pipeline` runs the query-language frontends (Stage 0), logical
 ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
 (Stage 2) and plan selection (Stage 3), and writes one JSON document:
