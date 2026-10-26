@@ -4,11 +4,19 @@
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 use std::collections::BTreeMap;
 
+#[path = "direct_schedule.rs"]
+mod schedules;
+
 use crate::search::candidates::graph::*;
 
 /// Smallest/largest monetary coefficient ratio after lifetime normalization.
 /// The minimum is scaled to one; no positive cost is rounded away.
 pub(super) const MINIMUM_DIRECT_RELATIVE_COEFFICIENT: f64 = 1e-12;
+
+// Weighted-lifetime equalities use dimensionless rates. Their small entries
+// need a stronger guard than monetary objective coefficients, since absolute
+// LP feasibility tolerances can erase a rare reader's otherwise large cost.
+const MINIMUM_QUERY_RATE_WEIGHT: f64 = 1e-6;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeCostProfile {
@@ -19,9 +27,18 @@ pub(crate) struct NodeCostProfile {
     pub raw_retention: Option<(String, f64)>,
 }
 
+/// Exact evaluator demand for each nonempty selected query subset. Only small
+/// heterogeneous domains are admitted; this is not a workload-plan product.
+#[derive(Debug, Clone)]
+pub(crate) struct QueryScheduleRates {
+    pub per_query_rates: Vec<f64>,
+    pub materialized_subset_rates: Vec<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DirectCostProfile {
     pub nodes: Vec<NodeCostProfile>,
+    pub schedules: Option<QueryScheduleRates>,
     pub query_rate: f64,
     pub request_latency_seconds: f64,
     /// Total request fee per second across all queries.
@@ -51,6 +68,51 @@ impl DirectCostProfile {
             return Err(CandidateSelectionError::InvalidGraph(
                 "invalid direct-cost profile".into(),
             ));
+        }
+        if let Some(schedule) = &self.schedules {
+            let queries = graph.query_roots.len();
+            if queries > 3 {
+                return Err(CandidateSelectionError::UnsupportedDirectCost(
+                    "heterogeneous query schedule table supports at most three output queries"
+                        .into(),
+                ));
+            }
+            if !schedule.per_query_rates.iter().sum::<f64>().is_finite()
+                || schedule.per_query_rates.len() != queries
+                || schedule.materialized_subset_rates.len() != (1usize << queries)
+                || schedule.materialized_subset_rates[0] != 0.0
+                || schedule
+                    .per_query_rates
+                    .iter()
+                    .any(|rate| !rate.is_finite() || *rate <= 0.0)
+                || schedule
+                    .materialized_subset_rates
+                    .iter()
+                    .skip(1)
+                    .any(|rate| !rate.is_finite() || *rate <= 0.0)
+                || schedule
+                    .per_query_rates
+                    .iter()
+                    .enumerate()
+                    .any(|(q, rate)| *rate != schedule.materialized_subset_rates[1 << q])
+            {
+                return Err(CandidateSelectionError::InvalidGraph(
+                    "invalid direct query-schedule rates".into(),
+                ));
+            }
+        }
+        if let Some(schedule) = &self.schedules {
+            let total_rate: f64 = schedule.per_query_rates.iter().sum();
+            if schedule
+                .per_query_rates
+                .iter()
+                .any(|rate| rate / total_rate < MINIMUM_QUERY_RATE_WEIGHT)
+            {
+                return Err(CandidateSelectionError::UnsupportedDirectCost(
+                    "query-rate weights are below the supported weighted-lifetime numerical range"
+                        .into(),
+                ));
+            }
         }
         let maximum_latency = self.maximum_latency();
         if self.coefficients().any(|cost| !cost.is_finite())
@@ -96,25 +158,40 @@ impl DirectCostProfile {
                         .sum::<f64>()
             })
             .collect();
-        let mut counts = vec![0usize; self.nodes.len()];
+        let rates = self.schedules.as_ref().map_or_else(
+            || vec![self.query_rate; graph.query_roots.len()],
+            |schedule| schedule.per_query_rates.clone(),
+        );
+        let union_rate = |id: usize| {
+            let Some(schedule) = &self.schedules else {
+                return self.query_rate;
+            };
+            let mask = reached
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row[id])
+                .fold(0usize, |mask, (q, _)| mask | (1 << q));
+            schedule.materialized_subset_rates[mask]
+        };
+        let mut execution_rates = vec![0.0; self.nodes.len()];
         let boundaries = selected
             .query_roots
             .iter()
-            .map(|root| vec![root.candidate.0])
+            .map(|root| (vec![root.candidate.0], rates[root.query_root]))
             .chain(
                 selected
                     .selected_candidates
                     .iter()
                     .filter(|id| self.nodes[id.0].materialized)
-                    .map(|id| inputs[id.0].clone()),
+                    .map(|id| (inputs[id.0].clone(), union_rate(id.0))),
             );
-        for mut pending in boundaries {
+        for (mut pending, rate) in boundaries {
             let mut seen = vec![false; self.nodes.len()];
             while let Some(id) = pending.pop() {
                 if self.nodes[id].materialized || std::mem::replace(&mut seen[id], true) {
                     continue;
                 }
-                counts[id] += 1;
+                execution_rates[id] += rate;
                 pending.extend(&inputs[id]);
             }
         }
@@ -128,14 +205,26 @@ impl DirectCostProfile {
                 .filter(|(_, row)| row[id.0])
                 .map(|(q, _)| latency[q])
                 .collect();
-            let executions = if node.materialized { 1 } else { counts[id.0] } as f64;
+            let execution_rate = if node.materialized {
+                union_rate(id.0)
+            } else {
+                execution_rates[id.0]
+            };
             let lifetime = if node.materialized {
                 readers.iter().copied().fold(0.0, f64::max)
             } else {
-                readers.iter().sum::<f64>() / readers.len().max(1) as f64
+                let reader_rates = reached.iter().enumerate().filter(|(_, row)| row[id.0]);
+                let denominator: f64 = reader_rates.clone().map(|(q, _)| rates[q]).sum();
+                if denominator > 0.0 {
+                    reader_rates
+                        .map(|(q, _)| rates[q] * latency[q])
+                        .sum::<f64>()
+                        / denominator
+                } else {
+                    0.0
+                }
             };
-            total += self.query_rate
-                * executions
+            total += execution_rate
                 * (node.execution_cost + node.held_memory_cost_per_second * lifetime);
             if let Some((source, cost)) = &node.raw_retention {
                 let value = raw.entry(source).or_default();
@@ -153,12 +242,27 @@ impl DirectCostProfile {
         // Constant request fees cannot influence selection and need not limit
         // the coefficient range. Lifetimes use a dimensionless [0,1] scale.
         let latency_scale = self.maximum_latency().max(f64::MIN_POSITIVE);
+        let rates = self.schedules.as_ref().map_or_else(
+            || vec![self.query_rate],
+            |schedule| {
+                schedule
+                    .materialized_subset_rates
+                    .iter()
+                    .copied()
+                    .filter(|rate| *rate > 0.0)
+                    .collect()
+            },
+        );
         self.nodes.iter().flat_map(move |node| {
-            [
-                node.execution_cost * self.query_rate,
-                node.held_memory_cost_per_second * self.query_rate * latency_scale,
-                node.raw_retention.as_ref().map_or(0.0, |(_, cost)| *cost),
-            ]
+            let mut coefficients = Vec::with_capacity(rates.len() * 2 + 1);
+            for rate in &rates {
+                coefficients.extend([
+                    node.execution_cost * rate,
+                    node.held_memory_cost_per_second * rate * latency_scale,
+                ]);
+            }
+            coefficients.push(node.raw_retention.as_ref().map_or(0.0, |(_, cost)| *cost));
+            coefficients
         })
     }
 }
@@ -177,10 +281,13 @@ fn gated(
     product
 }
 
-/// Exact on integer activation/connection decisions. Reach variables are
-/// implied integral by the selected acyclic graph, as in the main model.
+struct BoundaryReach {
+    boundary: usize,
+    reached: Vec<Option<Variable>>,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) fn encode(
+fn boundary_flows(
     graph: &CandidateDependencyGraph,
     profile: &DirectCostProfile,
     variables: &mut ProblemVariables,
@@ -188,29 +295,11 @@ pub(super) fn encode(
     active: &[Variable],
     edges: &[(ProducerConsumerConnection, Variable)],
     roots: &[(QueryRootAssignment, Variable)],
-    reach: &[Vec<Option<Variable>>],
-    divisor: f64,
-    check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
-) -> Result<Expression, CandidateSelectionError> {
+    check_deadline: &impl Fn() -> Result<(), CandidateSelectionError>,
+) -> Result<Vec<BoundaryReach>, CandidateSelectionError> {
     let count = graph.candidates.len();
     let queries = graph.query_roots.len();
-    let latency_scale = profile.maximum_latency().max(f64::MIN_POSITIVE);
-    let maximum_latency = 1.0;
-    let latency: Vec<Expression> = reach
-        .iter()
-        .map(|row| {
-            Expression::from(profile.request_latency_seconds / latency_scale)
-                + row
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(id, reached)| {
-                        reached.map(|r| profile.nodes[id].work_seconds / latency_scale * r)
-                    })
-                    .sum::<Expression>()
-        })
-        .collect();
-    let mut boundary_count = vec![Expression::from(0.0); count];
-    let mut boundary_limit = vec![0usize; count];
+    let mut flows = Vec::new();
     // Each root query and each selected materialized computation is one
     // independent execution boundary. Materialized nodes stop propagation.
     for boundary in 0..queries + count {
@@ -270,12 +359,83 @@ pub(super) fn encode(
                 support[edge.producer.0] += traversed;
             }
         }
-        for (id, used) in used.into_iter().enumerate() {
-            if let Some(used) = used {
+        for (id, reached) in used.iter().enumerate() {
+            if let Some(reached) = reached {
+                constraints.push(constraint!(*reached <= support[id].clone()));
+                constraints.push(constraint!(*reached <= active[id]));
+            }
+        }
+        flows.push(BoundaryReach {
+            boundary,
+            reached: used,
+        });
+    }
+    Ok(flows)
+}
+
+/// Exact on integer activation/connection decisions. Reach variables are
+/// implied integral by the selected acyclic graph, as in the main model.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode(
+    graph: &CandidateDependencyGraph,
+    profile: &DirectCostProfile,
+    variables: &mut ProblemVariables,
+    constraints: &mut Vec<Constraint>,
+    active: &[Variable],
+    edges: &[(ProducerConsumerConnection, Variable)],
+    roots: &[(QueryRootAssignment, Variable)],
+    reach: &[Vec<Option<Variable>>],
+    divisor: f64,
+    check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
+) -> Result<Expression, CandidateSelectionError> {
+    if let Some(schedule) = &profile.schedules {
+        return schedules::encode(
+            graph,
+            profile,
+            schedule,
+            variables,
+            constraints,
+            active,
+            edges,
+            roots,
+            reach,
+            divisor,
+            check_deadline,
+        );
+    }
+    let count = graph.candidates.len();
+    let queries = graph.query_roots.len();
+    let latency_scale = profile.maximum_latency().max(f64::MIN_POSITIVE);
+    let maximum_latency = 1.0;
+    let latency: Vec<Expression> = reach
+        .iter()
+        .map(|row| {
+            Expression::from(profile.request_latency_seconds / latency_scale)
+                + row
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(id, reached)| {
+                        reached.map(|r| profile.nodes[id].work_seconds / latency_scale * r)
+                    })
+                    .sum::<Expression>()
+        })
+        .collect();
+    let mut boundary_count = vec![Expression::from(0.0); count];
+    let mut boundary_limit = vec![0usize; count];
+    for flow in boundary_flows(
+        graph,
+        profile,
+        variables,
+        constraints,
+        active,
+        edges,
+        roots,
+        &check_deadline,
+    )? {
+        for (id, reached) in flow.reached.into_iter().enumerate() {
+            if let Some(reached) = reached {
+                boundary_count[id] += reached;
                 boundary_limit[id] += 1;
-                constraints.push(constraint!(used <= support[id].clone()));
-                constraints.push(constraint!(used <= active[id]));
-                boundary_count[id] += used;
             }
         }
     }
@@ -438,6 +598,7 @@ mod tests {
             ..Default::default()
         };
         let mut profile = DirectCostProfile {
+            schedules: None,
             query_rate: 2.0,
             request_latency_seconds: 0.5,
             request_cost: 7.0,
@@ -478,6 +639,7 @@ mod tests {
             ..Default::default()
         };
         let profile = DirectCostProfile {
+            schedules: None,
             query_rate: 2.0,
             request_latency_seconds: 0.5,
             request_cost: 7.0,
@@ -522,6 +684,7 @@ mod tests {
         }
         for materialized_build_cost in [1.0, 10.0, 100.0] {
             let profile = DirectCostProfile {
+                schedules: None,
                 query_rate: 2.0,
                 request_latency_seconds: 0.5,
                 request_cost: 7.0,
@@ -592,6 +755,7 @@ mod tests {
             ..Default::default()
         };
         let profile = DirectCostProfile {
+            schedules: None,
             nodes: vec![
                 NodeCostProfile {
                     execution_cost: 7.1e-13,

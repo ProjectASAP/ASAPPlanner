@@ -683,6 +683,7 @@ mod tests {
         let mut restricted = graph.clone();
         restricted.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(1)];
         let profile = DirectCostProfile {
+            schedules: None,
             nodes: vec![
                 NodeCostProfile {
                     execution_cost: 1.0,

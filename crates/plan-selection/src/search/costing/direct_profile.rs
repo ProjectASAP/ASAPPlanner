@@ -5,7 +5,7 @@
 //! catalog. No original-template child is used as workload statistics evidence.
 use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::candidates::graph::PhysicalCandidateId;
-use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile};
+use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
 use crate::search::refinement::planner::CandidatePlanningContext;
 use crate::{CostModel, PricedNode, ProducerOutput};
 use asap_types::ir::physical_export::PhysicalASAPDAGNode;
@@ -53,7 +53,7 @@ fn supported_node(node: &asap_types::ir::OperatorNode) -> bool {
     )
 }
 
-/// Only fixed, identical request schedules, no range requests and one operator
+/// Identical fixed schedules or up to three heterogeneous schedules, no range requests and one operator
 /// root per query are supported. Every returned profile is priced at one
 /// execution; the MILP supplies demand, held lifetime, retention and overhead.
 pub(in crate::search) fn extract(
@@ -67,48 +67,74 @@ pub(in crate::search) fn extract(
     let Some(first) = context.entries.first() else {
         return Ok(None);
     };
-    if !matches!(
-        first.recurrence,
-        QueryRecurrence::Repeated(
-            RepeatedDemand::FixedInterval(_) | RepeatedDemand::FixedIntervalAt { .. }
-        )
-    ) || context
+    if context
         .entries
         .iter()
-        .any(|entry| entry.recurrence != first.recurrence || entry.range_evaluation.is_some())
+        .any(|entry| entry.range_evaluation.is_some())
         || context
             .original_roots
             .iter()
             .any(|root| !matches!(root, QueryRoot::Operator(_)))
+        || context.original_roots.len() != context.entries.len()
         || context.original_roots.len() != configured.inventory.graph.query_roots.len()
     {
         return Ok(None);
     }
-    let rate = crate::cost::execution_demand::evaluation_rate(
-        [(&first.recurrence, None)],
-        settings.non_repeating_query_horizon_seconds,
-    )
-    .map_err(|error| DirectProfileError::Invalid(error.to_string()))?;
-    if !rate.is_finite() || rate <= 0.0 {
-        return Ok(None);
-    }
-    if context.entries.iter().any(|entry| {
-        !entry.requirements.accuracy.is_exact()
-            && (entry.requirements.accuracy.accuracy_scope != AccuracyScope::PerValue
-                || entry
-                    .requirements
-                    .accuracy
-                    .failure_probability
-                    .is_none_or(|delta| !delta.is_finite() || delta <= 0.0))
-    }) {
-        return Ok(None);
-    }
-    let delta = context
+    let equal_fixed = matches!(
+        first.recurrence,
+        QueryRecurrence::Repeated(
+            RepeatedDemand::FixedInterval(_) | RepeatedDemand::FixedIntervalAt { .. }
+        )
+    ) && context
         .entries
         .iter()
-        .filter(|entry| !entry.requirements.accuracy.is_exact())
-        .filter_map(|entry| entry.requirements.accuracy.failure_probability)
-        .reduce(f64::min);
+        .all(|entry| entry.recurrence == first.recurrence);
+    if !equal_fixed && context.entries.len() > 3 {
+        return Ok(None);
+    }
+    let rates: Vec<_> = context
+        .entries
+        .iter()
+        .map(|entry| {
+            crate::cost::execution_demand::evaluation_rate(
+                [(&entry.recurrence, None)],
+                settings.non_repeating_query_horizon_seconds,
+            )
+            .map_err(|error| DirectProfileError::Invalid(error.to_string()))
+        })
+        .collect::<Result<_, _>>()?;
+    if rates.iter().any(|rate| !rate.is_finite() || *rate <= 0.0) {
+        return Ok(None);
+    }
+    let rate = rates[0];
+    let request_rate: f64 = rates.iter().sum();
+    let schedules = if equal_fixed {
+        None
+    } else {
+        let mut materialized_subset_rates = Vec::with_capacity(1 << context.entries.len());
+        for mask in 0..(1usize << context.entries.len()) {
+            materialized_subset_rates.push(
+                crate::cost::execution_demand::evaluation_rate(
+                    context
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(query, _)| mask & (1 << query) != 0)
+                        .map(|(_, entry)| (&entry.recurrence, None)),
+                    settings.non_repeating_query_horizon_seconds,
+                )
+                .map_err(|error| DirectProfileError::Invalid(error.to_string()))?,
+            );
+        }
+        Some(QueryScheduleRates {
+            per_query_rates: rates,
+            materialized_subset_rates,
+        })
+    };
+    let delta = match failure_budget(context) {
+        Some(delta) => delta,
+        None => return Ok(None),
+    };
     let count = configured.configurations.len();
     let mut nodes = Vec::with_capacity(count);
     for (id, configuration) in configured.configurations.iter().enumerate() {
@@ -117,7 +143,7 @@ pub(in crate::search) fn extract(
         nodes.push(
             node.filter(|node| {
                 supported_node(node)
-                    && stable_size(node, delta)
+                    && (requires_source_sizing(node) || stable_size(node, delta))
                     && configuration.timing == ExecutionTiming::QueryTime
                     && matches!(
                         configuration.materialization,
@@ -201,6 +227,7 @@ pub(in crate::search) fn extract(
     let mut visiting = vec![false; count];
     let mut suppliers = vec![Vec::new(); count];
     let mut sketch_counts = vec![0; count];
+    let mut raw_sources = vec![None; count];
     for id in 0..count {
         price(
             id,
@@ -213,6 +240,8 @@ pub(in crate::search) fn extract(
             &mut visiting,
             &mut suppliers,
             &mut sketch_counts,
+            &mut raw_sources,
+            delta,
         )?;
     }
     let supported: Vec<_> = cache.iter().map(Option::is_some).collect();
@@ -256,11 +285,11 @@ pub(in crate::search) fn extract(
         profile: DirectCostProfile {
             nodes: profiles,
             query_rate: rate,
+            schedules,
             request_latency_seconds: request_ms / 1000.0,
             request_cost: request_ms / settings.resource_speed.ms_per_cpu_op
                 * prices.cost_per_cpu_op
-                * rate
-                * context.entries.len() as f64,
+                * request_rate,
         },
         supported,
         suppliers,
@@ -279,6 +308,8 @@ fn price<'a>(
     visiting: &mut [bool],
     suppliers: &mut [Vec<PhysicalCandidateId>],
     sketch_counts: &mut [usize],
+    raw_sources: &mut [Option<String>],
+    delta: Option<f64>,
 ) -> Result<(), DirectProfileError> {
     check_deadline(context.deadline)?;
     if visited[id] || visiting[id] {
@@ -318,6 +349,8 @@ fn price<'a>(
                 visiting,
                 suppliers,
                 sketch_counts,
+                raw_sources,
+                delta,
             )?;
             let Some(priced) = &cache[supplier.0] else {
                 continue;
@@ -332,6 +365,45 @@ fn price<'a>(
                 unchanged_columns: priced.unchanged_columns.clone(),
             });
         }
+        if let asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(kind, _),
+            ..
+        }) = &node.payload
+        {
+            if let SketchParams::Hll {
+                precision,
+                relative_error,
+            } = kind.params()
+            {
+                let Some(source) = supplier.and_then(|supplier| raw_sources[supplier.0].as_deref())
+                else {
+                    continue;
+                };
+                let Some(bound) = context
+                    .data
+                    .sources
+                    .get(source)
+                    .and_then(|facts| facts.max_distinct_per_evaluation)
+                else {
+                    continue;
+                };
+                let Some(delta) = delta else { continue };
+                if !hll_size_certified(*precision, *relative_error, delta, bound) {
+                    continue;
+                }
+            }
+        }
+        let raw_source = match &node.payload {
+            asap_types::ir::Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                Some(crate::source_name(source).to_string())
+            }
+            asap_types::ir::Operator::NonASAP(
+                NonASAPOp::Filter { .. } | NonASAPOp::TimeRange { .. },
+            ) if views.len() == 1 && *views[0].output_schema == node.output_schema => {
+                supplier.and_then(|supplier| raw_sources[supplier.0].clone())
+            }
+            _ => None,
+        };
         let sketches = supplier.map_or(0, |supplier| sketch_counts[supplier.0])
             + usize::from(matches!(
                 &node.payload,
@@ -379,11 +451,87 @@ fn price<'a>(
         sketch_counts[id] = sketch_counts[id].max(sketches);
         if cache[id].is_none() {
             cache[id] = Some(priced);
+            raw_sources[id] = raw_source;
+        } else if raw_sources[id] != raw_source {
+            // The same priced rows need not carry the same raw-population proof.
+            // Keep no proof unless every admitted binding preserves it.
+            raw_sources[id] = None;
         }
     }
     visiting[id] = false;
     visited[id] = true;
     Ok(())
+}
+
+/// A conservative delta valid for every selected unary output path, including
+/// rollups whose finer grouping the current evaluator uses for its row bound.
+/// Unknown population bounds reject this direct proposal, not the full search.
+fn failure_budget(context: &CandidatePlanningContext<'_>) -> Option<Option<f64>> {
+    let population = || {
+        let mut sources = HashSet::new();
+        for root in context.original_roots {
+            let QueryRoot::Operator(root) = root else {
+                return None;
+            };
+            for node in asap_types::ir::OperatorNode::reachable(root) {
+                if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
+                    sources.insert(crate::source_name(source).to_string());
+                }
+            }
+        }
+        let counts: Option<Vec<_>> = sources
+            .iter()
+            .map(|source| {
+                context
+                    .data
+                    .sources
+                    .get(source)?
+                    .series_count
+                    .filter(|count| *count > 0)
+            })
+            .collect();
+        counts?.into_iter().max()
+    };
+    let mut delta: Option<f64> = None;
+    for entry in context.entries {
+        let target = &entry.requirements.accuracy;
+        if target.is_exact() {
+            continue;
+        }
+        let requested = target
+            .failure_probability
+            .filter(|delta| delta.is_finite() && *delta > 0.0)?;
+        let values = match target.accuracy_scope {
+            AccuracyScope::WholeResult => population()?,
+            scope => scope.max_values_covered(None)?,
+        }
+        .max(1);
+        let required = requested / values as f64;
+        if !required.is_finite() || required <= 0.0 {
+            return None;
+        }
+        delta = Some(delta.map_or(required, |prior| prior.min(required)));
+    }
+    Some(delta)
+}
+
+fn requires_source_sizing(node: &asap_types::ir::OperatorNode) -> bool {
+    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+        if matches!(kind.params(), SketchParams::Hll { .. }))
+}
+
+fn hll_size_certified(
+    precision: u8,
+    relative_error: Option<f64>,
+    delta: f64,
+    distinct: u64,
+) -> bool {
+    use asap_logical_asap_optimization::accuracy::estimators::hll;
+    let error = hll::classic_relative_error(precision, relative_error);
+    // Unsupported populations can make min_precision return its input unchanged.
+    // The actual confidence certificate is essential, not merely size equality.
+    hll::min_precision(error, delta, distinct, precision) == precision
+        && hll::classic_failure_probability(precision, error, distinct) <= delta
 }
 
 fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool {
@@ -399,7 +547,11 @@ fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool 
         SketchParams::Kmv {
             relative_error: Some(_),
             ..
-        }
+        } | SketchParams::Kll { .. }
+            | SketchParams::DDSketch { .. }
+            | SketchParams::Cms { .. }
+            | SketchParams::CountSketch { .. }
+            | SketchParams::Theta { .. }
     ) {
         return false;
     }
@@ -462,6 +614,15 @@ fn same_price(a: &PricedNode<'_>, b: &PricedNode<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hll_admission_requires_stable_precision_and_a_supported_population() {
+        assert!(super::hll_size_certified(15, Some(0.05), 0.05, 1000));
+        assert!(!super::hll_size_certified(12, Some(0.05), 0.05, 1000));
+        // The sizing API returns the original precision when no supported
+        // precision proves the target. That must not admit an unproved sketch.
+        assert!(!super::hll_size_certified(15, Some(0.05), 0.05, 1_000_000));
+    }
+
     use super::*;
     use crate::search::candidates::configurations::CandidateConfiguration;
     use crate::search::candidates::graph::{
@@ -642,6 +803,386 @@ mod tests {
             extracted.suppliers[project_id.0],
             vec![exact_id, estimate_id]
         );
+    }
+
+    // Certified KLL/DDS configurations keep their sizes after reconstruction;
+    // direct costs include working memory and agree with the complete evaluator.
+    #[test]
+    fn fixed_sketch_profiles_match_the_real_evaluator() {
+        use asap_logical_asap_optimization::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        };
+        use asap_types::ir::schema::SketchAlgorithm;
+        use std::rc::Rc;
+        fn append(
+            node: Rc<OperatorNode>,
+            configured: &mut CandidateConfigurationInventory,
+        ) -> PhysicalCandidateId {
+            let mut inputs = Vec::new();
+            node.operator
+                .map_children(|child| inputs.push(append(child.clone(), configured)));
+            let id = PhysicalCandidateId(configured.configurations.len());
+            configured.configurations.push(CandidateConfiguration {
+                source_candidate: id,
+                materialization: Materialization::NotMaterialized,
+                timing: ExecutionTiming::QueryTime,
+            });
+            configured.inventory.templates.push(Some(node));
+            configured
+                .inventory
+                .graph
+                .candidates
+                .push(PhysicalCandidate {
+                    group: MemoGroupId(id.0 as u32),
+                    local_cost: 0.0,
+                    producer_requirements: inputs
+                        .into_iter()
+                        .map(|supplier| ProducerRequirement {
+                            compatible_producers: vec![supplier].into(),
+                        })
+                        .collect(),
+                });
+            id
+        }
+        for algorithm in [
+            SketchAlgorithm::Kll,
+            SketchAlgorithm::DDSketch,
+            SketchAlgorithm::Hll,
+        ] {
+            for scope in [
+                AccuracyScope::PerValue,
+                AccuracyScope::WholeResult,
+                AccuracyScope::GroupsWithRecordShareAtLeast(0.5),
+            ] {
+                let target = AccuracyTarget::max_error(0.05)
+                    .failure_probability(0.01)
+                    .accuracy_scope(scope);
+                let query = if algorithm == SketchAlgorithm::Hll {
+                    "distinct_over_time(latency[5m])"
+                } else {
+                    "quantile_over_time(0.95, latency[5m])"
+                };
+                let original = lower_promql(query, target.clone());
+                let generated = generate_per_computation_candidates(vec![(
+                    0,
+                    QueryRoot::Operator(original.clone()),
+                )])
+                .unwrap();
+                let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
+                    matches!(candidate, ComputationCandidate::Summary(found) if *found == algorithm)).unwrap();
+                let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, root)| root)
+                    .collect();
+                let data: DataWorkload = serde_json::from_value(serde_json::json!({
+                    "arrival":{"ingesting":{"rows_per_second":100.0}},
+                    "sources":{"latency":{"series_count":2,"rows_held":30000,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
+                })).unwrap();
+                // A legal finite configuration is sized before direct pricing.
+                let sized = crate::resize_for_failure_probability(
+                    &roots,
+                    std::slice::from_ref(&target),
+                    &data,
+                )
+                .unwrap();
+                let mut configured = CandidateConfigurationInventory {
+                    inventory: CandidateInventory {
+                        graph: CandidateDependencyGraph::default(),
+                        templates: vec![],
+                        group_candidates: vec![],
+                    },
+                    configurations: vec![],
+                };
+                let QueryRoot::Operator(root) = &sized[0] else {
+                    panic!("operator")
+                };
+                let id = append(root.clone(), &mut configured);
+                configured
+                    .inventory
+                    .graph
+                    .query_roots
+                    .push(QueryRootCandidates {
+                        compatible_candidates: vec![id],
+                    });
+                let originals = vec![QueryRoot::Operator(original)];
+                let entries = vec![QueryWorkloadEntry {
+                    query: Query(query.into()),
+                    requirements: QueryRequirements {
+                        accuracy: target,
+                        max_latency_ms: None,
+                    },
+                    predictability: Predictability::Predictable { known_at: None },
+                    recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                        RepetitionInterval(60_000),
+                    )),
+                    range_evaluation: None,
+                }];
+                let context = CandidatePlanningContext {
+                    deadline: None,
+                    refine_materialization: false,
+                    original_roots: &originals,
+                    entries: &entries,
+                    data: &data,
+                    models: crate::PlanningModels::builtin(),
+                    calibration: crate::CalibrationFit::default(),
+                };
+                let extracted = extract(&configured, &context).unwrap().unwrap();
+                assert!(
+                    extracted.supported.iter().all(|supported| *supported),
+                    "{algorithm:?} {scope:?}"
+                );
+                let proposal = crate::search::milp::model::solve_direct_cost_proposal_with_metrics(
+                    &configured.inventory.graph,
+                    &[],
+                    None,
+                    &mut Default::default(),
+                    &extracted.profile,
+                )
+                .unwrap()
+                .unwrap();
+                let mut rejections =
+                    crate::search::refinement::planner::CandidateRejectionSummary::default();
+                let evaluated = crate::search::refinement::planner::evaluate_configured_candidate(
+                    &configured,
+                    &context,
+                    &proposal.selected,
+                    0,
+                    &mut rejections,
+                    &mut Vec::new(),
+                )
+                .unwrap()
+                .unwrap_or_else(|| panic!("{algorithm:?} {scope:?}: {rejections:?}"));
+                let cost = evaluated.0.costs[&evaluated.0.selected]
+                    .cost_per_second
+                    .unwrap();
+                let direct = proposal.direct_modeled_cost.unwrap();
+                assert!(
+                    (cost - direct).abs() <= 1e-9 * cost.max(1e-15),
+                    "{algorithm:?} {scope:?}: {direct} vs {cost}"
+                );
+                if scope == AccuracyScope::WholeResult {
+                    let mut unknown = data.clone();
+                    unknown.sources.get_mut("latency").unwrap().series_count = None;
+                    let unproved = CandidatePlanningContext {
+                        data: &unknown,
+                        ..context
+                    };
+                    assert!(
+                        extract(&configured, &unproved).unwrap().is_none(),
+                        "unknown population cannot certify a whole-result sizing budget"
+                    );
+                }
+                let too_small_delta = match algorithm {
+                    SketchAlgorithm::Kll => Some(1e-12),
+                    _ => None,
+                };
+                if let Some(delta) = too_small_delta {
+                    assert!(configured
+                        .inventory
+                        .templates
+                        .iter()
+                        .flatten()
+                        .any(
+                            |node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
+                                && !stable_size(node, Some(delta))
+                        ));
+                }
+            }
+        }
+    }
+
+    // Real shared KLL/DDS plans verify schedule unions and held-memory lifetime,
+    // including two equal frequencies whose different phases cannot coalesce.
+    #[test]
+    fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
+        use asap_logical_asap_optimization::{
+            asap_aware_cse::{sharing_candidates, with_shared_candidates},
+            per_computation_candidates::{
+                compose_logical_candidate, generate_per_computation_candidates,
+                ComputationCandidate,
+            },
+        };
+        use asap_types::ir::schema::SketchAlgorithm;
+        use asap_types::workload::TimestampMs;
+        use std::rc::Rc;
+        fn append(
+            node: Rc<OperatorNode>,
+            inventory: &mut CandidateConfigurationInventory,
+        ) -> PhysicalCandidateId {
+            if let Some(id) = inventory
+                .inventory
+                .templates
+                .iter()
+                .position(|old| old.as_ref().is_some_and(|old| Rc::ptr_eq(old, &node)))
+            {
+                return PhysicalCandidateId(id);
+            }
+            let mut children = Vec::new();
+            node.operator
+                .map_children(|child| children.push(append(child.clone(), inventory)));
+            let id = PhysicalCandidateId(inventory.configurations.len());
+            inventory.configurations.push(CandidateConfiguration {
+                source_candidate: id,
+                timing: ExecutionTiming::QueryTime,
+                materialization: if matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })) {
+                    Materialization::MatAtQuery(Medium::Memory)
+                } else {
+                    Materialization::NotMaterialized
+                },
+            });
+            inventory.inventory.templates.push(Some(node));
+            inventory
+                .inventory
+                .graph
+                .candidates
+                .push(PhysicalCandidate {
+                    group: MemoGroupId(id.0 as u32),
+                    local_cost: 0.0,
+                    producer_requirements: children
+                        .into_iter()
+                        .map(|id| ProducerRequirement {
+                            compatible_producers: vec![id].into(),
+                        })
+                        .collect(),
+                });
+            id
+        }
+        for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
+            for phases in [false, true] {
+                let target = AccuracyTarget::max_error(0.05)
+                    .failure_probability(0.01)
+                    .accuracy_scope(AccuracyScope::PerValue);
+                let originals: Vec<_> = [0.95, 0.99]
+                    .iter()
+                    .map(|q| {
+                        QueryRoot::Operator(lower_promql(
+                            &format!("quantile_over_time({q}, latency[5m])"),
+                            target.clone(),
+                        ))
+                    })
+                    .collect();
+                let generated = generate_per_computation_candidates(
+                    originals.iter().cloned().enumerate().collect(),
+                )
+                .unwrap();
+                let choices: Vec<_> = generated.targets.iter().map(|target| target.choices.candidates.iter().position(|candidate|
+                    matches!(candidate,ComputationCandidate::Summary(found) if *found==algorithm)).unwrap()).collect();
+                let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, root)| root)
+                    .collect();
+                let candidates = sharing_candidates(&roots);
+                let shared =
+                    with_shared_candidates(&roots, &candidates, &vec![true; candidates.len()]);
+                let mut configured = CandidateConfigurationInventory {
+                    inventory: CandidateInventory {
+                        graph: CandidateDependencyGraph::default(),
+                        templates: vec![],
+                        group_candidates: vec![],
+                    },
+                    configurations: vec![],
+                };
+                for root in shared {
+                    let QueryRoot::Operator(root) = root else {
+                        panic!("operator")
+                    };
+                    let id = append(root, &mut configured);
+                    configured
+                        .inventory
+                        .graph
+                        .query_roots
+                        .push(QueryRootCandidates {
+                            compatible_candidates: vec![id],
+                        });
+                }
+                assert_eq!(
+                    configured
+                        .inventory
+                        .templates
+                        .iter()
+                        .flatten()
+                        .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
+                        .count(),
+                    1
+                );
+                let entries: Vec<_> = (0..2)
+                    .map(|q| QueryWorkloadEntry {
+                        query: Query(format!("quantile {q}")),
+                        requirements: QueryRequirements {
+                            accuracy: target.clone(),
+                            max_latency_ms: None,
+                        },
+                        predictability: Predictability::Predictable { known_at: None },
+                        recurrence: QueryRecurrence::Repeated(if phases {
+                            RepeatedDemand::FixedIntervalAt {
+                                interval: RepetitionInterval(1000),
+                                evaluation_phase: TimestampMs(q * 500),
+                            }
+                        } else {
+                            RepeatedDemand::FixedInterval(RepetitionInterval(if q == 0 {
+                                500
+                            } else {
+                                1000
+                            }))
+                        }),
+                        range_evaluation: None,
+                    })
+                    .collect();
+                let data:DataWorkload=serde_json::from_value(serde_json::json!({"arrival":{"ingesting":{"rows_per_second":1.0}},"sources":{"latency":{"series_count":2,"rows_held":300,"values_non_negative":true}}})).unwrap();
+                let context = CandidatePlanningContext {
+                    deadline: None,
+                    refine_materialization: false,
+                    original_roots: &originals,
+                    entries: &entries,
+                    data: &data,
+                    models: crate::PlanningModels::builtin(),
+                    calibration: crate::CalibrationFit::default(),
+                };
+                let extracted = extract(&configured, &context).unwrap().unwrap();
+                assert!(extracted.supported.iter().all(|supported| *supported));
+                assert_eq!(
+                    extracted
+                        .profile
+                        .schedules
+                        .as_ref()
+                        .unwrap()
+                        .materialized_subset_rates[3],
+                    if phases { 2.0 } else { 3.0 }
+                );
+                let proposal = crate::search::milp::model::solve_direct_cost_proposal_with_metrics(
+                    &configured.inventory.graph,
+                    &[],
+                    None,
+                    &mut Default::default(),
+                    &extracted.profile,
+                )
+                .unwrap()
+                .unwrap();
+                let mut rejections =
+                    crate::search::refinement::planner::CandidateRejectionSummary::default();
+                let (selection, _) =
+                    crate::search::refinement::planner::evaluate_configured_candidate(
+                        &configured,
+                        &context,
+                        &proposal.selected,
+                        0,
+                        &mut rejections,
+                        &mut Vec::new(),
+                    )
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{algorithm:?} phases={phases}: {rejections:?}"));
+                let actual = selection.costs[&selection.selected]
+                    .cost_per_second
+                    .unwrap();
+                let direct = proposal.direct_modeled_cost.unwrap();
+                assert!(
+                    (actual - direct).abs() <= 1e-9 * actual.max(1e-15),
+                    "{algorithm:?} phases={phases}: {direct} vs {actual}"
+                );
+            }
+        }
     }
 
     // A template child is not evidence that every supplier has the same rows.
