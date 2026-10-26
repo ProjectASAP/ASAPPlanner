@@ -3764,15 +3764,13 @@ fn summary_update(
             }
         }
         (_, Some(SketchAlgorithm::UnivMon))
-        | (AggIntent::Count { .. }, Some(SketchAlgorithm::Cms | SketchAlgorithm::CountSketch)) => {
-            SummaryUpdate {
-                item: Some(weight),
-                weight: SummaryInputExpr::Constant(1.0),
-                weight_domain: WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::UnitCount,
-                },
-            }
-        }
+        | (AggIntent::Count { .. }, Some(SketchAlgorithm::Cms)) => SummaryUpdate {
+            item: Some(weight),
+            weight: SummaryInputExpr::Constant(1.0),
+            weight_domain: WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::UnitCount,
+            },
+        },
         _ => SummaryUpdate {
             item: None,
             weight,
@@ -3849,6 +3847,32 @@ mod tests {
             ComputationCandidate::ExactAccumulator(vec![ExactKind::Count])
         );
         assert!(choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::UnivMon)));
+    }
+
+    /// Count Sketch's signed counters give no total, so Pass 1 offers no
+    /// Count Sketch for a count, and every count candidate it offers
+    /// answers the total.
+    #[test]
+    fn a_count_offers_no_count_sketch() {
+        let choices = computation_candidates_for_intent(&AggIntent::Count {
+            accuracy: AccuracyTarget::max_error(0.05).failure_probability(0.01),
+        })
+        .unwrap()
+        .candidates;
+        assert!(!choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::CountSketch)));
+        let total = statistic(&AggIntent::Count {
+            accuracy: AccuracyTarget::exact(),
+        })
+        .unwrap();
+        for choice in &choices {
+            if let ComputationCandidate::Summary(algorithm) = choice {
+                assert!(
+                    asap_types::ir::schema::FamilyCapability::of_per_instance_sketch(algorithm)
+                        .answers(&total),
+                    "{algorithm:?}"
+                );
+            }
+        }
     }
 
     /// Guarantee composition through scalar and vector arithmetic (#669).
@@ -5109,9 +5133,9 @@ mod tests {
 
     /// `combinations` counts each choice once: picking a fused
     /// whole-expression candidate with any but the first candidate of the
-    /// target it absorbs is the same candidate. An absorbed target with four
-    /// candidates (an approximate inner count) gives 1 exact · 4 + 2
-    /// whole-expression = 6, not 3 · 4.
+    /// target it absorbs is the same candidate. An absorbed target with three
+    /// candidates (an approximate inner count: its accumulator, Count-Min and
+    /// UnivMon) gives 1 exact · 3 + 2 whole-expression = 5, not 3 · 3.
     #[test]
     fn combinations_skip_choices_a_whole_expression_candidate_absorbs() {
         let inventory = inventory("topk by (job) (10, count_over_time(m[1m]))");
@@ -5127,7 +5151,7 @@ mod tests {
         let enumerated = enumerated_choices(&inventory);
         assert!(whole > 0 && m > 1, "{n} {whole} {m}");
         assert_eq!(inventory.combinations(), n * m + whole);
-        assert_eq!(inventory.combinations(), 6);
+        assert_eq!(inventory.combinations(), 5);
         assert_eq!(inventory.combinations(), enumerated);
     }
 
@@ -5552,14 +5576,13 @@ mod tests {
 
     /// A family the deployment builds but cannot answer the measure's
     /// readout from is pruned: UnivMon, supported for distinct counts and
-    /// L2 only, is no count candidate; Count-Min and CountSketch, supported
-    /// for the total, stay.
+    /// L2 only, is no count candidate; Count-Min, supported for the total,
+    /// stays.
     #[test]
     fn a_readout_the_deployment_cannot_answer_prunes_its_family() {
         let restricted =
             inventory("count_over_time(m[1m])").without_unsupported_summaries(&supporting(&[
                 (SketchAlgorithm::Cms, &[StatisticKind::Total]),
-                (SketchAlgorithm::CountSketch, &[StatisticKind::Total]),
                 (
                     SketchAlgorithm::UnivMon,
                     &[StatisticKind::Distinct, StatisticKind::FrequencyL2],
@@ -5571,7 +5594,6 @@ mod tests {
             [
                 ComputationCandidate::ExactAccumulator(vec![ExactKind::Count]),
                 ComputationCandidate::Summary(SketchAlgorithm::Cms),
-                ComputationCandidate::Summary(SketchAlgorithm::CountSketch),
             ]
         );
         assert_eq!(

@@ -50,9 +50,8 @@ pub enum ExactParams {
 // ── Approximate sketches ─────────────────────────────────────────────────────
 
 /// A specific sketch algorithm — bounded error, sized by its
-/// [`SketchParams`]. Each algorithm belongs to exactly one [`SketchKind`]
-/// category (e.g. `Kll` and `DDSketch` both realize quantile sketches);
-/// [`SketchKind::new`] is where that classification is made.
+/// [`SketchParams`]. The statistics each answers are its row of the
+/// family-capability table ([`FamilyCapability`](crate::ir::schema::FamilyCapability)).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SketchAlgorithm {
     /// Universal frequency-vector summary with shared statistic evaluations.
@@ -248,44 +247,27 @@ impl PartialEq for SketchParams {
     }
 }
 
-/// The query category served by a committed sketch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SketchCategory {
-    Universal,
-    Quantile,
-    Cardinality,
-    Frequency,
-    TopK,
-}
-
-/// A committed sketch choice: which *category* of query shape it answers —
-/// quantile-style, cardinality-style, frequency-style, or heavy-hitter/
-/// top-k-style estimation — together with the concrete [`SketchAlgorithm`]
-/// and [`SketchParams`] realizing it. Sits between
+/// A committed sketch choice: the concrete [`SketchAlgorithm`] and the
+/// [`SketchParams`] realizing it. Sits between
 /// [`FieldDataType::Sketch`](crate::ir::schema::FieldDataType::Sketch)
 /// (the `Sketch` family as a whole, sibling to `SummarySample`/`Wavelet`/
-/// `StatModel`) and the bare algorithm: `Kll` vs. `DDSketch` is a choice
-/// *within* `Quantile`, not a choice *of* `SketchKind` — every `Quantile`
-/// value already carries which of the two (and its params) was picked.
+/// `StatModel`) and the bare algorithm. Which statistics a state of the
+/// kind answers is the family-capability table's
+/// ([`FamilyCapability`](crate::ir::schema::FamilyCapability)).
 ///
-/// [`SketchKind::new`] is the one place `(SketchAlgorithm, SketchParams)`
-/// pairs get classified into a category; construct through it rather than
-/// naming a variant directly, so a new algorithm can't drift out of sync
-/// with its category. See `asap_logical_asap_optimization::summary_candidates` for the
-/// `AggIntent -> [SketchAlgorithm]` candidate list this ultimately groups.
+/// Construct through [`SketchKind::new`], which rejects parameters of a
+/// different algorithm. See `asap_logical_asap_optimization::summary_candidates` for the
+/// `AggIntent -> [SketchAlgorithm]` candidate list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SketchKind {
-    category: SketchCategory,
     algorithm: SketchAlgorithm,
     params: SketchParams,
 }
 
 impl SketchKind {
-    /// Classify `(algorithm, params)` into its `SketchKind` category. The
-    /// one place that mapping is made — every other piece of this crate
-    /// that needs to know an algorithm's category goes through this rather
-    /// than re-deriving it. Panics when `params` belongs to a different
-    /// algorithm; invalid committed sketch states cannot be constructed.
+    /// The kind of `algorithm` with `params`. Panics when `params` belongs
+    /// to a different algorithm; invalid committed sketch states cannot be
+    /// constructed.
     pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self {
         let valid_params = matches!(
             (&algorithm, &params),
@@ -313,34 +295,15 @@ impl SketchKind {
             valid_params,
             "SketchKind parameter mismatch: algorithm={algorithm:?}, params={params:?}"
         );
-        let category = match algorithm {
-            SketchAlgorithm::UnivMon => SketchCategory::Universal,
-            SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => SketchCategory::Quantile,
-            SketchAlgorithm::Hll | SketchAlgorithm::Theta | SketchAlgorithm::Kmv => {
-                SketchCategory::Cardinality
-            }
-            SketchAlgorithm::Cms | SketchAlgorithm::CountSketch => SketchCategory::Frequency,
-            SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap => {
-                SketchCategory::TopK
-            }
-        };
-        Self {
-            category,
-            algorithm,
-            params,
-        }
+        Self { algorithm, params }
     }
 
-    pub fn category(&self) -> SketchCategory {
-        self.category
-    }
-
-    /// The algorithm this kind committed to, regardless of category.
+    /// The algorithm this kind committed to.
     pub fn algorithm(&self) -> &SketchAlgorithm {
         &self.algorithm
     }
 
-    /// The parameters this kind committed to, regardless of category.
+    /// The parameters this kind committed to.
     pub fn params(&self) -> &SketchParams {
         &self.params
     }
@@ -870,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn sketch_kind_classifies_a_valid_algorithm_and_params_pair() {
+    fn sketch_kind_keeps_a_valid_algorithm_and_params_pair() {
         let kind = SketchKind::new(
             SketchAlgorithm::Kll,
             SketchParams::Kll {
@@ -878,7 +841,6 @@ mod tests {
                 failure_probability: None,
             },
         );
-        assert_eq!(kind.category(), SketchCategory::Quantile);
         assert_eq!(kind.algorithm(), &SketchAlgorithm::Kll);
     }
 
