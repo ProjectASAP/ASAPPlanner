@@ -442,8 +442,23 @@ fn accuracy_baseline(
             } else {
                 0.0
             };
+            // A strict feasibility seed must not spend its limited attempts on
+            // estimators whose error still needs unavailable workload facts.
+            // This is seed-only: another supplier may repair the contract, so
+            // the complete graph retains these candidates and validates them.
+            let unresolved_estimator_error =
+                matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. }))
+                    && {
+                        let root = QueryRoot::Operator(std::rc::Rc::clone(node));
+                        crate::bound_root_guarantee(
+                            &root,
+                            crate::series_read(&root, context.data),
+                            context.data,
+                            &context.models,
+                        ).is_none_or(|guarantee| guarantee.spec.error.evaluate().is_none())
+                    };
             let contract_risk = !context.models.plan_selection.ignore_accuracy_guarantees
-                && (node.guarantee.as_ref().is_some_and(|guarantee| {
+                && (unresolved_estimator_error || node.guarantee.as_ref().is_some_and(|guarantee| {
                     !guarantee.is_exact()
                         && guarantee.spec.accuracy_metric == AccuracyMetric::Rank
                         && !rank_requested[id]
