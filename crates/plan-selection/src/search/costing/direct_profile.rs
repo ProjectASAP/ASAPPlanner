@@ -1,10 +1,9 @@
-//! Exact local profiles for query-time plans and fixed-worker maintained panes.
+//! Local cost certification shared by fixed and supplier-dependent profiles.
 //!
-//! Each accepted input is priced from its actual recursively certified supplier.
-//! Different priced interfaces are excluded from this proposal, not the full
-//! catalog. No original-template child is used as workload statistics evidence.
-//! Ingestion support is limited to fixed-retention pane chains with certified
-//! unary input closures whose complete range certifies one worker-count bucket.
+//! Price each operation from its actual supplier output and state configuration.
+//! The fixed-profile adapter admits one interface; supplier_price_options keeps
+//! compatible interfaces as joint MILP choices. Ingestion worker counts require
+//! certified unary upstream work, never statistics from a template child.
 use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::candidates::graph::PhysicalCandidateId;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
@@ -25,6 +24,8 @@ pub(in crate::search) enum DirectProfileError {
     DeadlineExceeded(#[from] asap_logical_asap_optimization::memo::CandidateGenerationTimeout),
     #[error("direct cost profile: {0}")]
     Invalid(String),
+    #[error("direct cost profile unsupported: {0}")]
+    Unsupported(String),
 }
 
 pub(in crate::search) struct DirectProfileExtraction {
@@ -43,6 +44,8 @@ fn supported_node(node: &asap_types::ir::OperatorNode) -> bool {
                 | NonASAPOp::Filter { .. }
                 | NonASAPOp::Project { .. }
                 | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::Join { .. }
         )
     ) || matches!(
         node.asap(),
@@ -56,9 +59,9 @@ fn supported_node(node: &asap_types::ir::OperatorNode) -> bool {
     )
 }
 
-/// Identical fixed schedules or up to three heterogeneous schedules, no range requests and one operator
-/// root per query are supported. Every returned profile is priced at one
-/// execution; the MILP supplies demand, held lifetime, retention and overhead.
+/// Fixed-interface compatibility adapter. Local profiles are priced at one
+/// execution; the MILP supplies schedule demand, lifetime and shared charges.
+/// Joint extraction additionally carries input tuples and retention tiers.
 pub(in crate::search) fn extract(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
@@ -75,13 +78,23 @@ pub(in crate::search) fn extract_latest_panes(
     extract_scan_class(configured, context, true)
 }
 
-fn extract_scan_class(
+struct PreparedProfile {
+    nodes: Vec<Option<PhysicalASAPDAGNode>>,
+    lookbacks: Vec<Option<u64>>,
+    all_lookbacks: Vec<Vec<Option<u64>>>,
+    delta: Option<f64>,
+    schedules: Option<QueryScheduleRates>,
+    rate: f64,
+    request_rate: f64,
+}
+
+fn prepare_profile(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
     prefer_latest_pane: bool,
-) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
+) -> Result<Option<PreparedProfile>, DirectProfileError> {
     let settings = context.models.plan_selection;
-    let CostModel::UsageOverTime(prices) = &settings.cost_model else {
+    let CostModel::UsageOverTime(_prices) = &settings.cost_model else {
         return Ok(None);
     };
     let Some(first) = context.entries.first() else {
@@ -109,15 +122,6 @@ fn extract_scan_class(
         .entries
         .iter()
         .any(|entry| entry.range_evaluation.is_some());
-    if has_range
-        && (!equal_fixed
-            || context
-                .entries
-                .iter()
-                .any(|entry| entry.range_evaluation != first.range_evaluation))
-    {
-        return Ok(None);
-    }
     let rates: Vec<_> = context
         .entries
         .iter()
@@ -129,10 +133,15 @@ fn extract_scan_class(
             .map_err(|error| DirectProfileError::Invalid(error.to_string()))
         })
         .collect::<Result<_, _>>()?;
-    if rates.iter().any(|rate| !rate.is_finite() || *rate <= 0.0) {
+    if rates.iter().any(|rate| !rate.is_finite() || *rate < 0.0) {
         return Ok(None);
     }
-    let rate = rates[0];
+    let rate = rates
+        .iter()
+        .copied()
+        .filter(|rate| *rate > 0.0)
+        .reduce(f64::max)
+        .unwrap_or(1.0);
     let request_rate: f64 = context
         .entries
         .iter()
@@ -146,61 +155,18 @@ fn extract_scan_class(
         .collect::<Result<Vec<_>, _>>()?
         .iter()
         .sum();
-    let schedules = if equal_fixed {
+    let schedules = if equal_fixed && !has_range {
         None
-    } else if context.entries.len() > 3 {
-        use crate::search::milp::direct_cost::FixedQuerySchedule;
-        let fixed: Option<Vec<_>> = context
-            .entries
-            .iter()
-            .map(|entry| match &entry.recurrence {
-                QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
-                    Some(FixedQuerySchedule {
-                        interval_ms: interval.0,
-                        phase_ms: None,
-                    })
-                }
-                QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
-                    interval,
-                    evaluation_phase,
-                }) => Some(FixedQuerySchedule {
-                    interval_ms: interval.0,
-                    phase_ms: Some(evaluation_phase.0),
-                }),
-                _ => None,
-            })
-            .collect();
-        let Some(fixed) = fixed else { return Ok(None) };
-        match QueryScheduleRates::from_fixed_schedules(fixed) {
-            Ok(schedule) => Some(schedule),
-            Err(
-                crate::search::candidates::graph::CandidateSelectionError::UnsupportedDirectCost(_),
-            ) => return Ok(None),
-            Err(error) => return Err(DirectProfileError::Invalid(error.to_string())),
-        }
     } else {
-        let mut materialized_subset_rates = Vec::with_capacity(1 << context.entries.len());
-        for mask in 0..(1usize << context.entries.len()) {
-            materialized_subset_rates.push(
-                crate::cost::execution_demand::evaluation_rate(
-                    context
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .filter(|(query, _)| mask & (1 << query) != 0)
-                        .map(|(_, entry)| (&entry.recurrence, None)),
-                    settings.non_repeating_query_horizon_seconds,
-                )
-                .map_err(|error| DirectProfileError::Invalid(error.to_string()))?,
-            );
-        }
-        Some(QueryScheduleRates {
-            compact_fixed: None,
-            per_query_rates: rates,
-            materialized_subset_rates,
-        })
+        let general = crate::search::milp::direct_cost::QueryScheduleRates::new(
+            context.entries,
+            settings.non_repeating_query_horizon_seconds,
+            context.deadline,
+        )
+        .map_err(|error| DirectProfileError::Unsupported(error.to_string()))?;
+        Some(general)
     };
-    let delta = match failure_budget(context) {
+    let delta = match failure_budget(context)? {
         Some(delta) => delta,
         None => return Ok(None),
     };
@@ -222,7 +188,7 @@ fn extract_scan_class(
                     && match configuration.timing {
                         ExecutionTiming::QueryTime => {
                             matches!(configuration.materialization, Materialization::NotMaterialized | Materialization::MatAtQuery(Medium::Memory))
-                                || (!has_range && configuration.materialization == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+                                || (configuration.materialization == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
                                     && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
                                     && context.models.deployment_capabilities.query_time_results_retained
                                     && (0..context.entries.len()).any(|reader| asap_physical_asap_optimization::summary_materialization_eligibility(node, &[reader], context.entries, context.data, context.models.deployment_capabilities).is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)))
@@ -246,10 +212,7 @@ fn extract_scan_class(
                             }
                         },
                     }
-                    && configured.inventory.graph.candidates[id]
-                        .producer_requirements
-                        .len()
-                        <= 1
+
             })
             .map(|node| {
                 let mut position = 0;
@@ -278,6 +241,7 @@ fn extract_scan_class(
     // Each scan keeps one explicit lookback class, not a maximum requiring an
     // optionally selected witness. Every admitted consumer edge must use it.
     let mut lookbacks = vec![None; count];
+    let mut all_lookbacks = vec![vec![None]; count];
     for id in 0..count {
         let Some(scan) = &nodes[id] else { continue };
         if scan.output_state.timing != ExecutionTiming::QueryTime
@@ -316,6 +280,10 @@ fn extract_scan_class(
             root.compatible_candidates
                 .contains(&PhysicalCandidateId(id))
         });
+        if !raw_output {
+            all_lookbacks[id] = ordinary.union(&kept).copied().collect();
+            all_lookbacks[id].sort();
+        }
         if raw_output {
             lookbacks[id] = None;
         } else {
@@ -337,6 +305,66 @@ fn extract_scan_class(
             }
         }
     }
+    Ok(Some(PreparedProfile {
+        nodes,
+        lookbacks,
+        all_lookbacks,
+        delta,
+        schedules,
+        rate,
+        request_rate,
+    }))
+}
+
+fn extract_scan_class(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    prefer_latest_pane: bool,
+) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
+    // The fixed adapter has no selected-reader retention tiers. The joint
+    // option extractor carries those decisions instead.
+    if context
+        .entries
+        .iter()
+        .any(|entry| entry.range_evaluation != context.entries[0].range_evaluation)
+        || context
+            .entries
+            .iter()
+            .any(|entry| entry.range_evaluation.is_some())
+            && configured.configurations.iter().any(|c| {
+                c.materialization
+                    == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+            })
+    {
+        return Ok(None);
+    }
+    let Some(prepared) = prepare_profile(configured, context, prefer_latest_pane)? else {
+        return Ok(None);
+    };
+    let PreparedProfile {
+        nodes,
+        lookbacks,
+        delta,
+        schedules,
+        rate,
+        request_rate,
+        ..
+    } = prepared;
+    let mut nodes = nodes;
+    for (id, node) in nodes.iter_mut().enumerate() {
+        if configured.inventory.graph.candidates[id]
+            .producer_requirements
+            .len()
+            > 1
+        {
+            *node = None;
+        }
+    }
+    let count = nodes.len();
+    let settings = context.models.plan_selection;
+    let CostModel::UsageOverTime(prices) = &settings.cost_model else {
+        return Ok(None);
+    };
     let mut cache = vec![None; count];
     let mut visited = vec![false; count];
     let mut visiting = vec![false; count];
@@ -363,11 +391,13 @@ fn extract_scan_class(
             &mut worker_counts,
             &mut compaction_seconds,
             delta,
+            None,
         )?;
     }
     let supported: Vec<_> = cache.iter().map(Option::is_some).collect();
 
     let zero = || NodeCostProfile {
+        per_request: false,
         execution_cost: 0.0,
         work_seconds: 0.0,
         compaction_seconds: 0.0,
@@ -384,31 +414,12 @@ fn extract_scan_class(
             let Some(priced) = priced else {
                 return Ok(zero());
             };
-            let raw_retention = priced
-                .raw_scan
-                .map(|(source, bytes)| {
-                    serde_json::to_string(source)
-                        .map(|identity| (identity, bytes as f64 * prices.cost_per_disk_byte_second))
-                        .map_err(|error| DirectProfileError::Invalid(error.to_string()))
-                })
-                .transpose()?;
-            Ok(NodeCostProfile {
-                execution_cost: priced.cpu_ops_per_second * prices.cost_per_cpu_op
-                    + priced.scanned_bytes_per_second * prices.cost_per_scanned_byte,
-                ingestion: nodes[id].as_ref().unwrap().output_state.timing
-                    == ExecutionTiming::IngestionTime,
-                standing_cost_per_second: priced.average_memory_bytes
-                    * prices.cost_per_memory_byte_second
-                    + priced.disk_bytes as f64 * prices.cost_per_disk_byte_second,
-                work_seconds: priced.work_ms / 1000.0,
-                compaction_seconds: compaction_seconds[id],
-                held_memory_cost_per_second: priced.held.map_or(0.0, |(bytes, _, _)| {
-                    bytes as f64 * prices.cost_per_memory_byte_second
-                }),
-                materialized: nodes[id].as_ref().unwrap().materialization
-                    != Materialization::NotMaterialized,
-                raw_retention,
-            })
+            profile_for_priced(
+                priced,
+                nodes[id].as_ref().unwrap(),
+                compaction_seconds[id],
+                context,
+            )
         })
         .collect::<Result<Vec<_>, DirectProfileError>>()?;
     let request_ms = settings.measured_operation_costs.ns_per_evaluation * 1e-6;
@@ -425,6 +436,50 @@ fn extract_scan_class(
         supported,
         suppliers,
     }))
+}
+
+fn profile_for_priced(
+    priced: &PricedNode<'_>,
+    node: &PhysicalASAPDAGNode,
+    compaction_seconds: f64,
+    context: &CandidatePlanningContext<'_>,
+) -> Result<NodeCostProfile, DirectProfileError> {
+    let CostModel::UsageOverTime(prices) = &context.models.plan_selection.cost_model else {
+        return Err(DirectProfileError::Unsupported(
+            "non-usage objective".into(),
+        ));
+    };
+    let raw_retention = priced
+        .raw_scan
+        .map(|(source, bytes)| {
+            serde_json::to_string(source)
+                .map(|identity| (identity, bytes as f64 * prices.cost_per_disk_byte_second))
+                .map_err(|error| DirectProfileError::Invalid(error.to_string()))
+        })
+        .transpose()?;
+    Ok(NodeCostProfile {
+        per_request: node.materialization
+            == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
+        execution_cost: priced.cpu_ops_per_second * prices.cost_per_cpu_op
+            + priced.scanned_bytes_per_second * prices.cost_per_scanned_byte,
+        ingestion: node.output_state.timing == ExecutionTiming::IngestionTime,
+        standing_cost_per_second: priced.average_memory_bytes * prices.cost_per_memory_byte_second
+            + priced.disk_bytes as f64 * prices.cost_per_disk_byte_second,
+        work_seconds: priced.work_ms / 1000.0,
+        compaction_seconds,
+        held_memory_cost_per_second: priced.held.map_or(0.0, |(bytes, _, _)| {
+            bytes as f64 * prices.cost_per_memory_byte_second
+        }),
+        materialized: node.materialization != Materialization::NotMaterialized,
+        raw_retention,
+    })
+}
+
+struct PriceInputs {
+    suppliers: Vec<PhysicalCandidateId>,
+    upstream_work: WorkBounds,
+    upstream_sketches: usize,
+    range_span_ms: Option<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -444,6 +499,7 @@ fn price<'a>(
     worker_counts: &mut [Option<u64>],
     compaction_seconds: &mut [f64],
     delta: Option<f64>,
+    input_override: Option<&PriceInputs>,
 ) -> Result<(), DirectProfileError> {
     check_deadline(context.deadline)?;
     if visited[id] || visiting[id] {
@@ -455,22 +511,26 @@ fn price<'a>(
     };
     visiting[id] = true;
     let requirements = &configured.inventory.graph.candidates[id].producer_requirements;
-    let options: Vec<_> = requirements.first().map_or_else(
-        || vec![None],
-        |input| {
-            input
-                .compatible_producers
-                .iter()
-                .copied()
-                .map(Some)
-                .collect()
+    let options: Vec<Vec<PhysicalCandidateId>> = input_override.map_or_else(
+        || {
+            requirements.first().map_or_else(
+                || vec![vec![]],
+                |input| {
+                    input
+                        .compatible_producers
+                        .iter()
+                        .map(|id| vec![*id])
+                        .collect()
+                },
+            )
         },
+        |inputs| vec![inputs.suppliers.clone()],
     );
-    for supplier in options {
+    'bindings: for input_tuple in options {
         let mut views = Vec::new();
-        if let Some(supplier) = supplier {
+        for &supplier in &input_tuple {
             if visiting[supplier.0] {
-                continue;
+                continue 'bindings;
             }
             price(
                 supplier.0,
@@ -488,9 +548,10 @@ fn price<'a>(
                 worker_counts,
                 compaction_seconds,
                 delta,
+                None,
             )?;
             let Some(priced) = &cache[supplier.0] else {
-                continue;
+                continue 'bindings;
             };
             let producer = nodes[supplier.0].as_ref().unwrap();
             if producer.output_state.timing == ExecutionTiming::QueryTime
@@ -500,7 +561,7 @@ fn price<'a>(
                 )
                 && lookbacks[supplier.0] != scan_consumer_lookback(node)
             {
-                continue;
+                continue 'bindings;
             }
 
             let consumer_ingests = node.output_state.timing == ExecutionTiming::IngestionTime;
@@ -511,7 +572,7 @@ fn price<'a>(
                     && producer_ingests
                     && producer.materialization != Materialization::MatAtIngestion(Medium::Memory))
             {
-                continue;
+                continue 'bindings;
             }
             views.push(ProducerOutput {
                 payload: &producer.payload,
@@ -522,6 +583,7 @@ fn price<'a>(
                 unchanged_columns: priced.unchanged_columns.clone(),
             });
         }
+        let supplier = input_tuple.first().copied();
         if let asap_types::ir::Operator::ASAP(
             ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(kind, _),
@@ -567,22 +629,24 @@ fn price<'a>(
             }
             _ => None,
         };
-        let sketches = supplier.map_or(0, |supplier| sketch_counts[supplier.0])
-            + usize::from(matches!(
-                &node.payload,
-                asap_types::ir::Operator::ASAP(
-                    ASAPOp::SummaryAgg {
-                        family: FieldDataType::Sketch(..),
-                        ..
-                    } | ASAPOp::PaneChain {
-                        family: FieldDataType::Sketch(..),
-                        ..
-                    }
-                )
-            ));
+        let sketches = input_override.map_or_else(
+            || supplier.map_or(0, |supplier| sketch_counts[supplier.0]),
+            |inputs| inputs.upstream_sketches,
+        ) + usize::from(matches!(
+            &node.payload,
+            asap_types::ir::Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(..),
+                    ..
+                } | ASAPOp::PaneChain {
+                    family: FieldDataType::Sketch(..),
+                    ..
+                }
+            )
+        ));
         // Failure-budget sizing splits delta across approximate inputs. This
         // slice admits at most one sketch build along each unary output path.
-        if sketches > 1 {
+        if sketches > 1 && input_override.is_none() {
             continue;
         }
         let (retained_panes, ingestion_window) = match &node.payload {
@@ -592,11 +656,15 @@ fn price<'a>(
                 ..
             }) => {
                 let window = pane_width_ms.checked_mul(u64::from(*pane_count));
-                let span = context
-                    .entries
-                    .first()
-                    .and_then(|entry| entry.range_evaluation)
-                    .map_or(0, |range| range.span_ms);
+                let span = input_override
+                    .and_then(|inputs| inputs.range_span_ms)
+                    .unwrap_or_else(|| {
+                        context
+                            .entries
+                            .first()
+                            .and_then(|entry| entry.range_evaluation)
+                            .map_or(0, |range| range.span_ms)
+                    });
                 let Some(retention) = window.and_then(|window| window.checked_add(span)) else {
                     continue;
                 };
@@ -618,9 +686,14 @@ fn price<'a>(
         ) else {
             continue;
         };
-        let prior = supplier.map_or(WorkBounds::default(), |supplier| {
-            closure_work_ms[supplier.0]
-        });
+        let prior = input_override.map_or_else(
+            || {
+                supplier.map_or(WorkBounds::default(), |supplier| {
+                    closure_work_ms[supplier.0]
+                })
+            },
+            |inputs| inputs.upstream_work,
+        );
         let closure_work = WorkBounds {
             minimum: (prior.minimum + priced.work_ms).next_down().max(0.0),
             maximum: (prior.maximum + priced.work_ms).next_up(),
@@ -698,53 +771,111 @@ fn price<'a>(
 /// A conservative delta valid for every selected unary output path, including
 /// rollups whose finer grouping the current evaluator uses for its row bound.
 /// Unknown population bounds reject this direct proposal, not the full search.
-fn failure_budget(context: &CandidatePlanningContext<'_>) -> Option<Option<f64>> {
-    let population = || {
-        let mut sources = HashSet::new();
-        for root in context.original_roots {
-            let QueryRoot::Operator(root) = root else {
-                return None;
-            };
-            for node in asap_types::ir::OperatorNode::reachable(root) {
-                if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
-                    sources.insert(crate::source_name(source).to_string());
+fn failure_budget(
+    context: &CandidatePlanningContext<'_>,
+) -> Result<Option<Option<f64>>, DirectProfileError> {
+    check_deadline(context.deadline)?;
+    let result = (|| {
+        let population = || {
+            let mut sources = HashSet::new();
+            for root in context.original_roots {
+                let QueryRoot::Operator(root) = root else {
+                    return None;
+                };
+                for node in asap_types::ir::OperatorNode::reachable(root) {
+                    if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
+                        sources.insert(crate::source_name(source).to_string());
+                    }
                 }
             }
+            let counts: Option<Vec<_>> = sources
+                .iter()
+                .map(|source| {
+                    context
+                        .data
+                        .sources
+                        .get(source)?
+                        .series_count
+                        .filter(|count| *count > 0)
+                })
+                .collect();
+            let maximum_source = counts?.into_iter().max()?;
+            fn bound(
+                node: &std::rc::Rc<asap_types::ir::OperatorNode>,
+                maximum_source: u64,
+                deadline: Option<std::time::Instant>,
+                memo: &mut std::collections::HashMap<usize, u64>,
+            ) -> Option<u64> {
+                if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                    return None;
+                }
+                let identity = std::rc::Rc::as_ptr(node) as usize;
+                if let Some(bound) = memo.get(&identity) {
+                    return Some(*bound);
+                }
+                let mut children = Vec::new();
+                node.operator.map_children(|child| {
+                    children.push(bound(child, maximum_source, deadline, memo))
+                });
+                let children: Vec<_> = children.into_iter().collect::<Option<_>>()?;
+                let value = if children.is_empty() {
+                    maximum_source
+                } else if children.len() == 1 {
+                    children[0]
+                } else {
+                    // Branching operators can concatenate rows or pair inputs.
+                    // Both union and cross-product bounds cover supported joins,
+                    // set operations and vector matching; sharing does not reduce
+                    // the number of logical input positions in this calculation.
+                    let sum = children
+                        .iter()
+                        .try_fold(0u64, |sum, child| sum.checked_add(*child))?;
+                    let product = children
+                        .iter()
+                        .try_fold(1u64, |product, child| product.checked_mul(*child))?;
+                    sum.max(product)
+                };
+                memo.insert(identity, value);
+                Some(value)
+            }
+            let mut memo = std::collections::HashMap::new();
+            context
+                .original_roots
+                .iter()
+                .map(|root| match root {
+                    QueryRoot::Operator(node) => {
+                        bound(node, maximum_source, context.deadline, &mut memo)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .max()
+        };
+        let mut delta: Option<f64> = None;
+        for entry in context.entries {
+            let target = &entry.requirements.accuracy;
+            if target.is_exact() {
+                continue;
+            }
+            let requested = target
+                .failure_probability
+                .filter(|delta| delta.is_finite() && *delta > 0.0)?;
+            let values = match target.accuracy_scope {
+                AccuracyScope::WholeResult => population()?,
+                scope => scope.max_values_covered(None)?,
+            }
+            .max(1);
+            let required = requested / values as f64;
+            if !required.is_finite() || required <= 0.0 {
+                return None;
+            }
+            delta = Some(delta.map_or(required, |prior| prior.min(required)));
         }
-        let counts: Option<Vec<_>> = sources
-            .iter()
-            .map(|source| {
-                context
-                    .data
-                    .sources
-                    .get(source)?
-                    .series_count
-                    .filter(|count| *count > 0)
-            })
-            .collect();
-        counts?.into_iter().max()
-    };
-    let mut delta: Option<f64> = None;
-    for entry in context.entries {
-        let target = &entry.requirements.accuracy;
-        if target.is_exact() {
-            continue;
-        }
-        let requested = target
-            .failure_probability
-            .filter(|delta| delta.is_finite() && *delta > 0.0)?;
-        let values = match target.accuracy_scope {
-            AccuracyScope::WholeResult => population()?,
-            scope => scope.max_values_covered(None)?,
-        }
-        .max(1);
-        let required = requested / values as f64;
-        if !required.is_finite() || required <= 0.0 {
-            return None;
-        }
-        delta = Some(delta.map_or(required, |prior| prior.min(required)));
-    }
-    Some(delta)
+        Some(delta)
+    })();
+    check_deadline(context.deadline)?;
+    Ok(result)
 }
 
 fn requires_source_sizing(node: &asap_types::ir::OperatorNode) -> bool {
@@ -2021,17 +2152,11 @@ mod tests {
                             .schedules
                             .as_ref()
                             .unwrap()
-                            .materialized_subset_rates[3],
+                            .union_rate([true, true].into_iter()),
                         if phases { 2.0 } else { 3.0 }
                     );
                 } else {
-                    assert!(extracted
-                        .profile
-                        .schedules
-                        .as_ref()
-                        .unwrap()
-                        .compact_fixed
-                        .is_some());
+                    assert!(extracted.profile.schedules.is_some());
                 }
                 let proposal = crate::search::milp::model::solve_direct_cost_proposal_with_metrics(
                     &configured.inventory.graph,
@@ -2180,3 +2305,19 @@ mod tests {
         ));
     }
 }
+
+#[path = "supplier_price_options.rs"]
+mod supplier_price_options;
+pub(in crate::search) use supplier_price_options::extract_price_options;
+
+#[cfg(test)]
+#[path = "direct_price_options_tests.rs"]
+mod price_options_tests;
+
+#[cfg(test)]
+#[path = "multi_input_price_tests.rs"]
+mod multi_input_price_tests;
+
+#[cfg(test)]
+#[path = "range_price_options_tests.rs"]
+mod range_price_options_tests;

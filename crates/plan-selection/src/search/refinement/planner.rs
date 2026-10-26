@@ -14,7 +14,7 @@ use crate::search::candidates::physical::{
 };
 use crate::search::refinement::search::{
     search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
-    CandidateSearchResult,
+    CandidateSearchResult, DirectPriceModel,
 };
 use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
 
@@ -122,33 +122,42 @@ pub(in crate::search) fn optimize_configured_candidates(
     } else {
         Vec::new()
     };
+    let mut joint_fallback_reasons = Vec::new();
+    let joint_context = CandidatePlanningContext {
+        deadline: earliest_deadline(
+            context.deadline,
+            std::time::Instant::now()
+                .checked_add((limits.wall_time / 6).min(std::time::Duration::from_secs(2))),
+        ),
+        ..*context
+    };
+    let joint = joint_cost_seed(
+        configured,
+        &joint_context,
+        &exclusions,
+        &mut joint_fallback_reasons,
+    )?;
     let mut direct = Vec::new();
-    if let Some(seed) = direct_cost_seed(configured, context, &exclusions, false)? {
-        direct.push(seed);
-    }
-    if configured.configurations.iter().any(|configuration| {
-        matches!(
-            configuration.materialization,
-            asap_types::physical::Materialization::MatAtQueryKeptAcrossEvaluations(_)
-        )
-    }) || configured.inventory.templates.iter().flatten().any(|node| {
-        matches!(
-            node.non_asap(),
-            Some(asap_types::ir::NonASAPOp::TimeRange {
-                kind: asap_types::ir::TimeRangeKind::Instant,
-                ..
-            })
-        )
-    }) {
-        if let Some(seed) = direct_cost_seed(configured, context, &exclusions, true)? {
+    // Use a fixed-interface profile as a bounded fallback when the
+    // joint interface catalog cannot be certified within the planning budget.
+    // Both adapters share the same construction deadline, preserving time for
+    // the feasibility search even when direct pricing is unsupported.
+    if joint.is_none() {
+        if let Some(seed) = direct_cost_seed(configured, &joint_context, &exclusions, false)? {
+            direct.push(seed);
+        }
+        if let Some(seed) = direct_cost_seed(configured, &joint_context, &exclusions, true)? {
             direct.push(seed);
         }
     }
-    let direct_refs: Vec<_> = direct
+    let mut direct_refs: Vec<_> = direct
         .iter()
-        .map(|(graph, profile)| (graph, profile))
+        .map(|(graph, profile)| (graph, DirectPriceModel::Fixed(profile)))
         .collect();
-    let search = search_candidates_with_direct_feedback(
+    if let Some((graph, profile)) = &joint {
+        direct_refs.push((graph, DirectPriceModel::Joint(profile)));
+    }
+    let mut search = search_candidates_with_direct_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
             wall_time: limits.wall_time.saturating_sub(weighting_started.elapsed()),
@@ -210,6 +219,10 @@ pub(in crate::search) fn optimize_configured_candidates(
             Ok(Some(cost).into())
         },
     )?;
+    search
+        .solve_metrics
+        .direct_cost_fallback_reasons
+        .extend(joint_fallback_reasons);
     match (&search.incumbent, &best) {
         (Some(incumbent), Some((cost, selected, ..)))
             if incumbent.actual_cost == *cost && incumbent.selected == *selected => {}
@@ -222,6 +235,63 @@ pub(in crate::search) fn optimize_configured_candidates(
         rejections,
         best: best.map(|(_, _, selection, physical)| (selection, physical)),
     })
+}
+
+/// Every supported local price interface participates in one joint solve.
+fn joint_cost_seed(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    exclusions: &[crate::search::candidates::graph::PhysicalCandidateId],
+    fallback_reasons: &mut Vec<String>,
+) -> Result<
+    Option<(
+        crate::search::candidates::graph::CandidateDependencyGraph,
+        crate::search::milp::direct_price_options::JointPriceProfile,
+    )>,
+    String,
+> {
+    use crate::search::costing::direct_profile::{extract_price_options, DirectProfileError};
+    let mut profile = match extract_price_options(configured, context) {
+        Ok(Some(profile)) => profile,
+        Ok(None) => return Ok(None),
+        Err(DirectProfileError::DeadlineExceeded(_)) => {
+            fallback_reasons
+                .push("joint pricing: interface generation exhausted its reserved budget".into());
+            return Ok(None);
+        }
+        Err(DirectProfileError::Unsupported(reason)) => {
+            fallback_reasons.push(format!("joint pricing: {reason}"));
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    // As with the fixed-price seed, avoid permutations of interchangeable
+    // execution copies in this bounded proposal. Every supplier price option
+    // remains available on the first copy; the full search retains all copies.
+    for constraint in &configured.inventory.graph.reader_constraints {
+        if let crate::search::candidates::graph::ReaderConstraint::ActivationRequires {
+            candidate,
+            ..
+        } = constraint
+        {
+            profile.candidates[candidate.0].clear();
+        }
+    }
+    for excluded in exclusions {
+        profile.candidates[excluded.0].clear();
+    }
+    // Remove bindings to excluded options without renumbering other options.
+    let sizes: Vec<_> = profile.candidates.iter().map(Vec::len).collect();
+    for options in &mut profile.candidates {
+        for option in options {
+            option.compatible_input_tuples.retain(|tuple| {
+                tuple
+                    .iter()
+                    .all(|binding| binding.price_option < sizes[binding.producer.0])
+            });
+        }
+    }
+    Ok(Some((configured.inventory.graph.clone(), profile)))
 }
 
 /// Restrict only the direct-price proposal. Unsupported configurations and
@@ -249,7 +319,9 @@ fn direct_cost_seed(
     };
     let mut extracted = match extracted {
         Ok(Some(extracted)) => extracted,
-        Ok(None) | Err(DirectProfileError::DeadlineExceeded(_)) => return Ok(None),
+        Ok(None)
+        | Err(DirectProfileError::DeadlineExceeded(_))
+        | Err(DirectProfileError::Unsupported(_)) => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
     if context
@@ -1045,6 +1117,46 @@ mod tests {
             entries,
             data,
         )
+    }
+
+    // An optional direct-price proposal must not abort planning when its
+    // schedule construction budget expires; the ordinary search remains usable.
+    #[test]
+    fn unsupported_schedule_profiles_leave_both_seed_fallbacks_available() {
+        let (configured, roots, mut entries, data) = fixture();
+        entries[1].recurrence = QueryRecurrence::Unknown;
+        let context = CandidatePlanningContext {
+            deadline: Some(std::time::Instant::now()),
+            refine_materialization: false,
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models: PlanningModels::builtin(),
+            calibration: CalibrationFit::default(),
+        };
+        let mut reasons = Vec::new();
+        assert!(joint_cost_seed(&configured, &context, &[], &mut reasons)
+            .unwrap()
+            .is_none());
+        assert!(!reasons.is_empty());
+        for latest_panes in [false, true] {
+            assert!(direct_cost_seed(&configured, &context, &[], latest_panes)
+                .unwrap()
+                .is_none());
+        }
+        // Malformed demand is a real input error, not an unsupported model.
+        let mut invalid_entries = entries.clone();
+        invalid_entries[1].recurrence =
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(0)));
+        let invalid_context = CandidatePlanningContext {
+            deadline: None,
+            entries: &invalid_entries,
+            ..context
+        };
+        assert!(joint_cost_seed(&configured, &invalid_context, &[], &mut reasons).is_err());
+        for latest_panes in [false, true] {
+            assert!(direct_cost_seed(&configured, &invalid_context, &[], latest_panes).is_err());
+        }
     }
 
     // One logical group can serve a repeated reader through panes and an

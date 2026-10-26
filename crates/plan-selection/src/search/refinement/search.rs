@@ -3,6 +3,15 @@
 //! failures; full-assignment cuts remain a correctness fallback;
 //! they make no claim of scalable demand modeling or support for every cost model.
 use crate::search::milp::direct_cost::DirectCostProfile;
+use crate::search::milp::direct_price_options::{
+    solve_joint_price_proposal_with_metrics, JointPriceProfile,
+};
+
+#[derive(Clone, Copy)]
+pub(in crate::search) enum DirectPriceModel<'a> {
+    Fixed(&'a DirectCostProfile),
+    Joint(&'a JointPriceProfile),
+}
 use std::time::{Duration, Instant};
 
 use crate::search::candidates::graph::{
@@ -80,7 +89,7 @@ pub(in crate::search) struct CandidateSearchResult {
 struct SeedRestrictions<'a> {
     excluded: &'a [PhysicalCandidateId],
     materialization_changes: &'a [(PhysicalCandidateId, PhysicalCandidateId)],
-    direct: &'a [(&'a CandidateDependencyGraph, &'a DirectCostProfile)],
+    direct: &'a [(&'a CandidateDependencyGraph, DirectPriceModel<'a>)],
 }
 
 /// The callback returns an actual total cost for a validated feasible plan, or
@@ -175,7 +184,7 @@ pub(in crate::search) fn search_candidates_with_direct_feedback(
     weights: &[f64],
     excluded_from_seed: &[PhysicalCandidateId],
     materialization_changes: &[(PhysicalCandidateId, PhysicalCandidateId)],
-    direct: &[(&CandidateDependencyGraph, &DirectCostProfile)],
+    direct: &[(&CandidateDependencyGraph, DirectPriceModel<'_>)],
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_structural_baseline(
@@ -457,13 +466,22 @@ fn search_with_solver(
             continue;
         }
         let proposed = if use_direct {
-            solve_direct_cost_proposal_with_metrics(
-                proposal_graph,
-                &proposal_observations,
-                Some(solve_budget.as_secs_f64()),
-                &mut solve_metrics,
-                restrictions.direct[direct_index].1,
-            )
+            match restrictions.direct[direct_index].1 {
+                DirectPriceModel::Fixed(profile) => solve_direct_cost_proposal_with_metrics(
+                    proposal_graph,
+                    &proposal_observations,
+                    Some(solve_budget.as_secs_f64()),
+                    &mut solve_metrics,
+                    profile,
+                ),
+                DirectPriceModel::Joint(profile) => solve_joint_price_proposal_with_metrics(
+                    proposal_graph,
+                    &proposal_observations,
+                    Some(solve_budget.as_secs_f64()),
+                    &mut solve_metrics,
+                    profile,
+                ),
+            }
         } else {
             propose(
                 proposal_graph,
@@ -806,7 +824,7 @@ mod tests {
             &[1.0, 1.0],
             &[],
             &[],
-            &[(&restricted, &profile)],
+            &[(&restricted, DirectPriceModel::Fixed(&profile))],
             |selected| Ok(Some(profile.selected_cost(&restricted, selected)).into()),
         )
         .unwrap();
@@ -847,7 +865,10 @@ mod tests {
             &[1.0, 1.0],
             &[],
             &[],
-            &[(&first, &profile), (&second, &profile)],
+            &[
+                (&first, DirectPriceModel::Fixed(&profile)),
+                (&second, DirectPriceModel::Fixed(&profile)),
+            ],
             |selected| Ok(Some(profile.selected_cost(&graph, selected)).into()),
         )
         .unwrap();

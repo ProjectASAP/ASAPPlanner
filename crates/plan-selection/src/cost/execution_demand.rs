@@ -120,6 +120,33 @@ pub(crate) fn evaluation_rate<'r>(
     Ok(repeated + estimated + invocations as f64 / non_repeating_query_horizon_seconds)
 }
 
+/// Number of offsets common to nonempty arithmetic progressions
+/// `{k * step | k * step <= span}`. A checked LCM beyond the shortest span
+/// means only offset zero is shared. Kept in costing so both evaluator and
+/// MILP demand atoms use the same integer arithmetic without layer inversion.
+pub(crate) fn offset_intersection_count(geometries: &[(u64, u64)]) -> i128 {
+    fn gcd(mut a: u64, mut b: u64) -> u64 {
+        while b != 0 {
+            let remainder = a % b;
+            a = b;
+            b = remainder;
+        }
+        a
+    }
+    let Some(span) = geometries.iter().map(|(_, span)| *span).min() else {
+        return 0;
+    };
+    let mut lcm = 1u64;
+    for &(step, _) in geometries {
+        let step = step.max(1);
+        match (lcm / gcd(lcm, step)).checked_mul(step) {
+            Some(next) if next <= span => lcm = next,
+            _ => return 1,
+        }
+    }
+    i128::from(span / lcm) + 1
+}
+
 /// The distinct instants one request evaluates at, for steps in ms each with
 /// the longest span in ms at that step: the union of the offsets
 /// `k · step_ms ≤ span_ms` back from the request's end. One step needs no
@@ -128,6 +155,30 @@ fn distinct_instants_per_request(longest_span_ms_by_step_ms: &BTreeMap<u64, u64>
     if longest_span_ms_by_step_ms.len() == 1 {
         let (&step_ms, &span_ms) = longest_span_ms_by_step_ms.iter().next().expect("one step");
         return span_ms / step_ms.max(1) + 1;
+    }
+    // Inclusion-exclusion is bounded by 4095 intersections for up to twelve
+    // distinct steps, regardless of the number of evaluations in each range.
+    if longest_span_ms_by_step_ms.len() <= 12 {
+        let geometries: Vec<_> = longest_span_ms_by_step_ms
+            .iter()
+            .map(|(&step, &span)| (step, span))
+            .collect();
+        let mut total = 0i128;
+        for mask in 1usize..(1usize << geometries.len()) {
+            let intersection: Vec<_> = geometries
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, geometry)| *geometry)
+                .collect();
+            let count = offset_intersection_count(&intersection);
+            if mask.count_ones() % 2 == 1 {
+                total += count;
+            } else {
+                total -= count;
+            }
+        }
+        return u64::try_from(total).expect("distinct evaluation offset count fits u64");
     }
     let mut offsets_ms = BTreeSet::new();
     for (&step_ms, &span_ms) in longest_span_ms_by_step_ms {
@@ -370,6 +421,65 @@ mod tests {
             )
             .unwrap(),
             8.0 + 6.0 / 100.0,
+        );
+    }
+
+    #[test]
+    fn billion_offset_mixed_ranges_are_counted_arithmetically() {
+        let recurrence = fixed(1000, None);
+        let rate = evaluation_rate(
+            [
+                (
+                    &recurrence,
+                    Some(RangeEvaluation {
+                        span_ms: 1_000_000_000,
+                        step_ms: 2,
+                    }),
+                ),
+                (
+                    &recurrence,
+                    Some(RangeEvaluation {
+                        span_ms: 1_000_000_000,
+                        step_ms: 3,
+                    }),
+                ),
+            ],
+            60.0,
+        )
+        .unwrap();
+        assert_eq!(rate, 666_666_668.0);
+    }
+
+    #[test]
+    fn arithmetic_union_matches_small_explicit_offset_sets() {
+        for left_step in 1..=7 {
+            for right_step in 1..=7 {
+                for left_span in [0, 5, 17, 30] {
+                    for right_span in [0, 9, 23, 30] {
+                        let mut ranges = BTreeMap::new();
+                        for (step, span) in
+                            [(left_step, left_span), (right_step, right_span), (11, 29)]
+                        {
+                            let longest = ranges.entry(step).or_insert(0u64);
+                            *longest = (*longest).max(span);
+                        }
+                        let mut oracle = BTreeSet::new();
+                        for (&step, &span) in &ranges {
+                            oracle.extend((0..=span / step).map(|k| k * step));
+                        }
+                        assert_eq!(
+                            distinct_instants_per_request(&ranges),
+                            oracle.len() as u64,
+                            "{ranges:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let large = 1u64 << 63;
+        assert_eq!(
+            offset_intersection_count(&[(large - 1, large), (large - 3, large)]),
+            1
         );
     }
 
