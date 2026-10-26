@@ -1,0 +1,626 @@
+//! Exact objective encoding for certified equal-schedule query-time profiles.
+//! Profiles are supplied by physical costing; this module never infers prices
+//! from a logical template or treats accuracy as a monetary penalty.
+use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
+use std::collections::BTreeMap;
+
+use crate::search::candidates::graph::*;
+
+/// Smallest/largest monetary coefficient ratio after lifetime normalization.
+/// The minimum is scaled to one; no positive cost is rounded away.
+pub(super) const MINIMUM_DIRECT_RELATIVE_COEFFICIENT: f64 = 1e-12;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NodeCostProfile {
+    pub execution_cost: f64,
+    pub work_seconds: f64,
+    pub held_memory_cost_per_second: f64,
+    pub materialized: bool,
+    pub raw_retention: Option<(String, f64)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DirectCostProfile {
+    pub nodes: Vec<NodeCostProfile>,
+    pub query_rate: f64,
+    pub request_latency_seconds: f64,
+    /// Total request fee per second across all queries.
+    pub request_cost: f64,
+}
+
+impl DirectCostProfile {
+    pub(crate) fn validate(
+        &self,
+        graph: &CandidateDependencyGraph,
+    ) -> Result<(), CandidateSelectionError> {
+        let valid = |v: f64| v.is_finite() && v >= 0.0;
+        if self.nodes.len() != graph.candidates.len()
+            || !valid(self.query_rate)
+            || self.query_rate == 0.0
+            || !valid(self.request_latency_seconds)
+            || !valid(self.request_cost)
+            || self.nodes.iter().any(|n| {
+                !valid(n.execution_cost)
+                    || !valid(n.work_seconds)
+                    || !valid(n.held_memory_cost_per_second)
+                    || n.raw_retention
+                        .as_ref()
+                        .is_some_and(|(_, cost)| !valid(*cost))
+            })
+        {
+            return Err(CandidateSelectionError::InvalidGraph(
+                "invalid direct-cost profile".into(),
+            ));
+        }
+        let maximum_latency = self.maximum_latency();
+        if self.coefficients().any(|cost| !cost.is_finite())
+            || !maximum_latency.is_finite()
+            || !(maximum_latency * graph.query_roots.len() as f64).is_finite()
+        {
+            return Err(CandidateSelectionError::InvalidGraph(
+                "direct-cost latency bound overflow".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Recompute the complete selected objective independently of LP auxiliaries.
+    /// A time-limited incumbent may leave nonminimal epigraph variables.
+    pub(crate) fn selected_cost(
+        &self,
+        graph: &CandidateDependencyGraph,
+        selected: &SelectedCandidateGraph,
+    ) -> f64 {
+        let mut inputs = vec![Vec::new(); self.nodes.len()];
+        for edge in &selected.connections {
+            inputs[edge.consumer.0].push(edge.producer.0);
+        }
+        let mut reached = vec![vec![false; self.nodes.len()]; graph.query_roots.len()];
+        for root in &selected.query_roots {
+            let mut pending = vec![root.candidate.0];
+            while let Some(id) = pending.pop() {
+                if !std::mem::replace(&mut reached[root.query_root][id], true) {
+                    pending.extend(&inputs[id]);
+                }
+            }
+        }
+        let latency: Vec<f64> = reached
+            .iter()
+            .map(|row| {
+                self.request_latency_seconds
+                    + row
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, yes)| **yes)
+                        .map(|(id, _)| self.nodes[id].work_seconds)
+                        .sum::<f64>()
+            })
+            .collect();
+        let mut counts = vec![0usize; self.nodes.len()];
+        let boundaries = selected
+            .query_roots
+            .iter()
+            .map(|root| vec![root.candidate.0])
+            .chain(
+                selected
+                    .selected_candidates
+                    .iter()
+                    .filter(|id| self.nodes[id.0].materialized)
+                    .map(|id| inputs[id.0].clone()),
+            );
+        for mut pending in boundaries {
+            let mut seen = vec![false; self.nodes.len()];
+            while let Some(id) = pending.pop() {
+                if self.nodes[id].materialized || std::mem::replace(&mut seen[id], true) {
+                    continue;
+                }
+                counts[id] += 1;
+                pending.extend(&inputs[id]);
+            }
+        }
+        let mut total = self.request_cost;
+        let mut raw = BTreeMap::<&str, f64>::new();
+        for id in &selected.selected_candidates {
+            let node = &self.nodes[id.0];
+            let readers: Vec<_> = reached
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row[id.0])
+                .map(|(q, _)| latency[q])
+                .collect();
+            let executions = if node.materialized { 1 } else { counts[id.0] } as f64;
+            let lifetime = if node.materialized {
+                readers.iter().copied().fold(0.0, f64::max)
+            } else {
+                readers.iter().sum::<f64>() / readers.len().max(1) as f64
+            };
+            total += self.query_rate
+                * executions
+                * (node.execution_cost + node.held_memory_cost_per_second * lifetime);
+            if let Some((source, cost)) = &node.raw_retention {
+                let value = raw.entry(source).or_default();
+                *value = value.max(*cost);
+            }
+        }
+        total + raw.values().sum::<f64>()
+    }
+
+    fn maximum_latency(&self) -> f64 {
+        self.request_latency_seconds + self.nodes.iter().map(|n| n.work_seconds).sum::<f64>()
+    }
+
+    pub(crate) fn coefficients(&self) -> impl Iterator<Item = f64> + '_ {
+        // Constant request fees cannot influence selection and need not limit
+        // the coefficient range. Lifetimes use a dimensionless [0,1] scale.
+        let latency_scale = self.maximum_latency().max(f64::MIN_POSITIVE);
+        self.nodes.iter().flat_map(move |node| {
+            [
+                node.execution_cost * self.query_rate,
+                node.held_memory_cost_per_second * self.query_rate * latency_scale,
+                node.raw_retention.as_ref().map_or(0.0, |(_, cost)| *cost),
+            ]
+        })
+    }
+}
+
+fn gated(
+    variables: &mut ProblemVariables,
+    constraints: &mut Vec<Constraint>,
+    value: Expression,
+    enabled: Variable,
+    maximum: f64,
+) -> Variable {
+    let product = variables.add(variable().min(0).max(maximum));
+    constraints.push(constraint!(product <= value.clone()));
+    constraints.push(constraint!(product <= maximum * enabled));
+    constraints.push(constraint!(product >= value - maximum * (1.0 - enabled)));
+    product
+}
+
+/// Exact on integer activation/connection decisions. Reach variables are
+/// implied integral by the selected acyclic graph, as in the main model.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode(
+    graph: &CandidateDependencyGraph,
+    profile: &DirectCostProfile,
+    variables: &mut ProblemVariables,
+    constraints: &mut Vec<Constraint>,
+    active: &[Variable],
+    edges: &[(ProducerConsumerConnection, Variable)],
+    roots: &[(QueryRootAssignment, Variable)],
+    reach: &[Vec<Option<Variable>>],
+    divisor: f64,
+    check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
+) -> Result<Expression, CandidateSelectionError> {
+    let count = graph.candidates.len();
+    let queries = graph.query_roots.len();
+    let latency_scale = profile.maximum_latency().max(f64::MIN_POSITIVE);
+    let maximum_latency = 1.0;
+    let latency: Vec<Expression> = reach
+        .iter()
+        .map(|row| {
+            Expression::from(profile.request_latency_seconds / latency_scale)
+                + row
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(id, reached)| {
+                        reached.map(|r| profile.nodes[id].work_seconds / latency_scale * r)
+                    })
+                    .sum::<Expression>()
+        })
+        .collect();
+    let mut boundary_count = vec![Expression::from(0.0); count];
+    let mut boundary_limit = vec![0usize; count];
+    // Each root query and each selected materialized computation is one
+    // independent execution boundary. Materialized nodes stop propagation.
+    for boundary in 0..queries + count {
+        check_deadline()?;
+        if boundary >= queries && !profile.nodes[boundary - queries].materialized {
+            continue;
+        }
+        let mut possible = vec![false; count];
+        let mut pending = if boundary < queries {
+            graph.query_roots[boundary].compatible_candidates.clone()
+        } else {
+            graph.candidates[boundary - queries]
+                .producer_requirements
+                .iter()
+                .flat_map(|input| input.compatible_producers.iter().copied())
+                .collect()
+        };
+        while let Some(id) = pending.pop() {
+            check_deadline()?;
+            if profile.nodes[id.0].materialized || std::mem::replace(&mut possible[id.0], true) {
+                continue;
+            }
+            pending.extend(
+                graph.candidates[id.0]
+                    .producer_requirements
+                    .iter()
+                    .flat_map(|input| input.compatible_producers.iter().copied()),
+            );
+        }
+        let used: Vec<_> = possible
+            .iter()
+            .map(|possible| possible.then(|| variables.add(variable().min(0).max(1))))
+            .collect();
+        let mut support = vec![Expression::from(0.0); count];
+        if boundary < queries {
+            for (root, selected) in roots.iter().filter(|(root, _)| root.query_root == boundary) {
+                if let Some(reached) = used[root.candidate.0] {
+                    constraints.push(constraint!(*selected <= reached));
+                    support[root.candidate.0] += *selected;
+                }
+            }
+        }
+        for (edge, connected) in edges {
+            check_deadline()?;
+            let Some(producer) = used[edge.producer.0] else {
+                continue;
+            };
+            if boundary >= queries && edge.consumer.0 == boundary - queries {
+                constraints.push(constraint!(*connected <= producer));
+                support[edge.producer.0] += *connected;
+            } else if let Some(consumer) = used[edge.consumer.0] {
+                let traversed = variables.add(variable().min(0).max(1));
+                constraints.push(constraint!(traversed <= consumer));
+                constraints.push(constraint!(traversed <= *connected));
+                constraints.push(constraint!(traversed >= consumer + *connected - 1));
+                constraints.push(constraint!(traversed <= producer));
+                support[edge.producer.0] += traversed;
+            }
+        }
+        for (id, used) in used.into_iter().enumerate() {
+            if let Some(used) = used {
+                boundary_limit[id] += 1;
+                constraints.push(constraint!(used <= support[id].clone()));
+                constraints.push(constraint!(used <= active[id]));
+                boundary_count[id] += used;
+            }
+        }
+    }
+    let mut objective = Expression::from(profile.request_cost / divisor);
+    let mut retained: BTreeMap<&str, Vec<(usize, f64)>> = BTreeMap::new();
+    for (id, node) in profile.nodes.iter().enumerate() {
+        check_deadline()?;
+        let executions = if node.materialized {
+            Expression::from(active[id])
+        } else {
+            boundary_count[id].clone()
+        };
+        objective += node.execution_cost * profile.query_rate / divisor * executions.clone();
+        if let Some((source, cost)) = &node.raw_retention {
+            retained.entry(source).or_default().push((id, *cost));
+        }
+        if node.held_memory_cost_per_second == 0.0 {
+            continue;
+        }
+        let held_latency = if node.materialized {
+            let longest = variables.add(variable().min(0).max(maximum_latency));
+            for (query, row) in reach.iter().enumerate() {
+                if let Some(reached) = row[id] {
+                    constraints.push(constraint!(
+                        longest >= latency[query].clone() - maximum_latency * (1.0 - reached)
+                    ));
+                }
+            }
+            Expression::from(longest)
+        } else {
+            let sum: Expression = reach
+                .iter()
+                .enumerate()
+                .filter_map(|(query, row)| {
+                    row[id].map(|reached| {
+                        gated(
+                            variables,
+                            constraints,
+                            latency[query].clone(),
+                            reached,
+                            maximum_latency,
+                        )
+                    })
+                })
+                .sum();
+            let reader_count: Expression = reach.iter().filter_map(|row| row[id]).sum();
+            let sizes: Vec<_> = (0..=queries)
+                .map(|_| variables.add(variable().binary()))
+                .collect();
+            constraints.push(constraint!(sizes.iter().copied().sum::<Expression>() == 1));
+            constraints.push(constraint!(
+                sizes
+                    .iter()
+                    .enumerate()
+                    .map(|(k, v)| k as f64 * *v)
+                    .sum::<Expression>()
+                    == reader_count
+            ));
+            let mut weighted = Expression::from(0.0);
+            // The boundary count is an integer in [0, roots + states]. Gate
+            // its possible values, then multiply only by a bounded continuous
+            // lifetime. This reproduces B/Q without dividing by a variable.
+            let boundaries: Vec<_> = (0..=boundary_limit[id])
+                .map(|_| variables.add(variable().binary()))
+                .collect();
+            constraints.push(constraint!(
+                boundaries.iter().copied().sum::<Expression>() == 1
+            ));
+            constraints.push(constraint!(
+                boundaries
+                    .iter()
+                    .enumerate()
+                    .map(|(b, v)| b as f64 * *v)
+                    .sum::<Expression>()
+                    == executions
+            ));
+            for (k, size) in sizes.iter().enumerate().skip(1) {
+                check_deadline()?;
+                let selected_sum = gated(
+                    variables,
+                    constraints,
+                    sum.clone(),
+                    *size,
+                    maximum_latency * queries as f64,
+                );
+                for (b, boundary) in boundaries.iter().enumerate().skip(1) {
+                    check_deadline()?;
+                    let value = gated(
+                        variables,
+                        constraints,
+                        selected_sum.into(),
+                        *boundary,
+                        maximum_latency * queries as f64,
+                    );
+                    weighted += b as f64 / k as f64 * value;
+                }
+            }
+            weighted
+        };
+        objective += node.held_memory_cost_per_second * profile.query_rate * latency_scale
+            / divisor
+            * held_latency;
+    }
+    for entries in retained.into_values() {
+        let cost = variables.add(variable().min(0));
+        for (id, bytes_cost) in entries {
+            constraints.push(constraint!(cost >= bytes_cost / divisor * active[id]));
+        }
+        objective += cost;
+    }
+    Ok(objective)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::milp::model::{
+        solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics,
+    };
+    use asap_logical_asap_optimization::memo::MemoGroupId;
+
+    fn node(input: Option<usize>) -> PhysicalCandidate {
+        PhysicalCandidate {
+            group: MemoGroupId(0),
+            local_cost: 0.0,
+            producer_requirements: input
+                .into_iter()
+                .map(|id| ProducerRequirement {
+                    compatible_producers: vec![PhysicalCandidateId(id)].into(),
+                })
+                .collect(),
+        }
+    }
+    fn root(id: usize) -> QueryRootCandidates {
+        QueryRootCandidates {
+            compatible_candidates: vec![PhysicalCandidateId(id)],
+        }
+    }
+    fn solve(graph: &CandidateDependencyGraph, profile: &DirectCostProfile) -> f64 {
+        solve_direct_cost_proposal_with_metrics(
+            graph,
+            &[],
+            None,
+            &mut CandidateSolveMetrics::default(),
+            profile,
+        )
+        .unwrap()
+        .unwrap()
+        .model_lower_bound
+        .unwrap()
+    }
+
+    // Shared build demand is one; unmaterialized demand is two. Raw data is
+    // retained once at the maximum horizon, while fees remain per workload.
+    #[test]
+    fn complete_cost_counts_shared_demand_held_memory_retention_and_fees() {
+        let graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(Some(0)), node(Some(0))],
+            query_roots: vec![root(1), root(2)],
+            ..Default::default()
+        };
+        let mut profile = DirectCostProfile {
+            query_rate: 2.0,
+            request_latency_seconds: 0.5,
+            request_cost: 7.0,
+            nodes: vec![
+                NodeCostProfile {
+                    execution_cost: 2.0,
+                    work_seconds: 1.0,
+                    held_memory_cost_per_second: 3.0,
+                    materialized: true,
+                    raw_retention: None,
+                },
+                NodeCostProfile {
+                    execution_cost: 1.0,
+                    work_seconds: 2.0,
+                    raw_retention: Some(("source".into(), 4.0)),
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    execution_cost: 1.0,
+                    work_seconds: 3.0,
+                    raw_retention: Some(("source".into(), 6.0)),
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!((solve(&graph, &profile) - 48.0).abs() < 1e-7);
+        profile.nodes[0].materialized = false;
+        assert!((solve(&graph, &profile) - 73.0).abs() < 1e-7);
+    }
+
+    // Two queries behind one materialized computation produce B=1,Q=2 for
+    // its unmaterialized input. Charging it once per query would double memory.
+    #[test]
+    fn upstream_lifetime_uses_boundary_count_divided_by_query_count() {
+        let graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(Some(0)), node(Some(1)), node(Some(1))],
+            query_roots: vec![root(2), root(3)],
+            ..Default::default()
+        };
+        let profile = DirectCostProfile {
+            query_rate: 2.0,
+            request_latency_seconds: 0.5,
+            request_cost: 7.0,
+            nodes: vec![
+                NodeCostProfile {
+                    execution_cost: 2.0,
+                    work_seconds: 1.0,
+                    held_memory_cost_per_second: 3.0,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    execution_cost: 1.0,
+                    work_seconds: 2.0,
+                    held_memory_cost_per_second: 4.0,
+                    materialized: true,
+                    raw_retention: None,
+                },
+                NodeCostProfile {
+                    work_seconds: 3.0,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    work_seconds: 4.0,
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!((solve(&graph, &profile) - 115.0).abs() < 1e-7);
+    }
+    // Independently enumerate both readers' choices. Sharing changes execution
+    // counts and held lifetime; the least-node graph alone cannot price these.
+    #[test]
+    fn direct_selection_matches_four_assignment_cost_oracle() {
+        let mut graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(None), node(Some(0)), node(Some(0))],
+            query_roots: vec![root(2), root(3)],
+            ..Default::default()
+        };
+        for reader in [2, 3] {
+            graph.candidates[reader].producer_requirements[0].compatible_producers =
+                vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
+        }
+        for materialized_build_cost in [1.0, 10.0, 100.0] {
+            let profile = DirectCostProfile {
+                query_rate: 2.0,
+                request_latency_seconds: 0.5,
+                request_cost: 7.0,
+                nodes: vec![
+                    NodeCostProfile {
+                        execution_cost: materialized_build_cost,
+                        work_seconds: 1.0,
+                        held_memory_cost_per_second: 3.0,
+                        materialized: true,
+                        raw_retention: None,
+                    },
+                    NodeCostProfile {
+                        execution_cost: 2.0,
+                        work_seconds: 0.5,
+                        held_memory_cost_per_second: 1.0,
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        execution_cost: 1.0,
+                        work_seconds: 2.0,
+                        ..Default::default()
+                    },
+                    NodeCostProfile {
+                        execution_cost: 1.0,
+                        work_seconds: 3.0,
+                        ..Default::default()
+                    },
+                ],
+            };
+            let mut minimum = f64::INFINITY;
+            for assignment in [[0, 0], [0, 1], [1, 0], [1, 1]] {
+                let durations = [
+                    2.5 + [1.0, 0.5][assignment[0]],
+                    3.5 + [1.0, 0.5][assignment[1]],
+                ];
+                let mut cost = 7.0 + 4.0;
+                for producer in [0, 1] {
+                    let times: Vec<f64> = assignment
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, supplier)| **supplier == producer)
+                        .map(|(q, _)| durations[q])
+                        .collect();
+                    if times.is_empty() {
+                        continue;
+                    }
+                    cost += if producer == 0 {
+                        2.0 * (materialized_build_cost
+                            + 3.0 * times.iter().copied().fold(0.0, f64::max))
+                    } else {
+                        2.0 * (2.0 * times.len() as f64 + times.iter().sum::<f64>())
+                    };
+                }
+                minimum = minimum.min(cost);
+            }
+            assert!((solve(&graph, &profile) - minimum).abs() < 1e-7);
+        }
+    }
+    // Small reader fees remain meaningful alongside a 2.2-billion-times larger
+    // possible raw-buffer cost; currency normalization must not drop the fee.
+    #[test]
+    fn direct_currency_range_preserves_tiny_meaningful_costs() {
+        let graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(None)],
+            query_roots: vec![QueryRootCandidates {
+                compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+            }],
+            ..Default::default()
+        };
+        let profile = DirectCostProfile {
+            nodes: vec![
+                NodeCostProfile {
+                    execution_cost: 7.1e-13,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    execution_cost: 7.1e-13 * 2.2e9,
+                    ..Default::default()
+                },
+            ],
+            query_rate: 1.0,
+            request_latency_seconds: 0.0,
+            request_cost: 1.2e-15,
+        };
+        let proposal = solve_direct_cost_proposal_with_metrics(
+            &graph,
+            &[],
+            None,
+            &mut CandidateSolveMetrics::default(),
+            &profile,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            proposal.selected.selected_candidates,
+            vec![PhysicalCandidateId(0)]
+        );
+        let expected = 7.1e-13 + 1.2e-15;
+        assert!((proposal.direct_modeled_cost.unwrap() / expected - 1.0).abs() < 1e-9);
+        assert!((proposal.model_lower_bound.unwrap() / expected - 1.0).abs() < 1e-9);
+    }
+}

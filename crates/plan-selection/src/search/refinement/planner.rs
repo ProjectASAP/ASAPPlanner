@@ -13,7 +13,7 @@ use crate::search::candidates::physical::{
     materialize_selected_candidates, PhysicalCandidateError,
 };
 use crate::search::refinement::search::{
-    search_candidates_with_restricted_feedback, CandidateEvaluation, CandidateSearchLimits,
+    search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
     CandidateSearchResult,
 };
 use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
@@ -122,7 +122,8 @@ pub(in crate::search) fn optimize_configured_candidates(
     } else {
         Vec::new()
     };
-    let search = search_candidates_with_restricted_feedback(
+    let direct = direct_cost_seed(configured, context, &exclusions)?;
+    let search = search_candidates_with_direct_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
             wall_time: limits.wall_time.saturating_sub(weighting_started.elapsed()),
@@ -131,6 +132,7 @@ pub(in crate::search) fn optimize_configured_candidates(
         &weights,
         &exclusions,
         &changes,
+        direct.as_ref().map(|(graph, profile)| (graph, profile)),
         |selected| {
             evaluation_number += 1;
             let mut rejected_queries = Vec::new();
@@ -183,9 +185,82 @@ pub(in crate::search) fn optimize_configured_candidates(
     })
 }
 
-/// Prefer contracts that can survive downstream value computations. These are
-/// proposal priorities, not feasibility rules: recomposition and evaluation
-/// still decide the selected graph's actual accuracy.
+/// Restrict only the direct-price proposal. Unsupported configurations and
+/// supplier interfaces remain available in the full evaluator-refined search.
+fn direct_cost_seed(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    seed_exclusions: &[crate::search::candidates::graph::PhysicalCandidateId],
+) -> Result<
+    Option<(
+        crate::search::candidates::graph::CandidateDependencyGraph,
+        crate::search::milp::direct_cost::DirectCostProfile,
+    )>,
+    String,
+> {
+    use crate::search::candidates::graph::{PhysicalCandidateId, ReaderConstraint};
+    use crate::search::costing::direct_profile::{extract, DirectProfileError};
+    let mut extracted = match extract(configured, context) {
+        Ok(Some(extracted)) => extracted,
+        Ok(None) | Err(DirectProfileError::DeadlineExceeded(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if context
+        .deadline
+        .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    {
+        return Ok(None);
+    }
+    let mut graph = configured.inventory.graph.clone();
+    let mut supported = extracted.supported;
+    // One interchangeable execution-scope copy is sufficient for this seed.
+    // Keep all copies in the full graph, where independent input bindings may
+    // require them; avoiding their permutations bounds the direct-price solve.
+    for constraint in &graph.reader_constraints {
+        if let ReaderConstraint::ActivationRequires { candidate, .. } = constraint {
+            supported[candidate.0] = false;
+        }
+    }
+    for excluded in seed_exclusions {
+        supported[excluded.0] = false;
+    }
+    for (id, candidate) in graph.candidates.iter_mut().enumerate() {
+        if context
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return Ok(None);
+        }
+        if !supported[id] {
+            extracted.profile.nodes[id] = Default::default();
+            candidate.local_cost = 0.0;
+            candidate.producer_requirements.clear();
+            graph
+                .reader_constraints
+                .push(ReaderConstraint::AllowedOutputs {
+                    candidate: PhysicalCandidateId(id),
+                    outputs: Vec::new(),
+                });
+        } else {
+            for input in &mut candidate.producer_requirements {
+                input.compatible_producers.retain(|supplier| {
+                    supported[supplier.0] && extracted.suppliers[id].contains(supplier)
+                });
+            }
+        }
+    }
+    for root in &mut graph.query_roots {
+        root.compatible_candidates
+            .retain(|candidate| supported[candidate.0]);
+        if root.compatible_candidates.is_empty() {
+            return Ok(None);
+        }
+    }
+    Ok(Some((graph, extracted.profile)))
+}
+
+/// Price work and state for proposal ordering without an exactness surcharge.
+/// Recomposition and validation still decide the selected graph's accuracy.
 pub(in crate::search) fn accuracy_baseline_weights(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,

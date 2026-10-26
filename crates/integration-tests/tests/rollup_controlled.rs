@@ -175,6 +175,17 @@ fn production_distinct_rollup_finds_shared_kmv() {
         selection.costs[&selection.selected].cost_per_second,
         selection.search.candidate_connections
     );
+    let report = selection.search.candidate_connections.as_ref().unwrap();
+    assert!(
+        report.direct_cost_validated_plans > 0,
+        "production must validate a plan priced directly by MILP: {report:?}"
+    );
+    assert!(
+        report
+            .direct_cost_best_validated_cost
+            .is_some_and(|cost| cost < 2.0e-6),
+        "direct MILP must price a plan cheaper than independent KMV"
+    );
     let accepted = &selection.accepted[&selection.selected];
     assert_eq!(accepted.len(), 2);
     assert!(accepted

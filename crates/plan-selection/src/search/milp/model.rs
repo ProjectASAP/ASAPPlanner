@@ -34,6 +34,7 @@ use good_lp::{
 /// at a constrained producer and follows possible consumers back toward roots.
 fn required_reader_reach(
     graph: &CandidateDependencyGraph,
+    all_outputs: bool,
     check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
 ) -> Result<Vec<Vec<bool>>, CandidateSelectionError> {
     let count = graph.candidates.len();
@@ -60,6 +61,9 @@ fn required_reader_reach(
                 );
             }
         }
+    }
+    if all_outputs {
+        return Ok(potential);
     }
     let mut needed = vec![vec![false; count]; graph.query_roots.len()];
     let mut pending = Vec::new();
@@ -146,6 +150,8 @@ pub(crate) struct ObservedAssignment {
 #[derive(Debug)]
 pub(crate) struct CandidateProposal {
     pub selected: SelectedCandidateGraph,
+    /// Complete modeled cost of this selected DAG, only for a certified direct profile.
+    pub direct_modeled_cost: Option<f64>,
     /// Certified optimal relaxation objective, distinct from the local sum.
     /// A feasible gap/time-limited incumbent objective is NOT a lower bound.
     pub model_lower_bound: Option<f64>,
@@ -157,6 +163,10 @@ pub(crate) struct CandidateSolveMetrics {
     pub model_construction_seconds: f64,
     pub solver_seconds: f64,
     pub solve_calls: usize,
+    pub direct_cost_solve_calls: usize,
+    pub direct_cost_validated_plans: usize,
+    pub direct_cost_best_validated_cost: Option<f64>,
+    pub direct_cost_fallback_reasons: Vec<String>,
     /// Largest model submitted across refinement rounds, before solver presolve.
     pub peak_variables: usize,
     pub peak_constraints: usize,
@@ -185,8 +195,37 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
     remaining_seconds: Option<f64>,
     metrics: &mut CandidateSolveMetrics,
 ) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
+    solve_with_objective(graph, observations, remaining_seconds, metrics, None)
+}
+
+pub(crate) fn solve_direct_cost_proposal_with_metrics(
+    graph: &CandidateDependencyGraph,
+    observations: &[ObservedAssignment],
+    remaining_seconds: Option<f64>,
+    metrics: &mut CandidateSolveMetrics,
+    profile: &super::direct_cost::DirectCostProfile,
+) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
+    solve_with_objective(
+        graph,
+        observations,
+        remaining_seconds,
+        metrics,
+        Some(profile),
+    )
+}
+
+fn solve_with_objective(
+    graph: &CandidateDependencyGraph,
+    observations: &[ObservedAssignment],
+    remaining_seconds: Option<f64>,
+    metrics: &mut CandidateSolveMetrics,
+    direct_profile: Option<&super::direct_cost::DirectCostProfile>,
+) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
     let started = std::time::Instant::now();
     graph.validate()?;
+    if let Some(profile) = direct_profile {
+        profile.validate(graph)?;
+    }
     if remaining_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds <= 0.0) {
         return Err(CandidateSelectionError::Solver(
             "no positive solver time remains".into(),
@@ -231,6 +270,7 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
             return Ok(None);
         }
         return Ok(Some(CandidateProposal {
+            direct_modeled_cost: direct_profile.map(|profile| profile.request_cost),
             selected: SelectedCandidateGraph {
                 selected_candidates: Vec::new(),
                 connections: Vec::new(),
@@ -241,7 +281,10 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
                 observations
                     .iter()
                     .filter_map(|observation| observation.exact_cost)
-                    .fold(0.0, f64::max),
+                    .fold(
+                        direct_profile.map_or(0.0, |profile| profile.request_cost),
+                        f64::max,
+                    ),
             ),
         }));
     }
@@ -253,7 +296,11 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
         return Ok(None);
     }
 
-    let warm_start = warm_start::cheapest_start(graph, observations);
+    // Direct objective auxiliaries have no complete feasible start yet.
+    let warm_start = direct_profile
+        .is_none()
+        .then(|| warm_start::cheapest_start(graph, observations))
+        .flatten();
     let count = graph.candidates.len();
     let mut variables = ProblemVariables::new();
     let candidate_selected: Vec<Variable> = (0..count)
@@ -347,7 +394,8 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
         }
         constraints.push(constraint!(root_selected == 1));
     }
-    if !graph.reader_constraints.is_empty() {
+    let mut objective_reach = Vec::new();
+    if !graph.reader_constraints.is_empty() || direct_profile.is_some() {
         // Reachability is implied integral: roots and selected edges are binary,
         // and selected edges form a DAG. Induction from query roots makes each
         // AND/OR below exactly zero or one, so these auxiliaries need no integer
@@ -356,9 +404,10 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
         // edges determine actual reach; incompatible potential readers do not
         // rule out a candidate used by a compatible subset.
         let mut reach = Vec::with_capacity(graph.query_roots.len());
-        for (output, potential) in required_reader_reach(graph, check_deadline)?
-            .into_iter()
-            .enumerate()
+        for (output, potential) in
+            required_reader_reach(graph, direct_profile.is_some(), check_deadline)?
+                .into_iter()
+                .enumerate()
         {
             reach.push(
                 potential
@@ -418,6 +467,9 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
                     constraints.push(constraint!(*reached <= candidate_selected[candidate]));
                 }
             }
+        }
+        if direct_profile.is_some() {
+            objective_reach = reach.clone();
         }
         for requirement in &graph.reader_constraints {
             match requirement {
@@ -523,6 +575,10 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
         .iter()
         .map(|c| c.local_cost)
         .fold(0.0, f64::max);
+    let maximum_cost = direct_profile
+        .into_iter()
+        .flat_map(|profile| profile.coefficients())
+        .fold(maximum_cost, f64::max);
     let maximum_cost = observations
         .iter()
         .filter_map(|observation| observation.exact_cost)
@@ -540,9 +596,23 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
                 .iter()
                 .filter_map(|observation| observation.exact_cost),
         )
+        .chain(
+            direct_profile
+                .into_iter()
+                .flat_map(|profile| profile.coefficients()),
+        )
         .filter(|cost| *cost > 0.0)
         .reduce(f64::min)
         .unwrap_or(1.0);
+    // Direct held-memory profiles can span tiny reader buffers and large raw
+    // windows. Their lifetimes are dimensionless and the smallest currency
+    // coefficient is scaled to one; permit up to 1e12 here without rounding
+    // away fees. The fixed-node graph keeps its original stricter range.
+    let relative_coefficient_limit = if direct_profile.is_some() {
+        super::direct_cost::MINIMUM_DIRECT_RELATIVE_COEFFICIENT
+    } else {
+        MINIMUM_RELATIVE_COEFFICIENT
+    };
     if graph
         .candidates
         .iter()
@@ -552,11 +622,30 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
                 .iter()
                 .filter_map(|observation| observation.exact_cost),
         )
-        .any(|cost| cost > 0.0 && cost / maximum_cost < MINIMUM_RELATIVE_COEFFICIENT)
+        .chain(
+            direct_profile
+                .into_iter()
+                .flat_map(|profile| profile.coefficients()),
+        )
+        .any(|cost| cost > 0.0 && cost / maximum_cost < relative_coefficient_limit)
     {
-        return Err(CandidateSelectionError::InvalidGraph(
-            "observed costs and local bounds exceed supported numerical range".into(),
-        ));
+        let local_minimum = graph
+            .candidates
+            .iter()
+            .map(|candidate| candidate.local_cost)
+            .filter(|cost| *cost > 0.0)
+            .reduce(f64::min);
+        let direct_minimum = direct_profile
+            .into_iter()
+            .flat_map(|profile| profile.coefficients())
+            .filter(|cost| *cost > 0.0)
+            .reduce(f64::min);
+        let reason = format!("observed costs and objective coefficients exceed supported numerical range: min={divisor:e}, max={maximum_cost:e}, local_min={local_minimum:?}, direct_min={direct_minimum:?}");
+        return Err(if direct_profile.is_some() {
+            CandidateSelectionError::UnsupportedDirectCost(reason)
+        } else {
+            CandidateSelectionError::InvalidGraph(reason)
+        });
     }
     let local_bound: Expression = graph
         .candidates
@@ -569,6 +658,21 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
         warm_start.as_ref().map(|start| start.cost / divisor),
     ));
     constraints.push(constraint!(total_cost >= local_bound));
+    if let Some(profile) = direct_profile {
+        let objective = super::direct_cost::encode(
+            graph,
+            profile,
+            &mut variables,
+            &mut constraints,
+            &candidate_selected,
+            &connections,
+            &root_assignments,
+            &objective_reach,
+            divisor,
+            check_deadline,
+        )?;
+        constraints.push(constraint!(total_cost >= objective));
+    }
     for observation in observations {
         check_deadline()?;
         for witness in &observation.rejected_queries {
@@ -661,6 +765,7 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
     }
     let solve_started = std::time::Instant::now();
     metrics.solve_calls += 1;
+    metrics.direct_cost_solve_calls += usize::from(direct_profile.is_some());
     let result = model.solve();
     metrics.solver_seconds += solve_started.elapsed().as_secs_f64();
     let solution = match result {
@@ -701,13 +806,17 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
             .collect(),
         modeled_cost,
     };
+    let direct_modeled_cost = direct_profile.map(|profile| profile.selected_cost(graph, &selected));
     decoded_proposal(
         graph,
         selected,
         solution.status(),
         solution.value(total_cost) * divisor,
     )
-    .map(Some)
+    .map(|mut proposal| {
+        proposal.direct_modeled_cost = direct_modeled_cost;
+        Some(proposal)
+    })
 }
 
 fn validate_binary_value(value: f64) -> Result<(), CandidateSelectionError> {
@@ -732,6 +841,7 @@ fn decoded_proposal(
         ));
     }
     Ok(CandidateProposal {
+        direct_modeled_cost: None,
         selected,
         model_lower_bound: matches!(status, SolutionStatus::Optimal).then_some(objective),
     })

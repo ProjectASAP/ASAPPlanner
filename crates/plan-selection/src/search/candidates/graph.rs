@@ -100,6 +100,8 @@ pub(crate) struct SelectedCandidateGraph {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CandidateSelectionError {
+    #[error("direct cost model is not representable: {0}")]
+    UnsupportedDirectCost(String),
     #[error("invalid candidate dependency graph: {0}")]
     InvalidGraph(String),
     #[error("candidate selection solver: {0}")]

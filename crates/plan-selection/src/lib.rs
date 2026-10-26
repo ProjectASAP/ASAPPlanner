@@ -1098,6 +1098,17 @@ pub struct CandidateConnectionReport {
     pub solver_ms: f64,
     pub validation_ms: f64,
     pub solve_calls: usize,
+    /// Restricted query-time proposals priced completely inside the MILP.
+    #[serde(default)]
+    pub direct_cost_solve_calls: usize,
+    /// Feasible direct proposals whose objective agrees with the evaluator.
+    #[serde(default)]
+    pub direct_cost_validated_plans: usize,
+    #[serde(default)]
+    pub direct_cost_best_validated_cost: Option<f64>,
+    /// Direct-cost contexts rejected by numerical or modeling support checks.
+    #[serde(default)]
+    pub direct_cost_fallback_reasons: Vec<String>,
     pub peak_milp_variables: usize,
     pub peak_milp_constraints: usize,
     #[serde(default)]
