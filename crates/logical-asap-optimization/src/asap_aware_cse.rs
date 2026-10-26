@@ -3077,11 +3077,11 @@ mod tests {
         );
     }
 
-    /// A count over a window, read from a CountSketch built in tumbling
+    /// A count over a window, read from a Count-Min built in tumbling
     /// panes, keeps the guarantee of one build over the window: Pass 1
-    /// offers CountSketch for counts, and its merged counters add.
+    /// offers Count-Min for counts, and its merged counters add.
     #[test]
-    fn a_count_from_count_sketch_panes_keeps_its_guarantee() {
+    fn a_count_from_count_min_panes_keeps_its_guarantee() {
         use crate::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
         };
@@ -3101,8 +3101,8 @@ mod tests {
                 t.choices
                     .candidates
                     .iter()
-                    .position(|c| *c == ComputationCandidate::Summary(SketchAlgorithm::CountSketch))
-                    .expect("CountSketch is offered for a count")
+                    .position(|c| *c == ComputationCandidate::Summary(SketchAlgorithm::Cms))
+                    .expect("Count-Min is offered for a count")
             })
             .collect();
         let roots: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)

@@ -68,10 +68,9 @@ mod tests {
             .downcast_mut::<DDSketchAccumulator>()
             .unwrap();
         dd.inner.add(&3.0);
-        let count = SketchStatistic::PointCount {
-            key: planner_types::ir::scalar::ColumnRef::SampleValue,
-            value: None,
-        };
-        assert_eq!(state.estimate(&count).unwrap(), 1.0);
+        let median = state
+            .estimate(&SketchStatistic::Quantile { q: 0.5 })
+            .unwrap();
+        assert!((median - 3.0).abs() <= 0.03, "{median}");
     }
 }

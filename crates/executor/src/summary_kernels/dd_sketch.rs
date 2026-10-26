@@ -42,7 +42,7 @@ impl AggregateCore for DDSketchAccumulator {
         self.inner.get_count() == 0
     }
 
-    /// Quantiles, and the total sample count as a bare `PointCount`.
+    /// Quantiles.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
             // PromQL `quantile_over_time` and SQL `percentile_cont`
@@ -55,7 +55,6 @@ impl AggregateCore for DDSketchAccumulator {
                 .inner
                 .quantile_interpolated(*q)?
                 .ok_or_else(|| "DDSketch quantile of an empty population".into()),
-            SketchStatistic::PointCount { value: None, .. } => Ok(self.inner.get_count() as f64),
             other => Err(format!("DDSketch does not answer {other:?}").into()),
         }
     }
@@ -73,9 +72,9 @@ mod tests {
         }
     }
 
-    // A bare point count reads the total sample count, and merge adds counts.
+    // A merged state's quantile is the union's.
     #[test]
-    fn count_and_quantile_survive_merge() {
+    fn quantile_survives_merge() {
         let (mut a, mut b) = (
             DDSketchAccumulator::new(0.01),
             DDSketchAccumulator::new(0.01),
@@ -85,19 +84,20 @@ mod tests {
             b.inner.add(&f64::from(v + 50));
         }
         let merged = a.merge_with(&b).unwrap();
-        assert_eq!(merged.estimate(&bare_count()).unwrap(), 100.0);
         let median = merged
             .estimate(&SketchStatistic::Quantile { q: 0.5 })
             .unwrap();
         assert!((median - 50.0).abs() <= 1.0, "{median}");
     }
 
-    // An empty DDSketch has no quantile, and unsupported queries are errors.
+    // An empty DDSketch has no quantile, and unsupported queries (its
+    // total among them) are errors.
     #[test]
     fn empty_quantile_and_unsupported_queries_fail() {
         let dd = DDSketchAccumulator::new(0.01);
         assert!(dd.estimate(&SketchStatistic::Quantile { q: 0.5 }).is_err());
         assert!(dd.estimate(&SketchStatistic::Cardinality).is_err());
+        assert!(dd.estimate(&bare_count()).is_err());
     }
 
     // The quantile at q interpolates linearly between the order statistics
