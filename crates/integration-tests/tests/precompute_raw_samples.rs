@@ -17,7 +17,7 @@ use asap_executor::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::logical_candidates;
+use asap_integration_tests::planning::explicit_local_candidates;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
@@ -50,7 +50,7 @@ fn canonical(labels: &Series) -> Series {
         .collect()
 }
 
-/// Every logical candidate the planner pipeline composes for `query`, with
+/// Exact and explicit single-rule candidates for `query`, with
 /// `m` declared a counter: plan selection's answer to a heap's open
 /// requirement that its weights are counter samples, which the executor
 /// needs before it builds a Count-Min heap.
@@ -67,7 +67,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
         sources: [("m".to_string(), counter)].into(),
         ..Default::default()
     };
-    logical_candidates(root, accuracy)
+    explicit_local_candidates(root)
         .into_iter()
         .map(|candidate| {
             match &with_confirmed_weights(&[QueryRoot::Operator(candidate)], &data)[..] {

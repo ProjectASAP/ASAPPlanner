@@ -193,37 +193,45 @@ pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 /// The Count-Min summary of a Stage 1 candidate of `query`.
 pub fn cms_summary(query: &str) -> OperatorNode {
     use crate::deployment_capabilities::DeploymentCapabilities;
+    use crate::per_computation_candidates::compose_logical_candidate;
     use crate::per_computation_candidates::generate_per_computation_candidates;
-    use crate::workload_candidates::stage1_logical_asap_optimization;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, QueryRoot};
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_promql(query, target);
-    // The Stage 1 candidates the planner pipeline enumerates for `query`
-    // with the built-in deployment and an unknown recurrence.
+    // Inspect each local computation choice under the built-in deployment.
     let per_computation = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
         .unwrap()
         .without_unsupported_summaries(&DeploymentCapabilities::default());
-    let summary = stage1_logical_asap_optimization(
-        &per_computation,
-        &[entry(asap_types::workload::QueryRecurrence::Unknown)],
-    )
-    .filter_map(|candidate| candidate.roots.ok())
-    .flat_map(|roots| match &roots[0] {
-        QueryRoot::Operator(node) => OperatorNode::reachable(node),
-        QueryRoot::Scalar(_) => vec![],
-    })
-    .find(|node| {
-        matches!(
-            node.asap(),
-            Some(ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(kind, _),
-                ..
-            }) if *kind.algorithm() == SketchAlgorithm::Cms
-        )
-    })
-    .map(|node| (*node).clone())
-    .unwrap_or_else(|| panic!("{query}: a Count-Min summary"));
+    let summary = per_computation
+        .targets
+        .iter()
+        .enumerate()
+        .flat_map(|(target, choices)| {
+            let inventory = &per_computation;
+            (0..choices.choice_count()).filter_map(move |candidate| {
+                let mut assignment = vec![0; inventory.targets.len()];
+                assignment[target] = candidate;
+                compose_logical_candidate(inventory, &assignment)
+                    .ok()
+                    .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>())
+            })
+        })
+        .flat_map(|roots| match &roots[0] {
+            QueryRoot::Operator(node) => OperatorNode::reachable(node),
+            QueryRoot::Scalar(_) => vec![],
+        })
+        .find(|node| {
+            matches!(
+                node.asap(),
+                Some(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) if *kind.algorithm() == SketchAlgorithm::Cms
+            )
+        })
+        .map(|node| (*node).clone())
+        .unwrap_or_else(|| panic!("{query}: a Count-Min summary"));
     summary
 }
 

@@ -428,3 +428,65 @@ fn a_rollup_of_the_newest_panes_covers_their_window() {
         Some((Bound::Excluded(-2 * MINUTE as i64), Bound::Included(0)))
     );
 }
+
+/// A fine-width chain remains a legal candidate; interrupted expansion is a
+/// typed budget stop, never a malformed chain or a partially successful plan.
+#[test]
+fn fine_pane_expansion_stops_at_the_planning_deadline() {
+    use asap_types::ir::operator::pane_chain::{
+        expand_pane_chains_in_workload_before, PaneChainExpansionError,
+    };
+    use asap_types::ir::QueryRoot;
+    use std::time::Instant;
+    let mut op = chain(scan()).operator.clone();
+    let Operator::ASAP(ASAPOp::PaneChain {
+        pane_width_ms,
+        pane_count,
+        ..
+    }) = &mut op
+    else {
+        unreachable!()
+    };
+    *pane_width_ms = 1;
+    *pane_count = 1_000_000;
+    let roots = [QueryRoot::Operator(merge(vec![OperatorNode::new_shared(
+        op,
+    )
+    .unwrap()]))];
+    let deadline = Instant::now() + Duration::from_millis(1);
+    assert!(matches!(
+        expand_pane_chains_in_workload_before(&roots, Some(deadline)),
+        Err(PaneChainExpansionError::DeadlineExceeded)
+    ));
+}
+
+/// Supplying ample budget preserves complete expansion and shared pane identity.
+#[test]
+fn budgeted_expansion_preserves_every_pane_and_shared_reader() {
+    use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload_before;
+    use asap_types::ir::QueryRoot;
+    use std::time::Instant;
+    let shared = chain(scan());
+    let roots = [
+        QueryRoot::Operator(merge(vec![shared.clone()])),
+        QueryRoot::Operator(merge(vec![shared])),
+    ];
+    let result = expand_pane_chains_in_workload_before(
+        &roots,
+        Some(Instant::now() + Duration::from_secs(10)),
+    )
+    .unwrap();
+    assert_eq!(result.chains.len(), 1);
+    assert_eq!(result.chains[0].panes.len(), 5);
+    let QueryRoot::Operator(first) = &result.roots[0] else {
+        unreachable!()
+    };
+    let QueryRoot::Operator(second) = &result.roots[1] else {
+        unreachable!()
+    };
+    assert!(first
+        .children()
+        .iter()
+        .zip(second.children())
+        .all(|(a, b)| Rc::ptr_eq(a, b)));
+}

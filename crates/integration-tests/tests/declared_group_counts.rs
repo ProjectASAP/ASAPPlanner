@@ -35,6 +35,17 @@ fn workload(distinct_values_per_label: serde_json::Value) -> PlanningWorkload {
     .expect("workload")
 }
 
+/// Isolate the declared-cardinality pricing contract from search order.
+fn priced_exact(workload: &PlanningWorkload) -> Run {
+    let roots = lower_promql(workload);
+    run_explicit_candidates(
+        workload,
+        roots.clone(),
+        vec![roots],
+        asap_plan_selection::PlanningModels::builtin(),
+    )
+}
+
 /// The group counts every priced plan gives the builds and aggregates read
 /// only by `query`, from their cost details (`... into N states`, `... into
 /// N groups`).
@@ -49,7 +60,7 @@ fn priced_groups(run: &Run, query: usize) -> BTreeSet<u64> {
                 continue;
             }
             let detail = &cost.per_node[&node.id].detail;
-            let words: Vec<&str> = detail.split([' ', ':']).collect();
+            let words: Vec<&str> = detail.split([' ', ':', ';']).collect();
             for window in words.windows(3) {
                 if window[0] == "into" && matches!(window[2], "states" | "groups") {
                     groups.insert(window[1].parse().expect("a group count"));
@@ -67,7 +78,7 @@ const Q4_BY_JOB: usize = 3;
 /// groups, at most the 10,000 series, and `by (job)` at 10.
 #[test]
 fn a_grouping_is_priced_at_the_product_of_its_labels_counts() {
-    let run = run_promql(&workload(serde_json::json!({"host": 1000, "job": 10})));
+    let run = priced_exact(&workload(serde_json::json!({"host": 1000, "job": 10})));
     assert_eq!(
         priced_groups(&run, Q3_BY_HOST_JOB),
         BTreeSet::from([10_000])
@@ -79,7 +90,7 @@ fn a_grouping_is_priced_at_the_product_of_its_labels_counts() {
 /// least one series.
 #[test]
 fn a_grouping_has_at_most_one_group_per_series() {
-    let run = run_promql(&workload(serde_json::json!({"host": 5000, "job": 10})));
+    let run = priced_exact(&workload(serde_json::json!({"host": 5000, "job": 10})));
     assert_eq!(
         priced_groups(&run, Q3_BY_HOST_JOB),
         BTreeSet::from([10_000])
@@ -93,13 +104,13 @@ fn a_grouping_has_at_most_one_group_per_series() {
 /// 10,000 groups.
 #[test]
 fn a_grouping_with_an_undeclared_label_is_bound_by_the_series_read() {
-    let run = run_promql(&workload(serde_json::json!({"host": 1000})));
+    let run = priced_exact(&workload(serde_json::json!({"host": 1000})));
     assert_eq!(
         priced_groups(&run, Q3_BY_HOST_JOB),
         BTreeSet::from([10_000])
     );
     assert_eq!(priced_groups(&run, Q4_BY_JOB), BTreeSet::from([10_000]));
-    let run = run_promql(&workload(serde_json::json!({})));
+    let run = priced_exact(&workload(serde_json::json!({})));
     assert_eq!(
         priced_groups(&run, Q3_BY_HOST_JOB),
         BTreeSet::from([10_000])

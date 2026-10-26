@@ -1,6 +1,6 @@
-//! Stage orchestration shared by memo selection and the temporary legacy route.
+//! Stage orchestration for memo candidate generation and joint selection.
 //!
-//! On memo routes, logical identity is established before Pass 1; deployment
+//! Logical identity is established before Pass 1; deployment
 //! pruning and candidate population retain those group IDs. This module owns
 //! the public stage driver rather than an individual search implementation.
 
@@ -14,24 +14,23 @@ use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 
 use crate::search::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::PlanningModels;
-use crate::{CostModel, RoutedToLegacy, SearchAlgorithm, Selection, SelectionError};
+use crate::{SearchAlgorithm, Selection, SelectionError};
 use asap_logical_asap_optimization::per_computation_candidates::{
-    generate_per_computation_candidates, generate_per_computation_candidates_with_memo,
-    PerComputationCandidateError, PerComputationCandidates,
+    generate_per_computation_candidates_with_memo, PerComputationCandidateError,
+    PerComputationCandidates,
 };
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
-use asap_physical_asap_optimization::PhysicalCandidate;
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
-use crate::search::legacy::stage1_to_stage3::legacy_search;
-pub use crate::search::legacy::stage1_to_stage3::run_stage2_and_stage3;
+/// A selected execution plan and the logical roots from which it was built.
+pub(crate) type PlanSearchResult =
+    Result<(Selection, PhysicalWorkloadPlan, Vec<QueryRoot>), SelectionError>;
 
-/// One whole-workload CandidateLogicalASAPDAG: `choice[t]` picks target
-/// `t`'s candidate, or its fused computation's
-/// (`targets[t].computation_for(choice[t])`), of the Pass 1 inventory. `roots` are the
-/// composed query roots in input order, or why the choice did not compose.
+/// Logical roots reconstructed from one selected candidate assignment.
+/// The archive preserves the corresponding physical plan's provenance.
 #[derive(Debug)]
 pub struct LogicalCandidate {
-    /// `L<n>`, numbered in enumeration order.
+    /// Stable identifier within the planning run.
     pub id: String,
     pub choice: Vec<usize>,
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
@@ -55,20 +54,15 @@ pub struct Stage1ToStage3Run<Id> {
     /// Stage 1, Pass 1: the per-computation candidates, with the roots they
     /// read.
     pub stage1_pass1_per_computation: PerComputationCandidates<Id>,
-    /// Stage 1, Pass 1: the number of composed whole-workload candidates,
-    /// the size of the Cartesian product of the targets' candidates,
-    /// saturating at `usize::MAX`. Pass 2 adds to them.
+    /// Diagnostic Pass 1 Cartesian-product size, saturating at `usize::MAX`.
+    /// Joint search does not enumerate this product; it selects connected nodes.
     pub combinations: usize,
-    /// Stage 1: every whole-workload logical candidate, in enumeration
-    /// order: each composed Pass 1 candidate, followed by its Pass 2
-    /// candidates (those with [`LogicalCandidate::pass2`]). Empty unless
-    /// every candidate is kept.
+    /// Logical roots of evaluated assignments retained for inspection.
+    /// A bounded archive is not necessarily the complete finite search space.
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
-    /// Stage 2: the physical candidates of each Stage 1 candidate that
-    /// composed and was implemented, one per materialization assignment:
-    /// `P<n>` (nothing materialized), then `P<n>-m<k>`, from `L<n>`. Empty
-    /// unless every candidate is kept.
-    pub stage2_physical_asap_optimization: Vec<PhysicalCandidate>,
+    /// Executable workload DAGs reconstructed from evaluated assignments.
+    /// Each plan records its selected operators, connections and materializations.
+    pub stage2_physical_asap_optimization: Vec<PhysicalWorkloadPlan>,
     /// Stage 2: the Stage 1 candidates Stage 2 could not implement, with the
     /// reasons. Empty unless every candidate is kept.
     pub stage2_pruned: Vec<PrunedCandidate>,
@@ -76,7 +70,7 @@ pub struct Stage1ToStage3Run<Id> {
     pub stage3_plan_selection: Result<Selection, SelectionError>,
     /// Stage 3: the selected physical candidate, as Stage 2 built it
     /// ([`Self::selected`]).
-    pub stage3_selected: Option<PhysicalCandidate>,
+    pub stage3_selected: Option<PhysicalWorkloadPlan>,
     /// Stage 3: the selected candidate's logical roots, with the weight
     /// requirements it confirmed made proofs ([`Self::selected_logical`]).
     pub stage3_selected_logical: Option<Vec<QueryRoot>>,
@@ -88,7 +82,7 @@ pub struct Stage1ToStage3Run<Id> {
 
 impl<Id> Stage1ToStage3Run<Id> {
     /// The selected physical candidate, if selection succeeded.
-    pub fn selected(&self) -> Option<&PhysicalCandidate> {
+    pub fn selected(&self) -> Option<&PhysicalWorkloadPlan> {
         self.stage3_selected.as_ref()
     }
 
@@ -108,33 +102,28 @@ pub struct Stage1ToStage3Search {
     /// in the run, for a developer tool that shows them; default `false`:
     /// only the best so far is kept.
     pub keep_every_candidate: bool,
-    /// Compose every whole-workload choice, without checking each query's
-    /// own candidates first: the exhaustive search the pruned one is tested
-    /// against; default `false`.
+    /// Traverse all generated assignments, subject to the planning budgets.
+    /// The report distinguishes complete traversal from a budget stop.
     pub exhaustive: bool,
-    /// The search algorithm (joint-planning-search design: the legacy
-    /// search, or the memo over logical sub-expressions, "Memo-group
-    /// search"); ignored with `exhaustive`. Default
-    /// [`SearchAlgorithm::Legacy`] until the MILP selects the exhaustive
-    /// search's price on every equivalence test.
+    /// The joint candidate selection engine.
     pub search: SearchAlgorithm,
-    /// The longest the MILP search may run, in ms; `None` for no limit.
-    /// Stopped at the limit, it selects its best plan so far and reports
-    /// the gap to its bound ([`crate::MilpReport::gap`]) and
-    /// [`crate::MilpReport::time_limit_reached`]: not proven
-    /// optimal unless the gap is 0.
+    /// Cooperative budget for candidate generation, solving and validation.
+    /// Defaults to 30 seconds. A single evaluator call may exceed the remaining
+    /// budget; a validated incumbent is retained, without claiming optimality.
     pub milp_time_limit_ms: Option<u64>,
+    /// Maximum candidate assignments evaluated; None uses the default budget.
+    pub max_evaluations: Option<usize>,
 }
 
 impl Stage1ToStage3Search {
-    /// The exhaustive search keeping every candidate: what the planner did
-    /// before the search was pruned.
+    /// Traverse the finite candidate catalog and retain evaluated assignments.
     pub fn exhaustive() -> Self {
         Self {
             keep_every_candidate: true,
             exhaustive: true,
-            search: SearchAlgorithm::Legacy,
+            search: SearchAlgorithm::CandidateConnections,
             milp_time_limit_ms: None,
+            max_evaluations: None,
         }
     }
 
@@ -178,44 +167,31 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
-    // Legacy routes do not pay for memo identity they will never use.
-    let uses_memo = !search.exhaustive
-        && match search.search {
-            SearchAlgorithm::Legacy => false,
-            SearchAlgorithm::MemoBruteForce => true,
-            SearchAlgorithm::MemoMilp => matches!(
-                models.plan_selection.cost_model,
-                CostModel::UsageOverTime(_)
-            ),
-        };
-    if uses_memo {
-        for (_, root) in &roots {
-            root.validate_structure()?;
-        }
+    let generation_started = std::time::Instant::now();
+    for (_, root) in &roots {
+        root.validate_structure()?;
     }
-    let initial = uses_memo.then(|| LogicalMemo::from_roots(&roots));
-    let per_computation = match &initial {
-        Some(memo) => generate_per_computation_candidates_with_memo(roots, memo)?,
-        None => generate_per_computation_candidates(roots)?,
-    };
+    let initial = LogicalMemo::from_roots(&roots);
+    let per_computation = generate_per_computation_candidates_with_memo(roots, &initial)?;
     Ok(run_with_initial_memo(
         per_computation,
         entries,
         data,
         models,
         search,
-        initial,
+        Some(initial),
+        Some(generation_started.elapsed().as_secs_f64() * 1000.0),
     ))
 }
 
 /// [`run_stage1_to_stage3_with`] after Pass 1: searches the Stage 1
 /// candidates of `per_computation` (the Pass 1 inventory of the frontends'
-/// roots, [`asap_logical_asap_optimization::workload_candidates::stage1_logical_asap_optimization`]) without the summaries the
+/// roots) without the summaries the
 /// deployment does not support
 /// ([`PerComputationCandidates::without_unsupported_summaries`]), so a
 /// caller can read the inventory, e.g. its
 /// [`combinations`](PerComputationCandidates::combinations), before
-/// enumerating.
+/// generating the memo.
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
@@ -223,7 +199,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
 ) -> Stage1ToStage3Run<Id> {
-    run_with_initial_memo(per_computation, entries, data, models, search, None)
+    run_with_initial_memo(per_computation, entries, data, models, search, None, None)
 }
 
 fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
@@ -233,55 +209,33 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
     initial: Option<LogicalMemo>,
+    local_candidate_generation_ms: Option<f64>,
 ) -> Stage1ToStage3Run<Id> {
-    let routed_to_legacy = match (search.exhaustive, search.search) {
-        (_, SearchAlgorithm::Legacy) => None,
-        (true, _) => Some(RoutedToLegacy::ExhaustiveRequested),
-        (false, SearchAlgorithm::MemoBruteForce) => {
-            let pruned =
-                per_computation.without_unsupported_summaries(models.deployment_capabilities);
-            let found = crate::search::memo::brute_force::brute_force_with_initial_memo(
-                initial.unwrap_or_else(|| LogicalMemo::from_roots(&pruned.roots)),
-                &pruned,
-                entries,
-                data,
-                models,
-            );
-            return memo_run(
-                pruned,
-                found,
-                entries,
-                data,
-                SearchAlgorithm::MemoBruteForce,
-            );
-        }
-        (false, SearchAlgorithm::MemoMilp) => {
-            if !matches!(
-                models.plan_selection.cost_model,
-                CostModel::UsageOverTime(_)
-            ) {
-                Some(RoutedToLegacy::CostModelNotSupported)
-            } else {
-                let pruned = per_computation
-                    .clone()
-                    .without_unsupported_summaries(models.deployment_capabilities);
-                let found = crate::search::milp::model::search_with_initial_memo(
-                    initial.unwrap_or_else(|| LogicalMemo::from_roots(&pruned.roots)),
-                    &pruned,
-                    entries,
-                    data,
-                    models,
-                    search.milp_time_limit_ms,
-                );
-                return memo_run(pruned, found, entries, data, SearchAlgorithm::MemoMilp);
-            }
-        }
-    };
-    let mut run = legacy_search(per_computation, entries, data, models, search);
-    if let Ok(selection) = &mut run.stage3_plan_selection {
-        selection.search.algorithm = SearchAlgorithm::Legacy;
-        selection.search.routed_to_legacy = routed_to_legacy;
-    }
+    let pruned = per_computation.without_unsupported_summaries(models.deployment_capabilities);
+    let initial = initial.unwrap_or_else(|| LogicalMemo::from_roots(&pruned.roots));
+    let mut archive = crate::search::route::CandidateArchive::default();
+    let found = crate::search::route::candidate_connection_search(
+        initial,
+        &crate::search::route::CandidateSearchContext {
+            inventory: &pruned,
+            entries,
+            data,
+            models,
+        },
+        search,
+        local_candidate_generation_ms,
+        &mut archive,
+    );
+    let mut run = memo_run(
+        pruned,
+        found,
+        entries,
+        data,
+        SearchAlgorithm::CandidateConnections,
+    );
+    run.stage1_logical_asap_optimization = archive.logical;
+    run.stage2_physical_asap_optimization = archive.physical;
+    run.stage2_pruned = archive.pruned;
     run
 }
 
@@ -290,7 +244,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
 /// and its logical roots, or why none is valid.
 fn memo_run<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
-    found: crate::search::milp::model::MemoSearchResult,
+    found: crate::search::pipeline::PlanSearchResult,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     algorithm: SearchAlgorithm,

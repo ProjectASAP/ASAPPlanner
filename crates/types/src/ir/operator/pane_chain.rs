@@ -13,7 +13,7 @@
 //! ends at the same time and is shorter.
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::asap::ASAPOp;
 use super::node::{Operator, OperatorNode};
@@ -197,6 +197,24 @@ fn build_over(
     Ok(build)
 }
 
+/// Expansion failure distinguishes invalid IR from an interrupted valid plan.
+#[derive(Debug, thiserror::Error)]
+pub enum PaneChainExpansionError {
+    #[error(transparent)]
+    Invalid(#[from] SchemaDerivationError),
+    #[error("planning deadline exceeded expanding pane chains")]
+    DeadlineExceeded,
+}
+
+fn without_deadline(error: PaneChainExpansionError) -> SchemaDerivationError {
+    match error {
+        PaneChainExpansionError::Invalid(error) => error,
+        PaneChainExpansionError::DeadlineExceeded => {
+            unreachable!("no expansion deadline was supplied")
+        }
+    }
+}
+
 /// `root` with every `PaneChain` expanded into its panes: a `SummaryMerge`
 /// reads each pane of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs; a merge of the newest `n` panes
@@ -210,7 +228,7 @@ fn build_over(
 pub fn expand_pane_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    expand(root, &mut ExpansionMemo::default())
+    expand(root, &mut ExpansionMemo::default()).map_err(without_deadline)
 }
 
 /// A workload with its pane chains expanded
@@ -249,7 +267,19 @@ pub struct ExpandedPaneChain {
 pub fn expand_pane_chains_in_workload(
     roots: &[QueryRoot],
 ) -> Result<PaneChainExpansion, SchemaDerivationError> {
-    let mut memo = ExpansionMemo::default();
+    expand_pane_chains_in_workload_before(roots, None).map_err(without_deadline)
+}
+
+/// Expand the same legal pane domain, abandoning partial expansion on timeout.
+pub fn expand_pane_chains_in_workload_before(
+    roots: &[QueryRoot],
+    deadline: Option<Instant>,
+) -> Result<PaneChainExpansion, PaneChainExpansionError> {
+    let mut memo = ExpansionMemo {
+        deadline,
+        ..Default::default()
+    };
+    memo.check_deadline()?;
     let roots = roots
         .iter()
         .map(|root| match root {
@@ -283,6 +313,10 @@ pub fn expand_pane_chains_in_workload(
             ExpandedPaneChain { chain, panes }
         })
         .collect();
+    // Catalog assembly follows expansion and is part of the same budget.
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(PaneChainExpansionError::DeadlineExceeded);
+    }
     Ok(PaneChainExpansion {
         roots,
         chains,
@@ -311,6 +345,7 @@ fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode 
 /// merges read expands into one set of panes.
 #[derive(Default)]
 struct ExpansionMemo {
+    deadline: Option<Instant>,
     nodes: HashMap<*const OperatorNode, Rc<OperatorNode>>,
     panes: HashMap<(*const OperatorNode, u32), Rc<OperatorNode>>,
     /// Each chain expanded, in the order first reached.
@@ -319,16 +354,30 @@ struct ExpansionMemo {
     expanded: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
 }
 
+impl ExpansionMemo {
+    fn check_deadline(&self) -> Result<(), PaneChainExpansionError> {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            Err(PaneChainExpansionError::DeadlineExceeded)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn expand(
     node: &Rc<OperatorNode>,
     memo: &mut ExpansionMemo,
-) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
+) -> Result<Rc<OperatorNode>, PaneChainExpansionError> {
+    memo.check_deadline()?;
     if let Some(done) = memo.nodes.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
     }
     let out = match &node.operator {
         Operator::ASAP(ASAPOp::PaneChain { .. }) => {
-            return Err(invalid("a pane chain is read only through a summary merge"))
+            return Err(invalid("a pane chain is read only through a summary merge").into())
         }
         Operator::ASAP(ASAPOp::SummaryMerge {
             children,
@@ -340,6 +389,7 @@ fn expand(
                 match child.asap() {
                     Some(ASAPOp::PaneChain { pane_count, .. }) => {
                         for index in 0..newest_panes.unwrap_or(*pane_count) {
+                            memo.check_deadline()?;
                             let key = (Rc::as_ptr(child), index);
                             if let Some(done) = memo.panes.get(&key) {
                                 inputs.push(Rc::clone(done));

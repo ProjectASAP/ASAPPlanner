@@ -1,0 +1,936 @@
+{
+  "format": "asap-joint-candidate-evaluation/v1",
+  "measurement_kind": "single-run debug optimizer wall/RSS and modeled plan costs, not runtime execution",
+  "environment": {
+    "captured_utc": "2026-10-24T03:59:38.422748+00:00",
+    "commit": "b1d1691efc47e4e5a5d17c202b5839ea8636bc48",
+    "status": "M crates/devtools/src/bin/stage_pipeline.rs\n M crates/plan-selection/src/lib.rs\n M crates/plan-selection/src/search/milp/candidate_connections.rs\n M crates/plan-selection/src/search/milp/candidate_search.rs\n M crates/plan-selection/src/search/pipeline.rs",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "kernel": "Linux 5.15.0-187-generic x86_64 GNU/Linux",
+    "logical_cpus": "56",
+    "binary_sha256": "9c8ab2db90f0b21dabb07dd7a2627e0f6978edf2ca3fed3c79ad21be1bf38af1  /mydata/target-joint-candidate-connections/debug/stage_pipeline",
+    "build_profile": "dev: unoptimized + debuginfo",
+    "timeout_seconds": 120,
+    "concurrency_note": "Exploratory measurements: parent plan-selection unit tests and unrelated long-running stage_pipeline process compete for resources; no controlled repeated trial.",
+    "baseline_binary_copy": "/tmp/asap-workload-benchmark-20261024/stage_pipeline-baseline",
+    "binary_note": "Source files were being edited concurrently after build; executable SHA256 is the precise measured artifact. Build excludes subsequent CandidateConnections CLI wiring.",
+    "candidate_before_pruning_sha256": "73a7ed1be60fac3ff98c7f9c8868d3251ff6d26d163c38a9bbea2a69a4a8263e"
+  },
+  "runs": [
+    {
+      "workload": "random-mixed-seed-862",
+      "algorithm": "legacy",
+      "wall_s": 93.70525495600305,
+      "peak_rss_kib": 171240,
+      "status": "selected",
+      "selected": "P315-m319",
+      "error": null,
+      "cost_per_second": 1.5764190368555072e-06,
+      "max_latency_ms": 1.1,
+      "peak_memory_bytes": 1313441848,
+      "avg_memory_bytes": 1294496934.313579,
+      "peak_cpu_cores": 10,
+      "cpu_ops_per_second": 3782833.333333335,
+      "scanned_bytes_per_second": 40000000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 9,
+      "search_summary": {
+        "candidates_checked": 933,
+        "incumbent_cost": 1.5764190368555072e-06,
+        "raw_scan_assignments_skipped": 185847,
+        "raw_scan_candidates_skipped": 10752,
+        "runner_up_cost_per_second": 1.5764359193046939e-06,
+        "searched_as_one": "not_in_joint_space"
+      }
+    },
+    {
+      "workload": "random-mixed-seed-862-x5",
+      "algorithm": "legacy",
+      "wall_s": 120.01523971601273,
+      "peak_rss_kib": 168396,
+      "status": "timeout",
+      "selected": null,
+      "error": null
+    },
+    {
+      "workload": "random-mixed-seed-862-long",
+      "algorithm": "legacy",
+      "wall_s": 120.24453831199207,
+      "peak_rss_kib": 168320,
+      "status": "timeout",
+      "selected": null,
+      "error": null
+    },
+    {
+      "workload": "random-mixed-seed-862",
+      "algorithm": "memo-milp",
+      "wall_s": 72.06186810098006,
+      "peak_rss_kib": 100668,
+      "status": "selected",
+      "selected": "P1-5+P1-0",
+      "error": null,
+      "cost_per_second": 1.580150194036131e-06,
+      "max_latency_ms": 1.1,
+      "peak_memory_bytes": 1314242152,
+      "avg_memory_bytes": 1294496954.4674296,
+      "peak_cpu_cores": 10,
+      "cpu_ops_per_second": 3794666.6666666684,
+      "scanned_bytes_per_second": 43200000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 9,
+      "search_summary": {
+        "algorithm": "memo-milp",
+        "candidates_checked": 324,
+        "incumbent_cost": 1.580150194036131e-06,
+        "memo": {
+          "build_ms": 223.66578900000002,
+          "candidates": 147,
+          "candidates_by_origin": {
+            "Panes": 37,
+            "Pass1": 43,
+            "Rollup": 1,
+            "SharedBuild": 4,
+            "WidenedScans": 62
+          },
+          "coupling_sites_by_kind": {
+            "PaneChain": 5,
+            "RawHorizon": 2,
+            "ScanLabels": 2,
+            "SharedBuildSize": 2
+          },
+          "groups": 31,
+          "shared_groups": 3
+        },
+        "milp": {
+          "clusters": [
+            {
+              "decode_failures": 0,
+              "gap": 5.460827831687762e-06,
+              "groups": 23,
+              "incumbent_cost": 1.5140790397658693e-06,
+              "lower_bound": 1.5140707716409096e-06,
+              "queries": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6
+              ],
+              "rounds": 33,
+              "solver_time_ms": 53647,
+              "time_limit_reached": false
+            },
+            {
+              "decode_failures": 0,
+              "gap": 3.087999426002294e-07,
+              "groups": 8,
+              "incumbent_cost": 6.607115427026132e-08,
+              "lower_bound": 6.607113386749267e-08,
+              "queries": [
+                7,
+                8
+              ],
+              "rounds": 2,
+              "solver_time_ms": 24,
+              "time_limit_reached": false
+            }
+          ],
+          "constraint_count": 14154,
+          "decode_failures": 0,
+          "first_lower_bound": 1.5762895355342884e-06,
+          "gap": 5.2454049999154154e-06,
+          "lower_bound": 1.5801419055084023e-06,
+          "rounds": 35,
+          "solver_time_ms": 53671,
+          "time_limit_reached": false,
+          "variable_count": 6755
+        },
+        "raw_scan_assignments_skipped": 0,
+        "raw_scan_candidates_skipped": 0,
+        "runner_up_cost_per_second": null,
+        "searched_as_one": null
+      }
+    },
+    {
+      "workload": "random-mixed-seed-862-x5",
+      "algorithm": "memo-milp",
+      "wall_s": 89.71705353798461,
+      "peak_rss_kib": 102796,
+      "status": "selected",
+      "selected": "P1-5+P1-0",
+      "error": null,
+      "cost_per_second": 7.901140962245756e-06,
+      "max_latency_ms": 5.5,
+      "peak_memory_bytes": 6571202152,
+      "avg_memory_bytes": 6472823841.803808,
+      "peak_cpu_cores": 10,
+      "cpu_ops_per_second": 18973333.333333336,
+      "scanned_bytes_per_second": 216000000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 9,
+      "search_summary": {
+        "algorithm": "memo-milp",
+        "candidates_checked": 324,
+        "incumbent_cost": 7.901140962245756e-06,
+        "memo": {
+          "build_ms": 219.144218,
+          "candidates": 147,
+          "candidates_by_origin": {
+            "Panes": 37,
+            "Pass1": 43,
+            "Rollup": 1,
+            "SharedBuild": 4,
+            "WidenedScans": 62
+          },
+          "coupling_sites_by_kind": {
+            "PaneChain": 5,
+            "RawHorizon": 2,
+            "ScanLabels": 2,
+            "SharedBuildSize": 2
+          },
+          "groups": 31,
+          "shared_groups": 3
+        },
+        "milp": {
+          "clusters": [
+            {
+              "decode_failures": 0,
+              "gap": 5.4605982824378485e-06,
+              "groups": 23,
+              "incumbent_cost": 7.570784782962742e-06,
+              "lower_bound": 7.57074344194836e-06,
+              "queries": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6
+              ],
+              "rounds": 33,
+              "solver_time_ms": 66134,
+              "time_limit_reached": false
+            },
+            {
+              "decode_failures": 0,
+              "gap": 1.5436234602808447e-06,
+              "groups": 8,
+              "incumbent_cost": 3.3035617928301204e-07,
+              "lower_bound": 3.3035566933746345e-07,
+              "queries": [
+                7,
+                8
+              ],
+              "rounds": 2,
+              "solver_time_ms": 25,
+              "time_limit_reached": false
+            }
+          ],
+          "constraint_count": 14156,
+          "decode_failures": 0,
+          "first_lower_bound": 7.881897620595889e-06,
+          "gap": 5.296824867621686e-06,
+          "lower_bound": 7.901099111285823e-06,
+          "rounds": 35,
+          "solver_time_ms": 66159,
+          "time_limit_reached": false,
+          "variable_count": 6757
+        },
+        "raw_scan_assignments_skipped": 0,
+        "raw_scan_candidates_skipped": 0,
+        "runner_up_cost_per_second": null,
+        "searched_as_one": null
+      }
+    },
+    {
+      "workload": "random-mixed-seed-862-long",
+      "algorithm": "memo-milp",
+      "wall_s": 97.60120308498153,
+      "peak_rss_kib": 115124,
+      "status": "selected",
+      "selected": "P1-5+P1-0",
+      "error": null,
+      "cost_per_second": 4.561910277723392e-06,
+      "max_latency_ms": 3.0999999999999996,
+      "peak_memory_bytes": 3874242152,
+      "avg_memory_bytes": 3854527829.355376,
+      "peak_cpu_cores": 10,
+      "cpu_ops_per_second": 7107999.999999997,
+      "scanned_bytes_per_second": 43200000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 9,
+      "search_summary": {
+        "algorithm": "memo-milp",
+        "candidates_checked": 324,
+        "incumbent_cost": 4.561910277723392e-06,
+        "memo": {
+          "build_ms": 219.51357299999998,
+          "candidates": 147,
+          "candidates_by_origin": {
+            "Panes": 37,
+            "Pass1": 43,
+            "Rollup": 1,
+            "SharedBuild": 4,
+            "WidenedScans": 62
+          },
+          "coupling_sites_by_kind": {
+            "PaneChain": 5,
+            "RawHorizon": 2,
+            "ScanLabels": 2,
+            "SharedBuildSize": 2
+          },
+          "groups": 31,
+          "shared_groups": 3
+        },
+        "milp": {
+          "clusters": [
+            {
+              "decode_failures": 0,
+              "gap": 5.599367084713087e-06,
+              "groups": 23,
+              "incumbent_cost": 4.405027549978366e-06,
+              "lower_bound": 4.405002884612096e-06,
+              "queries": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6
+              ],
+              "rounds": 33,
+              "solver_time_ms": 69729,
+              "time_limit_reached": false
+            },
+            {
+              "decode_failures": 0,
+              "gap": 3.627739258690275e-07,
+              "groups": 8,
+              "incumbent_cost": 1.568827277450248e-07,
+              "lower_bound": 1.5688267083206176e-07,
+              "queries": [
+                7,
+                8
+              ],
+              "rounds": 2,
+              "solver_time_ms": 25,
+              "time_limit_reached": false
+            }
+          ],
+          "constraint_count": 14158,
+          "decode_failures": 0,
+          "first_lower_bound": 4.557998924450074e-06,
+          "gap": 5.419282214762817e-06,
+          "lower_bound": 4.5618855554441575e-06,
+          "rounds": 35,
+          "solver_time_ms": 69754,
+          "time_limit_reached": false,
+          "variable_count": 6758
+        },
+        "raw_scan_assignments_skipped": 0,
+        "raw_scan_candidates_skipped": 0,
+        "runner_up_cost_per_second": null,
+        "searched_as_one": null
+      }
+    },
+    {
+      "workload": "random-mixed-seed-862",
+      "algorithm": "candidate-connections",
+      "wall_s": 30.88085449798382,
+      "peak_rss_kib": 88516,
+      "status": "selected (time_limit)",
+      "selected": "joint-plan-1",
+      "error": null,
+      "internal_search": {
+        "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+        "compatible_connections": 436,
+        "groups": 35,
+        "immediate_candidates": 187,
+        "inventory_construction_ms": 17.634411999999998,
+        "logical_candidates": 73,
+        "lower_bound": 0.0,
+        "max_refinements": 128,
+        "memo_expansion_ms": 26.180011999999998,
+        "model_construction_ms": 11580.880698999998,
+        "output_references": 9,
+        "peak_milp_constraints": 3921,
+        "peak_milp_variables": 1875,
+        "physical_configurations": 361,
+        "refinements": 91,
+        "relative_gap": 1.0,
+        "search_and_validation_ms": 30028.535765,
+        "solve_calls": 91,
+        "solver_ms": 14816.506773000003,
+        "status": "time_limit",
+        "time_limit_ms": 30000,
+        "validation_ms": 3519.164243999999,
+        "validation_rejection_counts": {
+          "no_accuracy_guarantee": 90
+        },
+        "validation_rejection_examples": [
+          "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q5: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q6: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q7: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+        ]
+      },
+      "cost_per_second": 2.995141955100763e-06,
+      "max_latency_ms": 1.09,
+      "peak_memory_bytes": 2533281848,
+      "avg_memory_bytes": 2491562258.509177,
+      "peak_cpu_cores": 10,
+      "cpu_ops_per_second": 6387333.33333333,
+      "scanned_bytes_per_second": 51200000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 9,
+      "search_summary": {
+        "algorithm": "candidate-connections",
+        "candidate_connections": {
+          "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+          "compatible_connections": 436,
+          "groups": 35,
+          "immediate_candidates": 187,
+          "inventory_construction_ms": 17.634411999999998,
+          "logical_candidates": 73,
+          "lower_bound": 0.0,
+          "max_refinements": 128,
+          "memo_expansion_ms": 26.180011999999998,
+          "model_construction_ms": 11580.880698999998,
+          "output_references": 9,
+          "peak_milp_constraints": 3921,
+          "peak_milp_variables": 1875,
+          "physical_configurations": 361,
+          "refinements": 91,
+          "relative_gap": 1.0,
+          "search_and_validation_ms": 30028.535765,
+          "solve_calls": 91,
+          "solver_ms": 14816.506773000003,
+          "status": "time_limit",
+          "time_limit_ms": 30000,
+          "validation_ms": 3519.164243999999,
+          "validation_rejection_counts": {
+            "no_accuracy_guarantee": 90
+          },
+          "validation_rejection_examples": [
+            "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q5: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q6: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q7: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+          ]
+        },
+        "candidates_checked": 91,
+        "incumbent_cost": 2.995141955100763e-06,
+        "raw_scan_assignments_skipped": 0,
+        "raw_scan_candidates_skipped": 0,
+        "runner_up_cost_per_second": null,
+        "searched_as_one": null
+      },
+      "binary_snapshot": "stage_pipeline-contract-baseline",
+      "binary_sha256": "5595e41795a4e7676343ab1e849569f308754c3a72532ab9f6a892e5a6172671"
+    },
+    {
+      "workload": "random-mixed-seed-862-x5",
+      "algorithm": "candidate-connections",
+      "wall_s": 30.86585076499614,
+      "peak_rss_kib": 89948,
+      "status": "selected (time_limit)",
+      "selected": "joint-plan-1",
+      "error": null,
+      "internal_search": {
+        "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+        "compatible_connections": 436,
+        "groups": 35,
+        "immediate_candidates": 187,
+        "inventory_construction_ms": 17.677854,
+        "logical_candidates": 73,
+        "lower_bound": 0.0,
+        "max_refinements": 128,
+        "memo_expansion_ms": 27.610678999999998,
+        "model_construction_ms": 11589.098659000001,
+        "output_references": 9,
+        "peak_milp_constraints": 3921,
+        "peak_milp_variables": 1875,
+        "physical_configurations": 361,
+        "refinements": 90,
+        "relative_gap": 1.0,
+        "search_and_validation_ms": 30006.630222,
+        "solve_calls": 91,
+        "solver_ms": 14763.246854999998,
+        "status": "time_limit",
+        "time_limit_ms": 30000,
+        "validation_ms": 3543.2489290000008,
+        "validation_rejection_counts": {
+          "no_accuracy_guarantee": 89
+        },
+        "validation_rejection_examples": [
+          "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q5: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q6: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q7: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+        ]
+      },
+      "cost_per_second": 1.4976681857741224e-05,
+      "max_latency_ms": 5.449999999999999,
+      "peak_memory_bytes": 12666401848,
+      "avg_memory_bytes": 12458656446.679232,
+      "peak_cpu_cores": 10,
+      "cpu_ops_per_second": 31936666.66666668,
+      "scanned_bytes_per_second": 256000000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 9,
+      "search_summary": {
+        "algorithm": "candidate-connections",
+        "candidate_connections": {
+          "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+          "compatible_connections": 436,
+          "groups": 35,
+          "immediate_candidates": 187,
+          "inventory_construction_ms": 17.677854,
+          "logical_candidates": 73,
+          "lower_bound": 0.0,
+          "max_refinements": 128,
+          "memo_expansion_ms": 27.610678999999998,
+          "model_construction_ms": 11589.098659000001,
+          "output_references": 9,
+          "peak_milp_constraints": 3921,
+          "peak_milp_variables": 1875,
+          "physical_configurations": 361,
+          "refinements": 90,
+          "relative_gap": 1.0,
+          "search_and_validation_ms": 30006.630222,
+          "solve_calls": 91,
+          "solver_ms": 14763.246854999998,
+          "status": "time_limit",
+          "time_limit_ms": 30000,
+          "validation_ms": 3543.2489290000008,
+          "validation_rejection_counts": {
+            "no_accuracy_guarantee": 89
+          },
+          "validation_rejection_examples": [
+            "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q5: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q6: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q7: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+          ]
+        },
+        "candidates_checked": 90,
+        "incumbent_cost": 1.4976681857741224e-05,
+        "raw_scan_assignments_skipped": 0,
+        "raw_scan_candidates_skipped": 0,
+        "runner_up_cost_per_second": null,
+        "searched_as_one": null
+      },
+      "binary_snapshot": "stage_pipeline-contract-baseline",
+      "binary_sha256": "5595e41795a4e7676343ab1e849569f308754c3a72532ab9f6a892e5a6172671"
+    },
+    {
+      "workload": "random-mixed-seed-862-long",
+      "algorithm": "candidate-connections",
+      "wall_s": 32.37240129898419,
+      "peak_rss_kib": 102724,
+      "status": "selected (time_limit)",
+      "selected": "joint-plan-1",
+      "error": null,
+      "internal_search": {
+        "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+        "compatible_connections": 436,
+        "groups": 35,
+        "immediate_candidates": 187,
+        "inventory_construction_ms": 17.579928000000002,
+        "logical_candidates": 73,
+        "lower_bound": 0.0,
+        "max_refinements": 128,
+        "memo_expansion_ms": 26.066677,
+        "model_construction_ms": 10910.626024,
+        "output_references": 9,
+        "peak_milp_constraints": 3918,
+        "peak_milp_variables": 1875,
+        "physical_configurations": 361,
+        "refinements": 87,
+        "relative_gap": 1.0,
+        "search_and_validation_ms": 30125.675745,
+        "solve_calls": 88,
+        "solver_ms": 13944.631198999996,
+        "status": "time_limit",
+        "time_limit_ms": 30000,
+        "validation_ms": 5165.354629000002,
+        "validation_rejection_counts": {
+          "no_accuracy_guarantee": 86
+        },
+        "validation_rejection_examples": [
+          "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q5: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q6: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q7: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+        ]
+      },
+      "cost_per_second": 8.747743584451108e-06,
+      "max_latency_ms": 3.0899999999999994,
+      "peak_memory_bytes": 7462881848,
+      "avg_memory_bytes": 7421239812.25296,
+      "peak_cpu_cores": 10,
+      "cpu_ops_per_second": 13730666.666666672,
+      "scanned_bytes_per_second": 51200000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 9,
+      "search_summary": {
+        "algorithm": "candidate-connections",
+        "candidate_connections": {
+          "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+          "compatible_connections": 436,
+          "groups": 35,
+          "immediate_candidates": 187,
+          "inventory_construction_ms": 17.579928000000002,
+          "logical_candidates": 73,
+          "lower_bound": 0.0,
+          "max_refinements": 128,
+          "memo_expansion_ms": 26.066677,
+          "model_construction_ms": 10910.626024,
+          "output_references": 9,
+          "peak_milp_constraints": 3918,
+          "peak_milp_variables": 1875,
+          "physical_configurations": 361,
+          "refinements": 87,
+          "relative_gap": 1.0,
+          "search_and_validation_ms": 30125.675745,
+          "solve_calls": 88,
+          "solver_ms": 13944.631198999996,
+          "status": "time_limit",
+          "time_limit_ms": 30000,
+          "validation_ms": 5165.354629000002,
+          "validation_rejection_counts": {
+            "no_accuracy_guarantee": 86
+          },
+          "validation_rejection_examples": [
+            "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q5: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q6: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q7: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+          ]
+        },
+        "candidates_checked": 87,
+        "incumbent_cost": 8.747743584451108e-06,
+        "raw_scan_assignments_skipped": 0,
+        "raw_scan_candidates_skipped": 0,
+        "runner_up_cost_per_second": null,
+        "searched_as_one": null
+      },
+      "binary_snapshot": "stage_pipeline-contract-baseline",
+      "binary_sha256": "5595e41795a4e7676343ab1e849569f308754c3a72532ab9f6a892e5a6172671"
+    },
+    {
+      "workload": "seed862-original-q03-q04-q05",
+      "algorithm": "legacy",
+      "wall_s": 2.111683227994945,
+      "peak_rss_kib": 68008,
+      "status": "selected",
+      "selected": "P6-m3",
+      "error": null,
+      "cost_per_second": 1.3836280530907367e-06,
+      "max_latency_ms": 1.1,
+      "peak_memory_bytes": 1194720808,
+      "avg_memory_bytes": 1179696522.3958402,
+      "peak_cpu_cores": 4,
+      "cpu_ops_per_second": 1580000.0,
+      "scanned_bytes_per_second": 8000000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 3,
+      "search_summary": {
+        "candidates_checked": 10,
+        "incumbent_cost": 1.3836280530907367e-06,
+        "raw_scan_assignments_skipped": 29,
+        "raw_scan_candidates_skipped": 21,
+        "runner_up_cost_per_second": 1.3948866963053797e-06,
+        "searched_as_one": "one_component"
+      }
+    },
+    {
+      "workload": "seed862-original-q03-q04-q05",
+      "algorithm": "candidate-connections",
+      "wall_s": 30.44025274302112,
+      "peak_rss_kib": 81724,
+      "status": "selected (time_limit)",
+      "selected": "joint-plan-1",
+      "error": null,
+      "internal_search": {
+        "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+        "compatible_connections": 250,
+        "groups": 14,
+        "immediate_candidates": 94,
+        "inventory_construction_ms": 10.058915,
+        "logical_candidates": 34,
+        "lower_bound": 0.0,
+        "max_refinements": 128,
+        "memo_expansion_ms": 12.285896,
+        "model_construction_ms": 6252.24072,
+        "output_references": 3,
+        "peak_milp_constraints": 2226,
+        "peak_milp_variables": 993,
+        "physical_configurations": 174,
+        "refinements": 102,
+        "relative_gap": 1.0,
+        "search_and_validation_ms": 30024.257279,
+        "solve_calls": 103,
+        "solver_ms": 9736.373036000003,
+        "status": "time_limit",
+        "time_limit_ms": 30000,
+        "validation_ms": 13980.816669000005,
+        "validation_rejection_counts": {
+          "no_accuracy_guarantee": 85
+        },
+        "validation_rejection_examples": [
+          "no_accuracy_guarantee: q1: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q2: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+          "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+        ]
+      },
+      "cost_per_second": 2.7716514014591154e-06,
+      "max_latency_ms": 1.09,
+      "peak_memory_bytes": 2397760744,
+      "avg_memory_bytes": 2359401856.671439,
+      "peak_cpu_cores": 4,
+      "cpu_ops_per_second": 3870000.0,
+      "scanned_bytes_per_second": 12800000.0,
+      "disk_bytes": 0,
+      "accepted_queries": 3,
+      "search_summary": {
+        "algorithm": "candidate-connections",
+        "candidate_connections": {
+          "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+          "compatible_connections": 250,
+          "groups": 14,
+          "immediate_candidates": 94,
+          "inventory_construction_ms": 10.058915,
+          "logical_candidates": 34,
+          "lower_bound": 0.0,
+          "max_refinements": 128,
+          "memo_expansion_ms": 12.285896,
+          "model_construction_ms": 6252.24072,
+          "output_references": 3,
+          "peak_milp_constraints": 2226,
+          "peak_milp_variables": 993,
+          "physical_configurations": 174,
+          "refinements": 102,
+          "relative_gap": 1.0,
+          "search_and_validation_ms": 30024.257279,
+          "solve_calls": 103,
+          "solver_ms": 9736.373036000003,
+          "status": "time_limit",
+          "time_limit_ms": 30000,
+          "validation_ms": 13980.816669000005,
+          "validation_rejection_counts": {
+            "no_accuracy_guarantee": 85
+          },
+          "validation_rejection_examples": [
+            "no_accuracy_guarantee: q1: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q2: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+          ]
+        },
+        "candidates_checked": 102,
+        "incumbent_cost": 2.7716514014591154e-06,
+        "raw_scan_assignments_skipped": 0,
+        "raw_scan_candidates_skipped": 0,
+        "runner_up_cost_per_second": null,
+        "searched_as_one": null
+      },
+      "binary_snapshot": "stage_pipeline-contract-baseline",
+      "binary_sha256": "5595e41795a4e7676343ab1e849569f308754c3a72532ab9f6a892e5a6172671"
+    }
+  ],
+  "bounded_baseline_followup": {
+    "binary_sha256": "90f2bd9a6efbaf2d1e6c81e8a6876fae549bd725264c4240a038599651db0ae5",
+    "runs": [
+      {
+        "workload": "random-mixed-seed-862",
+        "algorithm": "candidate-connections",
+        "wall_seconds": 30.145247228007065,
+        "selected": null,
+        "search": null,
+        "error": "MILP solver: candidate-connections: planning budget ended before a validated incumbent was found. Search report: {\"catalog_scope\":\"Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included\",\"status\":\"time_limit\",\"groups\":35,\"logical_candidates\":73,\"immediate_candidates\":187,\"physical_configurations\":361,\"compatible_connections\":436,\"output_references\":9,\"refinements\":91,\"max_refinements\":128,\"time_limit_ms\":30000,\"lower_bound\":0.0,\"relative_gap\":null,\"memo_expansion_ms\":26.687114,\"inventory_construction_ms\":18.052367,\"search_and_validation_ms\":30010.471235,\"model_construction_ms\":11868.950857,\"solver_ms\":15386.925313000002,\"validation_ms\":2643.4962680000003,\"solve_calls\":92,\"peak_milp_variables\":1875,\"peak_milp_constraints\":3922,\"validation_rejection_counts\":{\"no_accuracy_guarantee\":91},\"validation_rejection_examples\":[\"no_accuracy_guarantee: q6: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }\",\"no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }\",\"no_accuracy_guarantee: q5: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }\",\"no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }\",\"no_accuracy_guarantee: q7: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }\"]}; this route currently supports Pass 1, local panes, and concrete shared summary/pane states. Use memo-milp or legacy for the existing broader rule catalog.",
+        "cost": null
+      },
+      {
+        "workload": "seed862-original-q03-q04-q05",
+        "algorithm": "candidate-connections",
+        "wall_seconds": 30.50658312998712,
+        "selected": "joint-plan-3",
+        "search": {
+          "candidate_connections": {
+            "catalog_scope": "Pass 1 + local pane composition + identical-configuration shared summary/pane states; cross-width/horizon pane reuse, rollup, scan-widening and top-k-reuse rule expansion is not included",
+            "compatible_connections": 250,
+            "groups": 14,
+            "immediate_candidates": 94,
+            "inventory_construction_ms": 10.178492,
+            "logical_candidates": 34,
+            "lower_bound": 0.0,
+            "max_refinements": 128,
+            "memo_expansion_ms": 12.563505000000001,
+            "model_construction_ms": 6030.366824999998,
+            "output_references": 3,
+            "peak_milp_constraints": 2224,
+            "peak_milp_variables": 993,
+            "physical_configurations": 174,
+            "refinements": 100,
+            "relative_gap": 1.0,
+            "search_and_validation_ms": 30087.864899,
+            "solve_calls": 100,
+            "solver_ms": 9375.813212,
+            "status": "time_limit",
+            "time_limit_ms": 30000,
+            "validation_ms": 14627.585545,
+            "validation_rejection_counts": {
+              "no_accuracy_guarantee": 82
+            },
+            "validation_rejection_examples": [
+              "no_accuracy_guarantee: q1: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+              "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+              "no_accuracy_guarantee: q2: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+            ]
+          }
+        },
+        "error": null,
+        "cost_per_second": 2.7716514014591154e-06
+      }
+    ]
+  },
+  "certified_pruning_and_bounds_checkpoint": {
+    "source_commit": "c196e423",
+    "binary_sha256": "ca29aa00d2b24a9b259fbbe0446f80c6969b54987f343cb6d31d3e3507c76dd5",
+    "runs": [
+      {
+        "workload": "seed-862",
+        "selected": "joint-plan-1",
+        "accepted_queries": 9,
+        "cost_per_second": 1.631438681377807e-06,
+        "wall_seconds": 21.31,
+        "peak_rss_kib": 92468,
+        "report": {
+          "catalog_scope": "Pass 1 + local panes + identical-configuration shared summary/pane states with compatible per-entity scan-label widening; cross-width/horizon pane reuse, rollup, general shared scans and top-k-reuse expansion is not included",
+          "certified_query_cuts": 49,
+          "compatible_connections": 826,
+          "groups": 40,
+          "immediate_candidates": 321,
+          "inventory_construction_ms": 36.481718,
+          "logical_candidates": 120,
+          "lower_bound": 1.3775372893056489e-06,
+          "max_refinements": 128,
+          "memo_expansion_ms": 37.225734,
+          "model_construction_ms": 2613.525978,
+          "output_references": 9,
+          "peak_milp_constraints": 7041,
+          "peak_milp_variables": 3346,
+          "physical_configurations": 618,
+          "refinements": 27,
+          "relative_gap": 0.15563036169874891,
+          "search_and_validation_ms": 20557.931299,
+          "solve_calls": 28,
+          "solver_ms": 10416.963874000003,
+          "status": "solver_stopped: candidate selection solver: search stopped with GapLimit",
+          "time_limit_ms": 30000,
+          "validation_ms": 7479.309539,
+          "validation_rejection_counts": {
+            "no_accuracy_guarantee": 49
+          },
+          "validation_rejection_examples": [
+            "no_accuracy_guarantee: q2: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+          ]
+        }
+      },
+      {
+        "workload": "seed-862-x5",
+        "selected": "joint-plan-1",
+        "accepted_queries": 9,
+        "cost_per_second": 8.158168437889898e-06,
+        "wall_seconds": 15.03,
+        "peak_rss_kib": 91904,
+        "report": {
+          "catalog_scope": "Pass 1 + local panes + identical-configuration shared summary/pane states with compatible per-entity scan-label widening; cross-width/horizon pane reuse, rollup, general shared scans and top-k-reuse expansion is not included",
+          "certified_query_cuts": 47,
+          "compatible_connections": 826,
+          "groups": 40,
+          "immediate_candidates": 321,
+          "inventory_construction_ms": 36.454721,
+          "logical_candidates": 120,
+          "lower_bound": 6.8876864465282465e-06,
+          "max_refinements": 128,
+          "memo_expansion_ms": 38.064762,
+          "model_construction_ms": 1847.5636840000002,
+          "output_references": 9,
+          "peak_milp_constraints": 7034,
+          "peak_milp_variables": 3346,
+          "physical_configurations": 618,
+          "refinements": 22,
+          "relative_gap": 0.1557312773123204,
+          "search_and_validation_ms": 14287.841585,
+          "solve_calls": 23,
+          "solver_ms": 7820.427958,
+          "status": "solver_stopped: candidate selection solver: search stopped with GapLimit",
+          "time_limit_ms": 30000,
+          "validation_ms": 4580.344967999999,
+          "validation_rejection_counts": {
+            "no_accuracy_guarantee": 47
+          },
+          "validation_rejection_examples": [
+            "no_accuracy_guarantee: q2: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+          ]
+        }
+      },
+      {
+        "workload": "seed-862-long",
+        "selected": "joint-plan-1",
+        "accepted_queries": 9,
+        "cost_per_second": 4.697211936125574e-06,
+        "wall_seconds": 33.08,
+        "peak_rss_kib": 111624,
+        "report": {
+          "catalog_scope": "Pass 1 + local panes + identical-configuration shared summary/pane states with compatible per-entity scan-label widening; cross-width/horizon pane reuse, rollup, general shared scans and top-k-reuse expansion is not included",
+          "certified_query_cuts": 46,
+          "compatible_connections": 826,
+          "groups": 40,
+          "immediate_candidates": 321,
+          "inventory_construction_ms": 36.513739,
+          "logical_candidates": 120,
+          "lower_bound": 4.06436566416832e-06,
+          "max_refinements": 128,
+          "memo_expansion_ms": 38.402801000000004,
+          "model_construction_ms": 2278.40167,
+          "output_references": 9,
+          "peak_milp_constraints": 7036,
+          "peak_milp_variables": 3346,
+          "physical_configurations": 618,
+          "refinements": 26,
+          "relative_gap": 0.13472806434176945,
+          "search_and_validation_ms": 31314.891162,
+          "solve_calls": 26,
+          "solver_ms": 9758.41639,
+          "status": "time_limit",
+          "time_limit_ms": 30000,
+          "validation_ms": 19230.981113999995,
+          "validation_rejection_counts": {
+            "no_accuracy_guarantee": 46
+          },
+          "validation_rejection_examples": [
+            "no_accuracy_guarantee: q2: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q3: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }",
+            "no_accuracy_guarantee: q4: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.05000000000000005, failure_probability: Some(0.3), accuracy_scope: WholeResult }"
+          ]
+        }
+      }
+    ]
+  }
+}

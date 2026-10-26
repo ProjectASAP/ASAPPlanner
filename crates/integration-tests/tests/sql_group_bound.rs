@@ -63,6 +63,33 @@ fn every_column() -> serde_json::Value {
     serde_json::json!({"region": 4, "service": 25, "endpoint": 25, "status": 4})
 }
 
+/// Evaluate the exact computation and each supported local summary choice.
+/// These tests exercise group/error models, not a timed search's visited archive.
+fn run_group_choices(workload: &PlanningWorkload) -> Run {
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    let roots = lower_sql_roots(workload, &http_catalog()).expect("lowers");
+    let local =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    assert_eq!(local.targets.len(), 1, "one grouped statistic per fixture");
+    let candidates = (0..local.targets[0].choices.candidates.len())
+        .map(|choice| {
+            compose_logical_candidate(&local, &[choice])
+                .unwrap()
+                .into_iter()
+                .map(|(_, root)| root)
+                .collect()
+        })
+        .collect();
+    run_explicit_candidates(
+        workload,
+        roots,
+        candidates,
+        asap_plan_selection::PlanningModels::builtin(),
+    )
+}
+
 /// The sketches the selected plan builds (empty for the exact plan).
 fn selected_sketches(
     query: &str,
@@ -70,8 +97,7 @@ fn selected_sketches(
     declared: serde_json::Value,
 ) -> Vec<SketchAlgorithm> {
     let workload = workload(query, metric, declared);
-    let roots = lower_sql_roots(&workload, &http_catalog()).expect("lowers");
-    let run = run_stages(&workload, roots);
+    let run = run_group_choices(&workload);
     sketch_builds(run.physical(&run.selection.selected).dag())
         .into_iter()
         .map(|(_, algorithm, _)| algorithm)
@@ -146,8 +172,7 @@ fn priced_groups_and_scan_rows(
     std::collections::BTreeSet<u64>,
     std::collections::BTreeSet<u64>,
 ) {
-    let roots = lower_sql_roots(&workload, &http_catalog()).expect("lowers");
-    let run = run_stages(&workload, roots);
+    let run = run_group_choices(&workload);
     let (mut groups, mut scanned) = (
         std::collections::BTreeSet::new(),
         std::collections::BTreeSet::new(),

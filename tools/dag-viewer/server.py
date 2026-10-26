@@ -47,15 +47,14 @@ def sidecar_tables(workload: Path) -> list:
 
 
 # `stage_pipeline --search` algorithms an examples.json entry may name.
-SEARCHES = ("legacy", "memo-brute-force", "memo-milp")
+SEARCHES = ("candidate-connections",)
 
 
 def example_args(example: dict, out: str) -> list[str]:
     """The `stage_pipeline` arguments that write one examples.json entry: a
     built-in example (`example`, with the exhaustive search its story
     describes) or a PlanningWorkload file (`workload`, relative to this
-    directory, with the default search, or the entry's `search` (`legacy`,
-    `memo-brute-force` or `memo-milp`) when it names one, the entry's
+    directory, with the default search, or the entry's `search` (`candidate-connections`) when it names one, the entry's
     `deployment_capabilities` and the SQL tables in the `tables.json` next to
     the file, if any). Accuracy guarantees are ignored, as
     `stage_pipeline` does by default, unless the entry's

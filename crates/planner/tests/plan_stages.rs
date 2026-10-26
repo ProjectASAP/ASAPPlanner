@@ -46,11 +46,10 @@ fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
     .expect("Pass 1 accepts the query")
 }
 
-/// Every whole-workload candidate is enumerated, in mixed-radix order (the
-/// last target fastest), built and priced; the cheapest valid one is
-/// selected and every other one is reported.
+/// Reconstructed candidate assignments retain their stage provenance, and
+/// selection references an archived physical plan.
 #[test]
-fn enumerates_every_combination_and_selects_one() {
+fn archives_connected_candidates_and_selects_one() {
     let run = promql_stages("count(a) + count(b)", 0.01);
     let sizes: Vec<_> = run
         .stage1_pass1_per_computation
@@ -60,13 +59,20 @@ fn enumerates_every_combination_and_selects_one() {
         .collect();
     assert_eq!(sizes.len(), 2);
     assert_eq!(run.combinations, sizes[0] * sizes[1]);
-    assert_eq!(run.stage1_logical_asap_optimization.len(), run.combinations);
-    assert_eq!(run.stage1_logical_asap_optimization[0].choice, vec![0, 0]);
-    assert_eq!(run.stage1_logical_asap_optimization[1].choice, vec![0, 1]);
+    // The archive contains connected physical assignments, not the Cartesian
+    // product of Pass 1 choices. Sharing and materialization add decisions.
+    let logical_ids: std::collections::BTreeSet<_> = run
+        .stage1_logical_asap_optimization
+        .iter()
+        .map(|candidate| &candidate.id)
+        .collect();
     assert_eq!(
-        run.stage1_logical_asap_optimization[sizes[1]].choice,
-        vec![1, 0]
+        logical_ids.len(),
+        run.stage1_logical_asap_optimization.len()
     );
+    for physical in &run.stage2_physical_asap_optimization {
+        assert!(logical_ids.contains(&physical.from_logical));
+    }
     assert_eq!(
         run.stage2_physical_asap_optimization.len() + run.stage2_pruned.len(),
         run.stage1_logical_asap_optimization

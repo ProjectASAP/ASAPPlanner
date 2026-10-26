@@ -13,8 +13,7 @@ use asap_integration_tests::physical_export::{
     at_ingestion, at_ingestion_physical_asap_dag, physical_asap_dag,
 };
 use asap_integration_tests::planning::logical_candidates;
-use asap_physical_asap_optimization::PhysicalCandidate;
-use asap_plan_selection::PlanningModels;
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::Selection;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -687,26 +686,49 @@ fn ddsketch_ratio_selection(
     query: &str,
     planned: AccuracyTarget,
     accuracy: AccuracyTarget,
-) -> (Vec<PhysicalCandidate>, Selection) {
+    non_negative: bool,
+) -> (Vec<PhysicalWorkloadPlan>, Selection) {
     let root = lower_promql(query, planned).unwrap();
-    let data = asap_integration_tests::planning::declared_data(&root);
-    let run = asap_plan_selection::run_stage1_to_stage3_with(
-        vec![(0, QueryRoot::Operator(root))],
-        &[asap_types::workload::QueryWorkloadEntry {
-            query: Default::default(),
-            requirements: asap_types::workload::QueryRequirements {
-                accuracy,
-                max_latency_ms: None,
-            },
-            predictability: Default::default(),
-            recurrence: Default::default(),
-            range_evaluation: None,
-        }],
+    let mut data = asap_integration_tests::planning::declared_data(&root);
+    for facts in data.sources.values_mut() {
+        facts.values_non_negative = non_negative;
+    }
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        generate_per_computation_candidates, ComputationCandidate,
+    };
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    let exact = vec![0; inventory.targets.len()];
+    let dds = inventory
+        .targets
+        .iter()
+        .map(|target| {
+            target
+                .choices
+                .candidates
+                .iter()
+                .position(|candidate| {
+                    *candidate == ComputationCandidate::Summary(SketchAlgorithm::DDSketch)
+                })
+                .expect("quantile supports DDS")
+        })
+        .collect();
+    let entries = [asap_types::workload::QueryWorkloadEntry {
+        query: Default::default(),
+        requirements: asap_types::workload::QueryRequirements {
+            accuracy,
+            max_latency_ms: None,
+        },
+        predictability: Default::default(),
+        recurrence: Default::default(),
+        range_evaluation: None,
+    }];
+    let run = asap_integration_tests::planning::explicit_assignment_plans(
+        inventory,
+        vec![exact, dds],
+        &entries,
         &data,
-        PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
-    )
-    .unwrap();
+    );
     let ratios = run
         .stage2_physical_asap_optimization
         .into_iter()
@@ -729,25 +751,31 @@ fn ddsketch_ratio_selection(
     (ratios, run.stage3_plan_selection.unwrap())
 }
 
-/// A ratio of two DDSketch quantiles is selected with no operand-domain
-/// evidence, and the committed planner alpha is exercised against the
-/// pinned sketch implementation on one-signed data.
+/// Declared nonnegative inputs permit formal ratio admission; an unknown
+/// sign does not. The same explicitly sized DDS fixture is also evaluated
+/// numerically on all-positive and all-negative samples without claiming
+/// a general bound for arbitrary signed interpolation.
 #[test]
-fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
+fn ddsketch_ratio_checks_sign_contract_and_one_sided_sketch_evaluations() {
     for sign in [-1., 1.] {
         let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
         let (ratios, selection) = ddsketch_ratio_selection(
             "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
             AccuracyTarget::max_error(0.01),
             target.clone(),
+            sign > 0.0,
         );
         let accepted: Vec<_> = ratios
             .iter()
             .filter(|candidate| selection.costs.contains_key(&candidate.id))
             .collect();
-        assert!(!accepted.is_empty(), "{selection:?}");
-        // Both operands read one alpha, which the accepted ratio's target bounds.
-        let alphas: Vec<f64> = accepted[0]
+        assert!(
+            !ratios.is_empty(),
+            "explicit DDS fixture exists regardless of admission"
+        );
+        assert_eq!(!accepted.is_empty(), sign > 0.0, "{selection:?}");
+        // Both explicit operands use the planner's composed-budget alpha.
+        let alphas: Vec<f64> = ratios[0]
             .dag
             .nodes
             .iter()

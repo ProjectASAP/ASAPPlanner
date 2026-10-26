@@ -143,12 +143,13 @@ fn exact_duplicate_of_a_shared_query_holds() {
     );
 }
 
-/// A small in-process campaign writes the summary with the design-doc
-/// coverage table, and one draft per finding.
+/// A bounded worker campaign writes the summary with the design-doc coverage
+/// table and one draft per finding, including cases stopped by its time limit.
 #[test]
 fn campaign_writes_summary_coverage_and_drafts() {
     use asap_devtools::planner_fuzz::report::{run_campaign, Campaign};
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("planner_fuzz_campaign");
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("planner_fuzz_campaign_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     let campaign = Campaign {
         seed: 7,
@@ -158,11 +159,21 @@ fn campaign_writes_summary_coverage_and_drafts() {
         seeds: vec![seed("issue903.workload.json")],
         out_dir: out.clone(),
         max_shrink_attempts: 5,
-        worker: None,
+        // The report test must honor case_timeout_s even when an individual
+        // case performs many planner calls; in-process campaigns cannot do so.
+        worker: Some(env!("CARGO_BIN_EXE_planner_fuzz").into()),
         case_timeout_s: 60.0,
     };
     let summary = run_campaign(&campaign, FuzzSettings::default()).expect("the campaign runs");
     assert_eq!(summary.cases_run, 2);
+    assert!(
+        summary
+            .failed_cases
+            .iter()
+            .all(|case| case.error.starts_with("timed out after ")),
+        "worker failures other than the configured timeout: {:?}",
+        summary.failed_cases
+    );
     let markdown = std::fs::read_to_string(out.join("summary.md")).expect("summary.md");
     assert!(markdown.contains("## Design-doc reuse patterns"));
     assert!(markdown.contains("`a-looser-accuracy`"));

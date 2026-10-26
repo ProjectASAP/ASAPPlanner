@@ -2,22 +2,20 @@
 
 A browser view of what the planner does with one workload, read from an
 `asap-stage-pipeline/v1` document written by the `stage_pipeline` devtool.
-`stage_pipeline` plans with the default search, the one `plan_installable`
-runs: it keeps only the best candidate, so the document holds the selected
-plan, the rejections Stage 3 recorded (the first of each cause) and the
-search's report. With `--exhaustive` it composes and prices every candidate
-and the document lists them; the built-in examples are written so. The
-document shows:
+`stage_pipeline` uses the candidate-connection MILP, the same search used by
+`plan_installable`. By default the document keeps the selected plan and its
+validation, cost, and search reports. `--exhaustive` uses the same engine to
+archive evaluated assignments within the configured time and evaluation
+budgets; only `catalog_exhausted` establishes complete traversal. The document
+shows:
 
-- **Stage 0**, the DAG the query-language frontends lower the queries into,
-  one root per query;
-- **Stage 1**, the logical ASAP candidates: Pass 1's per-computation
-  choices, each followed by its Pass 2 identical-expression candidates;
-- **Stage 2**, the physical candidates of each composed Stage 1 candidate,
-  one per materialization assignment (`P<n>`, then `P<n>-m<k>`), or the
-  reason Stage 2 pruned it;
-- **Stage 3**, which checks every physical candidate, prices the valid ones
-  per second and selects the cheapest.
+- **Stage 0**, the query-language frontends' DAG, with one root per query;
+- **Stage 1**, local computation choices and reconstructed logical plans for
+  evaluated candidate selections;
+- **Stage 2**, executable physical plans, their materialization assignments,
+  and any recorded physical-legality rejection;
+- **Stage 3**, validation, configured objective values, the selected plan,
+  and bounded-search status. A feasible selected plan need not be a proven optimum.
 
 To run it, see [RUNNING.md](RUNNING.md).
 
@@ -25,7 +23,7 @@ To run it, see [RUNNING.md](RUNNING.md).
 
 - **Examples**: one tab per entry of `examples.json`: #509 Examples 1, 3a
   and 3b, workload-01 of each ASAPQuery random workload set (below), and
-  six memo-MILP examples, each one kind of sharing on the smallest subset
+  six sharing examples, each one kind of sharing on the smallest subset
   of a paper workload template (below). `#example3b` in the URL opens that
   example.
 - **Workload sets** (button): one table per set listed in
@@ -91,16 +89,11 @@ To run it, see [RUNNING.md](RUNNING.md).
   node in the Stage 2 lane. Stage 3 predicts no
   per-node state size, so the table has none. The lane's header also shows
   the shown candidate's Stage 3 usage.
-- **Shared units** (memo-MILP documents only), under the stored outputs:
-  a line with the selected plan's cost, the MILP lower bound, gap and
-  rounds, whether the run certified (gap ≤ 1e-4 without a time limit) and
-  the cost of the queries planned alone with the saving; then the selected
-  plan's shared units: each memo group (`G1`, `G2`, …: one distinct
-  logical sub-expression) one node serves to several readers, each
-  coupling site (`S1`, …) read by several groups, and a widened scan, with
-  their readers, the queries behind them, their repeat intervals (a shared
-  unit runs on their union) and the threshold (a shared build's size, a
-  pane chain's grid, set by the strictest reader).
+- **Search summary**, under the stored outputs: candidate-connection reports
+  show the incumbent cost, available lower bound and gap, refinement count,
+  and solver status. Historical documents may also contain a legacy memo-plan
+  view of shared units. Rendering that archived format does not enable a second
+  planner implementation; new documents use the candidate-connection report.
 - **Details**: click a node for its operator, the queries reaching it, timing, materialization,
   output schema, guarantee and Stage 3 cost; click an edge for its schema
   and data state.
@@ -279,34 +272,16 @@ are ignored, `stage_pipeline`'s default.
   `enforced` (`--enforce-accuracy-guarantees`, as `plan_installable` plans
   with the default `PlanSelectionSettings`). The Stage 3 header shows it;
   an older document without it is still valid, any other value is not.
-- `search` is `default` (`Stage1ToStage3Search::default`, the search
-  `plan_installable` runs: each query's own candidates checked first,
-  independent components searched separately, raw-scan candidates skipped
-  when raw data is not retained) or `exhaustive` (`--exhaustive`: every
-  candidate composed and priced). Under the default search the document's
-  Stage 1 and Stage 2 hold the selected candidate only (none when selection
-  fails), `combinations` is 1, and `stage3_plan_selection.search` is
-  Stage 3's `SearchReport`: the physical candidates checked, the components
-  searched separately with their selections or why the workload was
-  searched as one (`searched_as_one`), the classes of interchangeable
-  queries (`interchangeable_queries`, by query index), and per query its
-  own candidates checked and those discarded with why.
-- Under `search` `memo-milp`, `stage3_plan_selection.search` also has
-  `algorithm`, `memo` (the memo's size: `groups`, `shared_groups`,
-  `candidates`, `candidates_by_origin`, `coupling_sites_by_kind`,
-  `build_ms`), `incumbent_cost`, `milp` (`lower_bound`, `gap`, `rounds`,
-  model size, `solver_time_ms`, `time_limit_reached`, per-cluster
-  `clusters`, and `queries_alone_cost`, the warm-start plan's cost: each
-  query planned alone, no sharing between queries) and `memo_plan`, the
-  selected plan over the memo: `groups` (per group its `operator` with
-  children named by group index, `parents`, `queries`, `roots_of`,
-  `candidates`, the `chosen` implementation candidate's `origin`,
-  `operator`, `implements`, `reads`, `built_once` and `coupling_sites`, or
-  `implemented_by` the group whose fused candidate implements it),
-  `coupling_sites` (per site its `kind`, chosen `threshold`, number of
-  `thresholds` and reader groups `readers`) and `scans_widened` (the
-  selected plan is the solution's scan-widening variant). `memo_plan` is
-  absent when the warm start (each query planned alone) was selected.
+- `search` is `candidate-connections`, or `exhaustive` for traversal of the
+  same finite catalog with evaluated plans and rejections archived. Exhaustive
+  mode is not an independent reference optimizer; time and evaluation budgets
+  still apply. `--max-combinations` bounds evaluated assignments.
+- `stage3_plan_selection.search.candidate_connections` reports catalog size,
+  objective, calibration scope, termination status, nullable lower bound/gap,
+  generation/model/solver/validation timings, and refinement counts. A timeout
+  incumbent is validated but does not certify unexplored candidates. Cluster
+  objectives can have no scalar lower bound. Historical committed documents
+  with old memo reports remain readable; those engines cannot be selected.
 - `stage3_plan_selection.warnings` holds one-line warnings about the
   workload and the selected plan: a PromQL query applying `rate`,
   `increase` or `irate` to a metric the data workload declares a gauge
@@ -369,22 +344,23 @@ shown. If a check fails, it shows the problems instead.
   `deployment_capabilities` and `cost_model`) is committed under
   `examples/`. The committed documents are
   `examples/planner-layering-example1.json` and workload-01 of each
-  ASAPQuery set (0.9, 0.9 and 1.4 MB), and the six memo-MILP examples
-  (0.1 MB each); `crates/devtools/tests/stage_pipeline.rs`
-  checks that they are current (a memo-MILP one up to its timings, and
-  certified). `server.py --regenerate` rewrites them.
+  ASAPQuery set and the six sharing examples. Historical snapshots retain
+  their original plans; `crates/devtools/tests/stage_pipeline.rs` checks input
+  consistency and newly generated plan validity and stored-output linkage.
+  Timed searches are not required to reproduce snapshot IDs or prove optimality.
+  `server.py --regenerate` rewrites the snapshots.
   An entry's `accuracy_guarantees` (`ignored` when absent) says whether it
   is planned with `--enforce-accuracy-guarantees`; every current entry
   enforces, since each story is about which plans meet their accuracy
   target, and a workload example matches its set.
-- `memo-examples/`: the memo-MILP examples' `PlanningWorkload` files
+- `memo-examples/`: the sharing examples' `PlanningWorkload` files
   (`promql/`, and `sql/` with its `tables.json`). Each is the smallest
   subset of an ASAPQuery paper workload template that shows one kind of
   sharing, with the template's data facts (W-RangeHeavy: `data`, 10^4
   series sampled every 5 ms, 2 × 10^6 rows/s; W-RollupHeavy: `http`, 10^4
   series, every 5 ms, at most 10^6 distinct values per evaluation), raw
   data retained, AWS Fargate prices and accuracy guarantees enforced. Their
-  `examples.json` entries name `"search": "memo-milp"`, which server.py
+  `examples.json` entries name `"search": "candidate-connections"`, which server.py
   passes as `--search`; their documents are committed under `examples/`.
 - `cytoscape.min.js`, `dagre.min.js`, `cytoscape-dagre.js`: vendored, so the
   page works offline.

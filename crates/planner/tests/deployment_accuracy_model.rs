@@ -68,42 +68,66 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
     })
 }
 
-/// Every Stage 2 candidate for `workload` under `models`, rendered in full:
-/// its id and its query roots with every node's guarantee and summary
-/// parameters. Two runs that differ only in Stage 3's models must agree.
-fn stage2_candidates(workload: &PlanningWorkload, models: PlanningModels<'_>) -> Vec<String> {
+/// A small, fixed physical inventory, independent of deployment accuracy models.
+/// Exercise each local implementation with the remaining computations exact.
+/// These fixtures test evaluator hooks, not a timed search's archive prefix.
+fn physical_candidates(
+    workload: &PlanningWorkload,
+) -> Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan> {
+    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    use asap_physical_asap_optimization::optimize_physical_asap_chosen;
+    use asap_types::physical::Materialization;
+
     let roots = lower_promql_query_workload(workload).expect("lowers");
-    let run = asap_plan_selection::run_stage1_to_stage3_with(
-        roots.into_iter().enumerate().collect(),
-        &workload.query_workload.entries().collect::<Vec<_>>(),
-        workload.data_workload.as_ref().unwrap(),
-        models,
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
-    )
-    .expect("Stage 1 accepts the workload");
-    run.stage2_physical_asap_optimization
-        .iter()
-        .map(|candidate| format!("{}: {:?}", candidate.id, candidate.roots))
+    let inventory =
+        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let mut choices = BTreeSet::from([vec![0; inventory.targets.len()]]);
+    for (index, target) in inventory.targets.iter().enumerate() {
+        for implementation in 1..target.choice_count() {
+            let mut choice = vec![0; inventory.targets.len()];
+            choice[index] = implementation;
+            choices.insert(choice);
+        }
+    }
+    choices
+        .into_iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
+                .unwrap()
+                .into_iter()
+                .map(|(_, root)| root)
+                .collect();
+            let mut candidate = optimize_physical_asap_chosen(
+                &format!("fixture-{index}"),
+                &roots,
+                &workload.query_workload.entries().collect::<Vec<_>>(),
+                workload.data_workload.as_ref().unwrap(),
+                &DeploymentCapabilities::default(),
+                &mut |_, _, _| Materialization::NotMaterialized,
+            )
+            .unwrap()
+            .expect("query-time fixture is executable");
+            candidate.id = format!("fixture-{index}");
+            candidate
+        })
         .collect()
 }
 
-/// `workload` planned through Stage 1 to Stage 3 under `models`, keeping
-/// every candidate in the selection: the exhaustive search, whose selection
-/// lists every candidate Stage 3 priced or rejected.
 fn plan_every_candidate(
     workload: &PlanningWorkload,
+    candidates: &[asap_physical_asap_optimization::PhysicalWorkloadPlan],
     models: PlanningModels<'_>,
 ) -> Result<PlanOutput, asap_plan_selection::SelectionError> {
-    let roots = lower_promql_query_workload(workload).expect("lowers");
-    let run = asap_plan_selection::run_stage1_to_stage3_with(
-        roots.into_iter().enumerate().collect(),
+    let selection = asap_plan_selection::select_plan(
+        candidates,
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
         models,
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
-    )
-    .expect("Stage 1 accepts the workload");
-    let selection = run.stage3_plan_selection?;
+    )?;
     let plans = selection
         .plan
         .iter()
@@ -150,8 +174,10 @@ async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
     // The user's workload: one p99 query with a 1% rank-error target.
     let workload = rank_target_workload("quantile_over_time(0.99, lat[5m])");
 
+    let candidates = physical_candidates(&workload);
+
     // The built-in models: Stage 3 checks guarantees with BuiltinAccuracyModel.
-    let builtin = plan_every_candidate(&workload, PlanningModels::builtin())
+    let builtin = plan_every_candidate(&workload, &candidates, PlanningModels::builtin())
         .expect("plans with the built-in models");
     // The candidates whose approximate output the built-in model accepts:
     // the sketch candidates, sized in Stage 1 for the 1% target.
@@ -163,6 +189,7 @@ async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
     let exact_only_model = ExactOnlyAccuracyModel;
     let exact_only = plan_every_candidate(
         &workload,
+        &candidates,
         PlanningModels::builtin().with_accuracy(&exact_only_model),
     )
     .expect("plans with the exact-only model");
@@ -173,13 +200,7 @@ async fn the_deployment_accuracy_model_decides_only_in_plan_selection() {
         stage3_candidate_ids(&builtin),
         stage3_candidate_ids(&exact_only)
     );
-    assert_eq!(
-        stage2_candidates(&workload, PlanningModels::builtin()),
-        stage2_candidates(
-            &workload,
-            PlanningModels::builtin().with_accuracy(&exact_only_model)
-        )
-    );
+
     // Stage 3 now rejects each of those candidates for missing its target,
     // accepts no approximate output and selects an exact plan.
     let exact_only_selection = exact_only.selection.as_ref().unwrap();
@@ -247,11 +268,13 @@ async fn the_deployment_accuracy_model_accepts_outputs_without_a_guarantee() {
     // estimates, so it keeps the summary candidates with no guarantee.
     let workload = rank_target_workload("quantile(0.99, rate(x[5m])) - quantile(0.5, rate(x[5m]))");
 
+    let candidates = physical_candidates(&workload);
+
     // The built-in model (default hook: accepts nothing directly) rejects
     // every summary candidate as having no guarantee and selects exact.
-    let builtin = plan_every_candidate(&workload, PlanningModels::builtin())
+    let builtin = plan_every_candidate(&workload, &candidates, PlanningModels::builtin())
         .expect("plans with the built-in models");
-    // The candidates rejected for having no guarantee: P6 … P47.
+    // Candidates rejected for having no guarantee.
     let unguaranteed = rejected_with(&builtin, RejectionCause::NoAccuracyGuarantee);
     assert!(!unguaranteed.is_empty());
     assert!(accepted_regardless_of_guarantee(&builtin).is_empty());
@@ -261,18 +284,16 @@ async fn the_deployment_accuracy_model_accepts_outputs_without_a_guarantee() {
     let accepting_model = AcceptsEveryOutput;
     let accepting = plan_every_candidate(
         &workload,
+        &candidates,
         PlanningModels::builtin().with_accuracy(&accepting_model),
     )
     .expect("plans with the accepting model");
     let accepting_selection = accepting.selection.as_ref().unwrap();
-    // Stages 1 and 2 produced the same candidates under both models.
     assert_eq!(
-        stage2_candidates(&workload, PlanningModels::builtin()),
-        stage2_candidates(
-            &workload,
-            PlanningModels::builtin().with_accuracy(&accepting_model)
-        )
+        stage3_candidate_ids(&builtin),
+        stage3_candidate_ids(&accepting)
     );
+
     // Every candidate the built-in model rejected for having no guarantee
     // is now valid and priced, accepted regardless of its guarantee, and no
     // candidate fails the accuracy check.
@@ -284,9 +305,20 @@ async fn the_deployment_accuracy_model_accepts_outputs_without_a_guarantee() {
         r.cause,
         RejectionCause::NoAccuracyGuarantee | RejectionCause::AccuracyTargetMissed
     )));
-    // Stage 3 selects one of them, a plan that reads a sketch.
-    assert!(unguaranteed.contains(&accepting_selection.selected));
-    assert!(reads_sketch(&accepting.plans[0].root));
+    // A singleton previously rejected sketch is now selectable; the cheapest
+    // plan in the complete fixture need not be that sketch.
+    let sketch = candidates
+        .iter()
+        .find(|c| unguaranteed.contains(&c.id))
+        .unwrap();
+    let singleton = plan_every_candidate(
+        &workload,
+        std::slice::from_ref(sketch),
+        PlanningModels::builtin().with_accuracy(&accepting_model),
+    )
+    .unwrap();
+    assert_eq!(singleton.selection.as_ref().unwrap().selected, sketch.id);
+    assert!(reads_sketch(&singleton.plans[0].root));
 }
 
 /// The hook has priority over a guarantee that misses: a candidate whose
@@ -296,9 +328,10 @@ async fn the_deployment_accuracy_model_accepts_outputs_without_a_guarantee() {
 async fn the_deployment_accuracy_model_accepts_outputs_whose_guarantee_misses() {
     // The user's workload: one p99 query with a 1% rank-error target.
     let workload = rank_target_workload("quantile_over_time(0.99, lat[5m])");
+    let candidates = physical_candidates(&workload);
     // Under the built-in models: the candidates whose guarantee misses the
-    // target (P3, a relative bound 0.01 for a rank target).
-    let builtin = plan_every_candidate(&workload, PlanningModels::builtin())
+    // target (a relative bound for a rank target).
+    let builtin = plan_every_candidate(&workload, &candidates, PlanningModels::builtin())
         .expect("plans with the built-in models");
     let missed = rejected_with(&builtin, RejectionCause::AccuracyTargetMissed);
     assert!(!missed.is_empty());
@@ -306,6 +339,7 @@ async fn the_deployment_accuracy_model_accepts_outputs_whose_guarantee_misses() 
     let accepting_model = AcceptsEveryOutput;
     let accepting = plan_every_candidate(
         &workload,
+        &candidates,
         PlanningModels::builtin().with_accuracy(&accepting_model),
     )
     .expect("plans with the accepting model");
@@ -319,11 +353,9 @@ async fn the_deployment_accuracy_model_accepts_outputs_whose_guarantee_misses() 
         );
     }
     // The hook also overrides guarantees that meet the target: every
-    // accepted output, including the exact P1 and the KLL P2, is accepted
+    // accepted output, including exact and KLL candidates, is accepted
     // regardless of its guarantee.
-    for id in ["P1", "P2"] {
-        assert!(accepting_selection.accepted.contains_key(id), "{id}");
-    }
+    assert_eq!(accepting_selection.accepted.len(), candidates.len());
     for (id, queries) in &accepting_selection.accepted {
         assert!(
             queries.iter().all(|q| q.accepted_regardless_of_guarantee),

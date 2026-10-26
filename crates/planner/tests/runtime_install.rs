@@ -510,7 +510,9 @@ async fn a_runtime_installs_and_runs_the_plan_from_one_facade_call() {
         EVALUATION_MS,
         &mut SummaryStore::new(),
     );
-    assert_eq!(run.outputs_built, 6, "six ten-minute panes");
+    let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    assert!(!installed.stored_outputs.is_empty());
+    assert_eq!(run.outputs_built, installed.stored_outputs.len());
     // The p99 of the hour comes from its oldest pane, pane 5.
     assert_answers_from_pane(&run.answers_per_query[0], 5);
     assert_eq!(run.answers_per_query[0][0].0["instance"], "a");
@@ -556,7 +558,7 @@ async fn the_plan_carries_stage3s_predicted_usage() {
     assert_eq!(usage.per_query.len(), 1);
     assert!(usage.peak_memory_bytes > 0);
     // Each prediction names the installed nodes that run it: the pane
-    // chain its six ten-minute panes, the query's root its own node.
+    // chain its selected panes, the query's root its own node.
     let installed: BTreeSet<_> = plan.dag.dag.nodes.iter().map(|node| node.id).collect();
     for node in &usage.per_node {
         assert!(
@@ -571,7 +573,11 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         .iter()
         .find(|node| node.operator == OperatorKind::PaneChain)
         .unwrap();
-    assert_eq!(chain.installed_node_ids.len(), 6, "{chain:?}");
+    assert_eq!(
+        chain.installed_node_ids.len(),
+        plan.stored_outputs.len(),
+        "{chain:?}"
+    );
     let stored: BTreeSet<_> = plan.stored_outputs.iter().map(|o| o.node_id).collect();
     assert!(chain
         .installed_node_ids
@@ -604,9 +610,9 @@ async fn label_matchers_select_the_series_a_pane_reads() {
 }
 
 /// The p99 over the last hour and over the hour before the last 10
-/// minutes store six panes each; five of them cover the same windows
-/// (offsets 10..50 min), which this runtime's own cache key finds, so it
-/// builds 7. Both answers equal the reference.
+/// minutes may share selected pane windows. The runtime builds each distinct
+/// state key once, independent of the optimizer's pane widths. Both answers
+/// equal the reference.
 #[tokio::test]
 async fn an_hour_and_its_offset_twin_both_equal_the_reference() {
     let plan_json = plan_json(&[
@@ -615,14 +621,19 @@ async fn an_hour_and_its_offset_twin_both_equal_the_reference() {
     ])
     .await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    assert_eq!(installed.stored_outputs.len(), 12);
+    let distinct_states: BTreeSet<_> = installed
+        .stored_outputs
+        .iter()
+        .map(|output| state_key(output, EVALUATION_MS))
+        .collect();
+    assert!(!distinct_states.is_empty());
     let run = run_data_plane(
         &plan_json,
         &remote_write_samples(),
         EVALUATION_MS,
         &mut SummaryStore::new(),
     );
-    assert_eq!(run.outputs_built, 7);
+    assert_eq!(run.outputs_built, distinct_states.len());
     assert_eq!(run.answers_per_query.len(), 2);
     // The last hour's p99 comes from pane 5, the offset hour's from pane 6.
     assert_answers_from_pane(&run.answers_per_query[0], 5);
@@ -1539,17 +1550,24 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
     assert_eq!(next.answers_per_query, next.reference_answers_per_query);
 }
 
-/// Example 4b's six 10-minute panes at offsets 0 to 50 minutes share one
-/// definition id, each with its own time selection; each reads its pane of
+/// Example 4b's selected panes cover the hour and share one definition id,
+/// each with its own time selection; each reads its pane of
 /// raw data samples and nothing stored.
 #[tokio::test]
 async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     let plan: InstallablePlan =
         serde_json::from_str(&plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await)
             .unwrap();
-    assert_eq!(plan.stored_outputs.len(), 6);
+    assert!(!plan.stored_outputs.is_empty());
     let mut panes: Vec<&StoredOutput> = plan.stored_outputs.iter().collect();
     panes.sort_by_key(|o| o.inputs.raw_data_sample_windows[0].end_offset_ms);
+    let width_ms = panes[0].inputs.raw_data_sample_windows[0].width_ms;
+    assert!(width_ms > 0);
+    assert_eq!(
+        width_ms * panes.len() as i64,
+        3_600_000,
+        "complete hour coverage"
+    );
     for (i, pane) in panes.iter().enumerate() {
         let i = i as i64;
         let [window] = pane.inputs.raw_data_sample_windows.as_slice() else {
@@ -1557,13 +1575,13 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
         };
         assert_eq!(
             (window.width_ms, window.end_offset_ms),
-            (600_000, i * 600_000)
+            (width_ms, i * width_ms)
         );
         assert!(pane.inputs.stored_outputs.is_empty());
         assert_eq!(pane.coverage.definition_id, panes[0].coverage.definition_id);
         assert_eq!(
             pane.coverage.selection,
-            relative_time(-(i + 1) * 600_000, -i * 600_000)
+            relative_time(-(i + 1) * width_ms, -i * width_ms)
         );
     }
 }
@@ -1846,84 +1864,18 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
     }
 }
 
-/// Without the declaration nothing proves `data`'s samples non-negative, so
-/// the merged panes' relative bound does not carry through `avg`: no
-/// merged-pane DDSketch candidate is accepted, and with no raw data samples no
-/// plan is valid. The joint search discards the sketch candidates before
-/// composition (they have no bound to meet the target), and the plans left
-/// all scan raw data samples at query time, so its error reports that. The
-/// exhaustive search keeps every candidate and shows each merged-pane
-/// DDSketch candidate rejected for missing the target with no relative
-/// bound.
+/// Without a non-negative declaration, relative sketch error cannot propagate
+/// through the average. Early candidate pruning must report that missing bound
+/// and reject this no-raw deployment, just as final validation would.
 #[tokio::test]
 async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
-    assert!(error.contains("no valid candidate"), "{error}");
-    assert!(error.contains("cause: RawDataNotRetained"), "{error}");
-
-    // The exhaustive search keeps every candidate in Stage 3, so its report
-    // shows why the merged-pane DDSketch candidates fail: their output has
-    // no relative bound, which misses the 5% target.
-    let workload = p99_avg_workload(false);
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained: false,
-        ..DeploymentCapabilities::default()
-    };
-    let roots = asap_frontend_promql::lower_promql_query_workload(&workload).expect("lowers");
-    let run = asap_plan_selection::run_stage1_to_stage3_with(
-        roots.into_iter().enumerate().collect(),
-        &workload.query_workload.entries().collect::<Vec<_>>(),
-        workload.data_workload.as_ref().unwrap(),
-        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
-    )
-    .expect("Stage 1 accepts the workload");
-    // A candidate merges DDSketch panes when it keeps a DDSketch pane chain
-    // (its panes are merged at query time).
-    let merges_ddsketch_panes = |root: &QueryRoot| {
-        let QueryRoot::Operator(root) = root else {
-            return false;
-        };
-        OperatorNode::reachable(root).iter().any(|node| {
-            matches!(
-                node.asap(),
-                Some(ASAPOp::PaneChain {
-                    family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
-                    ..
-                }) if *kind.algorithm() == asap_types::ir::schema::SketchAlgorithm::DDSketch
-            )
-        })
-    };
-    let merged_pane_ids: BTreeSet<&str> = run
-        .stage2_physical_asap_optimization
-        .iter()
-        .filter(|candidate| candidate.roots.iter().any(merges_ddsketch_panes))
-        .map(|candidate| candidate.id.as_str())
-        .collect();
     assert!(
-        !merged_pane_ids.is_empty(),
-        "a merged-pane DDSketch candidate"
+        error.contains("infeasible_under_configured_model"),
+        "{error}"
     );
-    let Err(asap_plan_selection::SelectionError::NoValidCandidate(rejections)) =
-        run.stage3_plan_selection
-    else {
-        panic!("no valid candidate");
-    };
-    for id in merged_pane_ids {
-        let rejection = rejections
-            .iter()
-            .find(|rejection| rejection.id == id)
-            .unwrap_or_else(|| panic!("{id} rejected: {rejections:?}"));
-        assert_eq!(
-            rejection.cause,
-            asap_plan_selection::RejectionCause::AccuracyTargetMissed,
-            "{rejection:?}"
-        );
-        assert!(
-            rejection.reason.contains("Relative bound None"),
-            "{rejection:?}"
-        );
-    }
+    assert!(error.contains("AccuracyTargetMissed"), "{error}");
+    assert!(error.contains("Relative bound None"), "{error}");
 }
 
 /// `avg by (g) (quantile_over_time(0.99, x[100s]))` every 10 s at rank
@@ -2091,7 +2043,12 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
     let error = plan(PlanSelectionSettings::default())
         .await
         .expect_err("no candidate is valid without the setting");
-    assert!(error.to_string().contains("no valid candidate"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("infeasible_under_configured_model"),
+        "{error}"
+    );
     // With it, loaded from JSON as a deployment passes it.
     let settings: PlanSelectionSettings =
         serde_json::from_str(r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
@@ -2189,7 +2146,11 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
 
 /// [`p99_avg_workload`]'s query with `outer` in place of `avg`, planned
 /// for a deployment that keeps no raw data samples.
-async fn plan_p99(outer: &str, values_non_negative: bool) -> InstallablePlan {
+async fn plan_p99(
+    outer: &str,
+    values_non_negative: bool,
+    ignore_accuracy: bool,
+) -> InstallablePlan {
     let mut json = serde_json::to_value(p99_avg_workload(values_non_negative)).unwrap();
     json["query_workload"]["repeating_queries"][0]["query"] =
         format!("{outer} by (region, service, job) (quantile_over_time(0.99, data[100s]))").into();
@@ -2198,10 +2159,24 @@ async fn plan_p99(outer: &str, values_non_negative: bool) -> InstallablePlan {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
+    let settings = PlanSelectionSettings {
+        ignore_accuracy_guarantees: ignore_accuracy,
+        ..PlanSelectionSettings::default()
+    };
+    let only_dds = SketchPlansOnly(SketchAlgorithm::DDSketch);
+    let models = PlanningModels::builtin()
+        .with_deployment_capabilities(&capabilities)
+        .with_plan_selection(&settings);
+    let models = if ignore_accuracy {
+        // This is a DDS kernel fixture, not a comparison of sketch families.
+        models.with_executor_compile_check(&only_dds)
+    } else {
+        models
+    };
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
-        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+        models,
     ))
     .await
     .expect("a valid plan")
@@ -2308,7 +2283,7 @@ fn assert_p99s_within_alpha(
 /// of the exact average of PromQL's interpolated p99s.
 #[tokio::test]
 async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
-    let plan = plan_p99("avg", true).await;
+    let plan = plan_p99("avg", true, false).await;
     assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
     let (samples, per_group) = data_samples(8, 4, 20_000, |s, step| {
         (s + 1) as f64 * [0.0, 0.0, 3.0, 5.0][step as usize]
@@ -2325,13 +2300,25 @@ async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
 
 /// Signed samples (negative, zero and positive) are summarized by the
 /// selected DDSketch panes, through their negative store and zero bucket:
-/// `max` of the per-series p99s carries the relative bound whatever the
-/// samples' sign, and every answer equals the query-time reference's and is
+/// Signed interpolation has no general relative guarantee, so this kernel
+/// fixture explicitly bypasses accuracy admission. Every answer equals the
+/// query-time reference's and is
 /// within 0.05 of the exact value, including series whose samples are all
 /// negative.
 #[tokio::test]
 async fn a_ddsketch_over_signed_samples_runs_within_alpha() {
-    let plan = plan_p99("max", false).await;
+    let plan = plan_p99("max", false, true).await;
+    assert!(
+        !stored_definitions(&plan, "DDSketch").is_empty(),
+        "exercise signed DDS state"
+    );
+    assert_eq!(
+        plan.selection
+            .as_ref()
+            .unwrap()
+            .queries_accepted_without_guarantee,
+        vec![0]
+    );
     assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
     let max = |p99s: &[f64]| p99s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     // Series 0..4 cross zero; series 4..8 are all negative.
@@ -2652,16 +2639,29 @@ fn heap_topk_workload(query: &str, metric: &str, facts: &str) -> PlanningWorkloa
     .unwrap()
 }
 
-/// Stage 3's executor check for a deployment that runs only top-k plans
-/// with a heap of this algorithm: any other plan is refused, and such a
-/// plan must compile with the Planner's executor
+/// Stage 3's executor check for a deployment requiring this sketch
+/// algorithm. Other plans are refused, and an accepted plan must compile
+/// with the Planner's executor
 /// ([`PlannerExecutorCompileCheck`]). It forces the cheapest such plan that
 /// compiles.
-struct HeapPlansOnly(SketchAlgorithm);
+struct SketchPlansOnly(SketchAlgorithm);
 
-impl ExecutorCompileCheck for HeapPlansOnly {
+impl ExecutorCompileCheck for SketchPlansOnly {
     fn compiles(&self, roots: &[QueryRoot]) -> Result<(), String> {
-        let heap = roots
+        self.compiles_before(roots, None)
+            .map_err(|error| error.to_string())
+    }
+
+    fn compiles_before(
+        &self,
+        roots: &[QueryRoot],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), asap_plan_selection::pass::ExecutorCompileError> {
+        use asap_plan_selection::pass::ExecutorCompileError;
+        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+            return Err(ExecutorCompileError::DeadlineExceeded);
+        }
+        let supported_sketch = roots
             .iter()
             .filter_map(|root| match root {
                 QueryRoot::Operator(node) => Some(node),
@@ -2673,19 +2673,19 @@ impl ExecutorCompileCheck for HeapPlansOnly {
                     | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
                     if *kind.algorithm() == self.0)
             });
-        if !heap {
-            return Err(format!(
-                "this deployment runs only {:?} top-k plans",
+        if !supported_sketch {
+            return Err(ExecutorCompileError::Rejected(format!(
+                "this deployment requires a {:?} sketch",
                 self.0
-            ));
+            )));
         }
-        PlannerExecutorCompileCheck.compiles(roots)
+        PlannerExecutorCompileCheck.compiles_before(roots, deadline)
     }
 }
 
 /// `workload` planned with accuracy guarantees ignored (a top-k estimate
 /// has none) on a deployment that keeps no raw samples; with `heap`, Stage
-/// 3 keeps only plans with a heap of that algorithm ([`HeapPlansOnly`]).
+/// 3 keeps only plans with a heap of that algorithm ([`SketchPlansOnly`]).
 async fn plan_ignoring_guarantees(
     workload: &PlanningWorkload,
     heap: Option<SketchAlgorithm>,
@@ -2701,7 +2701,7 @@ async fn plan_ignoring_guarantees(
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
         .with_plan_selection(&settings);
-    let check = heap.map(HeapPlansOnly);
+    let check = heap.map(SketchPlansOnly);
     let models = match &check {
         Some(check) => models.with_executor_compile_check(check),
         None => models,

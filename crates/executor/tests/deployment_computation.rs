@@ -7,7 +7,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::{compile_physical_asap_dag, logical_candidates, selected_dag};
+use common::{compile_physical_asap_dag, computation_candidates, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::AccuracyTarget;
@@ -725,7 +725,7 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_executor::summary_kernels::CountMinSketchAccumulator;
     let accuracy = AccuracyTarget::max_error(0.02);
     let root = lower_with("count(up)", accuracy.clone());
-    let dag = logical_candidates(root, accuracy)
+    let dag = computation_candidates(root)
         .into_iter()
         .find_map(|node| {
             let dag = compile_physical_asap_dag(&node).ok()?;

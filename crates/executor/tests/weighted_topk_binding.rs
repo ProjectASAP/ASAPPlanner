@@ -6,7 +6,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::{compile_physical_asap_dag, logical_candidates};
+use common::{compile_physical_asap_dag, computation_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::{AccuracyTarget, *};
@@ -36,7 +36,7 @@ fn heap_candidate(
     root: Rc<planner_types::ir::OperatorNode>,
     algorithm: &SketchAlgorithm,
 ) -> Rc<planner_types::ir::OperatorNode> {
-    logical_candidates(root, AccuracyTarget::max_error(0.1))
+    computation_candidates(root)
         .into_iter()
         .find(|candidate| builds(&compile_physical_asap_dag(candidate).unwrap(), algorithm))
         .unwrap_or_else(|| panic!("missing {algorithm:?} candidate"))
@@ -272,8 +272,7 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
 // and the runtime admits a Count-Min heap only over non-negative weights, so
 // only the Count Sketch heap runs.
 #[test]
-#[ignore = "the runtime's keyed top-k evaluation returns the selected rows, but the planner's \
-            top-k estimate declares [keys.., topk_k]; the canonical top-k schema is #672"]
+#[ignore = "direct TopK(rate(...)) does not generate the required CountSketchWithHeap candidate"]
 fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
     use asap_executor::physical_planner::promql_rows::{
         decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
@@ -574,8 +573,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
 // A maintained heap over finalized per-series Rate is the fixed-window
 // placement: materialization timing, not a separate candidate, puts it in precompute.
 #[test]
-#[ignore = "the runtime's keyed top-k evaluation returns the selected rows, but the planner's \
-            top-k estimate declares [keys.., topk_k]; the canonical top-k schema is #672"]
+#[ignore = "direct TopK(rate(...)) does not generate the required CountSketchWithHeap candidate"]
 fn maintained_rate_heap_compiles_fixed_window_precompute() {
     use asap_executor::physical_planner::{compile_candidate, promql_rows::with_series_identity};
     let root = Rc::new(

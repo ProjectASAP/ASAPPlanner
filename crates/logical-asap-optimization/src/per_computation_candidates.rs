@@ -76,10 +76,9 @@
 //! `1 − (1 + ε)^{−1/n}`) and `δ/n` for `n` inputs (#669b). Only the inputs
 //! approximate in this candidate count. Stage 1 sizes for ε and δ per output
 //! value; plan selection enlarges the parameters that depend on δ for a
-//! target over the whole result. Sizing belongs after Pass 2, where a shared
-//! summary takes the strictest requirement among its consumers; Pass 2
-//! sharing is not implemented yet, so this is that post-Pass-2 sizing step
-//! with no sharing.
+//! target over the whole result. These local sizes seed the memo; shared
+//! state configurations must satisfy the requirements of their selected
+//! consumers and are checked during joint selection.
 //!
 //! Every node of the candidate gets a theoretical guarantee, composed with
 //! the built-in accuracy model through operators (#669): exact over exact
@@ -1082,10 +1081,12 @@ fn whole_expression_input(
             ..
         })
     );
+    let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
     if per_series && realized.child.schema.has_promql_series_identity() {
-        input.item = Some(SummaryInputExpr::Column(ColumnRef::Named(
-            asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
-        )));
+        input.item = Some(asap_types::ir::schema::topk::series_identity_item(
+            &realized.child.schema,
+            partitions.group_keys().map_or(&[][..], |keys| keys.keys()),
+        ));
     } else if realized.child.schema.closed
         && (matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
             || !reads_only_time_series(&realized.child))
@@ -1096,7 +1097,6 @@ fn whole_expression_input(
         // result.)
         return None;
     }
-    let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
     Some((realized.child, input, partitions))
 }
 
@@ -1316,11 +1316,23 @@ fn budget_shares(
 
 /// The approximate inputs a query's value composes: every sketch summary
 /// state reachable from `root`, each once, when the value carries a
-/// guarantee that is not exact ([`root_guarantee`]). Empty when it carries
-/// none (no rule composes the inputs) or an exact one. Plan selection sizes
-/// each for its share of the query's failure probability too.
+/// guarantee that is not exact ([`root_guarantee`]), including compositions
+/// conditional on source-sign facts supplied later. Empty when neither the
+/// current nor conditional contract composes the inputs, or the result is
+/// exact. Plan selection sizes each for its share of failure probability too.
 pub fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
-    if root_guarantee(root).is_none_or(|g| g.is_exact()) {
+    // Sizing may depend on a source-domain proof supplied only at Stage 3.
+    // Count the inputs of that conditional composition too, without attaching
+    // the hypothetical proof to the candidate or accepting its accuracy.
+    let guarantee = root_guarantee(root).or_else(|| {
+        bind_guarantees(root, &|guarantee| {
+            guarantee.bind(&|statistic| {
+                crate::accuracy::composition::parse_raw_data_samples_sign_statistic(statistic)
+                    .map(|_| 1.0)
+            })
+        })
+    });
+    if guarantee.is_none_or(|g| g.is_exact()) {
         return Vec::new();
     }
     let operators = match root {
@@ -1357,6 +1369,45 @@ pub fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
         QueryRoot::Operator(node) => node.guarantee.clone(),
         QueryRoot::Scalar(expr) => scalar_guarantee(expr, &|_| None),
     }
+}
+
+/// Bind known statistics in existing contracts, then recover compositions
+/// that previously required constant child bounds. Physical state contracts,
+/// schemas, timing, materialization, and sharing are preserved. This does not
+/// infer facts: `bind` must leave unsupported statistics unknown.
+pub fn bind_guarantees(
+    root: &QueryRoot,
+    bind: &dyn Fn(&AccuracyGuarantee) -> AccuracyGuarantee,
+) -> Option<AccuracyGuarantee> {
+    fn walk(
+        node: &Rc<OperatorNode>,
+        bind: &dyn Fn(&AccuracyGuarantee) -> AccuracyGuarantee,
+        memo: &mut Memo,
+    ) -> Rc<OperatorNode> {
+        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+            return done.clone();
+        }
+        let operator = node.operator.map_children(|child| walk(child, bind, memo));
+        let mut rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
+            .with_timing(node.timing)
+            .with_materialization(node.materialization);
+        rebuilt.guarantee = node
+            .guarantee
+            .as_ref()
+            .map(bind)
+            .or_else(|| composed_guarantee(&rebuilt).as_ref().map(bind));
+        let rebuilt = Rc::new(rebuilt);
+        memo.insert(Rc::as_ptr(node), rebuilt.clone());
+        rebuilt
+    }
+    let mut memo = HashMap::new();
+    let bound = match root {
+        QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, bind, &mut memo)),
+        QueryRoot::Scalar(expr) => {
+            QueryRoot::Scalar(expr.map_operator_refs(&mut |node| walk(node, bind, &mut memo)))
+        }
+    };
+    root_guarantee(&bound)
 }
 
 /// `roots` with every sketch summary state rebuilt with the parameters
@@ -1689,6 +1740,7 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
                     None => source_distinct_guarantee(family, query, input)
                         .or_else(|| local_guarantee(family, query))?,
                 };
+                let local = interpolation_guarantee(family, update, query, input, local)?;
                 if exact_inputs(summary_input) {
                     Some(local)
                 } else if exact_filter(summary_input) && !groups_by_estimate(reduction, input) {
@@ -1962,6 +2014,12 @@ fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<Propaga
 /// functions) ends it. Only the sign of the values is read from it.
 fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<String> {
     match &node.operator {
+        Operator::NonASAP(NonASAPOp::TimeRange { child, .. }) => {
+            estimates_raw_data_samples_of(child)
+        }
+        Operator::NonASAP(NonASAPOp::TimeShift { child, shift }) if shift.at.is_none() => {
+            estimates_raw_data_samples_of(child)
+        }
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap()? {
             ASAPOp::SummaryAgg {
                 family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
@@ -2806,6 +2864,45 @@ fn estimate_has_bound(
         && !(count_min && !matches!(update.weight_domain, WeightDomain::NonNegative { .. }))
 }
 
+/// DDS quantiles use linear interpolation of neighbouring representatives.
+/// Relative error survives that convex combination only without cancellation.
+/// Endpoints select an extremum; interior quantiles need a sign proof. Keep a
+/// raw metric's requirement symbolic so Stage 3 can bind declared source facts.
+fn interpolation_guarantee(
+    family: &FieldDataType,
+    update: &SummaryUpdate,
+    query: &SketchStatistic,
+    input: &OperatorNode,
+    mut guarantee: AccuracyGuarantee,
+) -> Option<AccuracyGuarantee> {
+    let interpolates = matches!(family, FieldDataType::Sketch(kind, _)
+        if *kind.algorithm() == SketchAlgorithm::DDSketch)
+        && matches!(query, SketchStatistic::Quantile { q } if *q > 0.0 && *q < 1.0);
+    if !interpolates || matches!(update.weight_domain, WeightDomain::NonNegative { .. }) {
+        return Some(guarantee);
+    }
+    let metric = match &update.weight_domain {
+        WeightDomain::RawDataSamplesOfMetric { metric } => metric.clone(),
+        _ if matches!(
+            update.weight,
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
+        ) =>
+        {
+            estimates_raw_data_samples_of(input)?
+        }
+        _ => return None,
+    };
+    guarantee.spec.error = asap_types::ir::properties::BoundExpr::Product {
+        factors: vec![
+            guarantee.spec.error,
+            asap_types::ir::properties::BoundExpr::Unknown {
+                statistic: raw_data_samples_sign_statistic(&metric),
+            },
+        ],
+    };
+    Some(guarantee)
+}
+
 /// A Count-Min estimate whose weights carry the open requirement that they
 /// are raw data samples of one metric ([`WeightDomain::RawDataSamplesOfMetric`]): its local
 /// guarantee with the bound gated on that metric's sign
@@ -2960,7 +3057,7 @@ fn with_names_of(
     // A top-k's ranked rows may carry their item columns after the
     // aggregate's ([`ranked_as_topk`]).
     if names(&output).starts_with(&names(target)) {
-        return Ok(output);
+        return Ok(with_aggregate_qualifiers(target, output));
     }
     if output.schema.fields.len() != target.schema.fields.len() {
         return Err(PerComputationCandidateError::Unsupported(
@@ -2975,13 +3072,34 @@ fn with_names_of(
             expr: ScalarExpr::Column(column),
         })
         .collect();
-    Ok(OperatorNode::new_shared(Operator::NonASAP(
-        NonASAPOp::Project {
+    Ok(with_aggregate_qualifiers(
+        target,
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
             cols,
             qualifier: None,
             child: output,
-        },
-    ))?)
+        }))?,
+    ))
+}
+
+/// An equivalent aggregate replacement must retain SQL field identity. These
+/// explicit qualifiers survive child rebinding; types and keys remain derived
+/// from executable operators rather than copied from the requested output.
+fn with_aggregate_qualifiers(target: &OperatorNode, output: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    if output
+        .schema
+        .fields
+        .iter()
+        .zip(&target.schema.fields)
+        .all(|(field, expected)| field.table == expected.table)
+    {
+        return output;
+    }
+    let mut output = output.as_ref().clone();
+    for (field, expected) in output.schema.fields.iter_mut().zip(&target.schema.fields) {
+        field.table = expected.table.clone();
+    }
+    Rc::new(output)
 }
 
 /// A whole-expression top-k for `target` ([`whole_expression_input`]): one
@@ -3027,40 +3145,36 @@ fn ranked_as_topk(
     target: &OperatorNode,
     estimate: Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
-    let (ranked, keys) = target
-        .schema
-        .fields
-        .split_last()
-        .expect("an aggregate outputs its measure");
+    let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
+        return Err(PerComputationCandidateError::Unsupported(
+            "top-k target is not an aggregate",
+        ));
+    };
+    let ranked_index = reduction.group_keys().map_or(0, |keys| keys.len());
     let fields = &estimate.schema.fields;
     let estimated = fields.len() - 1;
-    let column = |index: usize, name: &str| ProjectItem {
-        alias: Some(name.to_string()),
-        expr: ScalarExpr::Column(index),
-    };
-    // Each key by name among the estimate's partition and item columns.
-    let key_columns = keys
+    let cols = target
+        .schema
+        .fields
         .iter()
-        .map(|key| {
-            fields[..estimated]
-                .iter()
-                .position(|field| field.name == key.name)
-                .ok_or(PerComputationCandidateError::Unsupported(
-                    "top-k estimate without a partition column",
-                ))
+        .enumerate()
+        .map(|(index, field)| {
+            let source = if index == ranked_index {
+                estimated
+            } else {
+                fields[..estimated]
+                    .iter()
+                    .position(|input| input.name == field.name)
+                    .ok_or(PerComputationCandidateError::Unsupported(
+                        "top-k estimate without a ranked-row identity column",
+                    ))?
+            };
+            Ok(ProjectItem {
+                alias: Some(field.name.clone()),
+                expr: ScalarExpr::Column(source),
+            })
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let cols = key_columns
-        .iter()
-        .zip(keys)
-        .map(|(&index, key)| column(index, &key.name))
-        .chain(std::iter::once(column(estimated, &ranked.name)))
-        .chain(
-            (0..estimated)
-                .filter(|index| !key_columns.contains(index))
-                .map(|index| column(index, &fields[index].name)),
-        )
-        .collect();
+        .collect::<Result<Vec<_>, PerComputationCandidateError>>()?;
     Ok(OperatorNode::new_shared(Operator::NonASAP(
         NonASAPOp::Project {
             cols,
@@ -3604,12 +3718,7 @@ fn summary_update(
                 .flat_map(|keys| keys.iter().copied())
                 .collect();
             let item = if child.has_promql_series_identity() {
-                // Rows that carry the full series identity rank it as a
-                // column, the item form the runtime builds keyed summaries
-                // from.
-                SummaryInputExpr::Column(ColumnRef::Named(
-                    asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
-                ))
+                asap_types::ir::schema::topk::series_identity_item(child, &groups)
             } else if child.closed {
                 // A closed child (an aggregate's output, say) lists every
                 // column: the item is its columns outside the partition and
@@ -3693,6 +3802,35 @@ fn statistic(intent: &AggIntent) -> Result<SketchStatistic, PerComputationCandid
 
 #[cfg(test)]
 mod tests {
+    /// Aggregate replacement qualifiers survive both renaming and later input rebinding.
+    #[test]
+    fn aggregate_replacement_preserves_sql_field_identity() {
+        let original =
+            crate::test_support::lower_promql("sum by (job) (m)", AccuracyTarget::exact());
+        let mut target = original.as_ref().clone();
+        target.schema.fields[0].table = Some("metrics".into());
+        let projected = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+            cols: target
+                .schema
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(column, field)| ProjectItem {
+                    alias: Some(field.name.clone()),
+                    expr: ScalarExpr::Column(column),
+                })
+                .collect(),
+            qualifier: None,
+            child: original,
+        }))
+        .unwrap();
+        assert_eq!(projected.schema.fields[0].table, None);
+        let replaced = with_names_of(&target, projected).unwrap();
+        assert_eq!(replaced.schema, target.schema);
+        let rebound = replaced.with_new_children(Rc::clone).unwrap();
+        assert_eq!(rebound.schema, target.schema);
+    }
+
     use super::*;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::StatisticKind;
@@ -5789,6 +5927,40 @@ mod tests {
                 SummaryInputExpr::Column(ColumnRef::SampleValue)
             );
         }
+    }
+
+    // Identity realization must preserve named labels and every top-k candidate's output contract.
+    #[test]
+    fn topk_keeps_known_labels_beside_series_identity() {
+        let inventory = inventory("topk by (service) (5, sum_over_time(m{instance=\"a\"}[1m]))");
+        let topk = topk_target(&inventory);
+        let expected = &inventory.targets[topk].aggregate.schema;
+        assert!(expected.fields.iter().any(|field| field.name == "instance"));
+        assert!(expected
+            .fields
+            .iter()
+            .any(|field| field.name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY));
+        for (_, root) in composed_with(&inventory, topk) {
+            assert_eq!(root.schema.fields, expected.fields);
+            assert_eq!(root.schema.time_index, expected.time_index);
+            assert_eq!(root.schema.closed, expected.closed);
+            // A physical heap may prove an additional partition/item key.
+            // Every required uniqueness fact must still follow from its keys.
+            for required in &expected.unique_keys {
+                assert!(
+                    root.schema.unique_keys.iter().any(|supplied| {
+                        supplied.iter().all(|column| required.contains(column))
+                    }),
+                    "required key {required:?} is not implied by {:?}",
+                    root.schema.unique_keys
+                );
+            }
+        }
+        let (_, state) = fused_heap(&inventory, SketchAlgorithm::CountSketchWithHeap);
+        assert!(matches!(
+            heap_update(&state).item,
+            Some(SummaryInputExpr::Tuple(_))
+        ));
     }
 
     /// A KLL quantile over an exact sum accumulator composes per node, the sum adding no error.

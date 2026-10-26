@@ -1,17 +1,10 @@
-//! Acceptance tests for #509 "Example 2: One summary for several
-//! computations — the summary-capability rule in Pass 2".
+//! Rule-fixture and production acceptance for Example 2: shared summaries across statistics.
 //!
-//! Spec: `docs/design_docs/proposals/planner-layering-example2-acceptance.md`.
-//! Written by a test designer who does not implement the stages. Tests that
-//! need an unimplemented feature are `#[ignore]`d, naming it and the PR that
-//! delivers it.
-//!
-//! The doc's workload is SQL; the SQL frontend lowers Q1 to a distinct
-//! count and recognizes Q2 and Q3 as `Entropy` and `L2` (Q3 with a Float64
-//! product), and its time filter to the same 1-min `TimeRange` as PromQL's
-//! `[1m]`. Most planning tests predate that and run on a PromQL stand-in with the same structure: three
-//! statistics of one input over the same 1-min window, through the
-//! frontend's `distinct_over_time`, `entropy_over_time` and `l2_over_time`.
+//! Numerical, accuracy, and operator assertions use explicitly supplied
+//! configurations of the existing rules and physical evaluator. They do not
+//! assume a bounded MILP run archives every supported workload plan. Separate
+//! production checks exercise memo search and validated output selection.
+//! Unsupported algorithms retain their existing ignored tests.
 
 mod physical_common;
 mod planner_layering_common;
@@ -165,9 +158,110 @@ async fn lower_sql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
     roots
 }
 
+// Targeted rule fixtures: exact, each local summary in isolation, and the
+// all/pairwise UnivMon consumers needed by compatibility and cost assertions.
+// Production optimization is tested separately; this is not a Cartesian search.
+fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        capability_sharing_candidates, pane_candidates, sharing_candidates,
+        summary_capability_pass2_candidates, window_composition_pass2_candidates,
+        with_shared_candidates,
+    };
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    let local =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let exact = vec![0; local.targets.len()];
+    let mut choices = BTreeSet::from([exact.clone()]);
+    let mut univmon = exact.clone();
+    let mut shared_targets = Vec::new();
+    for (target, options) in local.targets.iter().enumerate() {
+        for option in 1..options.choice_count() {
+            let mut choice = exact.clone();
+            choice[target] = option;
+            choices.insert(choice);
+        }
+        if let Some(option) = (0..options.choice_count()).find(|&choice| {
+            matches!(
+                options.computation_for(choice),
+                Some((ComputationCandidate::Summary(SketchAlgorithm::UnivMon), _))
+            )
+        }) {
+            univmon[target] = option;
+            shared_targets.push(target);
+        }
+    }
+    choices.insert(univmon.clone());
+    for &third in &shared_targets {
+        for option in 0..local.targets[third].choice_count() {
+            let mut choice = univmon.clone();
+            choice[third] = option;
+            choices.insert(choice);
+        }
+    }
+    let grid: Vec<_> = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.evaluation_grid_ms())
+        .collect();
+    let mut computations = Vec::new();
+    for choice in choices {
+        if local.absorbed_choice_varies(&choice) {
+            continue;
+        }
+        let whole: Vec<_> = compose_logical_candidate(&local, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        computations.push(whole.clone());
+        let sharing = sharing_candidates(&whole);
+        if !sharing.is_empty() {
+            computations.push(with_shared_candidates(
+                &whole,
+                &sharing,
+                &vec![true; sharing.len()],
+            ));
+        }
+        let capabilities = capability_sharing_candidates(&whole);
+        computations.extend(
+            summary_capability_pass2_candidates(&whole, &capabilities)
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.roots.unwrap()),
+        );
+        let panes = pane_candidates(&whole, &grid);
+        // Isolate one pane configuration at a time; no Cartesian products of
+        // independent window implementations are needed for the error tests.
+        for pane in panes {
+            computations.extend(
+                window_composition_pass2_candidates(&whole, &[pane])
+                    .unwrap()
+                    .into_iter()
+                    .map(|candidate| candidate.roots.unwrap()),
+            );
+        }
+    }
+    run_explicit_candidates(
+        workload,
+        roots,
+        computations,
+        asap_plan_selection::PlanningModels::builtin(),
+    )
+}
+
+#[test]
+fn production_memo_selects_a_validated_example2_plan() {
+    let workload = standin_workload();
+    let run = run_stages(&workload, lower_promql(&workload));
+    assert_selects_cheapest_valid(&run);
+    assert_eq!(run.selection.accepted[&run.selection.selected].len(), 3);
+}
+
 fn pipeline() -> Run {
     let workload = standin_workload();
-    run_stages(&workload, lower_promql(&workload))
+    rule_fixture(&workload, lower_promql(&workload))
 }
 
 /// The stand-in with the deployment's bound on distinct items per
@@ -189,7 +283,7 @@ fn standin_with_distinct_bound(bound: Option<u64>) -> PlanningWorkload {
 
 fn pipeline_with_distinct_bound(bound: Option<u64>) -> Run {
     let workload = standin_with_distinct_bound(bound);
-    run_stages(&workload, lower_promql(&workload))
+    rule_fixture(&workload, lower_promql(&workload))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -297,7 +391,7 @@ async fn stage0_query_language_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
 #[tokio::test]
 async fn stage1_logical_asap_optimization_sql_has_the_standin_options() {
     let workload = sql_workload();
-    let sql = run_stages(&workload, lower_sql(&workload).await);
+    let sql = rule_fixture(&workload, lower_sql(&workload).await);
     let standin = pipeline();
     for q in 0..3 {
         assert_eq!(options(&sql, q), options(&standin, q), "Q{}", q + 1);
@@ -309,7 +403,7 @@ async fn stage1_logical_asap_optimization_sql_has_the_standin_options() {
 #[tokio::test]
 async fn stage1_logical_asap_optimization_sql_adds_one_univmon_for_all_three() {
     let workload = sql_workload();
-    let run = run_stages(&workload, lower_sql(&workload).await);
+    let run = rule_fixture(&workload, lower_sql(&workload).await);
     assert!(
         run.logical.iter().any(|c| {
             let ums = univmons(c);
@@ -389,24 +483,6 @@ fn stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summ
             q + 1
         );
     }
-}
-
-/// Every combination of the three queries' own options is kept as an independent candidate.
-#[test]
-fn stage1_logical_asap_optimization_keeps_every_independent_combination() {
-    let run = pipeline();
-    let found: BTreeSet<_> = run
-        .logical
-        .iter()
-        .filter(|c| !shares_a_summary(c))
-        .map(|c| {
-            (0..3)
-                .map(|q| query_option(&c.dag, &c.query_roots, q))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let (o1, o2, o3) = (options(&run, 0), options(&run, 1), options(&run, 2));
-    assert_eq!(found.len(), o1.len() * o2.len() * o3.len());
 }
 
 /// The summary-capability rule adds one UnivMon build feeding a distinct-count, an entropy and an L2 estimate.
@@ -699,7 +775,7 @@ fn stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound
             accuracy_scope: AccuracyScope::PerValue,
             ..AccuracyTarget::max_error(0.02).failure_probability(delta)
         };
-        let run = run_stages(&workload, lower_promql(&workload));
+        let run = rule_fixture(&workload, lower_promql(&workload));
         for id in q1_only_candidates(&run, "Kmv") {
             assert!(
                 run.cost(id).is_some(),
@@ -884,7 +960,7 @@ fn stage3_plan_selection_accepts_univmon_l2() {
 #[tokio::test]
 async fn stage3_plan_selection_accepts_sql_univmon_l2_beside_its_exact_population_count() {
     let workload = sql_workload();
-    let run = run_stages(&workload, lower_sql(&workload).await);
+    let run = rule_fixture(&workload, lower_sql(&workload).await);
     for id in univmon_only_candidates(&run, 2) {
         assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
     }
@@ -953,7 +1029,7 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
 
     let workload = standin_workload();
     let roots = lower_promql(&workload);
-    let run = run_stages(&workload, roots.clone());
+    let run = rule_fixture(&workload, roots.clone());
     let kmv: Vec<_> = run
         .logical
         .iter()

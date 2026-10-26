@@ -33,9 +33,7 @@ fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
         &lower_promql("count by(job)(up)", target.clone()).unwrap(),
     )
     .unwrap();
-    assert!(logical_candidates(Rc::clone(&root), target.clone())
-        .iter()
-        .any(reads_hydra));
+    assert!(logical_candidates(Rc::clone(&root)).iter().any(reads_hydra));
     assert!(!reads_hydra(&selected_dag(root, target)));
 }
 
@@ -66,7 +64,7 @@ fn frequency_count_candidates_use_unit_weights() {
     for query in ["count_over_time(up[5m])", "count(up)"] {
         let accuracy = AccuracyTarget::max_error(0.02);
         let root = lower_promql(query, accuracy.clone()).unwrap();
-        let candidates = logical_candidates(root, accuracy);
+        let candidates = logical_candidates(root);
         let mut algorithms = Vec::new();
         for node in &candidates {
             let Some(summary_input) =
@@ -229,7 +227,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     use asap_types::ir::scalar::ColumnRef;
     let accuracy = AccuracyTarget::max_error(0.02);
     let root = lower_promql("count_over_time(up[5m])", accuracy.clone()).unwrap();
-    let candidates = logical_candidates(root, accuracy);
+    let candidates = logical_candidates(root);
     let dag = candidates
         .iter()
         .find_map(|node| {
@@ -273,19 +271,30 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     }
 }
 
-/// A candidate that does not compose fails `logical_candidates` instead of
-/// being skipped, so an assertion over every candidate cannot pass on none.
-/// An aggregate over a top-k output does not compose yet (#672).
-/// This test relies on that bug: when #672 is fixed, the query composes and
-/// this test must switch to another candidate that does not compose.
+// The assertion helper must fail on an injected composition error; its coverage
+// must not depend on a real planner bug remaining unfixed.
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
+    use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
+    support::require_composed_operator_candidates(vec![
+        asap_plan_selection::search::LogicalCandidate {
+            id: "invalid-composition".into(),
+            choice: Vec::new(),
+            roots: Err(PerComputationCandidateError::InvalidChoice),
+            pass2: None,
+        },
+    ]);
+}
+
+// Ranked-row schemas let an aggregate consume TopK's numeric output (#672).
+#[test]
+fn aggregate_over_topk_candidates_compose() {
     let accuracy = AccuracyTarget::max_error(0.01);
     let root = lower_promql(
         "sum by (job) (topk by (job, instance) (1, rate(m[5m])))",
         accuracy.clone(),
     )
     .unwrap();
-    logical_candidates(root, accuracy);
+    assert!(!logical_candidates(root).is_empty());
 }

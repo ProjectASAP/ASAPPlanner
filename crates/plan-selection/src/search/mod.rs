@@ -12,13 +12,13 @@
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
-pub(crate) mod legacy;
-pub(crate) mod memo;
+pub(crate) mod candidates;
+pub(crate) mod costing;
 pub(crate) mod milp;
-/// Costed reuse of compatible physical pane producers.
-pub mod pane_sharing;
 pub(crate) mod pipeline;
-pub(crate) mod workload_dependencies;
+pub(crate) mod query_pruning;
+pub(crate) mod refinement;
+pub(crate) mod route;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -42,8 +42,7 @@ use asap_logical_asap_optimization::per_computation_candidates::PerComputationCa
 
 pub use pipeline::{
     run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage1_to_stage3_with,
-    run_stage2_and_stage3, LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass,
-    Stage1ToStage3Run, Stage1ToStage3Search,
+    LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run, Stage1ToStage3Search,
 };
 
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;
@@ -92,12 +91,45 @@ pub struct PlanningModels<'a> {
     pub executor_compile_check: Option<&'a dyn ExecutorCompileCheck>,
 }
 
+/// Compiler rejection and incomplete validation have different search semantics.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExecutorCompileError {
+    #[error("{0}")]
+    Rejected(String),
+    #[error("planning deadline exceeded during executor validation")]
+    DeadlineExceeded,
+}
+
+impl From<String> for ExecutorCompileError {
+    fn from(reason: String) -> Self {
+        Self::Rejected(reason)
+    }
+}
+
 /// The deployment executor's compiler, asked by Stage 3 whether it compiles
 /// a candidate's plan, so selection and execution cannot drift.
 pub trait ExecutorCompileCheck {
     /// `Err` with the executor's reason when it cannot compile the plan of
     /// `roots`: one candidate's timed query roots, in workload order.
     fn compiles(&self, roots: &[asap_types::ir::QueryRoot]) -> Result<(), String>;
+
+    /// Cooperative deadline-aware validation. Custom checkers can override this
+    /// to interrupt expensive work; timeout is not proof of an invalid plan.
+    fn compiles_before(
+        &self,
+        roots: &[asap_types::ir::QueryRoot],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), ExecutorCompileError> {
+        let expired = || deadline.is_some_and(|limit| std::time::Instant::now() >= limit);
+        if expired() {
+            return Err(ExecutorCompileError::DeadlineExceeded);
+        }
+        let result = self.compiles(roots);
+        if expired() {
+            return Err(ExecutorCompileError::DeadlineExceeded);
+        }
+        result.map_err(ExecutorCompileError::Rejected)
+    }
 }
 
 impl<'a> PlanningModels<'a> {

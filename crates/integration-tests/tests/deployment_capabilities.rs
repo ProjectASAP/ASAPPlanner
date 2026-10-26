@@ -43,40 +43,12 @@ fn summaries_used(dag: &FlatDag) -> Vec<(SketchAlgorithm, StatisticKind)> {
         .collect()
 }
 
-/// Example 2 (three SQL flow statistics) planned for `deployment`.
-fn example2_for(deployment: &DeploymentCapabilities) -> Run {
-    let (workload, catalog) = example2();
-    let roots = lower_sql_roots(&workload, &catalog).expect("example 2 lowers");
-    run_stages_with(
-        &workload,
-        roots,
-        &PlanSelectionSettings::default(),
-        deployment,
-    )
-}
-
-/// Restricting the supported summaries removes exactly the Stage 1
-/// candidates (Pass 1's and Pass 2's) that build an unsupported family or
-/// read an unsupported readout from one, and keeps the others in order:
-///
-/// * Example 1 without Count-Min heaps: the top-k keeps its CountSketch
-///   heap;
-/// * Example 2 with UnivMon for distinct counts and L2 only (no entropy),
-///   and HLL: KMV and UnivMon's entropy go, so the entropy is exact, and
-///   the shared UnivMon builds for the distinct count and L2 stay (Pass
-///   2's summary-capability rule);
-/// * Example 3's Pattern B with KLL only: DDSketch goes, whole-window and
-///   tumbling panes alike (Pass 2's window-composition rule).
+/// Capabilities filter each local computation before physical selection.
+/// Compare explicit one-rule applications, not a timed search's archive.
 #[test]
 fn restricting_summaries_removes_exactly_the_candidates_that_use_them() {
-    let all = DeploymentCapabilities::default();
     let heap = supporting(&[(SketchAlgorithm::CountSketchWithHeap, &[StatisticKind::TopK])]);
-    assert_removes_exactly(
-        "example 1",
-        &run_promql_for(&example1(), &all),
-        &run_promql_for(&example1(), &heap),
-        &heap,
-    );
+    assert_removes_exactly("example 1", lower_promql(&example1()), &heap);
     let distinct_and_l2 = supporting(&[
         (
             SketchAlgorithm::UnivMon,
@@ -84,52 +56,57 @@ fn restricting_summaries_removes_exactly_the_candidates_that_use_them() {
         ),
         (SketchAlgorithm::Hll, &[StatisticKind::Distinct]),
     ]);
+    let (workload, catalog) = example2();
     assert_removes_exactly(
         "example 2",
-        &example2_for(&all),
-        &example2_for(&distinct_and_l2),
+        lower_sql_roots(&workload, &catalog).unwrap(),
         &distinct_and_l2,
     );
     let kll = supporting(&[(SketchAlgorithm::Kll, &[StatisticKind::Quantile])]);
-    assert_removes_exactly(
-        "pattern B",
-        &run_promql_for(&pattern_b(), &all),
-        &run_promql_for(&pattern_b(), &kll),
-        &kll,
-    );
+    assert_removes_exactly("pattern B", lower_promql(&pattern_b()), &kll);
 }
 
-/// `restricted` (planned for `deployment`) has exactly `unrestricted`'s
-/// Stage 1 candidates whose every summary `deployment` supports, in order;
-/// some are removed, a supported summary stays, and the cheapest valid
-/// candidate is selected.
 fn assert_removes_exactly(
     name: &str,
-    unrestricted: &Run,
-    restricted: &Run,
+    roots: Vec<asap_types::ir::QueryRoot>,
     deployment: &DeploymentCapabilities,
 ) {
-    let expected: Vec<&FlatDag> = unrestricted
-        .logical
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    let local =
+        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let enumerate_local = |inventory: &asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates<usize>| {
+        let mut result = Vec::new();
+        for (target, options) in inventory.targets.iter().enumerate() {
+            for choice in 0..options.choice_count() {
+                let mut choices = vec![0; inventory.targets.len()]; choices[target] = choice;
+                if let Ok(roots) = compose_logical_candidate(inventory, &choices) {
+                    result.push(asap_types::ir::flat::flatten(&roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>()).0);
+                }
+            }
+        }
+        result
+    };
+    let unrestricted = enumerate_local(&local);
+    let restricted = enumerate_local(&local.without_unsupported_summaries(deployment));
+    let expected = unrestricted
         .iter()
-        .map(|c| &c.dag)
         .filter(|dag| {
             summaries_used(dag)
                 .iter()
                 .all(|(family, readout)| deployment.supports(family, *readout))
         })
-        .collect();
-    let found: Vec<&FlatDag> = restricted.logical.iter().map(|c| &c.dag).collect();
+        .collect::<Vec<_>>();
     assert!(
-        expected.len() < unrestricted.logical.len(),
-        "{name}: the restriction removes some candidate"
+        expected.len() < unrestricted.len(),
+        "{name}: unsupported candidates removed"
     );
     assert!(
-        found.iter().any(|dag| !summaries_used(dag).is_empty()),
-        "{name}: a supported summary stays"
+        restricted.iter().any(|dag| !summaries_used(dag).is_empty()),
+        "{name}: supported summary retained"
     );
-    assert_eq!(found, expected, "{name}");
-    assert_selects_cheapest_valid(restricted);
+    assert_eq!(restricted.iter().collect::<Vec<_>>(), expected, "{name}");
 }
 
 /// Pattern B with a p50 panel beside its p99, both every minute over the
@@ -145,6 +122,67 @@ fn pattern_b_with_p50() -> asap_types::workload::PlanningWorkload {
     p50.query = asap_types::workload::Query("quantile_over_time(0.5, latency_ms[5m])".into());
     repeating.push(p50);
     workload
+}
+
+/// One explicitly shared KLL pane chain, passed through normal physical rules.
+fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
+    use asap_logical_asap_optimization::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_types::ir::QueryRoot;
+    let workload = pattern_b_with_p50();
+    let original = lower_promql(&workload);
+    let local = generate_per_computation_candidates(original.iter().cloned().enumerate().collect())
+        .unwrap();
+    let choices = local
+        .targets
+        .iter()
+        .map(|target| {
+            target
+                .choices
+                .candidates
+                .iter()
+                .position(|candidate| {
+                    matches!(
+                        candidate,
+                        ComputationCandidate::Summary(SketchAlgorithm::Kll)
+                    )
+                })
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let composed = compose_logical_candidate(&local, &choices).unwrap();
+    let shared = asap_types::ir::cse::share_common_sub_dags(
+        composed
+            .into_iter()
+            .map(|(id, root)| match root {
+                QueryRoot::Operator(node) => (id, node),
+                _ => unreachable!(),
+            })
+            .collect(),
+    )
+    .into_iter()
+    .map(|(_, node)| QueryRoot::Operator(node))
+    .collect::<Vec<_>>();
+    let panes = pane_candidates(&shared, &[Some(60_000), Some(60_000)]);
+    assert_eq!(panes.len(), 1, "both estimators share one build");
+    let pane_roots = window_composition_pass2_candidates(&shared, &panes)
+        .unwrap()
+        .remove(0)
+        .roots
+        .unwrap();
+    let settings = PlanSelectionSettings::default();
+    run_explicit_candidates(
+        &workload,
+        original,
+        vec![pane_roots],
+        asap_plan_selection::PlanningModels::builtin()
+            .with_plan_selection(&settings)
+            .with_deployment_capabilities(deployment),
+    )
 }
 
 /// Physical candidate ids with their cost per second.
@@ -194,7 +232,7 @@ fn query_time_results_retained_still_offers_the_chain_shared_within_one_evaluati
         query_time_results_retained: true,
         ..DeploymentCapabilities::default()
     };
-    let run = run_promql_for(&pattern_b_with_p50(), &keeping);
+    let run = shared_pane_configurations(&keeping);
     let (within_one, kept) = shared_chain_costs(&run);
     assert!(!within_one.is_empty(), "no shared option: kept {kept:?}");
     assert!(!kept.is_empty(), "no kept option: shared {within_one:?}");
@@ -215,8 +253,7 @@ fn query_time_results_retained_still_offers_the_chain_shared_within_one_evaluati
     );
     assert_selects_cheapest_valid(&run);
 
-    let (_, kept) = shared_chain_costs(&run_promql_for(
-        &pattern_b_with_p50(),
+    let (_, kept) = shared_chain_costs(&shared_pane_configurations(
         &DeploymentCapabilities::default(),
     ));
     assert!(kept.is_empty(), "{kept:?}");
