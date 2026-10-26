@@ -1510,11 +1510,9 @@ fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
     assert!(costs.len() >= 2, "{costs:?}");
 }
 
-/// With no supported summaries declared, `stage_pipeline` plans with the
-/// executor's families, as `plan_installable` does: a count's CountSketch,
-/// which the Planner's executor does not run, is pruned in Pass 1 instead of
-/// offered (before, `Q1 CountSketch` was a candidate), and the document
-/// shows the families used. A declared list is kept as declared.
+/// With no supported summaries declared, `stage_pipeline` uses the executor's
+/// families, as `plan_installable` does. CountSketch cannot answer a total, so
+/// it is neither generated for count nor reported as deployment-pruned.
 #[test]
 fn undeclared_supported_summaries_default_to_the_executors_families() {
     let document = document_of(&[
@@ -1540,8 +1538,8 @@ fn undeclared_supported_summaries_default_to_the_executors_families() {
     }
     assert!(labels.iter().all(|label| !label.contains("CountSketch")));
     assert_eq!(
-        document["stage1_logical_asap_optimization"]["pass1_pruned"][0]["pruned"],
-        serde_json::json!([{ "candidate": "CountSketch", "reason": "UnsupportedByDeployment" }])
+        document["stage1_logical_asap_optimization"]["pass1_pruned"],
+        serde_json::json!([])
     );
     assert_eq!(
         document["deployment_capabilities"]["supported_summaries"],
