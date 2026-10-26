@@ -658,8 +658,8 @@ fn solve_with_objective(
         warm_start.as_ref().map(|start| start.cost / divisor),
     ));
     constraints.push(constraint!(total_cost >= local_bound));
-    if let Some(profile) = direct_profile {
-        let objective = super::direct_cost::encode(
+    let objective = if let Some(profile) = direct_profile {
+        super::direct_cost::encode(
             graph,
             profile,
             &mut variables,
@@ -670,9 +670,12 @@ fn solve_with_objective(
             &objective_reach,
             divisor,
             check_deadline,
-        )?;
-        constraints.push(constraint!(total_cost >= objective));
-    }
+        )?
+    } else {
+        Expression::from(total_cost)
+    };
+    // A certified direct expression needs no epigraph row. Keeping its large
+    // currency sum in the objective avoids postsolve cancellation in that row.
     for observation in observations {
         check_deadline()?;
         for witness in &observation.rejected_queries {
@@ -716,6 +719,7 @@ fn solve_with_objective(
             }
         }
         match observation.exact_cost {
+            Some(_) if direct_profile.is_some() => {} // Already priced exactly.
             Some(cost) => constraints.push(constraint!(
                 total_cost >= (cost / divisor) * (1.0 - mismatch)
             )),
@@ -748,7 +752,7 @@ fn solve_with_objective(
     metrics.peak_variables = metrics.peak_variables.max(variables.len());
     metrics.peak_constraints = metrics.peak_constraints.max(constraints.len());
     let mut model = variables
-        .minimise(total_cost)
+        .minimise(objective.clone())
         .using(highs)
         .set_option("mip_rel_gap", 0.0)
         .set_option("mip_abs_gap", 0.0)
@@ -811,7 +815,7 @@ fn solve_with_objective(
         graph,
         selected,
         solution.status(),
-        solution.value(total_cost) * divisor,
+        solution.eval(&objective) * divisor,
     )
     .map(|mut proposal| {
         proposal.direct_modeled_cost = direct_modeled_cost;

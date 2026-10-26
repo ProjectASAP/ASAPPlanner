@@ -77,7 +77,7 @@ pub(in crate::search) struct CandidateSearchResult {
 struct SeedRestrictions<'a> {
     excluded: &'a [PhysicalCandidateId],
     materialization_changes: &'a [(PhysicalCandidateId, PhysicalCandidateId)],
-    direct: Option<(&'a CandidateDependencyGraph, &'a DirectCostProfile)>,
+    direct: &'a [(&'a CandidateDependencyGraph, &'a DirectCostProfile)],
 }
 
 /// The callback returns an actual total cost for a validated feasible plan, or
@@ -160,7 +160,7 @@ pub(in crate::search) fn search_candidates_with_restricted_feedback(
         weights,
         excluded_from_seed,
         materialization_changes,
-        None,
+        &[],
         evaluate,
     )
 }
@@ -171,7 +171,7 @@ pub(in crate::search) fn search_candidates_with_direct_feedback(
     weights: &[f64],
     excluded_from_seed: &[PhysicalCandidateId],
     materialization_changes: &[(PhysicalCandidateId, PhysicalCandidateId)],
-    direct: Option<(&CandidateDependencyGraph, &DirectCostProfile)>,
+    direct: &[(&CandidateDependencyGraph, &DirectCostProfile)],
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_structural_baseline(
@@ -302,8 +302,11 @@ fn search_with_solver(
     let mut baseline_attempts = 0;
     let mut baseline_started: Option<Instant> = None;
     let mut direct_attempts = 0;
-    let mut direct_finished = restrictions.direct.is_none();
+    let mut direct_finished = false;
+    let mut direct_index = 0;
     let direct_budget = (limits.wall_time / 3).min(Duration::from_secs(2));
+    let per_direct_budget = direct_budget / restrictions.direct.len().max(1) as u32;
+    let mut direct_started = Instant::now();
     // Each local proposal uses the same solver and evaluator. Limit the phase
     // to four validations and one fifth of this domain's existing wall budget.
     let neighborhood_budget = (limits.wall_time / 5).min(Duration::from_secs(1));
@@ -318,8 +321,18 @@ fn search_with_solver(
         if refinements >= limits.max_refinements {
             break CandidateSearchStatus::RefinementLimit;
         }
+        if direct_index < restrictions.direct.len()
+            && (direct_finished
+                || direct_attempts >= 3
+                || direct_started.elapsed() >= per_direct_budget)
+        {
+            direct_index += 1;
+            direct_attempts = 0;
+            direct_finished = false;
+            direct_started = Instant::now();
+        }
         let use_direct =
-            !direct_finished && direct_attempts < 3 && started.elapsed() < direct_budget;
+            direct_index < restrictions.direct.len() && started.elapsed() < direct_budget;
         if !use_direct {
             baseline_started.get_or_insert_with(Instant::now);
         }
@@ -372,10 +385,26 @@ fn search_with_solver(
         }
         let (proposal_graph, proposal_observations, solve_budget) = if use_direct {
             direct_attempts += 1;
+            let restricted = restrictions.direct[direct_index].0;
+            // A different scan-price class may forbid earlier bindings. Keep
+            // their observations for the full graph, not this restricted model.
+            let admitted = observations
+                .iter()
+                .filter(|observation: &&ObservedAssignment| {
+                    crate::search::candidates::graph::validate_selected_graph(
+                        restricted,
+                        &observation.selected,
+                    )
+                    .is_ok()
+                })
+                .cloned()
+                .collect();
             (
-                restrictions.direct.expect("direct profile").0,
-                observations.clone(),
-                remaining.min(direct_budget.saturating_sub(started.elapsed())),
+                restricted,
+                admitted,
+                remaining
+                    .min(direct_budget.saturating_sub(started.elapsed()))
+                    .min(per_direct_budget.saturating_sub(direct_started.elapsed())),
             )
         } else if let Some(restricted) = &neighborhood {
             (
@@ -428,7 +457,7 @@ fn search_with_solver(
                 &proposal_observations,
                 Some(solve_budget.as_secs_f64()),
                 &mut solve_metrics,
-                restrictions.direct.expect("direct profile").1,
+                restrictions.direct[direct_index].1,
             )
         } else {
             propose(
@@ -708,7 +737,7 @@ mod tests {
             &[1.0, 1.0],
             &[],
             &[],
-            Some((&restricted, &profile)),
+            &[(&restricted, &profile)],
             |selected| Ok(Some(profile.selected_cost(&restricted, selected)).into()),
         )
         .unwrap();
@@ -716,6 +745,47 @@ mod tests {
         assert_eq!(result.lower_bound, 0.0);
         assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
         assert_eq!(result.solve_metrics.direct_cost_validated_plans, 1);
+    }
+
+    // Separate scan-price classes share one budget and retain the best validated DAG.
+    #[test]
+    fn direct_price_classes_preserve_the_best_incumbent() {
+        use crate::search::milp::direct_cost::NodeCostProfile;
+        let graph = choices(&[0.0, 0.0]);
+        let mut first = graph.clone();
+        first.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(0)];
+        let mut second = graph.clone();
+        second.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(1)];
+        let profile = DirectCostProfile {
+            schedules: None,
+            nodes: vec![
+                NodeCostProfile {
+                    execution_cost: 1.0,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    execution_cost: 2.0,
+                    ..Default::default()
+                },
+            ],
+            query_rate: 1.0,
+            request_latency_seconds: 0.0,
+            request_cost: 0.0,
+        };
+        let result = search_candidates_with_direct_feedback(
+            &graph,
+            limits(2),
+            &[1.0, 1.0],
+            &[],
+            &[],
+            &[(&first, &profile), (&second, &profile)],
+            |selected| Ok(Some(profile.selected_cost(&graph, selected)).into()),
+        )
+        .unwrap();
+        assert_eq!(result.incumbent.unwrap().actual_cost, 1.0);
+        assert_eq!(result.solve_metrics.direct_cost_validated_plans, 2);
+        assert_eq!(result.lower_bound, 0.0);
+        assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
     }
 
     // A later unproven solve can improve the validated incumbent without replacing

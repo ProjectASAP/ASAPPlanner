@@ -63,6 +63,23 @@ pub(in crate::search) fn extract(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
+    extract_scan_class(configured, context, false)
+}
+
+/// A second restricted proposal keeps the newest-pane scan class separate from
+/// ordinary full-window scans. The full candidate graph is never changed.
+pub(in crate::search) fn extract_latest_panes(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
+    extract_scan_class(configured, context, true)
+}
+
+fn extract_scan_class(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    prefer_latest_pane: bool,
+) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
     let settings = context.models.plan_selection;
     let CostModel::UsageOverTime(prices) = &settings.cost_model else {
         return Ok(None);
@@ -155,12 +172,11 @@ pub(in crate::search) fn extract(
                     && (requires_source_sizing(node) || stable_size(node, delta))
                     && match configuration.timing {
                         ExecutionTiming::QueryTime => {
-                            !matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
-                                && matches!(
-                                    configuration.materialization,
-                                    Materialization::NotMaterialized
-                                        | Materialization::MatAtQuery(Medium::Memory)
-                                )
+                            matches!(configuration.materialization, Materialization::NotMaterialized | Materialization::MatAtQuery(Medium::Memory))
+                                || (configuration.materialization == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+                                    && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                                    && context.models.deployment_capabilities.query_time_results_retained
+                                    && (0..context.entries.len()).any(|reader| asap_physical_asap_optimization::summary_materialization_eligibility(node, &[reader], context.entries, context.data, context.models.deployment_capabilities).is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)))
                         }
                         ExecutionTiming::IngestionTime => match node.asap() {
                             Some(ASAPOp::PaneChain { .. }) => {
@@ -210,47 +226,64 @@ pub(in crate::search) fn extract(
             }),
         );
     }
-    // The evaluator inspects immediate scan consumers (and TimeShift, excluded
-    // here). Different possible window/no-window contexts cannot share a price.
+    // Each scan keeps one explicit lookback class, not a maximum requiring an
+    // optionally selected witness. Every admitted consumer edge must use it.
     let mut lookbacks = vec![None; count];
     for id in 0..count {
-        if !nodes[id].as_ref().is_some_and(|node| {
-            matches!(
-                node.payload,
+        let Some(scan) = &nodes[id] else { continue };
+        if scan.output_state.timing != ExecutionTiming::QueryTime
+            || !matches!(
+                scan.payload,
                 asap_types::ir::Operator::NonASAP(NonASAPOp::Scan { .. })
             )
-        }) {
+        {
             continue;
         }
-        let mut windows = HashSet::new();
+        let mut ordinary = HashSet::new();
+        let mut kept = HashSet::new();
         for (consumer, candidate) in configured.inventory.graph.candidates.iter().enumerate() {
             check_deadline(context.deadline)?;
             let Some(node) = &nodes[consumer] else {
                 continue;
             };
+            if node.output_state.timing != ExecutionTiming::QueryTime {
+                continue;
+            }
             if candidate.producer_requirements.iter().any(|input| {
                 input
                     .compatible_producers
                     .contains(&PhysicalCandidateId(id))
             }) {
-                windows.insert(match &node.payload {
-                    asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                        Some(range.as_millis() as u64)
-                    }
-                    _ => None,
-                });
+                if node.materialization
+                    == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+                {
+                    kept.insert(scan_consumer_lookback(node));
+                } else {
+                    ordinary.insert(scan_consumer_lookback(node));
+                }
             }
         }
-        if configured.inventory.graph.query_roots.iter().any(|root| {
+        let raw_output = configured.inventory.graph.query_roots.iter().any(|root| {
             root.compatible_candidates
                 .contains(&PhysicalCandidateId(id))
-        }) {
-            windows.insert(None);
-        }
-        if windows.len() == 1 {
-            lookbacks[id] = *windows.iter().next().unwrap();
+        });
+        if raw_output {
+            lookbacks[id] = None;
         } else {
-            nodes[id] = None;
+            let choices = if prefer_latest_pane && !kept.is_empty() {
+                &kept
+            } else if !ordinary.is_empty() {
+                &ordinary
+            } else {
+                &kept
+            };
+            if choices.is_empty() {
+                nodes[id] = None;
+            } else if choices.contains(&None) {
+                lookbacks[id] = None;
+            } else {
+                lookbacks[id] = choices.iter().copied().max().flatten();
+            }
         }
     }
     let mut cache = vec![None; count];
@@ -399,6 +432,16 @@ fn price<'a>(
                 continue;
             };
             let producer = nodes[supplier.0].as_ref().unwrap();
+            if producer.output_state.timing == ExecutionTiming::QueryTime
+                && matches!(
+                    producer.payload,
+                    asap_types::ir::Operator::NonASAP(NonASAPOp::Scan { .. })
+                )
+                && lookbacks[supplier.0] != scan_consumer_lookback(node)
+            {
+                continue;
+            }
+
             let consumer_ingests = node.output_state.timing == ExecutionTiming::IngestionTime;
             let producer_ingests = producer.output_state.timing == ExecutionTiming::IngestionTime;
             if (consumer_ingests && !producer_ingests)
@@ -518,6 +561,8 @@ fn price<'a>(
         }
         if priced.cost.cost_per_second.is_none()
             || (node.output_state.timing == ExecutionTiming::QueryTime
+                && node.materialization
+                    != Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
                 && (priced.average_memory_bytes != 0.0
                     || priced.disk_bytes != 0
                     || priced.maintained.is_some()))
@@ -649,6 +694,28 @@ fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool 
     match (rmp_serde::to_vec(kind.params()), rmp_serde::to_vec(&sized)) {
         (Ok(before), Ok(after)) => before == after,
         _ => false,
+    }
+}
+
+fn scan_consumer_lookback(node: &PhysicalASAPDAGNode) -> Option<u64> {
+    match &node.payload {
+        asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+            Some(range.as_millis() as u64)
+        }
+        asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
+            pane_width_ms,
+            pane_count,
+            ..
+        }) => Some(
+            if node.materialization
+                == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+            {
+                *pane_width_ms
+            } else {
+                pane_width_ms.saturating_mul(u64::from(*pane_count))
+            },
+        ),
+        _ => None,
     }
 }
 
@@ -1095,7 +1162,24 @@ mod tests {
     }
 
     #[test]
-    fn ingestion_pane_profiles_match_the_real_evaluator_and_reject_extra_workers() {
+    fn ingestion_pane_profiles_match_the_real_evaluator() {
+        check_pane_profile(Materialization::MatAtIngestion(Medium::Memory));
+    }
+
+    #[test]
+    fn rebuilt_pane_profiles_match_the_real_evaluator() {
+        check_pane_profile(Materialization::NotMaterialized);
+        check_pane_profile(Materialization::MatAtQuery(Medium::Memory));
+    }
+
+    #[test]
+    fn kept_pane_profiles_and_scan_classes_match_the_real_evaluator() {
+        check_pane_profile(Materialization::MatAtQueryKeptAcrossEvaluations(
+            Medium::Memory,
+        ));
+    }
+
+    fn check_pane_profile(mode: Materialization) {
         use asap_logical_asap_optimization::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
         };
@@ -1105,17 +1189,21 @@ mod tests {
             node: Rc<OperatorNode>,
             configured: &mut CandidateConfigurationInventory,
             ingestion: bool,
+            mode: Materialization,
         ) -> PhysicalCandidateId {
-            let ingestion = ingestion || matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+            let ingestion = ingestion
+                || (matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                    && mode == Materialization::MatAtIngestion(Medium::Memory));
             let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
             let mut inputs = Vec::new();
-            node.operator
-                .map_children(|child| inputs.push(append(child.clone(), configured, ingestion)));
+            node.operator.map_children(|child| {
+                inputs.push(append(child.clone(), configured, ingestion, mode))
+            });
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
                 source_candidate: id,
                 materialization: if pane {
-                    Materialization::MatAtIngestion(Medium::Memory)
+                    mode
                 } else {
                     Materialization::NotMaterialized
                 },
@@ -1197,7 +1285,7 @@ mod tests {
                     let QueryRoot::Operator(root) = &sized[0] else {
                         panic!("operator")
                     };
-                    let id = append(root.clone(), &mut configured, false);
+                    let id = append(root.clone(), &mut configured, false, mode);
                     configured
                         .inventory
                         .graph
@@ -1205,8 +1293,16 @@ mod tests {
                         .push(QueryRootCandidates {
                             compatible_candidates: vec![id],
                         });
-                    let originals = vec![QueryRoot::Operator(original)];
-                    let entries = vec![QueryWorkloadEntry {
+                    configured
+                        .inventory
+                        .graph
+                        .query_roots
+                        .push(configured.inventory.graph.query_roots[0].clone());
+                    let originals = vec![
+                        QueryRoot::Operator(original.clone()),
+                        QueryRoot::Operator(original),
+                    ];
+                    let mut entries = vec![QueryWorkloadEntry {
                         query: Query(query.into()),
                         requirements: QueryRequirements {
                             accuracy: target,
@@ -1214,20 +1310,28 @@ mod tests {
                         },
                         predictability: Predictability::Predictable { known_at: None },
                         recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
-                            RepetitionInterval(60_000),
+                            RepetitionInterval(width as u32),
                         )),
                         range_evaluation: None,
                     }];
+                    entries.push(entries[0].clone());
                     let mut settings = crate::PlanSelectionSettings::default();
                     settings.resource_speed.ms_per_cpu_op *= speed_multiplier;
                     settings.resource_speed.ms_per_scanned_byte *= speed_multiplier;
+                    let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
+                        query_time_results_retained: true,
+                        ..Default::default()
+                    };
                     let context = CandidatePlanningContext {
                         deadline: None,
                         refine_materialization: false,
                         original_roots: &originals,
                         entries: &entries,
                         data: &data,
-                        models: crate::PlanningModels::builtin().with_plan_selection(&settings),
+                        models: crate::PlanningModels {
+                            deployment_capabilities: &deployment,
+                            ..crate::PlanningModels::builtin().with_plan_selection(&settings)
+                        },
                         calibration: crate::CalibrationFit::default(),
                     };
                     let extracted = extract(&configured, &context).unwrap().unwrap();
@@ -1243,22 +1347,14 @@ mod tests {
                             &mut Default::default(),
                             &extracted.profile,
                         );
-                    let proposal = if speed_multiplier == 1.0 {
-                        // Default nanosecond operation latency gives sub-threshold
-                        // held-memory terms. Keep the explicit unsupported outcome;
-                        // fixed-binding profile/evaluator parity remains meaningful.
-                        assert!(matches!(direct_proposal, Err(crate::search::candidates::graph::CandidateSelectionError::UnsupportedDirectCost(_))));
-                        crate::search::milp::model::solve_candidate_proposal(
-                            &configured.inventory.graph,
-                            &[],
-                            None,
-                        )
-                        .unwrap()
-                        .unwrap()
-                    } else {
-                        // An explicit microsecond operation calibration fits
-                        // the same guard, with unchanged prices.
-                        direct_proposal.unwrap().unwrap()
+                    let proposal = match direct_proposal {
+                        Ok(Some(proposal)) => proposal,
+                        Err(crate::search::candidates::graph::CandidateSelectionError::UnsupportedDirectCost(_)) if speed_multiplier == 1.0 => {
+                            // Default nanosecond work can give sub-threshold
+                            // held-memory coefficients. Preserve that fallback.
+                            crate::search::milp::model::solve_candidate_proposal(&configured.inventory.graph, &[], None).unwrap().unwrap()
+                        }
+                        result => panic!("{mode:?} {algorithm:?} width={width} series={series_count} speed={speed_multiplier}: {result:?}"),
                     };
                     let mut rejections =
                         crate::search::refinement::planner::CandidateRejectionSummary::default();
@@ -1318,8 +1414,14 @@ mod tests {
                     else {
                         unreachable!()
                     };
-                    let expected_residency =
-                        (u64::from(*pane_count) + 1) * series_count * state_bytes;
+                    let expected_residency = match mode {
+                        Materialization::MatAtIngestion(_) => u64::from(*pane_count) + 1,
+                        Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
+                            u64::from(*pane_count) - 1
+                        }
+                        _ => 0,
+                    } * series_count
+                        * state_bytes;
                     let expected_standing =
                         expected_residency as f64 * prices.cost_per_memory_byte_second;
                     assert!(
@@ -1328,24 +1430,137 @@ mod tests {
                             .abs()
                             <= 1e-12 * expected_standing.max(1e-15)
                     );
-                    assert_eq!(
-                        extracted.profile.nodes[chain].held_memory_cost_per_second,
-                        0.0
-                    );
-                    let mut overloaded = data.clone();
-                    overloaded.arrival = serde_json::from_value(
-                        serde_json::json!({"ingesting":{"rows_per_second":1e12}}),
-                    )
-                    .unwrap();
-                    let overloaded_context = CandidatePlanningContext {
-                        data: &overloaded,
-                        ..context
-                    };
-                    let rejected = extract(&configured, &overloaded_context).unwrap().unwrap();
-                    assert!(
-                        !rejected.supported[chain],
-                        "multiworker compaction is outside this certified slice"
-                    );
+                    if matches!(
+                        mode,
+                        Materialization::MatAtIngestion(_)
+                            | Materialization::MatAtQueryKeptAcrossEvaluations(_)
+                    ) {
+                        assert_eq!(
+                            extracted.profile.nodes[chain].held_memory_cost_per_second,
+                            0.0
+                        );
+                    } else {
+                        assert!(extracted.profile.nodes[chain].held_memory_cost_per_second > 0.0);
+                    }
+                    if mode == Materialization::MatAtIngestion(Medium::Memory) {
+                        let mut overloaded = data.clone();
+                        overloaded.arrival = serde_json::from_value(
+                            serde_json::json!({"ingesting":{"rows_per_second":1e12}}),
+                        )
+                        .unwrap();
+                        let overloaded_context = CandidatePlanningContext {
+                            data: &overloaded,
+                            ..context
+                        };
+                        let rejected = extract(&configured, &overloaded_context).unwrap().unwrap();
+                        assert!(
+                            !rejected.supported[chain],
+                            "multiworker compaction is outside this certified slice"
+                        );
+                    }
+                    if mode == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory) {
+                        // The same physical scan may feed either a full-window
+                        // rebuild or a newest-pane refresh. Keep these priced
+                        // domains distinct, and validate each selected binding.
+                        let normal_chain = PhysicalCandidateId(configured.configurations.len());
+                        configured.configurations.push(CandidateConfiguration {
+                            source_candidate: normal_chain,
+                            timing: ExecutionTiming::QueryTime,
+                            materialization: Materialization::MatAtQuery(Medium::Memory),
+                        });
+                        configured
+                            .inventory
+                            .templates
+                            .push(configured.inventory.templates[chain].clone());
+                        configured
+                            .inventory
+                            .graph
+                            .candidates
+                            .push(configured.inventory.graph.candidates[chain].clone());
+                        for candidate in &mut configured.inventory.graph.candidates {
+                            for input in &mut candidate.producer_requirements {
+                                if input
+                                    .compatible_producers
+                                    .contains(&PhysicalCandidateId(chain))
+                                {
+                                    input.compatible_producers.push(normal_chain);
+                                }
+                            }
+                        }
+                        let normal = extract(&configured, &context).unwrap().unwrap();
+                        let latest = extract_latest_panes(&configured, &context)
+                            .unwrap()
+                            .unwrap();
+                        assert!(!normal.supported[chain] && normal.supported[normal_chain.0]);
+                        assert!(latest.supported[chain] && !latest.supported[normal_chain.0]);
+                        let scan = configured
+                            .inventory
+                            .templates
+                            .iter()
+                            .position(|node| {
+                                node.as_ref().is_some_and(|node| {
+                                    matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
+                                })
+                            })
+                            .unwrap();
+                        let ratio = 300_000.0 / width as f64;
+                        assert!(
+                            (normal.profile.nodes[scan].execution_cost
+                                - ratio * latest.profile.nodes[scan].execution_cost)
+                                .abs()
+                                <= 1e-12 * normal.profile.nodes[scan].execution_cost
+                        );
+                        let mut full_selection = proposal.selected.clone();
+                        for id in &mut full_selection.selected_candidates {
+                            if id.0 == chain {
+                                *id = normal_chain;
+                            }
+                        }
+                        for edge in &mut full_selection.connections {
+                            if edge.producer.0 == chain {
+                                edge.producer = normal_chain;
+                            }
+                            if edge.consumer.0 == chain {
+                                edge.consumer = normal_chain;
+                            }
+                        }
+                        let full_evaluated =
+                            crate::search::refinement::planner::evaluate_configured_candidate(
+                                &configured,
+                                &context,
+                                &full_selection,
+                                1,
+                                &mut Default::default(),
+                                &mut Vec::new(),
+                            )
+                            .unwrap()
+                            .unwrap();
+                        let actual = full_evaluated.0.costs[&full_evaluated.0.selected]
+                            .cost_per_second
+                            .unwrap();
+                        let modeled = normal
+                            .profile
+                            .selected_cost(&configured.inventory.graph, &full_selection);
+                        assert!(
+                            (actual - modeled).abs() <= 1e-9 * actual.max(1e-15),
+                            "full-window class: {actual} vs {modeled}"
+                        );
+                        let forbidden =
+                            asap_logical_asap_optimization::DeploymentCapabilities::default();
+                        let no_retention = CandidatePlanningContext {
+                            models: crate::PlanningModels {
+                                deployment_capabilities: &forbidden,
+                                ..context.models
+                            },
+                            ..context
+                        };
+                        assert!(
+                            !extract(&configured, &no_retention)
+                                .unwrap()
+                                .unwrap()
+                                .supported[chain]
+                        );
+                    }
                     if scope == AccuracyScope::WholeResult {
                         let mut unknown = data.clone();
                         unknown.sources.get_mut("latency").unwrap().series_count = None;

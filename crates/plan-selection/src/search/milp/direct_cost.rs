@@ -1,4 +1,6 @@
-//! Exact objective encoding for certified equal-schedule query-time profiles.
+//! Exact objective encoding for certified query-time and ingestion profiles.
+//! Fixed evaluation schedules may be equal or use a bounded union-rate table;
+//! maintained and retained states carry separate standing resource charges.
 //! Profiles are supplied by physical costing; this module never infers prices
 //! from a logical template or treats accuracy as a monetary penalty.
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
@@ -1061,6 +1063,78 @@ mod tests {
             .unwrap();
             assert!((proposal.direct_modeled_cost.unwrap() - expected).abs() < 1e-8);
             assert!((proposal.model_lower_bound.unwrap() - expected).abs() < 1e-6);
+        }
+    }
+    // Query-kept state refreshes once at its readers' union rate. Residency is
+    // charged once, while its unmaterialized input is held for the weighted
+    // reader lifetime. This differs from charging the kept state per reader.
+    #[test]
+    fn retained_query_state_prices_residency_refresh_and_input_lifetime() {
+        let graph = CandidateDependencyGraph {
+            candidates: vec![node(None), node(Some(0)), node(Some(1)), node(Some(1))],
+            query_roots: vec![root(2), root(3)],
+            ..Default::default()
+        };
+        let mut profile = DirectCostProfile {
+            query_rate: 2.0,
+            schedules: None,
+            request_latency_seconds: 0.1,
+            request_cost: 0.0,
+            nodes: vec![
+                NodeCostProfile {
+                    execution_cost: 2.0,
+                    work_seconds: 1.0,
+                    held_memory_cost_per_second: 3.0,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    execution_cost: 1.0,
+                    work_seconds: 2.0,
+                    materialized: true,
+                    standing_cost_per_second: 7.0,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    execution_cost: 1.0,
+                    work_seconds: 0.5,
+                    held_memory_cost_per_second: 2.0,
+                    ..Default::default()
+                },
+                NodeCostProfile {
+                    execution_cost: 1.0,
+                    work_seconds: 1.5,
+                    held_memory_cost_per_second: 2.0,
+                    ..Default::default()
+                },
+            ],
+        };
+        // Latencies are 3.6 and 4.6 seconds. Equal-rate readers share one
+        // refresh; distinct fixed intervals add under the evaluator's policy.
+        for (rates, union, expected) in [(vec![2.0, 2.0], 2.0, 74.4), (vec![1.0, 2.0], 3.0, 83.0)] {
+            if rates[0] != rates[1] {
+                profile.schedules = Some(QueryScheduleRates {
+                    per_query_rates: rates.clone(),
+                    materialized_subset_rates: vec![0.0, rates[0], rates[1], union],
+                });
+            }
+            let weighted_latency = rates[0] * 3.6 + rates[1] * 4.6;
+            let rate_sum: f64 = rates.iter().sum();
+            let independent = 7.0
+                + union * (3.0 + 3.0 * weighted_latency / rate_sum)
+                + rate_sum
+                + 2.0 * weighted_latency;
+            assert!((independent - expected).abs() < 1e-10);
+            let proposal = solve_direct_cost_proposal_with_metrics(
+                &graph,
+                &[],
+                None,
+                &mut CandidateSolveMetrics::default(),
+                &profile,
+            )
+            .unwrap()
+            .unwrap();
+            assert!((proposal.direct_modeled_cost.unwrap() - expected).abs() < 1e-8);
+            assert!((proposal.model_lower_bound.unwrap() - expected).abs() < 1e-7 * expected);
         }
     }
 }

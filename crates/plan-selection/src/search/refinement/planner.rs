@@ -122,7 +122,24 @@ pub(in crate::search) fn optimize_configured_candidates(
     } else {
         Vec::new()
     };
-    let direct = direct_cost_seed(configured, context, &exclusions)?;
+    let mut direct = Vec::new();
+    if let Some(seed) = direct_cost_seed(configured, context, &exclusions, false)? {
+        direct.push(seed);
+    }
+    if configured.configurations.iter().any(|configuration| {
+        matches!(
+            configuration.materialization,
+            asap_types::physical::Materialization::MatAtQueryKeptAcrossEvaluations(_)
+        )
+    }) {
+        if let Some(seed) = direct_cost_seed(configured, context, &exclusions, true)? {
+            direct.push(seed);
+        }
+    }
+    let direct_refs: Vec<_> = direct
+        .iter()
+        .map(|(graph, profile)| (graph, profile))
+        .collect();
     let search = search_candidates_with_direct_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
@@ -132,7 +149,7 @@ pub(in crate::search) fn optimize_configured_candidates(
         &weights,
         &exclusions,
         &changes,
-        direct.as_ref().map(|(graph, profile)| (graph, profile)),
+        &direct_refs,
         |selected| {
             evaluation_number += 1;
             let mut rejected_queries = Vec::new();
@@ -191,6 +208,7 @@ fn direct_cost_seed(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
     seed_exclusions: &[crate::search::candidates::graph::PhysicalCandidateId],
+    latest_panes: bool,
 ) -> Result<
     Option<(
         crate::search::candidates::graph::CandidateDependencyGraph,
@@ -199,8 +217,15 @@ fn direct_cost_seed(
     String,
 > {
     use crate::search::candidates::graph::{PhysicalCandidateId, ReaderConstraint};
-    use crate::search::costing::direct_profile::{extract, DirectProfileError};
-    let mut extracted = match extract(configured, context) {
+    use crate::search::costing::direct_profile::{
+        extract, extract_latest_panes, DirectProfileError,
+    };
+    let extracted = if latest_panes {
+        extract_latest_panes(configured, context)
+    } else {
+        extract(configured, context)
+    };
+    let mut extracted = match extracted {
         Ok(Some(extracted)) => extracted,
         Ok(None) | Err(DirectProfileError::DeadlineExceeded(_)) => return Ok(None),
         Err(error) => return Err(error.to_string()),
