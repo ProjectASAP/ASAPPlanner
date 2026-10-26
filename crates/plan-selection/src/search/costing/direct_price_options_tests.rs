@@ -76,7 +76,7 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
             .collect(),
     };
     let roots = vec![QueryRoot::Operator(project)];
-    let entries = vec![QueryWorkloadEntry {
+    let entries = [QueryWorkloadEntry {
         query: Query("m".into()),
         requirements: QueryRequirements {
             accuracy: AccuracyTarget::exact(),
@@ -118,21 +118,22 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
             .iter()
             .find(|option| {
                 option
-                    .compatible_suppliers
+                    .compatible_input_tuples
                     .iter()
+                    .flatten()
                     .any(|binding| binding.producer == producer)
             })
             .expect("missing compatible supplier price option");
-        assert_eq!(option.compatible_suppliers.len(), 1);
-        assert_eq!(option.compatible_suppliers[0].price_option, 0);
+        assert_eq!(option.compatible_input_tuples.len(), 1);
+        assert_eq!(option.compatible_input_tuples[0][0].price_option, 0);
     }
     let low = reader_options
         .iter()
-        .find(|option| option.compatible_suppliers[0].producer == PhysicalCandidateId(0))
+        .find(|option| option.compatible_input_tuples[0][0].producer == PhysicalCandidateId(0))
         .unwrap();
     let high = reader_options
         .iter()
-        .find(|option| option.compatible_suppliers[0].producer == PhysicalCandidateId(1))
+        .find(|option| option.compatible_input_tuples[0][0].producer == PhysicalCandidateId(1))
         .unwrap();
     assert!(
         high.profile.work_seconds > low.profile.work_seconds,
@@ -299,7 +300,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
     });
     configured.inventory.graph.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(3)];
     let roots = vec![QueryRoot::Operator(downstream)];
-    let entries = vec![QueryWorkloadEntry {
+    let entries = [QueryWorkloadEntry {
         query: Query("m".into()),
         requirements: QueryRequirements {
             accuracy: AccuracyTarget::exact(),
@@ -336,8 +337,8 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
     );
     let mut referenced = Vec::new();
     for option in &extracted.candidates[3] {
-        assert_eq!(option.compatible_suppliers.len(), 1);
-        let binding = &option.compatible_suppliers[0];
+        assert_eq!(option.compatible_input_tuples.len(), 1);
+        let binding = &option.compatible_input_tuples[0][0];
         assert_eq!(binding.producer, PhysicalCandidateId(2));
         referenced.push(binding.price_option);
         let supplier = &extracted.candidates[2][binding.price_option];
@@ -378,7 +379,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
     assert_eq!(cyclic.candidates[3].len(), 2);
     assert!(cyclic.candidates[2]
         .iter()
-        .flat_map(|option| &option.compatible_suppliers)
+        .flat_map(|option| option.compatible_input_tuples.iter().flatten())
         .all(|binding| binding.producer != PhysicalCandidateId(2)));
     let chosen = solve(&configured, &cyclic);
     assert!(
@@ -635,8 +636,9 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .iter()
         .find(|option| {
             option
-                .compatible_suppliers
+                .compatible_input_tuples
                 .iter()
+                .flatten()
                 .any(|binding| binding.producer == raw_supplier)
         })
         .unwrap();
@@ -644,8 +646,9 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .iter()
         .find(|option| {
             option
-                .compatible_suppliers
+                .compatible_input_tuples
                 .iter()
+                .flatten()
                 .any(|binding| binding.producer == projected_supplier)
         })
         .unwrap();
@@ -697,4 +700,153 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
             "{supplier:?}: direct {modeled}, evaluator {actual}"
         );
     }
+}
+
+#[test]
+fn mixed_schedule_joint_prices_match_the_real_evaluator() {
+    let scan = |metric| {
+        OperatorNode::reachable(&lower_promql(metric, AccuracyTarget::exact()))
+            .into_iter()
+            .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .unwrap()
+    };
+    let m = scan("m");
+    let n = scan("n");
+    let project = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+        cols: m
+            .schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| ProjectItem {
+                alias: Some(field.name.clone()),
+                expr: ScalarExpr::Column(index),
+            })
+            .collect(),
+        qualifier: None,
+        child: m.clone(),
+    }))
+    .unwrap();
+    let mut configured = CandidateConfigurationInventory {
+        inventory: CandidateInventory {
+            graph: CandidateDependencyGraph {
+                candidates: (0..3)
+                    .map(|id| PhysicalCandidate {
+                        group: MemoGroupId(id as u32),
+                        local_cost: 0.0,
+                        producer_requirements: if id == 2 {
+                            vec![ProducerRequirement {
+                                compatible_producers: vec![
+                                    PhysicalCandidateId(0),
+                                    PhysicalCandidateId(1),
+                                ]
+                                .into(),
+                            }]
+                        } else {
+                            vec![]
+                        },
+                    })
+                    .collect(),
+                query_roots: vec![QueryRootCandidates {
+                    compatible_candidates: vec![PhysicalCandidateId(2)],
+                }],
+                ..Default::default()
+            },
+            templates: vec![Some(m), Some(n), Some(project.clone())],
+            group_candidates: vec![],
+        },
+        configurations: (0..3)
+            .map(|id| CandidateConfiguration {
+                source_candidate: PhysicalCandidateId(id),
+                materialization: Materialization::NotMaterialized,
+                timing: ExecutionTiming::QueryTime,
+            })
+            .collect(),
+    };
+    let roots = vec![QueryRoot::Operator(project); 5];
+    let entries = [QueryWorkloadEntry {
+        query: Query("m".into()),
+        requirements: QueryRequirements {
+            accuracy: AccuracyTarget::exact(),
+            max_latency_ms: None,
+        },
+        predictability: Predictability::Predictable { known_at: None },
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
+            60_000,
+        ))),
+        range_evaluation: None,
+    }];
+    let data: DataWorkload = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 100.0}},
+        "sources": {"m": {"rows_held":10,"series_count":1},"n":{"rows_held":100,"series_count":1}}
+    }))
+    .unwrap();
+    use asap_types::workload::{DemandEstimate, Rate, TimestampMs};
+    let mut entries = vec![entries[0].clone(); 5];
+    entries[0].recurrence =
+        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(59_000)));
+    entries[1].recurrence =
+        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(61_000)));
+    entries[2].recurrence =
+        QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
+            expected_rate: Rate(0.137),
+            observed_at: None,
+            valid_for: None,
+        }));
+    entries[3].recurrence = QueryRecurrence::Repeated(RepeatedDemand::Scheduled(vec![
+        TimestampMs(10),
+        TimestampMs(20),
+    ]));
+    entries[4].recurrence = QueryRecurrence::OneTime {
+        invocations: 3,
+        execute_at: None,
+    };
+    configured.inventory.graph.query_roots =
+        vec![configured.inventory.graph.query_roots[0].clone(); 5];
+    // All roots use the original source; this parity check has no synthetic
+    // equivalence between different source names.
+    configured.inventory.graph.candidates[2].producer_requirements[0].compatible_producers =
+        vec![PhysicalCandidateId(0)].into();
+    let context = CandidatePlanningContext {
+        deadline: None,
+        refine_materialization: false,
+        original_roots: &roots,
+        entries: &entries,
+        data: &data,
+        models: crate::PlanningModels::builtin(),
+        calibration: crate::CalibrationFit::default(),
+    };
+    let profile = extract_price_options(&configured, &context)
+        .unwrap()
+        .unwrap();
+    assert!(profile.schedules.is_some());
+    let proposal =
+        crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
+            &configured.inventory.graph,
+            &[],
+            None,
+            &mut Default::default(),
+            &profile,
+        )
+        .unwrap()
+        .unwrap();
+    let mut rejections = crate::search::refinement::planner::CandidateRejectionSummary::default();
+    let evaluated = crate::search::refinement::planner::evaluate_configured_candidate(
+        &configured,
+        &context,
+        &proposal.selected,
+        0,
+        &mut rejections,
+        &mut Vec::new(),
+    )
+    .unwrap()
+    .unwrap_or_else(|| panic!("{rejections:?}"));
+    let actual = evaluated.0.costs[&evaluated.0.selected]
+        .cost_per_second
+        .unwrap();
+    let modeled = proposal.direct_modeled_cost.unwrap();
+    assert!(
+        (actual - modeled).abs() <= 1e-9 * actual.max(1e-15),
+        "mixed schedules: {modeled} vs {actual}"
+    );
 }
