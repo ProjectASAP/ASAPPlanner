@@ -463,7 +463,7 @@ executor, and a deployment runtime.
 | **Planner** | `InstallablePlan`: the selected physical ASAP DAG (each node's materialization and, for a materialized view, its retention) and the query texts | ASAPPlanner (deployment-agnostic) | Flink's JobGraph |
 | **Executor: operator library** | `PhysicalOperator` and the native operators | `asap-executor` | DataFusion's `ExecutionPlan` nodes |
 | **Executor: compiled plan** | `compile` → `CompiledPhysicalDAG` with input slots; `frontier_from_timing`, `cut_candidate` | `asap-executor` | DataFusion's physical planner, which resolves tables while planning; ours leaves them as slots |
-| **Executor: deployment interface** | `TableProvider`, `Bindings`, `instantiate` | `asap-executor` defines it; the deployment implements it | DataFusion's `TableProvider` and catalog |
+| **Executor: deployment interface** | `TableProvider`, `BindingDataSources`, `instantiate` | `asap-executor` defines it; the deployment implements it | DataFusion's `TableProvider` and catalog |
 | **Deployment** | raw-data storage, the summary store (what a stored state is, where it lives, readiness, revisions), run scheduling, retention, transport | ASAPQuery, asap-fusion | catalog and runtime |
 
 ### The plan file
@@ -534,15 +534,15 @@ pub struct ScanRequest<'a> {
 `ScanRequest` lets a provider skip rows and columns. A provider that ignores it
 is still correct.
 
-### Bindings and instantiation
+### Binding data sources and instantiation
 
 ```rust
-pub struct Bindings {
+pub struct BindingDataSources {
     pub tables: DataSources,                             // Source → provider
     pub views: BTreeMap<NodeId, Arc<dyn TableProvider>>, // view slot → provider
 }
 impl CompiledPhysicalDAG {
-    pub fn instantiate<'a>(&self, bindings: &'a Bindings)
+    pub fn instantiate<'a>(&self, data_sources: &'a BindingDataSources)
         -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error>;
 }
 ```
@@ -575,12 +575,12 @@ Install (once):
     query     = compile(dag, {pane}, [p50, p99])  // view slot → NativeKllMerge → NativeP50, NativeP99
 
 Each complete pane (12:04, 12:05]:
-    refresh.instantiate(&Bindings { tables: { latency → time-series provider } })
+    refresh.instantiate(&BindingDataSources { tables: { latency → time-series provider } })
         Scan asks the provider for time_range_ms = (12:04, 12:05]
     store the KllState in the summary store under the view's coverage
 
 Query at T = 12:05 over (12:00, 12:05]:
-    query.instantiate(&Bindings { views: { pane → summary-store provider } })
+    query.instantiate(&BindingDataSources { views: { pane → summary-store provider } })
         the view slot asks for time_range_ms = (12:00, 12:05]
         ├── latency-kll-1m/(12:00,12:01]
         ├── latency-kll-1m/(12:01,12:02]
