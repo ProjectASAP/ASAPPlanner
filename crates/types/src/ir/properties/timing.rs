@@ -208,15 +208,25 @@ impl TimingMemo {
     }
 }
 
+/// What `node`'s output carries: summary state from a build, a merge or a
+/// node that keeps whole states (a key filter, a projection of the state
+/// column), raw rows otherwise.
+fn primitive(node: &OperatorNode) -> DataPrimitive {
+    match &node.operator {
+        Operator::ASAP(op) if op.produced_state().is_some() => DataPrimitive::SummaryState,
+        Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => DataPrimitive::SummaryState,
+        _ if node.result_kind == crate::ir::OperatorResultKind::State => {
+            DataPrimitive::SummaryState
+        }
+        _ => DataPrimitive::Raw,
+    }
+}
+
 /// The data state a timed node's output carries.
 pub fn data_state(node: &OperatorNode) -> Option<ExecutionDataState> {
     Some(ExecutionDataState {
         timing: node.timing?,
-        primitive: match &node.operator {
-            Operator::ASAP(op) if op.produced_state().is_some() => DataPrimitive::SummaryState,
-            Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => DataPrimitive::SummaryState,
-            _ => DataPrimitive::Raw,
-        },
+        primitive: primitive(node),
     })
 }
 
@@ -362,11 +372,7 @@ pub fn planned_data_state(
         .expect("a default assignment never fails");
     ExecutionDataState {
         timing,
-        primitive: match &node.operator {
-            Operator::ASAP(op) if op.produced_state().is_some() => DataPrimitive::SummaryState,
-            Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => DataPrimitive::SummaryState,
-            _ => DataPrimitive::Raw,
-        },
+        primitive: primitive(node),
     }
 }
 
@@ -695,6 +701,12 @@ fn check_all_plain(input: &Schema) -> Result<(), ExecutionDataStateError> {
     Ok(())
 }
 
+/// Whether `node` is a filter that keeps whole summary states by their key
+/// columns ([`selected_from`](crate::ir::operator::asap::selected_from)).
+fn selects_states(node: &OperatorNode) -> bool {
+    crate::ir::operator::asap::selected_from(node).is_some()
+}
+
 fn validate_non_asap(
     node: &OperatorNode,
     op: &NonASAPOp,
@@ -712,7 +724,7 @@ fn validate_non_asap(
                 | NonASAPOp::Sort { .. }
                 | NonASAPOp::Limit { .. }
         ) && s.primitive == DataPrimitive::SummaryState
-            && is_exact_accumulator_state(&child.schema).is_ok();
+            && (is_exact_accumulator_state(&child.schema).is_ok() || selects_states(node));
         // A query-time consumer may read the stored output of a sub-DAG
         // materialized at ingestion time.
         let reads_stored = timing == ExecutionTiming::QueryTime
@@ -727,6 +739,8 @@ fn validate_non_asap(
         }
     }
     match op {
+        // A key filter keeps whole summary states of any family.
+        NonASAPOp::Filter { .. } if selects_states(node) => {}
         NonASAPOp::Project { child, .. }
         | NonASAPOp::Filter { child, .. }
         | NonASAPOp::Sort { child, .. }

@@ -704,12 +704,42 @@ impl CompiledExpression {
         Self::compile_local(&expression, input)
     }
 
+    /// `expression` compiled over `input` whose other columns may hold
+    /// summary state: a filter that keeps whole states by their keys. The
+    /// expression itself reads only plain columns.
+    pub fn compile_over_states(expression: &PlannedExpr, input: &SchemaRef) -> Result<Self, Error> {
+        if !expression.operator_refs().is_empty() {
+            return Err(Error::Invalid(
+                "a state filter must read only plain columns".into(),
+            ));
+        }
+        Self::bind_over_states(&expression.map_operator_refs(&mut |_| ()), input)
+    }
+
+    fn bind_over_states(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
+        if expression.columns_referenced().iter().any(|&column| {
+            input
+                .fields
+                .get(column)
+                .is_none_or(|field| !field.is_plain())
+        }) {
+            return Err(Error::Invalid(
+                "a state filter must read only plain columns".into(),
+            ));
+        }
+        Self::bind(expression, input)
+    }
+
     fn compile_local(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
         if !input.is_all_plain() {
             return Err(Error::Invalid(
                 "scalar expression cannot consume summary state".into(),
             ));
         }
+        Self::bind(expression, input)
+    }
+
+    fn bind(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
         let schema = input.as_ref().clone();
         validate(expression, &schema)?;
         let output = expression
@@ -727,7 +757,12 @@ impl CompiledExpression {
         self.output.clone()
     }
     pub(crate) fn validate_input(&self, input: &SchemaRef) -> Result<(), Error> {
-        let checked = Self::compile_local(&self.expression, input)?;
+        let checked = if input.is_all_plain() {
+            Self::compile_local(&self.expression, input)?
+        } else {
+            // A state filter's expression, compiled by `compile_over_states`.
+            Self::bind_over_states(&self.expression, input)?
+        };
         if checked.output != self.output {
             return Err(Error::Invalid(
                 "persisted expression type differs from its semantics".into(),
@@ -752,9 +787,11 @@ impl CompiledExpression {
     pub fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {
         if row.len() != self.schema.fields.len()
             || row.iter().zip(&self.schema.fields).any(|(value, column)| {
-                !column
-                    .plain_dtype()
-                    .is_some_and(|dtype| value.matches(dtype, column.nullable))
+                match column.plain_dtype() {
+                    Some(dtype) => !value.matches(dtype, column.nullable),
+                    // A state column a state filter carries but does not read.
+                    None => !matches!(value, Value::Summary { .. }),
+                }
             })
         {
             return Err(Error::Invalid(

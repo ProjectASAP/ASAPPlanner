@@ -679,7 +679,9 @@ fn built_from_relation(state: &OperatorNode) -> bool {
         Some(ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. }) => {
             child.result_kind == planner_types::ir::OperatorResultKind::Relation
         }
-        _ => false,
+        // A filter keeping whole states reads them from their build.
+        _ => planner_types::ir::operator::asap::selected_from(state)
+            .is_some_and(|states| built_from_relation(states)),
     }
 }
 
@@ -1134,6 +1136,14 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                         ))
                     })
                     .collect::<Result<_, Error>>()?,
+            ),
+            // A filter keeping whole summary states reads only their keys.
+            NonASAPOp::Filter { pred, .. } if !input.is_all_plain() => Operator::filter(
+                input.clone(),
+                Expression::planner(crate::expressions::CompiledExpression::compile_over_states(
+                    &local_scalar(&pred.0)?,
+                    input,
+                )?),
             ),
             NonASAPOp::Filter { pred, .. } => {
                 Operator::filter(input.clone(), expression(&pred.0, input)?)
