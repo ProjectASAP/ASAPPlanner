@@ -1,0 +1,69 @@
+{
+  "query_workload": {
+    "language": {
+      "sql": "datafusion_sql"
+    },
+    "query_batch": null,
+    "repeating_queries": [
+      {
+        "query": "SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY value) AS v FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE",
+        "demand": {
+          "fixed_interval": 30000
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.0,
+            "failure_probability": 0.0,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      },
+      {
+        "query": "SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY value) AS v FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE",
+        "demand": {
+          "fixed_interval": 30000
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.0,
+            "failure_probability": 0.0,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      }
+    ]
+  },
+  "data_workload": {
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 1000.0
+      }
+    },
+    "sources": {
+      "metrics": {
+        "series_count": 10000,
+        "metric_type": null,
+        "values_non_negative": true,
+        "sample_interval": 10000,
+        "stream_norms": null,
+        "max_distinct_per_evaluation": null,
+        "distinct_values_per_label": {
+          "city": 10,
+          "host": 100
+        }
+      }
+    }
+  }
+}
