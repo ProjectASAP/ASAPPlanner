@@ -1,6 +1,7 @@
 //! Exact ranking reuse with explicit exact-input groups. No global selection
 //! flags are required: only exact implementations can supply these inputs.
 use super::reuse::{append_producer, append_reader, eligible, replace};
+use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
 use crate::asap_aware_cse::topk_reuse_candidates;
 use crate::memo::candidates::{CandidateMemo, CandidateOrigin};
 use crate::memo::check_generation_deadline;
@@ -18,61 +19,127 @@ pub(in crate::memo) fn add_topk_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
-    check_generation_deadline(deadline)?;
-    let mut owners = HashMap::new();
-    let mut roots = Vec::new();
-    for (group, entry) in memo.groups.iter().enumerate() {
-        check_generation_deadline(deadline)?;
-        let [input] = entry.node.children()[..] else {
-            continue;
-        };
-        let exact = Rc::new(
-            (**input)
-                .clone()
-                .with_guarantee(Some(AccuracyGuarantee::exact(
-                    "exact input candidate group",
-                ))),
-        );
-        let Ok(copy) = entry.node.with_new_children(|_| Rc::clone(&exact)) else {
-            continue;
-        };
-        let copy = Rc::new(copy);
-        owners.insert(Rc::as_ptr(&copy), group);
-        roots.push(QueryRoot::Operator(copy));
-    }
-    let mut exact_groups = HashMap::new();
-    let mut added = 0;
-    for reuse in topk_reuse_candidates(&roots) {
-        check_generation_deadline(deadline)?;
-        let members: Vec<_> = reuse
-            .members
-            .iter()
-            .filter_map(|node| owners.get(&Rc::as_ptr(node)).copied())
-            .collect();
-        if members.len() < 2 {
-            continue;
+    add_shared_producer_candidates(
+        memo,
+        &mut TopKRankings {
+            exact_groups: HashMap::new(),
+        },
+        deadline,
+    )
+}
+
+/// Exact top-k readers of one input and partition with different `k`: the
+/// covering need is the ranking with the largest `k`, `Limit(k_max)` over
+/// `Sort` of an exact input ([`topk_reuse_candidates`]); each reader derives
+/// `Limit(k) ▸ Project` from it.
+struct TopKRankings {
+    /// Each input group's exact-only group ([`exact_input_group`]).
+    exact_groups: HashMap<MemoGroupId, Option<MemoGroupId>>,
+}
+
+/// The ranking a top-k reader can share: its reuse candidate (the readers of
+/// one input and partition) and that candidate's ranking.
+struct Ranking {
+    set: usize,
+    ranking: Rc<OperatorNode>,
+}
+
+impl SharedProducer for TopKRankings {
+    type Need = Ranking;
+    type Covering = Rc<OperatorNode>;
+
+    fn readers(
+        &mut self,
+        memo: &CandidateMemo,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<Reader<Ranking>>, StateGroupExpansionError> {
+        let mut owners = HashMap::new();
+        let mut roots = Vec::new();
+        for (group, entry) in memo.groups.iter().enumerate() {
+            check_generation_deadline(deadline)?;
+            let [input] = entry.node.children()[..] else {
+                continue;
+            };
+            let exact = Rc::new(
+                (**input)
+                    .clone()
+                    .with_guarantee(Some(AccuracyGuarantee::exact(
+                        "exact input candidate group",
+                    ))),
+            );
+            let Ok(copy) = entry.node.with_new_children(|_| Rc::clone(&exact)) else {
+                continue;
+            };
+            let copy = Rc::new(copy);
+            owners.insert(Rc::as_ptr(&copy), group);
+            roots.push(QueryRoot::Operator(copy));
         }
-        let Some(input_group) = memo.groups[members[0]].children.first().copied() else {
-            continue;
+        Ok(topk_reuse_candidates(&roots)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(set, reuse)| {
+                let owners = &owners;
+                reuse.members.into_iter().filter_map(move |node| {
+                    Some(Reader {
+                        group: *owners.get(&Rc::as_ptr(&node))?,
+                        need: Ranking {
+                            set,
+                            ranking: Rc::clone(&reuse.ranking),
+                        },
+                    })
+                })
+            })
+            .collect())
+    }
+
+    fn can_share(&self, a: &Reader<Ranking>, b: &Reader<Ranking>) -> bool {
+        a.need.set == b.need.set
+    }
+
+    fn covering(
+        &mut self,
+        _memo: &CandidateMemo,
+        sharing: &[Reader<Ranking>],
+        _deadline: Option<Instant>,
+    ) -> Result<Vec<Rc<OperatorNode>>, StateGroupExpansionError> {
+        Ok(vec![Rc::clone(&sharing[0].need.ranking)])
+    }
+
+    fn serves(&self, _covering: &Rc<OperatorNode>, _reader: &Reader<Ranking>) -> bool {
+        // The largest `k` holds every smaller top-k.
+        true
+    }
+
+    fn derive(
+        &mut self,
+        memo: &mut CandidateMemo,
+        sharing: &[Reader<Ranking>],
+        reader: &Reader<Ranking>,
+        covering: &Rc<OperatorNode>,
+    ) -> Result<usize, StateGroupExpansionError> {
+        // Interning the ranking is idempotent, so every reader of the set
+        // reads the producer the first one interned.
+        let Some(input_group) = memo.groups[sharing[0].group].children.first().copied() else {
+            return Ok(0);
         };
-        let Some(exact_input) = exact_input_group(memo, input_group, &mut exact_groups)? else {
-            continue;
+        let Some(exact_input) = exact_input_group(memo, input_group, &mut self.exact_groups)?
+        else {
+            return Ok(0);
         };
         let input = Rc::clone(&memo.groups[exact_input.0 as usize].node);
-        let queries: Vec<_> = members
+        let queries: Vec<_> = sharing
             .iter()
-            .flat_map(|group| memo.groups[*group].queries.iter().copied())
+            .flat_map(|reader| memo.groups[reader.group].queries.iter().copied())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let sort = reuse.ranking.children()[0]
+        let sort = covering.children()[0]
             .with_new_children(|_| Rc::clone(&input))
             .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
         let sort_group =
             append_producer(memo, Rc::new(sort), &queries, CandidateOrigin::TopKReuse, 1)?;
         let sort = Rc::clone(&memo.groups[sort_group.0 as usize].node);
-        let ranking = reuse
-            .ranking
+        let ranking = covering
             .with_new_children(|_| Rc::clone(&sort))
             .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
         let ranking_group = append_producer(
@@ -83,51 +150,47 @@ pub(in crate::memo) fn add_topk_candidates(
             1,
         )?;
         let ranking = Rc::clone(&memo.groups[ranking_group.0 as usize].node);
-        for owner in members {
-            check_generation_deadline(deadline)?;
-            let logical = Rc::clone(&memo.groups[owner].node);
-            let Some(NonASAPOp::Aggregate {
-                reduction: Reduction::Reduce(keys),
-                measures,
-                ..
-            }) = logical.non_asap()
-            else {
-                continue;
-            };
-            let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
-                continue;
-            };
-            let Some(original) = memo.candidates[owner].iter().find(|candidate| eligible(candidate) && matches!(candidate.node.non_asap(), Some(NonASAPOp::Aggregate {measures, ..}) if matches!(measures.as_slice(), [AggIntent::TopK {..}]))).cloned() else { continue };
-            let limited = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Limit {
-                n: Some(*k),
-                offset: 0,
-                partition_by: keys.clone(),
-                child: Rc::clone(&ranking),
-            }))
-            .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
-            let columns = asap_types::ir::schema::topk::ranked_row_projection(
-                &ranking,
-                &Reduction::Reduce(keys.clone()),
-                &logical.schema.fields[keys.len()].name,
-            )
-            .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
-            let reader = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
-                cols: columns,
-                qualifier: None,
-                child: limited,
-            }))
-            .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
-            added += usize::from(append_reader(
-                memo,
-                owner,
-                &original,
-                reader,
-                CandidateOrigin::TopKReuse,
-            )?);
-        }
+        let owner = reader.group;
+        let logical = Rc::clone(&memo.groups[owner].node);
+        let Some(NonASAPOp::Aggregate {
+            reduction: Reduction::Reduce(keys),
+            measures,
+            ..
+        }) = logical.non_asap()
+        else {
+            return Ok(0);
+        };
+        let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
+            return Ok(0);
+        };
+        let Some(original) = memo.candidates[owner].iter().find(|candidate| eligible(candidate) && matches!(candidate.node.non_asap(), Some(NonASAPOp::Aggregate {measures, ..}) if matches!(measures.as_slice(), [AggIntent::TopK {..}]))).cloned() else { return Ok(0) };
+        let limited = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Limit {
+            n: Some(*k),
+            offset: 0,
+            partition_by: keys.clone(),
+            child: Rc::clone(&ranking),
+        }))
+        .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+        let columns = asap_types::ir::schema::topk::ranked_row_projection(
+            &ranking,
+            &Reduction::Reduce(keys.clone()),
+            &logical.schema.fields[keys.len()].name,
+        )
+        .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+        let reader = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+            cols: columns,
+            qualifier: None,
+            child: limited,
+        }))
+        .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+        Ok(usize::from(append_reader(
+            memo,
+            owner,
+            &original,
+            reader,
+            CandidateOrigin::TopKReuse,
+        )?))
     }
-    check_generation_deadline(deadline)?;
-    Ok(added)
 }
 
 fn exact_input_group(

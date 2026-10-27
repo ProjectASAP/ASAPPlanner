@@ -4,6 +4,7 @@ pub(super) mod filtered_group;
 pub(super) mod reuse;
 pub(super) mod rollup;
 pub(super) mod scan_labels;
+pub(super) mod shared_producer;
 pub(super) mod state_configurations;
 pub(super) mod summary_inputs;
 pub(super) mod summary_results;
