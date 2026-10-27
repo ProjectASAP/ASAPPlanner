@@ -1687,15 +1687,18 @@ fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     {
         return None;
     }
-    let (pinned, grouped) = match child.non_asap()? {
-        NonASAPOp::Filter { pred, child } => {
-            (crate::finer_aggregate::pinned_columns(&pred.0), child)
-        }
-        _ => (Vec::new(), child),
+    let (pred, grouped) = match child.non_asap()? {
+        NonASAPOp::Filter { pred, child } => (Some(&pred.0), child),
+        _ => (None, child),
     };
+    let pinned = pred.map_or_else(Vec::new, crate::finer_aggregate::pinned_columns);
+    // The filter may read only key columns: a predicate on an estimate
+    // would decide by an approximate value which groups are kept.
+    let reads = pred.map_or_else(Vec::new, ScalarExpr::columns_referenced);
     if !grouped.schema.unique_keys.iter().any(|key| {
         key.iter()
             .all(|column| by.keys().contains(column) || pinned.contains(column))
+            && reads.iter().all(|column| key.contains(column))
     }) {
         return None;
     }
