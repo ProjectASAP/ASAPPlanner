@@ -4,7 +4,7 @@
 //! a merge keeps the `k` smallest distinct hashes of both states, so merging
 //! two states equals building one over the union of their inputs.
 use crate::summary_kernels::factory::AccumulatorUpdater;
-use crate::{AggregateCore, KernelError, KeyByLabelValues};
+use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{DataInput, Kmv};
 use planner_types::ir::schema::SketchStatistic;
 
@@ -96,7 +96,7 @@ impl AccumulatorUpdater for KmvAccumulator {
         self.insert_sample(value);
         Ok(())
     }
-    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, _: i64) -> Result<(), String> {
+    fn update_keyed(&mut self, _: &[String], value: f64, _: i64) -> Result<(), String> {
         self.insert_sample(value);
         Ok(())
     }

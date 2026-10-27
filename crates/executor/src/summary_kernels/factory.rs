@@ -5,7 +5,7 @@ use crate::summary_kernels::{
     CountMinSketchAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator, HydraCms,
     HydraKllSketchAccumulator,
 };
-use crate::{AggregateCore, KeyByLabelValues};
+use crate::AggregateCore;
 use planner_types::ir::schema::{
     FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams,
 };
@@ -123,12 +123,8 @@ pub trait AccumulatorUpdater: Send {
     /// Feed a keyed (key, value, timestamp_ms) triple, e.g. a frequency item
     /// or an exact keyed state. An error when the state cannot take the
     /// value (a sum past `f64::MAX`); the state is then unchanged.
-    fn update_keyed(
-        &mut self,
-        key: &KeyByLabelValues,
-        value: f64,
-        timestamp_ms: i64,
-    ) -> Result<(), String>;
+    fn update_keyed(&mut self, key: &[String], value: f64, timestamp_ms: i64)
+        -> Result<(), String>;
 
     /// Extract the final accumulator as a boxed `AggregateCore`.
     fn take_accumulator(&mut self) -> Box<dyn AggregateCore>;
@@ -185,7 +181,7 @@ impl AccumulatorUpdater for KllAccumulatorUpdater {
 
     fn update_keyed(
         &mut self,
-        _key: &KeyByLabelValues,
+        _key: &[String],
         value: f64,
         timestamp_ms: i64,
     ) -> Result<(), String> {
@@ -249,7 +245,7 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
 
     fn update_keyed(
         &mut self,
-        _key: &KeyByLabelValues,
+        _key: &[String],
         value: f64,
         timestamp_ms: i64,
     ) -> Result<(), String> {
@@ -304,11 +300,11 @@ impl AccumulatorUpdater for CmsAccumulatorUpdater {
 
     fn update_keyed(
         &mut self,
-        key: &KeyByLabelValues,
+        key: &[String],
         value: f64,
         _timestamp_ms: i64,
     ) -> Result<(), String> {
-        self.acc.update(&key.to_semicolon_str(), value);
+        self.acc.update(&key.join(";"), value);
         Ok(())
     }
 
@@ -375,14 +371,14 @@ impl AccumulatorUpdater for WeightedFrequencyUpdater {
 
     fn update_keyed(
         &mut self,
-        key: &KeyByLabelValues,
+        key: &[String],
         value: f64,
         _timestamp_ms: i64,
     ) -> Result<(), String> {
         // Inputs pass `validate_single_input` first; only a sum past
         // `f64::MAX` can fail here.
         self.acc
-            .update_labels(&key.labels, value)
+            .update_labels(key, value)
             .map_err(|error| error.to_string())
     }
 
@@ -430,7 +426,7 @@ impl AccumulatorUpdater for HydraKllAccumulatorUpdater {
 
     fn update_keyed(
         &mut self,
-        key: &KeyByLabelValues,
+        key: &[String],
         value: f64,
         _timestamp_ms: i64,
     ) -> Result<(), String> {
@@ -593,12 +589,7 @@ impl AccumulatorUpdater for PlannerExactUpdater {
         self.acc.update(None, value, timestamp);
         Ok(())
     }
-    fn update_keyed(
-        &mut self,
-        key: &KeyByLabelValues,
-        value: f64,
-        timestamp: i64,
-    ) -> Result<(), String> {
+    fn update_keyed(&mut self, key: &[String], value: f64, timestamp: i64) -> Result<(), String> {
         self.acc.update(Some(key), value, timestamp);
         Ok(())
     }
@@ -650,12 +641,7 @@ impl AccumulatorUpdater for HllUpdater {
         }
         Ok(())
     }
-    fn update_keyed(
-        &mut self,
-        _: &KeyByLabelValues,
-        value: f64,
-        timestamp_ms: i64,
-    ) -> Result<(), String> {
+    fn update_keyed(&mut self, _: &[String], value: f64, timestamp_ms: i64) -> Result<(), String> {
         self.update_single(value, timestamp_ms)
     }
     impl_clone_accumulator_methods!(acc);
@@ -681,12 +667,7 @@ impl AccumulatorUpdater for UnivMonUpdater {
             .insert_sample(value)
             .map_err(|error| error.to_string())
     }
-    fn update_keyed(
-        &mut self,
-        _: &KeyByLabelValues,
-        value: f64,
-        timestamp_ms: i64,
-    ) -> Result<(), String> {
+    fn update_keyed(&mut self, _: &[String], value: f64, timestamp_ms: i64) -> Result<(), String> {
         self.update_single(value, timestamp_ms)
     }
     impl_clone_accumulator_methods!(acc);

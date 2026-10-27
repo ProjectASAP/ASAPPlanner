@@ -434,19 +434,13 @@ pub fn validate_exact_evaluation(
     evaluation: &crate::summary_kernels::exact::ExactEvaluation,
 ) -> Result<(), Error> {
     validate_native_family(family)?;
-    use crate::Statistic as S;
     use planner_types::ir::schema::ExactKind as E;
     let supported = matches!(
-        (family, evaluation.statistic),
-        (SummaryFamilyType::ExactAggregate(E::Sum, _), S::Sum)
-            | (SummaryFamilyType::ExactAggregate(E::Count, _), S::Count)
-            | (SummaryFamilyType::ExactAggregate(E::Min, _), S::Min)
-            | (SummaryFamilyType::ExactAggregate(E::Max, _), S::Max)
-            | (SummaryFamilyType::ExactAggregate(E::Rate, _), S::Rate)
-            | (
-                SummaryFamilyType::ExactAggregate(E::Increase, _),
-                S::Increase
-            )
+        family,
+        SummaryFamilyType::ExactAggregate(
+            kind @ (E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase),
+            _,
+        ) if *kind == evaluation.statistic
     );
     if !supported {
         return Err(Error::Invalid(
@@ -454,7 +448,7 @@ pub fn validate_exact_evaluation(
         ));
     }
     if evaluation.lookback_ms.is_some_and(|lookback| {
-        lookback <= 0 || !matches!(evaluation.statistic, S::Rate | S::Increase)
+        lookback <= 0 || !matches!(evaluation.statistic, E::Rate | E::Increase)
     }) {
         return Err(Error::Invalid("invalid exact counter lookback".into()));
     }

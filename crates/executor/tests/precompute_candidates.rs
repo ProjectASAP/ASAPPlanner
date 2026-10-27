@@ -133,7 +133,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 .as_any()
                 .downcast_ref::<asap_executor::summary_kernels::exact::ExactAccumulator>()
                 .unwrap()
-                .evaluation(asap_executor::Statistic::Rate, range_ms, None)
+                .evaluation(ExactKind::Rate, range_ms, None)
                 .unwrap()
                 .unwrap();
             let summary = Value::Summary {
@@ -357,7 +357,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .as_any()
         .downcast_ref::<asap_executor::summary_kernels::exact::ExactAccumulator>()
         .unwrap()
-        .evaluation(asap_executor::Statistic::Rate, range_ms, None)
+        .evaluation(ExactKind::Rate, range_ms, None)
         .unwrap()
         .unwrap();
     assert_ne!(

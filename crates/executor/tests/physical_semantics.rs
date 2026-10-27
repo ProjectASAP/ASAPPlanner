@@ -767,7 +767,7 @@ fn counter_panes_merge_in_any_order() {
             .as_any()
             .downcast_ref::<ExactAccumulator>()
             .unwrap()
-            .evaluation(asap_executor::Statistic::Increase, None, None)
+            .evaluation(planner_types::ir::schema::ExactKind::Increase, None, None)
             .unwrap()
             .unwrap()
     };
@@ -826,13 +826,12 @@ fn zero_column_output_obeys_memory_limit() {
 // Empty exact-state finalization must preserve ordinary global MIN/MAX null semantics.
 #[test]
 fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
-    use asap_executor::Statistic;
     use planner_types::ir::schema::{ExactKind, ExactParams};
 
     let input = schema(&[("v", DataType::Float64, false)]);
-    for (kind, params, statistic) in [
-        (ExactKind::Min, ExactParams::Min, Statistic::Min),
-        (ExactKind::Max, ExactParams::Max, Statistic::Max),
+    for (kind, params) in [
+        (ExactKind::Min, ExactParams::Min),
+        (ExactKind::Max, ExactParams::Max),
     ] {
         let build = Operator::per_group_summary_build(
             input.clone(),
@@ -855,7 +854,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
                 0,
                 asap_executor::operators::SummaryEvaluation::Exact(
                     asap_executor::summary_kernels::exact::ExactEvaluation {
-                        statistic,
+                        statistic: kind,
                         lookback_ms: None,
                         offset_ms: 0,
                     },

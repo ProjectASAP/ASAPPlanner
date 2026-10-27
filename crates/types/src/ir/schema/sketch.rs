@@ -14,7 +14,7 @@ pub const EXACT_ACCUMULATOR_STATE_BYTES: u64 = 56;
 /// An exact, mergeable accumulator family — zero approximation error. The
 /// partial state built for one of these *is* the answer; no
 /// `SummaryEstimate` evaluation is needed to get a value out of it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ExactKind {
     /// Exact sum accumulator (mergeable by addition).
     Sum,

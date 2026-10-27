@@ -1153,7 +1153,8 @@ fn evaluate_states(
         };
         if !matches!(
             evaluation.statistic,
-            crate::Statistic::Rate | crate::Statistic::Increase
+            planner_types::ir::schema::ExactKind::Rate
+                | planner_types::ir::schema::ExactKind::Increase
         ) {
             return false;
         }

@@ -5,7 +5,6 @@ use asap_executor::{
     physical_planner::{precompute, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
-    Statistic,
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{BinaryOpKind, GroupKeys, Reduction};
@@ -248,7 +247,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     .as_any()
                     .downcast_ref::<asap_executor::summary_kernels::exact::ExactAccumulator>()
                     .unwrap()
-                    .evaluation(Statistic::Sum, None, None)
+                    .evaluation(ExactKind::Sum, None, None)
                     .unwrap()
                     .unwrap(),
                 expected

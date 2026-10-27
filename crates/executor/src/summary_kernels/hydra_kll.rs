@@ -1,4 +1,4 @@
-use crate::{AggregateCore, KeyByLabelValues};
+use crate::AggregateCore;
 use asap_sketchlib::input::{HydraCounter, HydraQuery};
 use asap_sketchlib::{DataInput, Hydra, Kll};
 
@@ -20,19 +20,16 @@ impl HydraKllSketchAccumulator {
         }
     }
 
-    pub fn update(&mut self, key: &KeyByLabelValues, value: f64) {
+    pub fn update(&mut self, key: &[String], value: f64) {
         self.inner
-            .update(&[&key.to_semicolon_str()], &DataInput::F64(value), None)
+            .update(&[&key.join(";")], &DataInput::F64(value), None)
             .expect("one key per schema column");
     }
 
     /// The median over rows of each cell's KLL quantile.
-    pub fn query_key(&self, key: &KeyByLabelValues, quantile: f64) -> f64 {
+    pub fn query_key(&self, key: &[String], quantile: f64) -> f64 {
         self.inner
-            .query_key(
-                &[Some(&key.to_semicolon_str())],
-                &HydraQuery::Quantile(quantile),
-            )
+            .query_key(&[Some(&key.join(";"))], &HydraQuery::Quantile(quantile))
             .expect("KLL cells answer quantiles")
     }
 }
@@ -88,10 +85,7 @@ mod tests {
             HydraKllSketchAccumulator::new(3, 64, 200),
             HydraKllSketchAccumulator::new(3, 64, 200),
         );
-        let (x, y) = (
-            KeyByLabelValues::new_with_labels(vec!["x".into()]),
-            KeyByLabelValues::new_with_labels(vec!["y".into()]),
-        );
+        let (x, y) = (["x".to_string()], ["y".to_string()]);
         for v in 1..=50 {
             a.update(&x, f64::from(v));
             b.update(&x, f64::from(v + 50));
