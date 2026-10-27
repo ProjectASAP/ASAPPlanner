@@ -974,6 +974,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1125,6 +1126,7 @@ mod tests {
             let context = CandidatePlanningContext {
                 deadline: None,
                 refine_materialization: false,
+                seed_separate_plans: false,
                 original_roots: &roots,
                 entries: &entries,
                 data: &data,
@@ -1220,6 +1222,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1289,6 +1292,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,

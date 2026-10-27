@@ -96,6 +96,7 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
+        seed_separate_plans: false,
         original_roots: &roots,
         entries: &entries,
         data: &data,
@@ -320,6 +321,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
+        seed_separate_plans: false,
         original_roots: &roots,
         entries: &entries,
         data: &data,
@@ -585,6 +587,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
+        seed_separate_plans: false,
         original_roots: &originals,
         entries: &entries,
         data: &data,
@@ -810,6 +813,7 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
+        seed_separate_plans: false,
         original_roots: &roots,
         entries: &entries,
         data: &data,

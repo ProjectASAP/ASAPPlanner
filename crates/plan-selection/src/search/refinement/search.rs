@@ -89,9 +89,6 @@ pub(in crate::search) struct CandidateSearchResult {
 
 #[derive(Clone, Copy, Default)]
 struct SeedRestrictions<'a> {
-    /// Complete plans evaluated before any proposal, such as the queries'
-    /// separate plans combined.
-    plans: &'a [SelectedCandidateGraph],
     excluded: &'a [PhysicalCandidateId],
     materialization_changes: &'a [(PhysicalCandidateId, PhysicalCandidateId)],
     direct: &'a [(&'a CandidateDependencyGraph, DirectPriceModel<'a>)],
@@ -176,7 +173,6 @@ pub(in crate::search) fn search_candidates_with_restricted_feedback(
         graph,
         limits,
         weights,
-        &[],
         excluded_from_seed,
         materialization_changes,
         &[],
@@ -184,12 +180,10 @@ pub(in crate::search) fn search_candidates_with_restricted_feedback(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(in crate::search) fn search_candidates_with_direct_feedback(
     graph: &CandidateDependencyGraph,
     limits: CandidateSearchLimits,
     weights: &[f64],
-    seed_plans: &[SelectedCandidateGraph],
     excluded_from_seed: &[PhysicalCandidateId],
     materialization_changes: &[(PhysicalCandidateId, PhysicalCandidateId)],
     direct: &[(&CandidateDependencyGraph, DirectPriceModel<'_>)],
@@ -201,7 +195,6 @@ pub(in crate::search) fn search_candidates_with_direct_feedback(
         true,
         Some(weights),
         SeedRestrictions {
-            plans: seed_plans,
             excluded: excluded_from_seed,
             materialization_changes,
             direct,
@@ -336,7 +329,6 @@ fn search_with_solver(
     let mut neighborhood_spent = Duration::ZERO;
     let mut neighborhood_attempts = 0;
     let mut tried_changes = std::collections::HashSet::new();
-    let mut seed_plans = restrictions.plans.iter();
     let status = loop {
         let remaining = limits.wall_time.saturating_sub(started.elapsed());
         if remaining.is_zero() {
@@ -345,8 +337,6 @@ fn search_with_solver(
         if refinements >= limits.max_refinements {
             break CandidateSearchStatus::RefinementLimit;
         }
-        let seed_plan = seed_plans.next();
-        let use_seed = seed_plan.is_some();
         if direct_index < restrictions.direct.len()
             && (direct_finished
                 || direct_attempts >= 3
@@ -357,15 +347,13 @@ fn search_with_solver(
             direct_finished = false;
             direct_started = Instant::now();
         }
-        let use_direct = !use_seed
-            && direct_index < restrictions.direct.len()
-            && started.elapsed() < direct_budget;
+        let use_direct =
+            direct_index < restrictions.direct.len() && started.elapsed() < direct_budget;
         if !use_direct {
             baseline_started.get_or_insert_with(Instant::now);
         }
         let baseline_elapsed = baseline_started.map_or(Duration::ZERO, |start| start.elapsed());
-        let use_baseline = !use_seed
-            && !use_direct
+        let use_baseline = !use_direct
             && heuristic_graph.is_some()
             && (incumbent.is_none() || solve_metrics.direct_cost_validated_plans > 0)
             && baseline_attempts < 3
@@ -374,8 +362,7 @@ fn search_with_solver(
         let neighborhood_deadline = neighborhood_started
             + remaining.min(neighborhood_budget.saturating_sub(neighborhood_spent));
         let mut neighborhood = None;
-        if !use_seed
-            && !use_direct
+        if !use_direct
             && !use_baseline
             && neighborhood_attempts < 4
             && neighborhood_spent < neighborhood_budget
@@ -495,13 +482,7 @@ fn search_with_solver(
             neighborhood_spent += neighborhood_started.elapsed();
             continue;
         }
-        let proposed = if let Some(plan) = seed_plan {
-            Ok(Some(CandidateProposal {
-                selected: plan.clone(),
-                direct_modeled_cost: None,
-                model_lower_bound: None,
-            }))
-        } else if use_direct {
+        let proposed = if use_direct {
             match restrictions.direct[direct_index].1 {
                 DirectPriceModel::Structural => propose(
                     proposal_graph,
@@ -590,7 +571,7 @@ fn search_with_solver(
             }
         };
         let direct_modeled_cost = proposal.direct_modeled_cost;
-        if use_seed || use_baseline || use_direct {
+        if use_baseline || use_direct {
             proposal.selected.modeled_cost = proposal
                 .selected
                 .selected_candidates
@@ -814,7 +795,6 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                &[],
                 |selected| {
                     if selected
                         .selected_candidates
@@ -876,7 +856,6 @@ mod tests {
             &[1.0, 1.0],
             &[],
             &[],
-            &[],
             &[(&restricted, DirectPriceModel::Fixed(&profile))],
             |selected| Ok(Some(profile.selected_cost(&restricted, selected)).into()),
         )
@@ -901,7 +880,6 @@ mod tests {
             &[1.0, 1.0],
             &[],
             &[],
-            &[],
             &[(&restricted, DirectPriceModel::Structural)],
             |_| Ok(Some(2.0).into()),
         )
@@ -910,41 +888,6 @@ mod tests {
         assert_eq!(result.lower_bound, 0.0);
         assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
         assert_eq!(result.solve_metrics.direct_cost_validated_plans, 0);
-    }
-
-    // A seed plan is evaluated before any proposal, even when the model's
-    // lower bounds rank another candidate first.
-    #[test]
-    fn seed_plans_are_evaluated_first() {
-        let graph = choices(&[0.0, 1.0]);
-        let seed = SelectedCandidateGraph {
-            selected_candidates: vec![PhysicalCandidateId(1)],
-            connections: vec![],
-            query_roots: vec![crate::search::candidates::graph::QueryRootAssignment {
-                query_root: 0,
-                candidate: PhysicalCandidateId(1),
-            }],
-            modeled_cost: 0.0,
-        };
-        let mut evaluated = Vec::new();
-        let result = search_candidates_with_direct_feedback(
-            &graph,
-            limits(1),
-            &[1.0, 1.0],
-            std::slice::from_ref(&seed),
-            &[],
-            &[],
-            &[],
-            |selected| {
-                evaluated.push(selected.selected_candidates.clone());
-                Ok(Some(1.0).into())
-            },
-        )
-        .unwrap();
-        assert_eq!(evaluated, vec![vec![PhysicalCandidateId(1)]]);
-        let incumbent = result.incumbent.unwrap();
-        assert_eq!(incumbent.actual_cost, 1.0);
-        assert_eq!(incumbent.selected.modeled_cost, 1.0);
     }
 
     // Separate scan-price classes share one budget and retain the best validated DAG.
@@ -976,7 +919,6 @@ mod tests {
             &graph,
             limits(2),
             &[1.0, 1.0],
-            &[],
             &[],
             &[],
             &[

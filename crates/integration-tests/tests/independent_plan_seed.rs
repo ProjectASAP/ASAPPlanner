@@ -92,13 +92,23 @@ fn per_city_percentiles_cost_no_more_than_separate_plans() {
     ]);
 }
 
-/// A grouped and a filtered percentile over one window: already at the
-/// separate plans' cost, which seeding must keep.
+/// A percentile and a maximum over one window share its scan, so neither
+/// query has a plan of candidates the other cannot reach. Each alone keeps
+/// ingestion-time state; together the search used to stop at a query-time
+/// plan almost three times as costly.
 #[test]
-fn grouped_and_filtered_percentiles_cost_no_more_than_separate_plans() {
-    let (together, _) = assert_no_costlier_than_separate(&[
-        format!("SELECT city, {P90} FROM metrics WHERE {W5} GROUP BY city"),
-        format!("SELECT {P90} FROM metrics WHERE {W5} AND city IN ('NYC', 'SF')"),
+fn percentile_and_max_over_one_scan_cost_no_more_than_separate_plans() {
+    assert_no_costlier_than_separate(&[
+        format!("SELECT {P90} FROM metrics WHERE {W5}"),
+        format!("SELECT MAX(value) FROM metrics WHERE {W5}"),
     ]);
-    assert!(together <= 0.2284651 * 1.001, "{together}");
+}
+
+/// The same with a grouped count over the shared scan.
+#[test]
+fn percentile_and_grouped_count_over_one_scan_cost_no_more_than_separate_plans() {
+    assert_no_costlier_than_separate(&[
+        format!("SELECT {P90} FROM metrics WHERE {W5}"),
+        format!("SELECT city, COUNT(*) FROM metrics WHERE {W5} GROUP BY city"),
+    ]);
 }

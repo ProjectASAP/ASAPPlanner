@@ -14,7 +14,7 @@ use crate::search::candidates::physical::{
 };
 use crate::search::refinement::search::{
     search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
-    CandidateSearchResult, DirectPriceModel,
+    CandidateSearchResult, CandidateSearchStatus, DirectPriceModel, EvaluatedCandidate,
 };
 use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
 
@@ -22,6 +22,9 @@ use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, 
 pub(in crate::search) struct CandidatePlanningContext<'a> {
     pub deadline: Option<std::time::Instant>,
     pub refine_materialization: bool,
+    /// Whether the search first evaluates the queries' separate plans
+    /// combined: in the first round of a search only.
+    pub seed_separate_plans: bool,
     pub original_roots: &'a [QueryRoot],
     pub entries: &'a [QueryWorkloadEntry],
     pub data: &'a DataWorkload,
@@ -209,87 +212,110 @@ pub(in crate::search) fn optimize_configured_candidates(
     }
     // The model's lower bounds can rank many shared plans below the queries'
     // separate plans, so the search could stop above what planning each query
-    // alone achieves. Evaluating their combination first rules that out. Only
-    // the seed-grid round (the one that refines materialization) does this:
-    // later rounds keep the best plan of every round, and their larger graphs
-    // make the per-query searches slower without better plans.
-    let independent: Vec<_> = if context.refine_materialization && context.entries.len() > 1 {
-        super::components::independent_plan(
+    // alone achieves. In the first round of a search, a quarter of the time
+    // plans each query alone; their combination is evaluated after the joint
+    // search, only when it ended above their summed cost, so it never takes
+    // the place of one of the search's own evaluations.
+    let separate = (context.seed_separate_plans && context.entries.len() > 1)
+        .then(|| {
+            super::components::separate_plans_combined(
+                configured,
+                context,
+                CandidateSearchLimits {
+                    wall_time: limits.wall_time / 4,
+                    ..limits
+                },
+            )
+        })
+        .flatten();
+    let mut evaluate = |selected: &SelectedCandidateGraph| -> Result<CandidateEvaluation, String> {
+        evaluation_number += 1;
+        let mut rejected_queries = Vec::new();
+        let evaluated = evaluate_configured_candidate_before(
             configured,
             context,
-            CandidateSearchLimits {
-                wall_time: limits.wall_time / 4,
-                ..limits
-            },
-        )
-        .into_iter()
-        .collect()
-    } else {
-        Vec::new()
+            selected,
+            evaluation_number,
+            &mut rejections,
+            &mut rejected_queries,
+        );
+        let Some((selection, physical)) = (match evaluated {
+            Ok(result) => result,
+            Err(SelectionError::EvaluationDeadlineExceeded) => {
+                return Ok(CandidateEvaluation {
+                    budget_exhausted: true,
+                    ..Default::default()
+                });
+            }
+            Err(
+                error @ SelectionError::Cost {
+                    error: crate::AnalyticalCostError::Overflow,
+                    ..
+                },
+            ) => {
+                let reason = error.to_string();
+                rejections.record("cost_not_representable".into(), &reason);
+                return Ok(CandidateEvaluation {
+                    unpriced_reason: Some(reason),
+                    ..Default::default()
+                });
+            }
+            Err(error) => return Err(error.to_string()),
+        }) else {
+            return Ok(CandidateEvaluation {
+                actual_cost: None,
+                rejected_queries,
+                budget_exhausted: false,
+                unpriced_reason: None,
+            });
+        };
+        let cost = selection
+            .costs
+            .get(&selection.selected)
+            .and_then(|cost| cost.cost_per_second)
+            .ok_or("validated candidate has no scalar price")?;
+        if best.as_ref().is_none_or(|(previous, ..)| cost < *previous) {
+            best = Some((cost, selected.clone(), selection, physical));
+        }
+        Ok(Some(cost).into())
     };
     let mut search = search_candidates_with_direct_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
-            wall_time: limits.wall_time.saturating_sub(weighting_started.elapsed()),
+            // An eighth is kept to evaluate the separate plans afterwards.
+            wall_time: limits
+                .wall_time
+                .saturating_sub(weighting_started.elapsed())
+                .mul_f64(if separate.is_some() { 0.875 } else { 1.0 }),
             ..limits
         },
         &weights,
-        &independent,
         &exclusions,
         &changes,
         &direct_refs,
-        |selected| {
-            evaluation_number += 1;
-            let mut rejected_queries = Vec::new();
-            let evaluated = evaluate_configured_candidate_before(
-                configured,
-                context,
-                selected,
-                evaluation_number,
-                &mut rejections,
-                &mut rejected_queries,
-            );
-            let Some((selection, physical)) = (match evaluated {
-                Ok(result) => result,
-                Err(SelectionError::EvaluationDeadlineExceeded) => {
-                    return Ok(CandidateEvaluation {
-                        budget_exhausted: true,
-                        ..Default::default()
-                    });
-                }
-                Err(
-                    error @ SelectionError::Cost {
-                        error: crate::AnalyticalCostError::Overflow,
-                        ..
-                    },
-                ) => {
-                    let reason = error.to_string();
-                    rejections.record("cost_not_representable".into(), &reason);
-                    return Ok(CandidateEvaluation {
-                        unpriced_reason: Some(reason),
-                        ..Default::default()
-                    });
-                }
-                Err(error) => return Err(error.to_string()),
-            }) else {
-                return Ok(CandidateEvaluation {
-                    actual_cost: None,
-                    rejected_queries,
-                    budget_exhausted: false,
-                    unpriced_reason: None,
-                });
-            };
-            let cost = selection
-                .costs
-                .get(&selection.selected)
-                .and_then(|cost| cost.cost_per_second)
-                .ok_or("validated candidate has no scalar price")?;
-            if best.as_ref().is_none_or(|(previous, ..)| cost < *previous) {
-                best = Some((cost, selected.clone(), selection, physical));
-            }
-            Ok(Some(cost).into())
-        },
+        &mut evaluate,
     )?;
+    if let Some((separate, separate_cost)) = separate {
+        let above = search.status != CandidateSearchStatus::Optimal
+            && search
+                .incumbent
+                .as_ref()
+                .is_none_or(|best| best.actual_cost > separate_cost * (1.0 + 1e-9));
+        if above {
+            if let Some(cost) = evaluate(&separate)?.actual_cost {
+                if search
+                    .incumbent
+                    .as_ref()
+                    .is_none_or(|best| cost < best.actual_cost)
+                {
+                    search.incumbent = Some(EvaluatedCandidate {
+                        selected: separate,
+                        actual_cost: cost,
+                    });
+                }
+            }
+        }
+    }
     search
         .solve_metrics
         .direct_cost_fallback_reasons
@@ -1296,6 +1322,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1349,6 +1376,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: Some(std::time::Instant::now()),
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1464,6 +1492,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1532,6 +1561,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1660,6 +1690,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1807,6 +1838,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1854,6 +1886,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1901,6 +1934,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -1923,6 +1957,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -2017,6 +2052,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -2045,6 +2081,7 @@ mod tests {
                 &CandidatePlanningContext {
                     deadline: None,
                     refine_materialization: false,
+                    seed_separate_plans: false,
                     original_roots: &roots,
                     entries,
                     data: &data,
@@ -2119,6 +2156,7 @@ mod tests {
             let context = CandidatePlanningContext {
                 deadline: None,
                 refine_materialization: false,
+                seed_separate_plans: false,
                 original_roots: &roots,
                 entries: &entries,
                 data: &data,
@@ -2171,6 +2209,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -2203,6 +2242,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -2285,6 +2325,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -2324,6 +2365,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,

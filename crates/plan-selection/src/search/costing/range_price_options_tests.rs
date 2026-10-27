@@ -169,6 +169,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &originals,
             entries: &entries,
             data: &data,

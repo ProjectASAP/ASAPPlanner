@@ -182,6 +182,33 @@ fn components(
     Ok(result)
 }
 
+/// Whether `component` holds every producer, root candidate and required copy
+/// its candidates and outputs refer to, so `project` drops nothing.
+fn closed(graph: &CandidateDependencyGraph, component: &Component) -> bool {
+    let inside: HashSet<_> = component.candidates.iter().copied().collect();
+    component.candidates.iter().all(|&id| {
+        graph.candidates[id]
+            .producer_requirements
+            .iter()
+            .flat_map(|input| input.compatible_producers.iter())
+            .all(|producer| inside.contains(&producer.0))
+    }) && component.outputs.iter().all(|&output| {
+        graph.query_roots[output]
+            .compatible_candidates
+            .iter()
+            .all(|id| inside.contains(&id.0))
+    }) && graph
+        .reader_constraints
+        .iter()
+        .all(|constraint| match constraint {
+            ReaderConstraint::ActivationRequires {
+                candidate,
+                required_candidate,
+            } => !inside.contains(&candidate.0) || inside.contains(&required_candidate.0),
+            _ => true,
+        })
+}
+
 fn project(
     configured: &CandidateConfigurationInventory,
     component: &Component,
@@ -380,16 +407,23 @@ fn extend_selection(
     global.modeled_cost += local.modeled_cost;
 }
 
-/// Each query's own plan, searched over the candidates it can reach and
-/// evaluated for that query alone, combined into one selection of the whole
-/// graph. `None` when a query finds no plan within `limits` (shared among
-/// the queries) or the combination is not a valid selection. It is only a
-/// proposal: the joint search still evaluates it for the whole workload.
-pub(in crate::search) fn independent_plan(
+/// The largest graph of shared candidates a query is searched over alone.
+const MAX_SHARED_SEARCH_CANDIDATES: usize = 128;
+
+/// Each query's own plan, searched for that query alone, combined into one
+/// selection of the whole graph. A query is first searched over the
+/// candidates no other query can reach; when they hold no plan (queries share
+/// a group, such as one scan), over every candidate it can reach. A candidate
+/// two queries both select appears once: one node, as shared work is priced.
+/// Returns it with the sum of the queries' own costs, or `None` when a query
+/// finds no plan within `limits` (shared among the queries) or the
+/// combination is not a valid selection. It is not yet evaluated for the
+/// whole workload.
+pub(in crate::search) fn separate_plans_combined(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
     limits: CandidateSearchLimits,
-) -> Option<SelectedCandidateGraph> {
+) -> Option<(SelectedCandidateGraph, f64)> {
     let graph = &configured.inventory.graph;
     let outputs = output_queries(context.original_roots);
     if outputs.len() != graph.query_roots.len() {
@@ -397,6 +431,7 @@ pub(in crate::search) fn independent_plan(
     }
     let started = Instant::now();
     let count = context.entries.len();
+    let mut separate_cost = 0.0;
     let mut combined = SelectedCandidateGraph {
         selected_candidates: Vec::new(),
         connections: Vec::new(),
@@ -427,46 +462,80 @@ pub(in crate::search) fn independent_plan(
         let own_outputs: Vec<_> = (0..outputs.len())
             .filter(|&output| outputs[output] == query)
             .collect();
-        // Only candidates no other query can reach: the query planned alone.
-        let mut candidates: Vec<_> = reach
-            .iter()
-            .copied()
-            .filter(|&id| readers[id] == 1)
-            .collect();
-        candidates.sort_unstable();
-        let component = Component {
-            queries: vec![query],
-            candidates,
-            outputs: own_outputs,
-        };
-        let local = project(configured, &component);
         let roots = [context.original_roots[query].clone()];
         let entries = [context.entries[query].clone()];
         let local_context = CandidatePlanningContext {
             original_roots: &roots,
             entries: &entries,
+            seed_separate_plans: false,
             ..*context
         };
-        let result = optimize_configured_candidates(
-            &local,
-            &local_context,
-            CandidateSearchLimits {
-                wall_time: limits.wall_time.saturating_sub(started.elapsed())
-                    / (count - query) as u32,
-                max_refinements: limits.max_refinements,
-            },
-        )
-        .ok()?;
-        extend_selection(
-            &mut combined,
-            &result.search.incumbent?.selected,
-            &component,
-        );
+        let mut found = false;
+        for own_only in [true, false] {
+            let mut candidates: Vec<_> = reach
+                .iter()
+                .copied()
+                .filter(|&id| !own_only || readers[id] == 1)
+                .collect();
+            if !own_only
+                && (candidates.len() > MAX_SHARED_SEARCH_CANDIDATES
+                    || candidates.len() == reach.iter().filter(|&&id| readers[id] == 1).count())
+            {
+                // Nothing new to search, or too large a graph to prove an
+                // optimum within the budget: it would only take the joint
+                // search's time.
+                break;
+            }
+            candidates.sort_unstable();
+            let component = Component {
+                queries: vec![query],
+                candidates,
+                outputs: own_outputs.clone(),
+            };
+            let local = project(configured, &component);
+            let Ok(result) = optimize_configured_candidates(
+                &local,
+                &local_context,
+                CandidateSearchLimits {
+                    wall_time: limits.wall_time.saturating_sub(started.elapsed())
+                        / (count - query) as u32,
+                    max_refinements: limits.max_refinements,
+                },
+            ) else {
+                continue;
+            };
+            // Over shared candidates the search is larger and may stop at a
+            // poor plan; only a proved optimum is used then.
+            let usable = own_only || result.search.status == CandidateSearchStatus::Optimal;
+            if let Some(incumbent) = result.search.incumbent.filter(|_| usable) {
+                extend_selection(&mut combined, &incumbent.selected, &component);
+                separate_cost += incumbent.actual_cost;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return None;
+        }
     }
     combined.selected_candidates.sort_unstable();
+    combined.selected_candidates.dedup();
+    let mut connections = Vec::with_capacity(combined.connections.len());
+    for connection in combined.connections {
+        if !connections.contains(&connection) {
+            connections.push(connection);
+        }
+    }
+    combined.connections = connections;
     combined.query_roots.sort_by_key(|root| root.query_root);
+    // A shared candidate is counted once.
+    combined.modeled_cost = combined
+        .selected_candidates
+        .iter()
+        .map(|id| graph.candidates[id.0].local_cost)
+        .sum();
     validate_selected_graph(graph, &combined).ok()?;
-    Some(combined)
+    Some((combined, separate_cost))
 }
 
 /// Split only additive usage optimization, then validate the reconstructed full
@@ -494,6 +563,10 @@ pub(in crate::search) fn optimize_independent_components(
     if parts.len() <= 1 {
         return optimize_configured_candidates(configured, context, limits);
     }
+    // `project` drops what lies outside a component; components are closed.
+    debug_assert!(parts
+        .iter()
+        .all(|part| closed(&configured.inventory.graph, part)));
     let mut combined = SelectedCandidateGraph {
         selected_candidates: Vec::new(),
         connections: Vec::new(),
@@ -527,6 +600,7 @@ pub(in crate::search) fn optimize_independent_components(
         let local_context = CandidatePlanningContext {
             deadline: context.deadline,
             refine_materialization: context.refine_materialization,
+            seed_separate_plans: context.seed_separate_plans,
             original_roots: &roots,
             entries: &entries,
             data: context.data,
@@ -767,6 +841,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -840,6 +915,7 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
