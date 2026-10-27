@@ -123,6 +123,14 @@
 //!   for KMV, HLL, DDSketch and the linear sketches, the same rank bound
 //!   for KLL.
 //!
+//! A sketch build over fewer rows than a finer one, whose extra conjuncts
+//! read only the finer keys (`… WHERE city IN ('NYC', 'SF')` from a build
+//! by `city`), is answered by first keeping the finer states that pass
+//! those conjuncts, a compensating `Filter` over the states
+//! ([`filtered_finer`], [`match_finer`](crate::finer_aggregate)), then
+//! merging them. A SQL aggregate's finer *result* is read the same way by
+//! the memo rule `memo::rules::finer_aggregate`.
+//!
 //! [`rollup_pass2_candidates`] returns one Pass 2 candidate per non-empty
 //! subset of the rollup *choices* ([`rollup_choices`]): each exact rollup
 //! alone, and every sketch rollup of one finest build together, since they
@@ -154,7 +162,8 @@ use asap_types::ir::schema::{
 use asap_types::ir::ScalarExpr;
 use asap_types::ir::SortKey;
 use asap_types::ir::{
-    ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, TimeRangeKind,
+    ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, Predicate, QueryRoot,
+    TimeRangeKind,
 };
 
 use crate::accuracy::estimators::size_for_all_readers;
@@ -2034,9 +2043,11 @@ pub fn rollup_candidate_for(
 /// reaches what it reads), no such build, and leaves the walk order of the
 /// other nodes as it was, so [`rollup_candidate_for`] is unchanged.
 pub fn may_change_rollup_candidate(coarse: &Rc<OperatorNode>, root: &Rc<OperatorNode>) -> bool {
-    OperatorNode::reachable(root)
-        .iter()
-        .any(|node| Rc::ptr_eq(node, coarse) || finer_keys(coarse, node).is_some())
+    OperatorNode::reachable(root).iter().any(|node| {
+        Rc::ptr_eq(node, coarse)
+            || finer_keys(coarse, node).is_some()
+            || filtered_finer(coarse, node).is_some()
+    })
 }
 
 /// [`rollup_candidates`], over the coarse builds that are `only` when set.
@@ -2158,10 +2169,24 @@ fn sketch_rollup_candidates(
             continue;
         }
         // A build finer than the one with the most keys would have more.
-        let Some(fine) = finest(coarse) else {
-            continue;
+        // Over more rows, the finer build's states are first filtered by
+        // the coarse build's extra conjuncts (a compensating filter).
+        let rollup = match finest(coarse) {
+            Some(fine) => regrouped(coarse, fine).map(|rollup| (fine, rollup)),
+            None => builds
+                .iter()
+                .filter_map(|&fine| Some((filtered_finer(coarse, fine)?, fine)))
+                .max_by_key(|((keys, _), _)| *keys)
+                .and_then(|((_, pred), fine)| {
+                    let kept = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
+                        pred,
+                        child: Rc::clone(fine),
+                    }))
+                    .ok()?;
+                    Some((fine, regrouped(coarse, &kept)?))
+                }),
         };
-        if let Some(rollup) = regrouped(coarse, fine) {
+        if let Some((fine, rollup)) = rollup {
             candidates.push(RollupCandidate {
                 coarse: Rc::clone(coarse),
                 finer: Rc::clone(fine),
@@ -2305,6 +2330,63 @@ fn finer_keys(coarse: &OperatorNode, fine: &OperatorNode) -> Option<usize> {
         && coarse_keys.iter().all(|key| fine_keys.contains(key))
         && same_rows(child, fine_child))
     .then_some(fine_keys.len())
+}
+
+/// The number of group keys of `fine` and the compensating filter over its
+/// states when `fine` answers `coarse` from more rows: the same family,
+/// update and no build filter, over rows that hold `coarse`'s, whose extra
+/// conjuncts read only `fine`'s keys ([`match_finer`]), with group keys that
+/// include the coarse ones. `None` over the same rows ([`finer_keys`]).
+fn filtered_finer(coarse: &OperatorNode, fine: &OperatorNode) -> Option<(usize, Predicate)> {
+    let (
+        Some(ASAPOp::SummaryAgg {
+            child,
+            family,
+            input,
+            reduction: Reduction::Reduce(by),
+            filter: None,
+            ..
+        }),
+        Some(ASAPOp::SummaryAgg {
+            child: fine_child,
+            family: fine_family,
+            input: fine_input,
+            reduction: Reduction::Reduce(fine_by),
+            filter: None,
+            ..
+        }),
+    ) = (coarse.asap(), fine.asap())
+    else {
+        return None;
+    };
+    if by.is_without()
+        || fine_by.is_without()
+        || !same_family(family, fine_family)
+        || input != fine_input
+    {
+        return None;
+    }
+    let matched =
+        crate::finer_aggregate::match_finer(child, by.keys(), fine_child, fine_by.keys())?;
+    // The filter reads the finer keys as the state's columns of those names.
+    let state_columns = fine_by
+        .keys()
+        .iter()
+        .map(|&key| {
+            // A state's key column keeps the input column's name, not
+            // always its table qualifier.
+            let name = &fine_child.schema.fields.get(key)?.name;
+            fine.schema
+                .fields
+                .iter()
+                .position(|field| field.is_plain() && field.name == *name)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let pred = matched.compensating_filter?;
+    Some((
+        fine_by.keys().len(),
+        Predicate(pred.0.map_columns(&mut |key| state_columns[key])),
+    ))
 }
 
 type ColumnName = (Option<String>, String);
@@ -2609,7 +2691,17 @@ fn sketch_rollups(
             else {
                 unreachable!("a sketch rollup candidate's rollup is a regrouping merge");
             };
-            let merge = regroup_merge(&sized, keys.clone(), &candidate.coarse)?;
+            // A compensating filter is kept over the resized states.
+            let states = match candidate.rollup.children()[0].non_asap() {
+                Some(NonASAPOp::Filter { pred, .. }) => {
+                    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
+                        pred: pred.clone(),
+                        child: Rc::clone(&sized),
+                    }))?
+                }
+                _ => Rc::clone(&sized),
+            };
+            let merge = regroup_merge(&states, keys.clone(), &candidate.coarse)?;
             replaced.push((Rc::as_ptr(&candidate.coarse), merge));
         }
     }

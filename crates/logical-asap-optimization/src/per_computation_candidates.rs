@@ -1934,6 +1934,8 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
     let [input] = children.as_slice() else {
         return Some(None);
     };
+    // Kept whole, a selected state keeps the guarantee it was built with.
+    let input = asap_types::ir::operator::asap::selected_from(input).unwrap_or(input);
     let family = state.asap()?.produced_state()?;
     let merged = match node.asap()? {
         ASAPOp::SummaryEstimate { query, .. } => FamilyCapability::of(family).merged_error(query),
