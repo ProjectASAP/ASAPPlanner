@@ -167,7 +167,7 @@ mod tests {
             ),
             &SketchStatistic::PointCount {
                 key: asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue,
-                value: None,
+                value: Some("1".into()),
             },
         )
         .expect("CountSketch has a parameter-derived L2 guarantee");

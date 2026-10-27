@@ -50,7 +50,10 @@ mod tests {
                 SketchKind::new(SketchAlgorithm::Cms, params),
                 GroupingStrategy::default(),
             ),
-            &SketchStatistic::Cardinality,
+            &SketchStatistic::PointCount {
+                key: asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue,
+                value: None,
+            },
         )
         .unwrap();
         assert_eq!(g.spec.accuracy_metric, AccuracyMetric::ABSOLUTE_STREAM_L1);

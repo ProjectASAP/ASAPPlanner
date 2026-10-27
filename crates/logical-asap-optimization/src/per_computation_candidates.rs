@@ -127,7 +127,9 @@ use crate::accuracy::estimators::{hll, univmon};
 use crate::accuracy::{per_input_target, PropagationStats};
 use crate::deployment_capabilities::DeploymentCapabilities;
 use crate::function_rules::approximate_input_composition;
-use crate::realization::{accuracy_budget, default_size_params, sizing_target, summary_candidates};
+use crate::realization::{
+    accuracy_budget, default_size_params, sizing_target, sketch_statistic, summary_candidates,
+};
 
 /// How one Pass 1 target is computed: exact or a summary.
 ///
@@ -526,7 +528,7 @@ pub fn computation_candidates_for_intent(
                 });
             }
         }
-        let summaries = summary_candidates(intent).iter().cloned();
+        let summaries = summary_candidates(intent).into_iter();
         if matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q)) {
             choices.pruned.extend(summaries.map(|algorithm| {
                 (
@@ -3873,22 +3875,9 @@ fn summary_update(
 }
 
 fn statistic(intent: &AggIntent) -> Result<SketchStatistic, PerComputationCandidateError> {
-    Ok(match intent {
-        AggIntent::Quantile { q, .. } => SketchStatistic::Quantile { q: *q },
-        AggIntent::Cardinality { .. } => SketchStatistic::Cardinality,
-        AggIntent::FrequencyL2 { .. } => SketchStatistic::FrequencyL2,
-        AggIntent::FrequencyEntropy { .. } => SketchStatistic::FrequencyEntropy,
-        AggIntent::TopK { k, .. } => SketchStatistic::TopK { k: *k },
-        AggIntent::Count { .. } => SketchStatistic::PointCount {
-            key: ColumnRef::SampleValue,
-            value: None,
-        },
-        _ => {
-            return Err(PerComputationCandidateError::Unsupported(
-                "sketch evaluation",
-            ))
-        }
-    })
+    sketch_statistic(intent).ok_or(PerComputationCandidateError::Unsupported(
+        "sketch evaluation",
+    ))
 }
 
 #[cfg(test)]

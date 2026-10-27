@@ -17,10 +17,10 @@ A new sketch that Pass 1 can offer for an intent.
    merge (`MergeInputRule`) and which statistics it answers (`StatisticKind`,
    with the merged error). Pass 2's sharing, pane and rollup rules read only
    this table.
-3. **Offer and size.** List it for its intents in
-   `realization::summary_candidates` (`crates/logical-asap-optimization`),
-   most preferred first, and size it in
-   `realization::default_size_params`.
+3. **Offer and size.** Place it in `realization::FAMILY_PREFERENCE`
+   (`crates/logical-asap-optimization`): `summary_candidates` offers it, in
+   that order, for every intent whose statistic its capability row answers.
+   Size it in `realization::default_size_params`.
 4. **Accuracy.** Add its error model under
    `crates/logical-asap-optimization/src/accuracy/estimators/` and return
    it from `DefaultAccuracyModel`'s `local_guarantee`, by inverting the same

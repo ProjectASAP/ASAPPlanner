@@ -1,6 +1,7 @@
 //! Dispatch committed estimator parameters to their accuracy models.
 use super::*;
 use asap_types::ir::operator::AggIntent;
+use asap_types::ir::schema::FamilyCapability;
 
 pub mod cardinality;
 pub mod cms;
@@ -58,7 +59,8 @@ fn bounded_guarantee(
 /// `family` built over an **exact** input, derived from the family's
 /// committed parameters by inverting the same sizing formulas
 /// [`crate::realization::default_size_params`] uses. Exact for a plain value
-/// or an exact aggregate. `None` when the family has no error model
+/// or an exact aggregate. `None` when a sketch does not answer `query` (its
+/// family-capability table row), and when the family has no error model
 /// (`SummarySample`, `Wavelet`, `StatModel`, and sketch evaluations without a
 /// certified bound): Pass 1 then leaves the guarantee `None` and keeps the
 /// candidate for plan selection to decide.
@@ -71,7 +73,10 @@ pub fn local_guarantee(
         FieldDataType::ExactAggregate(kind, _) => Some(AccuracyGuarantee::exact(format!(
             "ExactAggregate({kind:?})"
         ))),
-        FieldDataType::Sketch(kind, _) => sketch_guarantee(kind.algorithm(), kind.params(), query),
+        FieldDataType::Sketch(kind, _) if FamilyCapability::of(family).answers(query) => {
+            sketch_guarantee(kind.algorithm(), kind.params(), query)
+        }
+        FieldDataType::Sketch(..) => None,
         // No error model is registered for these families.
         FieldDataType::SummarySample(..)
         | FieldDataType::Wavelet(..)
@@ -671,5 +676,38 @@ mod tests {
         assert!(hll::classic_failure_probability(p, 0.05, 64) <= 0.01);
         assert!(hll::classic_failure_probability(p - 1, 0.05, 64) > 0.01);
         assert_eq!(hll::min_precision(0.05, 1e-30, 4096, 12), 12);
+    }
+
+    /// A sketch read for a statistic its table row does not answer (an HLL
+    /// for a total) has no guarantee; one it answers keeps its guarantee,
+    /// and a plain value or exact aggregate stays exact.
+    #[test]
+    fn local_guarantee_needs_a_statistic_the_family_answers() {
+        use asap_types::ir::scalar::expr_ir::ColumnRef;
+        use asap_types::ir::schema::{
+            DataType, ExactKind, ExactParams, GroupingStrategy, SketchKind,
+        };
+        let hll = FieldDataType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::Hll,
+                SketchParams::Hll {
+                    precision: 12,
+                    relative_error: None,
+                },
+            ),
+            GroupingStrategy::default(),
+        );
+        let total = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        };
+        assert!(local_guarantee(&hll, &total).is_none());
+        assert!(local_guarantee(&hll, &SketchStatistic::Cardinality).is_some());
+        for exact in [
+            FieldDataType::Plain(DataType::Float64),
+            FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+        ] {
+            assert!(local_guarantee(&exact, &total).is_some(), "{exact:?}");
+        }
     }
 }
