@@ -173,6 +173,9 @@ pub enum PruneReason {
     RequiresExact,
     /// `count` counts rows, so a possibly-null `avg` input changes the result.
     NullableAvgInput,
+    /// Frequency sketches do not implement SQL row-count updates. Keep the
+    /// exact counter; a fused raw-row TopK has its own keyed update contract.
+    NoRelationalCountSketchRealization,
     /// The deployment's executor cannot build the summary's family or
     /// answer the measure's readout from it
     /// ([`DeploymentCapabilities::supports`]).
@@ -730,6 +733,13 @@ fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
                     matches!(choice, ComputationCandidate::ExactAccumulator(_))
                 });
             }
+            if matches!(intent, AggIntent::Count { .. })
+                && node.children()[0].result_kind == OperatorResultKind::Relation
+            {
+                choices.prune(PruneReason::NoRelationalCountSketchRealization, |choice| {
+                    matches!(choice, ComputationCandidate::Summary(_))
+                });
+            }
             targets.push(ComputationTarget {
                 aggregate: node.clone(),
                 measure,
@@ -1088,13 +1098,12 @@ fn whole_expression_input(
             partitions.group_keys().map_or(&[][..], |keys| keys.keys()),
         ));
     } else if realized.child.schema.closed
-        && (matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
-            || !reads_only_time_series(&realized.child))
+        && matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
     {
         // An encoded label set needs an open PromQL schema. PromQL rows that
         // carry the series identity are closed, but their inner group labels
-        // are item columns. (A SQL top-k keeps its heaps over its per-key
-        // result.)
+        // are item columns. SQL group keys are explicit columns too, so their
+        // keyed heap can consume raw rows without a per-key aggregate first.
         return None;
     }
     Some((realized.child, input, partitions))

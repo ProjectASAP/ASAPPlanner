@@ -222,11 +222,13 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
             }
             other => panic!("one item column: {other:?}"),
         },
-        other => panic!("a named column: {other:?}"),
+        SummaryInputExpr::Constant(value) => value.to_string(),
+        other => panic!("a named column or constant: {other:?}"),
     };
     let mut updates = Vec::new();
     for (t, target) in inventory.targets.iter().enumerate() {
-        for (c, candidate) in target.choices.candidates.iter().enumerate() {
+        for c in 0..target.choice_count() {
+            let (candidate, _) = target.computation_for(c).unwrap();
             if !matches!(
                 candidate,
                 ComputationCandidate::Summary(
@@ -261,9 +263,9 @@ const COUNT_RANKED_TOPK: &str =
     "SELECT KEY, count(*) FROM flows GROUP BY KEY ORDER BY count(*) DESC LIMIT 10";
 
 /// An Int64 key is not mistaken for the ranked value: both heap sketches
-/// compose, keyed by the key and weighted by the count.
+/// compose over raw rows, keyed by the key with unit weight.
 #[tokio::test]
-async fn topk_heap_over_an_int64_key_is_weighted_by_the_count() {
+async fn topk_heap_over_an_int64_key_counts_raw_rows() {
     let updates = heap_updates(
         "port",
         DataType::Int64,
@@ -274,15 +276,15 @@ async fn topk_heap_over_an_int64_key_is_weighted_by_the_count() {
     assert!(
         updates
             .iter()
-            .all(|(item, weight)| item == "port" && weight.starts_with("count(")),
+            .all(|(item, weight)| item == "port" && weight == "1"),
         "{updates:?}"
     );
 }
 
 /// A key named `value` is not the ranked value: the heap sketches are
-/// weighted by the count, not by the key.
+/// fed raw rows with unit weight.
 #[tokio::test]
-async fn topk_heap_over_a_key_named_value_is_weighted_by_the_count() {
+async fn topk_heap_over_a_key_named_value_counts_raw_rows() {
     let updates = heap_updates(
         "value",
         DataType::Utf8,
@@ -293,7 +295,7 @@ async fn topk_heap_over_a_key_named_value_is_weighted_by_the_count() {
     assert!(
         updates
             .iter()
-            .all(|(item, weight)| item == "value" && weight.starts_with("count(")),
+            .all(|(item, weight)| item == "value" && weight == "1"),
         "{updates:?}"
     );
 }
@@ -301,8 +303,7 @@ async fn topk_heap_over_a_key_named_value_is_weighted_by_the_count() {
 /// SQL's per-group top-k idiom (`ROW_NUMBER() OVER (PARTITION BY city
 /// ORDER BY COUNT(*) DESC) … WHERE rn <= 5`) is a heavy-hitter top-k, as
 /// PromQL `topk by (city)` is: both heap sketches compose, keyed by the
-/// host and weighted by the count (the aggregate's one value column, so
-/// read as its sample value).
+/// host and fed raw rows with unit weight.
 #[tokio::test]
 async fn rownumber_per_group_topk_offers_heap_sketches() {
     let updates = heap_updates_over(
@@ -319,7 +320,7 @@ async fn rownumber_per_group_topk_offers_heap_sketches() {
     assert!(
         updates
             .iter()
-            .all(|(item, weight)| item == "host" && weight == "<sample value>"),
+            .all(|(item, weight)| item == "host" && weight == "1"),
         "{updates:?}"
     );
 }
