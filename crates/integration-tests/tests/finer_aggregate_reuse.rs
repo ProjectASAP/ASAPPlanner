@@ -184,24 +184,55 @@ fn filtered_grouped_aggregates_roll_up_finer_values() {
 }
 
 /// Example C: two cities' p90 values cannot be combined, but their KLL
-/// states can: keep the NYC and SF states, merge them, estimate.
+/// states can: keep the NYC and SF states, merge them, estimate. The merged
+/// read gives the coarse KLL read's rows, SQL's one NULL row over an empty
+/// selection included. (The executor has no `IN`, so the query uses `OR`.)
 #[test]
 fn filtered_kll_states_merge() {
     let memo = expanded(&[
         format!("SELECT city, {P90} FROM metrics WHERE {WINDOW} GROUP BY city"),
-        format!("SELECT {P90} FROM metrics WHERE {WINDOW} AND city IN ('NYC', 'SF')"),
+        format!("SELECT {P90} FROM metrics WHERE {WINDOW} AND (city = 'NYC' OR city = 'SF')"),
     ]);
-    let (_, candidates) = rollups(&memo, 1);
-    let merged = |candidate: &&ImplementationCandidate| {
-        OperatorNode::reachable(&candidate.node).iter().any(|node| {
-            matches!(node.asap(), Some(ASAPOp::SummaryMerge { children, group_by: Some(_), .. })
-                if matches!(children[0].non_asap(), Some(NonASAPOp::Filter { .. })))
+    let (owner, candidates) = rollups(&memo, 1);
+    let merged = candidates
+        .into_iter()
+        .find(|candidate| {
+            OperatorNode::reachable(&candidate.node).iter().any(|node| {
+                matches!(node.asap(), Some(ASAPOp::SummaryMerge { children, group_by: Some(_), .. })
+                    if matches!(children[0].non_asap(), Some(NonASAPOp::Filter { .. })))
+            })
         })
-    };
-    assert!(
-        candidates.iter().any(merged),
-        "no candidate merges the filtered finer states"
-    );
+        .expect("a candidate merging the filtered finer states");
+    let direct = memo.candidates[owner]
+        .iter()
+        .find(|candidate| {
+            candidate.origin == CandidateOrigin::Pass1
+                && OperatorNode::reachable(&candidate.node).iter().any(|node| {
+                    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family, .. })
+                        if format!("{family:?}").contains("Kll"))
+                })
+        })
+        .expect("the query's own KLL candidate");
+    for rows in row_sets() {
+        let before = physical_common::execute_raw_rows_at(&direct.node, rows.clone(), 1000);
+        let after = physical_common::execute_raw_rows_at(&merged.node, rows.clone(), 1000);
+        assert_eq!(format!("{after:?}"), format!("{before:?}"), "rows {rows:?}");
+        assert_eq!(after.len(), 1);
+    }
+}
+
+/// The same groups in another key order are one computation: neither
+/// aggregate reads the other (two such reads would be a cycle).
+#[test]
+fn permuted_group_by_is_not_a_finer_read() {
+    let memo = expanded(&[
+        format!("SELECT city, host, SUM(value) FROM metrics WHERE {WINDOW} GROUP BY city, host"),
+        format!("SELECT host, city, SUM(value) FROM metrics WHERE {WINDOW} GROUP BY host, city"),
+    ]);
+    for query in 0..2 {
+        let (_, candidates) = rollups(&memo, query);
+        assert!(!candidates.into_iter().any(reads_finer_result));
+    }
 }
 
 /// A conjunct on a non-key column cannot be applied to finer sums.
@@ -290,4 +321,25 @@ fn filtered_sum_costs_little_beyond_the_finer_sums() {
         together <= alone * 1.01,
         "{together} vs {alone} + {separate}"
     );
+}
+
+/// Example C end to end: the joint plan costs no more than planning each
+/// query alone, and no more than on main before the state path (0.2285/s).
+/// Open: the joint search reaches the independent plan only after the
+/// sharing variants its lower bounds rank first, so within the budget it
+/// returns a sharing plan (0.3321/s).
+#[test]
+#[ignore = "joint search returns a sharing plan above the independent plan; see PR #952"]
+fn filtered_kll_states_cost_no_more_than_separate_plans() {
+    let grouped = format!("SELECT city, {P90} FROM metrics WHERE {WINDOW} GROUP BY city");
+    let filtered = format!("SELECT {P90} FROM metrics WHERE {WINDOW} AND city IN ('NYC', 'SF')");
+    let alone = cost(std::slice::from_ref(&grouped));
+    let separate = cost(std::slice::from_ref(&filtered));
+    let together = cost(&[grouped, filtered]);
+    println!("grouped alone {alone}, filtered alone {separate}, together {together}");
+    assert!(
+        together <= (alone + separate) * 1.001,
+        "{together} vs {alone} + {separate}"
+    );
+    assert!(together <= 0.2285 * 1.01, "{together} vs main's 0.2285");
 }
