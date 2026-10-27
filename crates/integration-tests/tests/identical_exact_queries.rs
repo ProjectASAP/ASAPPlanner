@@ -21,6 +21,10 @@ fn workload() -> FuzzWorkload {
 }
 
 fn cost(w: &FuzzWorkload) -> f64 {
+    // Each regression has a wall-clock planning budget. Concurrent solver
+    // runs in this test binary must not consume one another's CPU budget.
+    static PLANNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _planning = PLANNING.lock().unwrap();
     let roots = Planner::new(FuzzSettings::default()).lower(w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
