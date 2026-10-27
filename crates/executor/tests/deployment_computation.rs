@@ -9,6 +9,7 @@ use asap_executor::{
 };
 use common::{compile_physical_asap_dag, computation_candidates, selected_dag};
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::operator::maintained_population::PopulationStatistic;
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::AccuracyTarget;
 use planner_types::ir::schema::*;
@@ -54,10 +55,17 @@ fn exact_dag(query: &str) -> PhysicalASAPDAG {
     compile_physical_asap_dag(&selected_dag(root, AccuracyTarget::exact())).unwrap()
 }
 
-fn population_dag(query: &str) -> PhysicalASAPDAG {
+/// The population sub-DAG of `query`, which computes `statistic` grouped by
+/// `grouping` over one selector.
+fn population_dag(
+    query: &str,
+    statistic: PopulationStatistic,
+    grouping: &[&str],
+) -> PhysicalASAPDAG {
     let root = promql_rows::with_series_identity(&lower(query)).unwrap();
-    let selected =
-        asap_logical_asap_optimization::test_support::current_series_population(&root).unwrap();
+    let selected = asap_logical_asap_optimization::test_support::population_over_selector(
+        &root, statistic, grouping,
+    );
     compile_physical_asap_dag(&selected).unwrap()
 }
 
@@ -230,20 +238,30 @@ fn reference(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
 #[test]
 fn population_aggregates_match_current_series_reference() {
     // Latest values: api = {a: 1, b: 7, c: 2}; db = {d: 5}.
-    for (query, expected) in [
-        ("sum by (job) (m)", reference(&[("api", 10.), ("db", 5.)])),
-        ("count by (job) (m)", reference(&[("api", 3.), ("db", 1.)])),
+    for (query, statistic, expected) in [
+        (
+            "sum by (job) (m)",
+            PopulationStatistic::Sum,
+            reference(&[("api", 10.), ("db", 5.)]),
+        ),
+        (
+            "count by (job) (m)",
+            PopulationStatistic::Count,
+            reference(&[("api", 3.), ("db", 1.)]),
+        ),
         (
             "avg by (job) (m)",
+            PopulationStatistic::Average,
             reference(&[("api", 10. / 3.), ("db", 5.)]),
         ),
         // Sorted api = [1, 2, 7]; rank 0.25 * 2 = 0.5 → 1.5.
         (
             "quantile by (job) (0.25, m)",
+            PopulationStatistic::Quantile { q: 0.25 },
             reference(&[("api", 1.5), ("db", 5.)]),
         ),
     ] {
-        let dag = population_dag(query);
+        let dag = population_dag(query, statistic, &["job"]);
         assert_eq!(run(&dag, SAMPLES, 60_000).unwrap(), expected, "{query}");
     }
 }
@@ -252,8 +270,16 @@ fn population_aggregates_match_current_series_reference() {
 #[test]
 fn global_population_aggregate_of_no_members_is_empty() {
     // Latest values are [1, 2, 5, 7] at 60s; every member has expired by 1000s.
-    for (query, expected) in [("sum(m)", 15.), ("count(m)", 4.), ("quantile(0.5, m)", 3.5)] {
-        let dag = population_dag(query);
+    for (query, statistic, expected) in [
+        ("sum(m)", PopulationStatistic::Sum, 15.),
+        ("count(m)", PopulationStatistic::Count, 4.),
+        (
+            "quantile(0.5, m)",
+            PopulationStatistic::Quantile { q: 0.5 },
+            3.5,
+        ),
+    ] {
+        let dag = population_dag(query, statistic, &[]);
         let live = run(&dag, SAMPLES, 60_000).unwrap();
         assert_eq!(live, reference(&[("", expected)]), "{query}");
         assert!(run(&dag, SAMPLES, 1_000_000).unwrap().is_empty(), "{query}");
@@ -700,12 +726,22 @@ fn population_sums_and_averages_are_compensated() {
         ("m", "api", "a", 50_000, 1.7e308),
         ("m", "api", "b", 50_000, 1.7e308),
     ];
-    for (query, samples, expected) in [
-        ("sum by (job) (m)", cancel, 1.),
-        ("avg by (job) (m)", cancel, 1. / 3.),
-        ("avg by (job) (m)", huge, 1.7e308),
+    for (query, statistic, samples, expected) in [
+        ("sum by (job) (m)", PopulationStatistic::Sum, cancel, 1.),
+        (
+            "avg by (job) (m)",
+            PopulationStatistic::Average,
+            cancel,
+            1. / 3.,
+        ),
+        (
+            "avg by (job) (m)",
+            PopulationStatistic::Average,
+            huge,
+            1.7e308,
+        ),
     ] {
-        let dag = population_dag(query);
+        let dag = population_dag(query, statistic, &["job"]);
         assert_eq!(
             run(&dag, samples, 60_000).unwrap(),
             reference(&[("api", expected)]),

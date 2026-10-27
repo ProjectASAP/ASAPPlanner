@@ -175,9 +175,11 @@ average; the outer sketch candidate remains available.
 
 ## Acceptance evidence
 
-- PromQL quantiles, TopK limits and scalar readouts share only compatible populations.
-- SQL frontend tests cover shared quantiles/scalar readouts/maximum k, separation
-  by grouping and filters, preservation of projections, and invalid value-column rejection.
+- The planner rule and its tests were removed while no pass offers the rule.
+  Sharing only compatible populations across PromQL quantiles, TopK limits and
+  scalar readouts, and the SQL table-row cases, are acceptance tests for its
+  reimplementation. IR tests cover invalid value-column rejection and
+  lookback agreement.
 - Backend admission rejects a table-row producer when only a current-series executor
   is available.
 - Process tests compare current-series replacements and expiry with Prometheus 3.5.
