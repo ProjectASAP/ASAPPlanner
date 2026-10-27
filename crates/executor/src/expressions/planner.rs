@@ -1035,18 +1035,22 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
             Ok(())
         }
         ScalarExpr::IsNull(value) | ScalarExpr::IsNotNull(value) => validate(value, schema),
-        // Valid when each `expr = item` it evaluates is.
-        ScalarExpr::InList { expr, list, .. } => list.iter().try_for_each(|item| {
-            validate(
-                &ScalarExpr::Compare {
-                    left: expr.clone(),
-                    op: CompareOpKind::Eq,
-                    right: Box::new(item.clone()),
-                    semantics: planner_types::ir::scalar::ExprSemantics::Sql,
-                },
-                schema,
-            )
-        }),
+        // Valid when its operand is (an empty list still evaluates it) and
+        // each `expr = item` it evaluates is.
+        ScalarExpr::InList { expr, list, .. } => {
+            validate(expr, schema)?;
+            list.iter().try_for_each(|item| {
+                validate(
+                    &ScalarExpr::Compare {
+                        left: expr.clone(),
+                        op: CompareOpKind::Eq,
+                        right: Box::new(item.clone()),
+                        semantics: planner_types::ir::scalar::ExprSemantics::Sql,
+                    },
+                    schema,
+                )
+            })
+        }
         _ => Err(invalid()),
     }
 }
