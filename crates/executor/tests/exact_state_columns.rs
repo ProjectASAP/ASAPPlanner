@@ -9,7 +9,6 @@ use asap_executor::planner::ir::schema::{
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::exact::ExactEvaluation;
 use asap_executor::values::{Batch, SchemaRef, Value};
-use asap_executor::Statistic;
 use futures::{executor::block_on, StreamExt};
 use std::sync::Arc;
 
@@ -83,18 +82,6 @@ fn run(operator: Operator, inputs: Vec<Batch>) -> Vec<Batch> {
     })
 }
 
-fn statistic(kind: &ExactKind) -> Statistic {
-    match kind {
-        ExactKind::Sum => Statistic::Sum,
-        ExactKind::Count => Statistic::Count,
-        ExactKind::Min => Statistic::Min,
-        ExactKind::Max => Statistic::Max,
-        ExactKind::Rate => Statistic::Rate,
-        ExactKind::Increase => Statistic::Increase,
-        _ => unreachable!(),
-    }
-}
-
 // For each exact family: two panes built as numeric records, merged and
 // evaluated, equal the same panes read back as kernel objects (all objects,
 // or one of each), row for row.
@@ -125,7 +112,7 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
                 merged[0].schema().clone(),
                 1,
                 SummaryEvaluation::Exact(ExactEvaluation {
-                    statistic: statistic(&kind),
+                    statistic: kind.clone(),
                     lookback_ms: None,
                     offset_ms: 0,
                 }),

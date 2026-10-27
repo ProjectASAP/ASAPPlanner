@@ -1,5 +1,5 @@
 //! Count-Min Sketch frequency summary over `asap_sketchlib::CountMinF64`.
-use crate::{AggregateCore, KernelError, KeyByLabelValues};
+use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{CountMinF64, CountMinSketch, DataInput};
 use planner_types::ir::schema::SketchStatistic;
 
@@ -23,9 +23,8 @@ impl CountMinSketchAccumulator {
     }
 
     /// Estimated frequency of one item.
-    pub fn query_key(&self, key: &KeyByLabelValues) -> f64 {
-        self.inner
-            .estimate(&DataInput::Str(&key.to_semicolon_str()))
+    pub fn query_key(&self, key: &[String]) -> f64 {
+        self.inner.estimate(&DataInput::Str(&key.join(";")))
     }
 }
 
@@ -82,9 +81,9 @@ mod tests {
             CountMinSketchAccumulator::new(3, 128).unwrap(),
             CountMinSketchAccumulator::new(3, 128).unwrap(),
         );
-        let key = KeyByLabelValues::new_with_labels(vec!["checkout".into()]);
-        a.update(&key.to_semicolon_str(), 2.0);
-        b.update(&key.to_semicolon_str(), 3.0);
+        let key = ["checkout".to_string()];
+        a.update(&key.join(";"), 2.0);
+        b.update(&key.join(";"), 3.0);
         let merged = a.merge_with(&b).unwrap();
         let merged = merged
             .as_any()
@@ -116,10 +115,10 @@ mod tests {
     #[test]
     fn non_positive_weights_are_added() {
         let mut state = CountMinSketchAccumulator::new(3, 128).unwrap();
-        let key = KeyByLabelValues::new_with_labels(vec!["checkout".into()]);
-        state.update(&key.to_semicolon_str(), 5.0);
-        state.update(&key.to_semicolon_str(), 0.0);
-        state.update(&key.to_semicolon_str(), -2.0);
+        let key = ["checkout".to_string()];
+        state.update(&key.join(";"), 5.0);
+        state.update(&key.join(";"), 0.0);
+        state.update(&key.join(";"), -2.0);
         assert_eq!(state.query_key(&key), 3.0);
     }
 

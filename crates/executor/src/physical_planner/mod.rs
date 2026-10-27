@@ -1040,16 +1040,10 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
     match &node.payload {
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
             let state = summary_column(input)?;
-            use crate::Statistic as S;
             use planner_types::ir::schema::ExactKind as E;
             let statistic = match &input.fields[state].dtype {
                 FieldDataType::ExactAggregate(kind, _) => match kind {
-                    E::Sum => S::Sum,
-                    E::Count => S::Count,
-                    E::Min => S::Min,
-                    E::Max => S::Max,
-                    E::Rate => S::Rate,
-                    E::Increase => S::Increase,
+                    E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase => kind.clone(),
                     _ => return Err(invalid("exact family evaluation is unsupported")),
                 },
                 _ => return Err(invalid("exact finalization requires exact state")),

@@ -1132,13 +1132,13 @@ fn evaluate_states(
                 Error::Operator("exact count exceeds Int64".into())
             })?)));
         }
-        if evaluation.statistic != statistic_of(states.family()) {
+        if evaluation.statistic != *statistic_of(states.family()) {
             return Err(Error::Operator(
                 "evaluation differs from Planner exact family".into(),
             ));
         }
         match record
-            .evaluation(evaluation.statistic, range_ms)
+            .evaluation(&evaluation.statistic, range_ms)
             .map_err(|e| Error::Operator(e.to_string()))?
         {
             Some(value) => Ok(Some(Value::Float64(value))),
@@ -1153,19 +1153,20 @@ fn evaluate_states(
         };
         if !matches!(
             evaluation.statistic,
-            crate::Statistic::Rate | crate::Statistic::Increase
+            planner_types::ir::schema::ExactKind::Rate
+                | planner_types::ir::schema::ExactKind::Increase
         ) {
             return false;
         }
         match states.storage() {
             StateStorage::Exact(records) => {
-                evaluation.statistic == statistic_of(states.family())
+                evaluation.statistic == *statistic_of(states.family())
                     && records[index].insufficient_counter_raw_data_samples()
             }
             StateStorage::Objects(objects) => {
                 crate::evaluation::insufficient_counter_raw_data_samples(
                     objects[index].as_ref(),
-                    evaluation.statistic,
+                    &evaluation.statistic,
                 )
             }
         }

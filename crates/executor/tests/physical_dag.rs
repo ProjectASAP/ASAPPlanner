@@ -4,7 +4,6 @@ use asap_executor::{
     plan::PhysicalDAG,
     runtime::{Limits, RunContext, Scope},
     values::{Batch, SchemaRef, Value},
-    Statistic,
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{
@@ -149,7 +148,7 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
             0,
             asap_executor::operators::SummaryEvaluation::Exact(
                 asap_executor::summary_kernels::exact::ExactEvaluation {
-                    statistic: Statistic::Sum,
+                    statistic: ExactKind::Sum,
                     lookback_ms: None,
                     offset_ms: 0,
                 },
@@ -469,7 +468,7 @@ fn exact_state_and_family_validation() {
             0,
             asap_executor::operators::SummaryEvaluation::Exact(
                 asap_executor::summary_kernels::exact::ExactEvaluation {
-                    statistic: Statistic::Sum,
+                    statistic: ExactKind::Sum,
                     lookback_ms: None,
                     offset_ms: 0,
                 },
@@ -593,7 +592,7 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
         0,
         asap_executor::operators::SummaryEvaluation::Exact(
             asap_executor::summary_kernels::exact::ExactEvaluation {
-                statistic: Statistic::Count,
+                statistic: ExactKind::Count,
                 lookback_ms: None,
                 offset_ms: 0,
             },

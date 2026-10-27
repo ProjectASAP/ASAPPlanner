@@ -1,6 +1,7 @@
 //! Evaluations over merged exact summary states.
 use crate::summary_kernels::exact::ExactAccumulator;
-use crate::{AggregateCore, KeyByLabelValues, Statistic};
+use crate::AggregateCore;
+use planner_types::ir::schema::ExactKind;
 use std::sync::Arc;
 
 fn merge_exact_states(
@@ -27,13 +28,13 @@ fn merge_exact_states(
 /// state/type/range failures remain errors rather than empty results.
 pub fn insufficient_counter_raw_data_samples(
     state: &dyn AggregateCore,
-    statistic: Statistic,
+    statistic: &ExactKind,
 ) -> bool {
-    matches!(statistic, Statistic::Rate | Statistic::Increase)
+    matches!(statistic, ExactKind::Rate | ExactKind::Increase)
         && state
             .as_any()
             .downcast_ref::<ExactAccumulator>()
-            .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, &None))
+            .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, None))
 }
 
 /// Merge already selected exact panes and read one population. `None` means
@@ -41,12 +42,12 @@ pub fn insufficient_counter_raw_data_samples(
 /// or an empty MIN/MAX.
 pub fn exact_evaluation(
     states: impl IntoIterator<Item = Arc<dyn AggregateCore>>,
-    statistic: Statistic,
+    statistic: &ExactKind,
     range_ms: Option<(i64, i64)>,
-    key: Option<&KeyByLabelValues>,
+    key: Option<&[String]>,
 ) -> Result<Option<f64>, String> {
     let merged = merge_exact_states(states)?;
-    if merged.insufficient_counter_raw_data_samples(statistic, &key.cloned()) {
+    if merged.insufficient_counter_raw_data_samples(statistic, key) {
         return Ok(None);
     }
     merged
@@ -57,7 +58,7 @@ pub fn exact_evaluation(
 #[cfg(test)]
 mod counter_tests {
     use super::*;
-    use planner_types::ir::schema::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
+    use planner_types::ir::schema::{ExactParams, FieldDataType as SummaryFamilyType};
 
     fn counter(kind: ExactKind, params: ExactParams, keyed: bool) -> ExactAccumulator {
         ExactAccumulator::new(SummaryFamilyType::ExactAggregate(kind, params), keyed).unwrap()
@@ -66,24 +67,20 @@ mod counter_tests {
     // A counter population with a single sample is absent, keyed or not.
     #[test]
     fn planner_counter_population_omits_insufficient_samples() {
-        for (kind, params, statistic) in [
-            (ExactKind::Rate, ExactParams::Rate, Statistic::Rate),
-            (
-                ExactKind::Increase,
-                ExactParams::Increase,
-                Statistic::Increase,
-            ),
+        for (kind, params) in [
+            (ExactKind::Rate, ExactParams::Rate),
+            (ExactKind::Increase, ExactParams::Increase),
         ] {
             for keyed in [false, true] {
                 let mut state = counter(kind.clone(), params.clone(), keyed);
-                let key = keyed.then(|| KeyByLabelValues::new_with_labels(vec!["checkout".into()]));
-                state.update(key.as_ref(), 10., 10_000);
+                let key = keyed.then(|| vec!["checkout".to_string()]);
+                state.update(key.as_deref(), 10., 10_000);
                 assert_eq!(
                     exact_evaluation(
                         [Arc::new(state) as Arc<dyn AggregateCore>],
-                        statistic,
+                        &kind,
                         None,
-                        key.as_ref()
+                        key.as_deref()
                     )
                     .unwrap(),
                     None
@@ -97,7 +94,7 @@ mod counter_tests {
     fn sparse_counter_is_absent_but_invalid_ranges_still_fail() {
         let mut state = counter(ExactKind::Rate, ExactParams::Rate, false);
         state.update(None, 10., 10_000);
-        let rate = Statistic::Rate;
+        let rate = &ExactKind::Rate;
         let one = [Arc::new(state.clone()) as Arc<dyn AggregateCore>];
         assert_eq!(
             exact_evaluation(one, rate, Some((0, 60_000)), None).unwrap(),

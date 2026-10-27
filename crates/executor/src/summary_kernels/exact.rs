@@ -1,7 +1,6 @@
 //! Exact summary state identified by Planner family, independent of keyed layout.
 use super::increase::IncreaseAccumulator;
-use crate::Statistic;
-use crate::{AggregateCore, KeyByLabelValues, Measurement};
+use crate::{AggregateCore, KeyByLabelValues};
 use planner_types::ir::schema::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -72,9 +71,9 @@ impl TryFrom<ExactPayload> for ExactAccumulator {
 /// Planned evaluation of an exact summary. `lookback_ms` is the logical PromQL
 /// counter window, ending `offset_ms` before the evaluation time (PromQL
 /// `offset`); the evaluation range is resolved from them at run time.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExactEvaluation {
-    pub statistic: Statistic,
+    pub statistic: ExactKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookback_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -90,15 +89,17 @@ impl ExactAccumulator {
     /// `range_ms` extrapolates a counter Rate/Increase to that evaluation range.
     pub fn evaluation(
         &self,
-        statistic: Statistic,
+        statistic: &ExactKind,
         range_ms: Option<(i64, i64)>,
-        key: Option<&KeyByLabelValues>,
+        key: Option<&[String]>,
     ) -> Result<Option<f64>, Error> {
         if statistic != self.statistic() {
             return Err("evaluation differs from Planner exact family".into());
         }
         let state = match (&self.keyed, key) {
-            (Some(states), Some(key)) => states.get(key).ok_or("unknown exact population")?,
+            (Some(states), Some(key)) => states
+                .get(&KeyByLabelValues::new_with_labels(key.to_vec()))
+                .ok_or("unknown exact population")?,
             (None, None) => &self.scalar,
             _ => return Err("evaluation population differs from installed layout".into()),
         };
@@ -174,14 +175,16 @@ impl ExactAccumulator {
     }
     pub(crate) fn insufficient_counter_raw_data_samples(
         &self,
-        statistic: Statistic,
-        key: &Option<KeyByLabelValues>,
+        statistic: &ExactKind,
+        key: Option<&[String]>,
     ) -> bool {
         if statistic != self.statistic() {
             return false;
         }
         let state = match (&self.keyed, key) {
-            (Some(states), Some(key)) => states.get(key),
+            (Some(states), Some(key)) => {
+                states.get(&KeyByLabelValues::new_with_labels(key.to_vec()))
+            }
             (None, None) => Some(&self.scalar),
             _ => None,
         };
@@ -191,10 +194,10 @@ impl ExactAccumulator {
         self.keyed.is_some()
     }
 
-    pub fn update(&mut self, key: Option<&KeyByLabelValues>, value: f64, timestamp: i64) {
+    pub fn update(&mut self, key: Option<&[String]>, value: f64, timestamp: i64) {
         let state = match (&mut self.keyed, key) {
             (Some(states), Some(key)) => states
-                .entry(key.clone())
+                .entry(KeyByLabelValues::new_with_labels(key.to_vec()))
                 .or_insert_with(|| self.scalar.clone()),
             (None, None) => &mut self.scalar,
             _ => panic!("exact update population layout differs from installed DAG"),
@@ -217,20 +220,15 @@ impl ExactAccumulator {
         self.keyed.is_none().then_some(&self.scalar)
     }
 
-    fn statistic(&self) -> Statistic {
+    fn statistic(&self) -> &ExactKind {
         statistic_of(&self.family)
     }
 }
 
-/// The statistic an exact `family` answers.
-pub(crate) fn statistic_of(family: &SummaryFamilyType) -> Statistic {
+/// The statistic an exact `family` answers: its [`ExactKind`].
+pub(crate) fn statistic_of(family: &SummaryFamilyType) -> &ExactKind {
     match family {
-        SummaryFamilyType::ExactAggregate(ExactKind::Sum, _) => Statistic::Sum,
-        SummaryFamilyType::ExactAggregate(ExactKind::Count, _) => Statistic::Count,
-        SummaryFamilyType::ExactAggregate(ExactKind::Min, _) => Statistic::Min,
-        SummaryFamilyType::ExactAggregate(ExactKind::Max, _) => Statistic::Max,
-        SummaryFamilyType::ExactAggregate(ExactKind::Rate, _) => Statistic::Rate,
-        SummaryFamilyType::ExactAggregate(ExactKind::Increase, _) => Statistic::Increase,
+        SummaryFamilyType::ExactAggregate(kind, _) => kind,
         _ => unreachable!("validated exact family"),
     }
 }
@@ -262,12 +260,12 @@ impl ScalarState {
                 *current = Some(current.map_or(value, |old| old.max(value)))
             }
             ScalarState::Counter(current) => match current {
-                Some(counter) => counter.update(Measurement::new(value), timestamp_ms),
+                Some(counter) => counter.update(value, timestamp_ms),
                 None => {
                     *current = Some(IncreaseAccumulator::new(
-                        Measurement::new(value),
+                        value,
                         timestamp_ms,
-                        Measurement::new(value),
+                        value,
                         timestamp_ms,
                     ))
                 }
@@ -279,7 +277,7 @@ impl ScalarState {
     /// counter. An empty MIN/MAX reads as `None`.
     pub(crate) fn evaluation(
         &self,
-        statistic: Statistic,
+        statistic: &ExactKind,
         range_ms: Option<(i64, i64)>,
     ) -> Result<Option<f64>, Error> {
         match self {
@@ -289,7 +287,7 @@ impl ScalarState {
             ScalarState::Count(count) => Ok(Some(*count as f64)),
             ScalarState::Min(value) | ScalarState::Max(value) => Ok(*value),
             ScalarState::Counter(Some(counter)) => counter
-                .extrapolated_value(range_ms, statistic == Statistic::Rate)
+                .extrapolated_value(range_ms, *statistic == ExactKind::Rate)
                 .map(Some),
             ScalarState::Counter(None) => Err("empty counter population".into()),
         }
@@ -475,7 +473,7 @@ mod tests {
         negative.update(None, -1e16, 1);
         restored.merge_from(&negative).unwrap();
         assert_eq!(
-            restored.evaluation(Statistic::Sum, None, None).unwrap(),
+            restored.evaluation(&ExactKind::Sum, None, None).unwrap(),
             Some(1.0)
         );
     }
@@ -487,12 +485,12 @@ mod tests {
         state.update(None, f64::INFINITY, 0);
         state.update(None, 1.0, 0);
         assert_eq!(
-            state.evaluation(Statistic::Sum, None, None).unwrap(),
+            state.evaluation(&ExactKind::Sum, None, None).unwrap(),
             Some(f64::INFINITY)
         );
         state.update(None, f64::NEG_INFINITY, 0);
         assert!(state
-            .evaluation(Statistic::Sum, None, None)
+            .evaluation(&ExactKind::Sum, None, None)
             .unwrap()
             .unwrap()
             .is_nan());
@@ -502,14 +500,14 @@ mod tests {
     #[test]
     fn serialized_state_round_trips() {
         let mut state = ExactAccumulator::new(sum(), true).unwrap();
-        let key = KeyByLabelValues::new_with_labels(vec!["a".into()]);
+        let key = ["a".to_string()];
         state.update(Some(&key), 2.5, 0);
         let bytes = rmp_serde::to_vec_named(&state).unwrap();
         let restored: ExactAccumulator = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(restored.family(), &sum());
         assert_eq!(
             restored
-                .evaluation(Statistic::Sum, None, Some(&key))
+                .evaluation(&ExactKind::Sum, None, Some(&key))
                 .unwrap(),
             Some(2.5)
         );

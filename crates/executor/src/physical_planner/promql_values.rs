@@ -231,19 +231,13 @@ pub fn compile_exact_evaluation(
 ) -> Result<CompiledPhysicalDAG, Error> {
     use planner_types::ir::schema::ExactKind;
     let statistic = match &family {
-        SummaryFamilyType::ExactAggregate(kind, _) => match kind {
-            ExactKind::Sum => crate::Statistic::Sum,
-            ExactKind::Count => crate::Statistic::Count,
-            ExactKind::Min => crate::Statistic::Min,
-            ExactKind::Max => crate::Statistic::Max,
-            ExactKind::Rate => crate::Statistic::Rate,
-            ExactKind::Increase => crate::Statistic::Increase,
-            ExactKind::IRate => {
-                return Err(invalid("instant-rate state evaluation is not supported"))
-            }
-        },
+        SummaryFamilyType::ExactAggregate(ExactKind::IRate, _) => {
+            return Err(invalid("instant-rate state evaluation is not supported"))
+        }
+        SummaryFamilyType::ExactAggregate(kind, _) => kind.clone(),
         _ => return Err(invalid("exact evaluation requires an exact family")),
     };
+    let is_counter = matches!(statistic, ExactKind::Rate | ExactKind::Increase);
     let input = exact_state_schema(family)?;
     let merge = Operator::summary_merge(input.clone(), 1, vec![0])?;
     let mut evaluation = Operator::evaluation(
@@ -255,10 +249,7 @@ pub fn compile_exact_evaluation(
             offset_ms: 0,
         }),
     )?;
-    if matches!(
-        statistic,
-        crate::Statistic::Rate | crate::Statistic::Increase
-    ) {
+    if is_counter {
         evaluation = evaluation.with_counter_window(
             0,
             i64::try_from(lookback_ms).map_err(|_| invalid("counter lookback exceeds Int64"))?,

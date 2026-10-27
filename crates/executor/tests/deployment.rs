@@ -69,7 +69,6 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
 #[test]
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     use asap_executor::planner::ir::schema::SummaryInputExpr;
-    use asap_executor::KeyByLabelValues;
     let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::CountSketchWithHeap,
@@ -84,8 +83,9 @@ fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let mut operator = create_planner_accumulator(&family, &update, &Default::default()).unwrap();
-    let key = KeyByLabelValues::new_with_labels(vec!["a".into()]);
-    operator.update_keyed(&key, 7.0, 1000).unwrap();
+    operator
+        .update_keyed(&["a".to_string()], 7.0, 1000)
+        .unwrap();
     let state = operator.into_accumulator();
     let state = state
         .as_any()
@@ -109,8 +109,8 @@ fn plain_count_sketch(width: u32, depth: u32) -> FieldDataType {
     )
 }
 
-fn host(i: usize) -> asap_executor::KeyByLabelValues {
-    asap_executor::KeyByLabelValues::new_with_labels(vec![format!("host-{i}")])
+fn host(i: usize) -> [String; 1] {
+    [format!("host-{i}")]
 }
 
 /// Build a plain CountSketch over unit events, one per key index.

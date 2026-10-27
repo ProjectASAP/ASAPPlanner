@@ -186,11 +186,7 @@ mod tests {
             return false;
         };
         let updated = if updater.is_keyed() {
-            updater.update_keyed(
-                &crate::KeyByLabelValues::new_with_labels(vec!["a".into()]),
-                1.0,
-                0,
-            )
+            updater.update_keyed(&["a".to_string()], 1.0, 0)
         } else {
             updater.update_single(1.0, 0)
         };

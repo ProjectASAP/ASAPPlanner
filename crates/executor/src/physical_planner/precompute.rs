@@ -370,13 +370,11 @@ fn fragment(
             };
             validate_value_output(node)?;
             let statistic = match &input.fields[2].dtype {
-                SummaryFamilyType::ExactAggregate(planner_types::ir::schema::ExactKind::Sum, _) => {
-                    crate::Statistic::Sum
-                }
                 SummaryFamilyType::ExactAggregate(
-                    planner_types::ir::schema::ExactKind::Count,
+                    kind @ (planner_types::ir::schema::ExactKind::Sum
+                    | planner_types::ir::schema::ExactKind::Count),
                     _,
-                ) => crate::Statistic::Count,
+                ) => kind.clone(),
                 _ => {
                     return Err(invalid(
                         "precompute finalization requires explicit Sum or Count semantics",

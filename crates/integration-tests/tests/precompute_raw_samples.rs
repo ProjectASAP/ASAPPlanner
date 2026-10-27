@@ -14,7 +14,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     summary_kernels::{exact::ExactAccumulator, weighted_frequency::WeightedFrequency},
     values::{Batch, Value},
-    AggregateCore, KeyByLabelValues, Statistic,
+    AggregateCore,
 };
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::explicit_local_candidates;
@@ -257,19 +257,7 @@ fn evaluations(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
         let FieldDataType::ExactAggregate(kind, _) = family else {
             unreachable!()
         };
-        let statistic = match kind {
-            ExactKind::Sum => Statistic::Sum,
-            ExactKind::Count => Statistic::Count,
-            ExactKind::Min => Statistic::Min,
-            ExactKind::Max => Statistic::Max,
-            ExactKind::Rate => Statistic::Rate,
-            ExactKind::Increase => Statistic::Increase,
-            other => panic!("unexpected exact kind {other:?}"),
-        };
-        return vec![exact
-            .evaluation(statistic, None, None::<&KeyByLabelValues>)
-            .unwrap()
-            .unwrap()];
+        return vec![exact.evaluation(kind, None, None).unwrap().unwrap()];
     }
     let FieldDataType::Sketch(kind, _) = family else {
         panic!("sketch state for exact family")

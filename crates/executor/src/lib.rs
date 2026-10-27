@@ -1,14 +1,10 @@
 #![doc = include_str!("../README.md")]
 
-pub mod key_by_label_values;
-pub mod measurement;
+mod key_by_label_values;
 pub mod summary_kernels;
 pub use summary_kernels::traits;
 
-mod statistic;
-pub use key_by_label_values::KeyByLabelValues;
-pub use measurement::Measurement;
-pub use statistic::Statistic;
+use key_by_label_values::KeyByLabelValues;
 pub use traits::*;
 
 pub use expressions::arithmetic;
@@ -38,7 +34,6 @@ pub mod expressions;
 pub mod operators;
 pub mod physical_planner;
 pub mod plan;
-pub mod query_time;
 pub mod runtime;
 pub mod sources;
 pub mod values;
