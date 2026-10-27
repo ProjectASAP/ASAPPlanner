@@ -102,6 +102,7 @@ fn expand_with_state_index(
     super::rules::scan_labels::add_scan_label_candidates(&mut memo, deadline)?;
     super::rules::summary_inputs::factor_summary_inputs(&mut memo, deadline)?;
     super::rules::topk::add_topk_candidates(&mut memo, deadline)?;
+    super::rules::filtered_group::add_filtered_group_candidates(&mut memo, deadline)?;
     super::rules::rollup::add_rollup_candidates(&mut memo, deadline)?;
     super::rules::rollup::add_window_rollup_candidates(&mut memo, deadline)?;
     super::rules::summary_results::factor_summary_results(&mut memo, deadline)?;

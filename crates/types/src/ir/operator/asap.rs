@@ -981,8 +981,14 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
 /// NULLs gives an empty state).
 fn quantile_may_be_empty(state: &OperatorNode) -> bool {
     match state.asap() {
-        Some(ASAPOp::SummaryMerge { children, .. }) => {
-            children.iter().any(|child| quantile_may_be_empty(child))
+        Some(ASAPOp::SummaryMerge {
+            children, group_by, ..
+        }) => {
+            // A global rollup must also represent the empty input population,
+            // even when every existing grouped state is nonempty.
+            (source_kind(state) == OperatorResultKind::Relation
+                && group_by.as_ref().is_some_and(Vec::is_empty))
+                || children.iter().any(|child| quantile_may_be_empty(child))
         }
         Some(
             ASAPOp::SummaryAgg {

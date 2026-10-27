@@ -1656,6 +1656,78 @@ fn with_guarantees(
     Ok(rebuilt)
 }
 
+/// An extremum of at most one selected group is an identity on its value.
+/// Unlike a general aggregate over rank estimates, this does not change the
+/// population to which the input's error bound refers.
+fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+    let NonASAPOp::Aggregate {
+        reduction: Reduction::Reduce(by),
+        measures,
+        filters,
+        having: None,
+        child,
+        ..
+    } = node.non_asap()?
+    else {
+        return None;
+    };
+    if by.is_without()
+        || !by.is_empty()
+        || !filters.iter().all(Option::is_none)
+        || !matches!(
+            measures.as_slice(),
+            [AggIntent::Min { col: Some(1) } | AggIntent::Max { col: Some(1) }]
+        )
+    {
+        return None;
+    }
+    let NonASAPOp::Filter {
+        pred,
+        child: grouped,
+    } = child.non_asap()?
+    else {
+        return None;
+    };
+    if !matches!(&pred.0, ScalarExpr::Compare { left, op: asap_types::ir::scalar::CompareOpKind::Eq, right, .. }
+        if matches!(&**left, ScalarExpr::Column(0)) && matches!(&**right, ScalarExpr::Literal(_)))
+        || !grouped.schema.unique_keys.contains(&vec![0])
+    {
+        return None;
+    }
+    let mut source = grouped;
+    while let Some(NonASAPOp::Project { cols, child, .. }) = source.non_asap() {
+        if !cols
+            .iter()
+            .enumerate()
+            .all(|(index, item)| matches!(item.expr, ScalarExpr::Column(column) if column == index))
+        {
+            return None;
+        }
+        source = child;
+    }
+    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = source.asap() else {
+        return None;
+    };
+    let Some(ASAPOp::SummaryAgg {
+        reduction: Reduction::Reduce(keys),
+        child: raw,
+        ..
+    }) = summary_input.asap()
+    else {
+        return None;
+    };
+    if keys.is_without()
+        || keys.len() != 1
+        || !raw
+            .guarantee
+            .as_ref()
+            .is_some_and(AccuracyGuarantee::is_exact)
+    {
+        return None;
+    }
+    grouped.guarantee.clone()
+}
+
 /// The theoretical guarantee of a composed node, given its children's,
 /// composed with the built-in analytical rules ([`propagate`]);
 /// Stage 1 reads no data statistics or deployment evidence. Exact over exact
@@ -1676,6 +1748,9 @@ fn with_guarantees(
 ///
 /// [`AccuracyScope::PerValue`]: asap_types::ir::properties::AccuracyScope::PerValue
 fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+    if let Some(guarantee) = selected_group_guarantee(node) {
+        return Some(guarantee);
+    }
     if let Some(guarantee) = rolled_up_guarantee(node) {
         return guarantee;
     }
