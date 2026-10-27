@@ -36,12 +36,23 @@ impl<'a> Aggregate<'a> {
         else {
             return None;
         };
-        (!by.is_without() && filters.iter().all(Option::is_none)).then_some(Self {
-            keys: by.keys(),
-            measures,
-            output_names,
-            rows: child,
-        })
+        // A same-level read takes the one row of each group, so a measure
+        // that gives several rows per group (a top-k, a count of values)
+        // does not qualify.
+        let one_row_per_group = !measures.iter().any(|measure| {
+            matches!(
+                measure,
+                AggIntent::TopK { .. } | AggIntent::CountValues { .. }
+            )
+        });
+        (!by.is_without() && filters.iter().all(Option::is_none) && one_row_per_group).then_some(
+            Self {
+                keys: by.keys(),
+                measures,
+                output_names,
+                rows: child,
+            },
+        )
     }
 }
 

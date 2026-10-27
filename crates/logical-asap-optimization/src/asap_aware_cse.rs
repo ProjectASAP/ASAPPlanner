@@ -2176,7 +2176,12 @@ fn sketch_rollup_candidates(
             None => builds
                 .iter()
                 .filter_map(|&fine| Some((filtered_finer(coarse, fine)?, fine)))
-                .max_by_key(|((keys, _), _)| *keys)
+                // The same choice as `finest`'s, whatever the query order.
+                .min_by(|((keys, _), fine), ((other_keys, _), other)| {
+                    other_keys
+                        .cmp(keys)
+                        .then_with(|| key_names(fine).cmp(&key_names(other)))
+                })
                 .and_then(|((_, pred), fine)| {
                     let kept = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
                         pred,
@@ -2673,6 +2678,14 @@ fn sketch_rollups(
             "a sketch rollup whose finest and coarse builds have no shared size",
         )
     };
+    // A finest build can also be the coarse build of another choice, read
+    // through a compensating filter. Each build is replaced once: as a
+    // finest build, sized for its readers.
+    let finest: HashSet<*const OperatorNode> = choices
+        .iter()
+        .filter(|choice| is_sketch_build(&choice[0].finer))
+        .map(|choice| Rc::as_ptr(&choice[0].finer))
+        .collect();
     let mut replaced = Vec::new();
     for choice in choices {
         let fine = &choice[0].finer;
@@ -2684,6 +2697,9 @@ fn sketch_rollups(
         let sized = sized_for_all(&members)?.ok_or_else(unsupported)?;
         replaced.push((Rc::as_ptr(fine), Rc::clone(&sized)));
         for candidate in choice {
+            if finest.contains(&Rc::as_ptr(&candidate.coarse)) {
+                continue;
+            }
             let Some(ASAPOp::SummaryMerge {
                 group_by: Some(keys),
                 ..
