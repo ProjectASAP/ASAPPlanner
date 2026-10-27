@@ -186,12 +186,12 @@ fn filtered_grouped_aggregates_roll_up_finer_values() {
 /// Example C: two cities' p90 values cannot be combined, but their KLL
 /// states can: keep the NYC and SF states, merge them, estimate. The merged
 /// read gives the coarse KLL read's rows, SQL's one NULL row over an empty
-/// selection included. (The executor has no `IN`, so the query uses `OR`.)
+/// selection included.
 #[test]
 fn filtered_kll_states_merge() {
     let memo = expanded(&[
         format!("SELECT city, {P90} FROM metrics WHERE {WINDOW} GROUP BY city"),
-        format!("SELECT {P90} FROM metrics WHERE {WINDOW} AND (city = 'NYC' OR city = 'SF')"),
+        format!("SELECT {P90} FROM metrics WHERE {WINDOW} AND city IN ('NYC', 'SF')"),
     ]);
     let (owner, candidates) = rollups(&memo, 1);
     let merged = candidates
@@ -325,11 +325,12 @@ fn filtered_sum_costs_little_beyond_the_finer_sums() {
 
 /// Example C end to end: the joint plan costs no more than planning each
 /// query alone, and no more than on main before the state path (0.2285/s).
-/// Open: the joint search reaches the independent plan only after the
-/// sharing variants its lower bounds rank first, so within the budget it
-/// returns a sharing plan (0.3321/s).
+/// The joint optimum is 0.1963/s: q1 keeps the NYC and SF states of a KLL
+/// by city built over q0's query-time rows. Open: the search proves it only
+/// after about 16 evaluations and 9 s, past the seed round's 5 s, and later
+/// rounds return a query-time plan at 0.3321/s.
 #[test]
-#[ignore = "joint search returns a sharing plan above the independent plan; see PR #952"]
+#[ignore = "the joint search needs the independent plan as a seed (separate plan-selection PR)"]
 fn filtered_kll_states_cost_no_more_than_separate_plans() {
     let grouped = format!("SELECT city, {P90} FROM metrics WHERE {WINDOW} GROUP BY city");
     let filtered = format!("SELECT {P90} FROM metrics WHERE {WINDOW} AND city IN ('NYC', 'SF')");
