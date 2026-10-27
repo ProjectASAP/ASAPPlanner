@@ -1033,6 +1033,21 @@ mod tests {
             ));
             expressions.push(planner(compare(api(), op, ScalarExpr::Column(5)), &batch));
         }
+        // Label regex matchers: NULLs (column 4), an empty match, anchoring.
+        for op in [CompareOpKind::Regex, CompareOpKind::NotRegex] {
+            for pattern in ["api|db", "", "a.*", "pi"] {
+                for column in [4, 5] {
+                    expressions.push(planner(
+                        compare(
+                            ScalarExpr::Column(column),
+                            op.clone(),
+                            ScalarExpr::Literal(ScalarValue::Utf8(pattern.into())),
+                        ),
+                        &batch,
+                    ));
+                }
+            }
+        }
         expressions.extend([
             planner(
                 ScalarExpr::BoolAnd(vec![

@@ -354,6 +354,15 @@ fn compare(op: &CompareOpKind, left: Value, right: Value) -> Result<Value, Error
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
+    if let CompareOpKind::Regex | CompareOpKind::NotRegex = op {
+        let (Value::Utf8(text), Value::Utf8(pattern)) = (&left, &right) else {
+            return Err(Error::Invalid(format!(
+                "comparison {op:?} of non-text values"
+            )));
+        };
+        let matched = label_regex(pattern)?.is_match(text.as_ref());
+        return Ok(Value::Bool(matched == matches!(op, CompareOpKind::Regex)));
+    }
     // NaN is unordered, not a type mismatch. Match the native scalar path.
     if matches!(&left, Value::Float64(v) if v.is_nan())
         || matches!(&right, Value::Float64(v) if v.is_nan())
@@ -380,6 +389,27 @@ fn compare(op: &CompareOpKind, left: Value, right: Value) -> Result<Value, Error
         _ => return Err(Error::Invalid(format!("comparison {op:?}"))),
     };
     Ok(Value::Bool(value))
+}
+
+/// PromQL's fully anchored RE2 match of `pattern`, as `label_replace`
+/// anchors it. Compiled once per pattern and thread: a matcher is evaluated
+/// once per distinct label value, and patterns come from the plan.
+fn label_regex(pattern: &str) -> Result<regex::Regex, Error> {
+    thread_local! {
+        static COMPILED: std::cell::RefCell<std::collections::HashMap<String, regex::Regex>> =
+            std::cell::RefCell::default();
+    }
+    COMPILED.with(|compiled| {
+        if let Some(regex) = compiled.borrow().get(pattern) {
+            return Ok(regex.clone());
+        }
+        let regex = regex::Regex::new(&format!("^(?s:{pattern})$"))
+            .map_err(|e| Error::Invalid(format!("invalid label regex {pattern:?}: {e}")))?;
+        compiled
+            .borrow_mut()
+            .insert(pattern.to_string(), regex.clone());
+        Ok(regex)
+    })
 }
 
 fn arithmetic(op: &ArithmeticOpKind, left: Value, right: Value) -> Result<Value, Error> {
@@ -758,6 +788,28 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
             }
             Ok(())
         }
+        // PromQL's `=~` / `!~`: text against a literal pattern, compiled
+        // here so a bad pattern fails before any row.
+        ScalarExpr::Compare {
+            left,
+            right,
+            op: CompareOpKind::Regex | CompareOpKind::NotRegex,
+            ..
+        } => {
+            validate(left, schema)?;
+            let text = left
+                .scalar_type(schema)
+                .map_err(|e| Error::Invalid(e.to_string()))?
+                .0;
+            match &**right {
+                ScalarExpr::Literal(ScalarValue::Utf8(pattern))
+                    if matches!(text, DataType::Utf8 | DataType::Null) =>
+                {
+                    label_regex(pattern).map(|_| ())
+                }
+                _ => Err(invalid()),
+            }
+        }
         ScalarExpr::Compare {
             left, right, op, ..
         } => {
@@ -877,6 +929,33 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A label regex must be a valid literal pattern over text; both fail at
+    // compile time, the bad pattern named.
+    #[test]
+    fn label_regex_rejects_bad_patterns_at_compile_time() {
+        let schema = std::sync::Arc::new(planner_types::ir::schema::Schema::new(vec![
+            planner_types::ir::schema::Field::plain("job", DataType::Utf8, false),
+            planner_types::ir::schema::Field::plain("v", DataType::Float64, false),
+        ]));
+        let matcher = |column: usize, right: PlannedExpr| {
+            CompiledExpression::compile(
+                &PlannedExpr::Compare {
+                    left: Box::new(PlannedExpr::Column(column)),
+                    op: CompareOpKind::Regex,
+                    right: Box::new(right),
+                    semantics: planner_types::ir::scalar::ExprSemantics::Promql,
+                },
+                &schema,
+            )
+        };
+        let text = |value: &str| PlannedExpr::Literal(ScalarValue::Utf8(value.into()));
+        assert!(matcher(0, text("api|db")).is_ok());
+        let error = matcher(0, text("a(")).unwrap_err().to_string();
+        assert!(error.contains("\"a(\""), "{error}");
+        assert!(matcher(1, text("1")).is_err());
+        assert!(matcher(0, PlannedExpr::Column(0)).is_err());
+    }
     #[test]
     fn mixed_comparison_preserves_integer_precision_and_boundaries() {
         assert_eq!(
