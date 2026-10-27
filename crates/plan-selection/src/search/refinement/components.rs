@@ -413,7 +413,8 @@ const MAX_SHARED_SEARCH_CANDIDATES: usize = 128;
 /// Each query's own plan, searched for that query alone, combined into one
 /// selection of the whole graph. A query is first searched over the
 /// candidates no other query can reach; when they hold no plan (queries share
-/// a group, such as one scan), over every candidate it can reach. A candidate
+/// a group, such as one scan), over every candidate it can reach, when they
+/// are at most [`MAX_SHARED_SEARCH_CANDIDATES`]. A candidate
 /// two queries both select appears once: one node, as shared work is priced.
 /// Returns it with the sum of the queries' own costs, or `None` when a query
 /// finds no plan within `limits` (shared among the queries) or the
@@ -504,10 +505,7 @@ pub(in crate::search) fn separate_plans_combined(
             ) else {
                 continue;
             };
-            // Over shared candidates the search is larger and may stop at a
-            // poor plan; only a proved optimum is used then.
-            let usable = own_only || result.search.status == CandidateSearchStatus::Optimal;
-            if let Some(incumbent) = result.search.incumbent.filter(|_| usable) {
+            if let Some(incumbent) = result.search.incumbent {
                 extend_selection(&mut combined, &incumbent.selected, &component);
                 separate_cost += incumbent.actual_cost;
                 found = true;
