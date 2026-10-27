@@ -1,6 +1,6 @@
 //! Exact summary state identified by Planner family, independent of keyed layout.
 use super::increase::IncreaseAccumulator;
-use crate::{AggregateCore, KeyByLabelValues};
+use crate::AggregateCore;
 use planner_types::ir::schema::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -33,14 +33,14 @@ pub(crate) enum ScalarState {
 pub struct ExactAccumulator {
     family: SummaryFamilyType,
     scalar: ScalarState,
-    keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
+    keyed: Option<HashMap<Vec<String>, ScalarState>>,
 }
 
 #[derive(Deserialize)]
 struct ExactPayload {
     family: SummaryFamilyType,
     scalar: ScalarState,
-    keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
+    keyed: Option<HashMap<Vec<String>, ScalarState>>,
 }
 
 impl TryFrom<ExactPayload> for ExactAccumulator {
@@ -97,9 +97,7 @@ impl ExactAccumulator {
             return Err("evaluation differs from Planner exact family".into());
         }
         let state = match (&self.keyed, key) {
-            (Some(states), Some(key)) => states
-                .get(&KeyByLabelValues::new_with_labels(key.to_vec()))
-                .ok_or("unknown exact population")?,
+            (Some(states), Some(key)) => states.get(key).ok_or("unknown exact population")?,
             (None, None) => &self.scalar,
             _ => return Err("evaluation population differs from installed layout".into()),
         };
@@ -182,9 +180,7 @@ impl ExactAccumulator {
             return false;
         }
         let state = match (&self.keyed, key) {
-            (Some(states), Some(key)) => {
-                states.get(&KeyByLabelValues::new_with_labels(key.to_vec()))
-            }
+            (Some(states), Some(key)) => states.get(key),
             (None, None) => Some(&self.scalar),
             _ => None,
         };
@@ -197,7 +193,7 @@ impl ExactAccumulator {
     pub fn update(&mut self, key: Option<&[String]>, value: f64, timestamp: i64) {
         let state = match (&mut self.keyed, key) {
             (Some(states), Some(key)) => states
-                .entry(KeyByLabelValues::new_with_labels(key.to_vec()))
+                .entry(key.to_vec())
                 .or_insert_with(|| self.scalar.clone()),
             (None, None) => &mut self.scalar,
             _ => panic!("exact update population layout differs from installed DAG"),
@@ -423,7 +419,7 @@ impl AggregateCore for ExactAccumulator {
                 m.keys()
                     .map(|k| {
                         std::mem::size_of::<ScalarState>()
-                            + k.labels.iter().map(String::len).sum::<usize>()
+                            + k.iter().map(String::len).sum::<usize>()
                     })
                     .sum::<usize>()
             })
@@ -439,7 +435,7 @@ mod tests {
     struct Payload {
         family: SummaryFamilyType,
         scalar: ScalarState,
-        keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
+        keyed: Option<HashMap<Vec<String>, ScalarState>>,
     }
 
     /// The planner prices one exact state at the bytes a column of them
@@ -522,7 +518,7 @@ mod tests {
             keyed: None,
         };
         assert!(decode(&scalar).is_err());
-        let key = KeyByLabelValues::new_with_labels(vec!["a".into()]);
+        let key = vec!["a".to_string()];
         let keyed = Payload {
             family: sum(),
             scalar: ScalarState::Sum {

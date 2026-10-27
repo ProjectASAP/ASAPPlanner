@@ -1,10 +1,8 @@
 #![doc = include_str!("../README.md")]
 
-mod key_by_label_values;
 pub mod summary_kernels;
 pub use summary_kernels::traits;
 
-use key_by_label_values::KeyByLabelValues;
 pub use traits::*;
 
 pub use expressions::arithmetic;
