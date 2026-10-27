@@ -62,3 +62,12 @@ fn identical_exact_percentiles_share_work() {
         "{related_cost} vs {base_cost}"
     );
 }
+
+/// Different ranks share the source window but still compute their own values.
+#[test]
+fn different_exact_percentiles_share_the_input_window() {
+    let mut related = workload();
+    related.queries[1].entry.query.0 = related.queries[1].entry.query.0.replace("0.99", "0.5");
+    let related_cost = cost(&related);
+    assert!(related_cost <= 0.0883, "{related_cost}");
+}

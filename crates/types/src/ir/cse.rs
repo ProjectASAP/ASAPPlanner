@@ -45,6 +45,8 @@
 //! the rows it would have read alone, a SQL table's keyless rows included.
 //! Global scalar reductions are also shareable: their single result has stable
 //! identity even though the schema does not declare the empty unique key.
+//! Equal windows directly over scans and exact TopK retaining explicit series
+//! identity also preserve the identity of their selected rows.
 //! An ASAP node (summary state and its evaluations) has no such gate: equal
 //! operator, schema and guarantee make it shareable, exactly as post-ASAP
 //! sharing decided before this IR.
@@ -216,6 +218,17 @@ impl InternTable {
         let reusable = node.is_asap()
             || node.schema.has_unique_key()
             || matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
+            // Equal windows over one scan preserve its row identities, even
+            // for keyless SQL tables. Consumers can share that window's rows.
+            || matches!(node.non_asap(), Some(NonASAPOp::TimeRange { child, .. })
+                if matches!(child.non_asap(), Some(NonASAPOp::Scan { .. })))
+            // Exact PromQL TopK retains each selected series' identity. The
+            // ranked projection can drop the timestamp part of the input key,
+            // but identical selections still return the same series rows.
+            || (node.result_kind == crate::ir::OperatorResultKind::InstantVector
+                && node.schema.fields.iter().any(|field| field.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
+                && matches!(node.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
+                    if matches!(measures.as_slice(), [crate::ir::operator::AggIntent::TopK { .. }])))
             || matches!(node.non_asap(), Some(NonASAPOp::Aggregate {
                 reduction: crate::ir::operator::Reduction::Reduce(keys), measures, ..
             }) if !keys.is_without() && keys.is_empty() && measures.iter().all(|measure| matches!(measure,
