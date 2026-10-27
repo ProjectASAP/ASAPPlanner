@@ -64,6 +64,7 @@ pub mod per_computation_candidates;
 /// Stage 1, Pass 2: ASAP-aware common-subexpression elimination (the
 /// identical-expression rule).
 pub mod asap_aware_cse;
+mod finer_aggregate;
 
 pub mod workload_candidates;
 

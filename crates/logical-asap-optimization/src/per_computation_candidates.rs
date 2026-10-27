@@ -1656,9 +1656,13 @@ fn with_guarantees(
     Ok(rebuilt)
 }
 
-/// An extremum of at most one selected group is an identity on its value.
-/// Unlike a general aggregate over rank estimates, this does not change the
-/// population to which the input's error bound refers.
+/// An extremum over at most one row per group is an identity on its value:
+/// an aggregate whose measures are all `MIN`/`MAX` over a (possibly
+/// filtered) grouped estimate, where every column of a unique key of the
+/// estimate is a group key or pinned to one value by the filter
+/// ([`crate::finer_aggregate`]'s same-level read). Unlike a general
+/// aggregate over rank estimates, this does not change the population to
+/// which the input's error bound refers.
 fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     let NonASAPOp::Aggregate {
         reduction: Reduction::Reduce(by),
@@ -1672,26 +1676,27 @@ fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
         return None;
     };
     if by.is_without()
-        || !by.is_empty()
         || !filters.iter().all(Option::is_none)
-        || !matches!(
-            measures.as_slice(),
-            [AggIntent::Min { col: Some(1) } | AggIntent::Max { col: Some(1) }]
-        )
+        || measures.is_empty()
+        || !measures.iter().all(|measure| {
+            matches!(
+                measure,
+                AggIntent::Min { col: Some(_) } | AggIntent::Max { col: Some(_) }
+            )
+        })
     {
         return None;
     }
-    let NonASAPOp::Filter {
-        pred,
-        child: grouped,
-    } = child.non_asap()?
-    else {
-        return None;
+    let (pinned, grouped) = match child.non_asap()? {
+        NonASAPOp::Filter { pred, child } => {
+            (crate::finer_aggregate::pinned_columns(&pred.0), child)
+        }
+        _ => (Vec::new(), child),
     };
-    if !matches!(&pred.0, ScalarExpr::Compare { left, op: asap_types::ir::scalar::CompareOpKind::Eq, right, .. }
-        if matches!(&**left, ScalarExpr::Column(0)) && matches!(&**right, ScalarExpr::Literal(_)))
-        || !grouped.schema.unique_keys.contains(&vec![0])
-    {
+    if !grouped.schema.unique_keys.iter().any(|key| {
+        key.iter()
+            .all(|column| by.keys().contains(column) || pinned.contains(column))
+    }) {
         return None;
     }
     let mut source = grouped;
@@ -1717,7 +1722,6 @@ fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
         return None;
     };
     if keys.is_without()
-        || keys.len() != 1
         || !raw
             .guarantee
             .as_ref()
