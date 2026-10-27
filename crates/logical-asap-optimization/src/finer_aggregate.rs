@@ -71,10 +71,10 @@ pub(crate) fn match_finer(
     let needs_rollup = finer_keys
         .iter()
         .any(|key| !query_keys.contains(key) && !pinned.contains(key));
-    let identical = extra.is_empty()
-        && !needs_rollup
-        && query_key_positions.iter().copied().eq(0..finer_keys.len());
-    if identical {
+    // Without extra conjuncts or a rollup, the two aggregates have the same
+    // groups, perhaps in another key order: they are one computation, not
+    // one read from the other (each read from the other would be a cycle).
+    if extra.is_empty() && !needs_rollup {
         return None;
     }
     let compensating_filter = (!extra.is_empty()).then(|| {
