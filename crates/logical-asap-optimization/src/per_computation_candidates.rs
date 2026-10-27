@@ -173,6 +173,9 @@ pub enum PruneReason {
     RequiresExact,
     /// `count` counts rows, so a possibly-null `avg` input changes the result.
     NullableAvgInput,
+    /// Frequency sketches do not implement SQL row-count updates. Keep the
+    /// exact counter; a fused raw-row TopK has its own keyed update contract.
+    NoRelationalCountSketchRealization,
     /// The deployment's executor cannot build the summary's family or
     /// answer the measure's readout from it
     /// ([`DeploymentCapabilities::supports`]).
@@ -730,6 +733,13 @@ fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
                     matches!(choice, ComputationCandidate::ExactAccumulator(_))
                 });
             }
+            if matches!(intent, AggIntent::Count { .. })
+                && node.children()[0].result_kind == OperatorResultKind::Relation
+            {
+                choices.prune(PruneReason::NoRelationalCountSketchRealization, |choice| {
+                    matches!(choice, ComputationCandidate::Summary(_))
+                });
+            }
             targets.push(ComputationTarget {
                 aggregate: node.clone(),
                 measure,
@@ -1088,13 +1098,12 @@ fn whole_expression_input(
             partitions.group_keys().map_or(&[][..], |keys| keys.keys()),
         ));
     } else if realized.child.schema.closed
-        && (matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
-            || !reads_only_time_series(&realized.child))
+        && matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
     {
         // An encoded label set needs an open PromQL schema. PromQL rows that
         // carry the series identity are closed, but their inner group labels
-        // are item columns. (A SQL top-k keeps its heaps over its per-key
-        // result.)
+        // are item columns. SQL group keys are explicit columns too, so their
+        // keyed heap can consume raw rows without a per-key aggregate first.
         return None;
     }
     Some((realized.child, input, partitions))
@@ -1647,6 +1656,78 @@ fn with_guarantees(
     Ok(rebuilt)
 }
 
+/// An extremum of at most one selected group is an identity on its value.
+/// Unlike a general aggregate over rank estimates, this does not change the
+/// population to which the input's error bound refers.
+fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+    let NonASAPOp::Aggregate {
+        reduction: Reduction::Reduce(by),
+        measures,
+        filters,
+        having: None,
+        child,
+        ..
+    } = node.non_asap()?
+    else {
+        return None;
+    };
+    if by.is_without()
+        || !by.is_empty()
+        || !filters.iter().all(Option::is_none)
+        || !matches!(
+            measures.as_slice(),
+            [AggIntent::Min { col: Some(1) } | AggIntent::Max { col: Some(1) }]
+        )
+    {
+        return None;
+    }
+    let NonASAPOp::Filter {
+        pred,
+        child: grouped,
+    } = child.non_asap()?
+    else {
+        return None;
+    };
+    if !matches!(&pred.0, ScalarExpr::Compare { left, op: asap_types::ir::scalar::CompareOpKind::Eq, right, .. }
+        if matches!(&**left, ScalarExpr::Column(0)) && matches!(&**right, ScalarExpr::Literal(_)))
+        || !grouped.schema.unique_keys.contains(&vec![0])
+    {
+        return None;
+    }
+    let mut source = grouped;
+    while let Some(NonASAPOp::Project { cols, child, .. }) = source.non_asap() {
+        if !cols
+            .iter()
+            .enumerate()
+            .all(|(index, item)| matches!(item.expr, ScalarExpr::Column(column) if column == index))
+        {
+            return None;
+        }
+        source = child;
+    }
+    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = source.asap() else {
+        return None;
+    };
+    let Some(ASAPOp::SummaryAgg {
+        reduction: Reduction::Reduce(keys),
+        child: raw,
+        ..
+    }) = summary_input.asap()
+    else {
+        return None;
+    };
+    if keys.is_without()
+        || keys.len() != 1
+        || !raw
+            .guarantee
+            .as_ref()
+            .is_some_and(AccuracyGuarantee::is_exact)
+    {
+        return None;
+    }
+    grouped.guarantee.clone()
+}
+
 /// The theoretical guarantee of a composed node, given its children's,
 /// composed with the built-in analytical rules ([`propagate`]);
 /// Stage 1 reads no data statistics or deployment evidence. Exact over exact
@@ -1667,6 +1748,9 @@ fn with_guarantees(
 ///
 /// [`AccuracyScope::PerValue`]: asap_types::ir::properties::AccuracyScope::PerValue
 fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+    if let Some(guarantee) = selected_group_guarantee(node) {
+        return Some(guarantee);
+    }
     if let Some(guarantee) = rolled_up_guarantee(node) {
         return guarantee;
     }

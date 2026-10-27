@@ -150,9 +150,10 @@ pub(in crate::memo) fn append_reader(
         || (original.node.schema.closed && !node.schema.closed)
         || original.node.result_kind != node.result_kind
     {
-        return Err(StateGroupExpansionError::ReuseRule(
-            "reuse changed the reader output contract".into(),
-        ));
+        return Err(StateGroupExpansionError::ReuseRule(format!(
+            "reuse changed the reader output contract ({origin:?}): expected {:?}, got {:?}",
+            original.node.schema, node.schema
+        )));
     }
     let boundaries = memo
         .groups

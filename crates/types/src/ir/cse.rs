@@ -38,11 +38,15 @@
 //! only ever *returned* as a match for another when its output has a provable
 //! unique key (`Schema::has_unique_key()`): a producer's output can only be
 //! shared across consumers when its row identity is stable across reads, so
-//! an ungrouped aggregate, a `without(..)` grouping, a `Concat`/`SetOp` that
+//! a `without(..)` grouping, a `Concat`/`SetOp` that
 //! drops its keys, … is always inserted fresh even when it is structurally
 //! identical to something already interned. A `Scan` is the exception: equal
 //! scans read the same source rows, so every reader of one shared scan reads
 //! the rows it would have read alone, a SQL table's keyless rows included.
+//! Global scalar reductions are also shareable: their single result has stable
+//! identity even though the schema does not declare the empty unique key.
+//! Equal windows directly over scans and exact TopK retaining explicit series
+//! identity also preserve the identity of their selected rows.
 //! An ASAP node (summary state and its evaluations) has no such gate: equal
 //! operator, schema and guarantee make it shareable, exactly as post-ASAP
 //! sharing decided before this IR.
@@ -213,7 +217,32 @@ impl InternTable {
         // (harmless: later scans require legality of the new node too).
         let reusable = node.is_asap()
             || node.schema.has_unique_key()
-            || matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
+            || matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
+            // Equal windows over one scan preserve its row identities, even
+            // for keyless SQL tables. Consumers can share that window's rows.
+            || matches!(node.non_asap(), Some(NonASAPOp::TimeRange { child, .. })
+                if matches!(child.non_asap(), Some(NonASAPOp::Scan { .. })))
+            // Exact PromQL TopK retains each selected series' identity. The
+            // ranked projection can drop the timestamp part of the input key,
+            // but identical selections still return the same series rows.
+            || (node.result_kind == crate::ir::OperatorResultKind::InstantVector
+                && node.schema.fields.iter().any(|field| field.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
+                && matches!(node.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
+                    if matches!(measures.as_slice(), [crate::ir::operator::AggIntent::TopK { .. }])))
+            || matches!(node.non_asap(), Some(NonASAPOp::Aggregate {
+                reduction: crate::ir::operator::Reduction::Reduce(keys), measures, ..
+            }) if !keys.is_without() && keys.is_empty() && measures.iter().all(|measure| matches!(measure,
+                crate::ir::operator::AggIntent::Count { .. }
+                | crate::ir::operator::AggIntent::Sum { .. }
+                | crate::ir::operator::AggIntent::Min { .. }
+                | crate::ir::operator::AggIntent::Max { .. }
+                | crate::ir::operator::AggIntent::Avg { .. }
+                | crate::ir::operator::AggIntent::StdDev { .. }
+                | crate::ir::operator::AggIntent::Variance { .. }
+                | crate::ir::operator::AggIntent::PearsonCorr { .. }
+                | crate::ir::operator::AggIntent::Quantile { .. }
+                | crate::ir::operator::AggIntent::Cardinality { .. }
+            )));
         let bucket = self.buckets.entry(hash).or_default();
         if reusable {
             if let Some(existing) = bucket
@@ -397,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn no_unique_keys_means_no_merge_even_when_structurally_identical() {
+    fn identical_global_scalar_aggregates_share_their_single_result() {
         let a = quantile_agg(vec![], Some(2), 0.9);
         let b = quantile_agg(vec![], Some(2), 0.9);
         assert_eq!(a, b, "fixture sanity: structurally equal");
@@ -407,9 +436,24 @@ mod tests {
         );
         let (ra, rb) = two_roots(a, b);
         assert!(
-            !Rc::ptr_eq(&ra, &rb),
-            "no unique key ⇒ never hoisted, even for an identical structural match"
+            Rc::ptr_eq(&ra, &rb),
+            "a global scalar aggregate has one stable result per evaluation"
         );
+    }
+
+    /// A global scalar result can be shared only with the same computation.
+    #[test]
+    fn distinct_global_quantiles_do_not_merge() {
+        let (a, b) = two_roots(
+            quantile_agg(vec![], Some(2), 0.5),
+            quantile_agg(vec![], Some(2), 0.9),
+        );
+        assert!(!Rc::ptr_eq(&a, &b));
+        let (a, b) = two_roots(
+            quantile_agg(vec![], Some(2), 0.5),
+            quantile_agg(vec![], Some(3), 0.5),
+        );
+        assert!(!Rc::ptr_eq(&a, &b));
     }
 
     /// Two equal scans of a keyless table (SQL rows) are one node: each

@@ -150,10 +150,60 @@ pub(in crate::search) fn optimize_configured_candidates(
             direct.push(seed);
         }
     }
+    // A maintained-state seed avoids the large raw-scan latency range without
+    // weakening the direct model's numerical guards. It only proposes plans;
+    // the unrestricted graph and evaluator still determine bounds and validity.
+    let maintained = joint
+        .as_ref()
+        .filter(|(_, profile)| profile.schedules.is_some())
+        .and_then(|(_, profile)| maintained_state_profile(configured, profile, context.deadline));
+    // If even this smaller profile has unrepresentable monetary coefficients,
+    // its supported paths can still provide a structural feasibility seed.
+    let maintained_graph = maintained
+        .as_ref()
+        .map(|profile| {
+            use crate::search::candidates::graph::{PhysicalCandidateId, ReaderConstraint};
+            let mut graph = configured.inventory.graph.clone();
+            for (id, candidate) in graph.candidates.iter_mut().enumerate() {
+                candidate.local_cost = weights[id];
+                if profile.candidates[id].is_empty() {
+                    candidate.producer_requirements.clear();
+                    graph
+                        .reader_constraints
+                        .push(ReaderConstraint::AllowedOutputs {
+                            candidate: PhysicalCandidateId(id),
+                            outputs: Vec::new(),
+                        });
+                } else {
+                    for input in &mut candidate.producer_requirements {
+                        input
+                            .compatible_producers
+                            .retain(|producer| !profile.candidates[producer.0].is_empty());
+                    }
+                }
+            }
+            for root in &mut graph.query_roots {
+                root.compatible_candidates
+                    .retain(|id| !profile.candidates[id.0].is_empty());
+            }
+            graph
+        })
+        .filter(|graph| {
+            graph
+                .query_roots
+                .iter()
+                .all(|root| !root.compatible_candidates.is_empty())
+        });
     let mut direct_refs: Vec<_> = direct
         .iter()
         .map(|(graph, profile)| (graph, DirectPriceModel::Fixed(profile)))
         .collect();
+    if let (Some((graph, _)), Some(profile)) = (&joint, &maintained) {
+        direct_refs.push((graph, DirectPriceModel::Joint(profile)));
+    }
+    if let Some(graph) = &maintained_graph {
+        direct_refs.push((graph, DirectPriceModel::Structural));
+    }
     if let Some((graph, profile)) = &joint {
         direct_refs.push((graph, DirectPriceModel::Joint(profile)));
     }
@@ -238,6 +288,103 @@ pub(in crate::search) fn optimize_configured_candidates(
 }
 
 /// Every supported local price interface participates in one joint solve.
+/// Keep paths whose scans run at ingestion time and whose query readouts are
+/// not materialized. This avoids tiny held-memory charges on scalar readouts
+/// spanning a much smaller scale than ingestion costs. Prune unsupported price
+/// tuples to a fixed point before compacting option indices.
+fn maintained_state_profile(
+    configured: &CandidateConfigurationInventory,
+    profile: &crate::search::milp::direct_price_options::JointPriceProfile,
+    deadline: Option<std::time::Instant>,
+) -> Option<crate::search::milp::direct_price_options::JointPriceProfile> {
+    let mut supported: Vec<Vec<bool>> = profile
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(id, options)| {
+            let scan = configured.inventory.templates[id]
+                .as_ref()
+                .is_some_and(|node| {
+                    matches!(
+                        node.non_asap(),
+                        Some(asap_types::ir::NonASAPOp::Scan { .. })
+                    )
+                });
+            options
+                .iter()
+                .map(|option| {
+                    (!scan || option.profile.ingestion)
+                        && (option.profile.ingestion || !option.profile.materialized)
+                })
+                .collect()
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for (id, options) in profile.candidates.iter().enumerate() {
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                return None;
+            }
+            for (index, option) in options.iter().enumerate() {
+                if supported[id][index]
+                    && !option.compatible_input_tuples.iter().any(|tuple| {
+                        tuple
+                            .iter()
+                            .all(|binding| supported[binding.producer.0][binding.price_option])
+                    })
+                {
+                    supported[id][index] = false;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let remap: Vec<Vec<Option<usize>>> = supported
+        .iter()
+        .map(|options| {
+            let mut next = 0;
+            options
+                .iter()
+                .map(|keep| {
+                    if *keep {
+                        let index = next;
+                        next += 1;
+                        Some(index)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let mut result = profile.clone();
+    for (id, options) in result.candidates.iter_mut().enumerate() {
+        let mut index = 0;
+        options.retain_mut(|option| {
+            let keep = supported[id][index];
+            index += 1;
+            if keep {
+                option.compatible_input_tuples.retain(|tuple| {
+                    tuple
+                        .iter()
+                        .all(|binding| supported[binding.producer.0][binding.price_option])
+                });
+                for tuple in &mut option.compatible_input_tuples {
+                    for binding in tuple {
+                        binding.price_option =
+                            remap[binding.producer.0][binding.price_option].unwrap();
+                    }
+                }
+            }
+            keep
+        });
+    }
+    Some(result)
+}
+
 fn joint_cost_seed(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
@@ -1117,6 +1264,59 @@ mod tests {
             entries,
             data,
         )
+    }
+
+    /// Restricting a seed removes all query-time scan paths and repairs every
+    /// supplier option reference without changing the original profile.
+    #[test]
+    fn maintained_seed_prunes_and_remaps_supplier_options() {
+        use crate::search::costing::direct_profile::extract_price_options;
+        let (configured, roots, entries, data) = fixture();
+        let context = CandidatePlanningContext {
+            deadline: None,
+            refine_materialization: false,
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models: PlanningModels::builtin(),
+            calibration: CalibrationFit::default(),
+        };
+        let profile = extract_price_options(&configured, &context)
+            .unwrap()
+            .unwrap();
+        let original_count: usize = profile.candidates.iter().map(Vec::len).sum();
+        let restricted = maintained_state_profile(&configured, &profile, None).unwrap();
+        assert!(restricted
+            .candidates
+            .iter()
+            .any(|options| !options.is_empty()));
+        assert!(restricted.candidates.iter().map(Vec::len).sum::<usize>() < original_count);
+        for (id, options) in restricted.candidates.iter().enumerate() {
+            let scan = configured.inventory.templates[id]
+                .as_ref()
+                .is_some_and(|node| {
+                    matches!(
+                        node.non_asap(),
+                        Some(asap_types::ir::NonASAPOp::Scan { .. })
+                    )
+                });
+            for option in options {
+                assert!(!scan || option.profile.ingestion);
+                assert!(option.profile.ingestion || !option.profile.materialized);
+                assert!(!option.compatible_input_tuples.is_empty());
+                for binding in option.compatible_input_tuples.iter().flatten() {
+                    assert!(binding.price_option < restricted.candidates[binding.producer.0].len());
+                }
+            }
+        }
+        assert_eq!(
+            profile.candidates.iter().map(Vec::len).sum::<usize>(),
+            original_count
+        );
+        assert!(
+            maintained_state_profile(&configured, &profile, Some(std::time::Instant::now()))
+                .is_none()
+        );
     }
 
     // An optional direct-price proposal must not abort planning when its

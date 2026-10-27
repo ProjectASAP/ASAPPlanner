@@ -1189,7 +1189,7 @@ pub fn pane_candidates(
                 );
             }
             let pane_count = u32::try_from(window_ms / width).ok()?;
-            (!readers.is_empty() && pane_count >= 2).then_some(PaneCandidate {
+            (!readers.is_empty() && pane_count >= 1).then_some(PaneCandidate {
                 build,
                 pane_width_ms: width,
                 pane_count,
@@ -2348,6 +2348,40 @@ fn same_rows(a: &Rc<OperatorNode>, b: &Rc<OperatorNode>) -> bool {
                 child: other,
             }),
         ) => shift == other_shift && same_rows(child, other),
+        (
+            Some(NonASAPOp::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures,
+                filters,
+                having: None,
+                child,
+                ..
+            }),
+            Some(NonASAPOp::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures: other_measures,
+                filters: other_filters,
+                having: None,
+                child: other,
+                ..
+            }),
+        ) => {
+            // These reductions preserve series identity and read the implicit
+            // sample value. Extra projected labels do not change their values.
+            // Explicit column indices and filtered measures need remapping and
+            // are deliberately excluded.
+            measures == other_measures
+                && matches!(
+                    measures.as_slice(),
+                    [AggIntent::Avg { col: None }
+                        | AggIntent::Sum { col: None }
+                        | AggIntent::Min { col: None }
+                        | AggIntent::Max { col: None }]
+                )
+                && filters.iter().all(Option::is_none)
+                && other_filters.iter().all(Option::is_none)
+                && same_rows(child, other)
+        }
         _ => false,
     }
 }
@@ -2355,8 +2389,8 @@ fn same_rows(a: &Rc<OperatorNode>, b: &Rc<OperatorNode>) -> bool {
 /// The finalized value of `coarse` (`coarse_value`) as an exact
 /// accumulator over `finer` (the finer build's finalized values), grouped by
 /// the coarse keys, finalized, with `coarse_value`'s column names; `None`
-/// when it cannot be built, the finer values are not Float64 (the only
-/// update type exact accumulators execute), or it differs from
+/// when it cannot be built, a non-count finer value is not Float64 (the
+/// supported accumulator update type), or it differs from
 /// `coarse_value` in type.
 fn rolled_up(
     coarse: &OperatorNode,
@@ -2385,8 +2419,33 @@ fn rolled_up(
     };
     // A grouped accumulator outputs its keys, then its value.
     let value = fine_by.len();
-    // Exact accumulators update on Float64 values only: an integer count is
-    // not summed again.
+    // Merge count states directly: converting finalized Int64 counts through
+    // a Float64 sum would lose integer precision above 2^53.
+    if matches!(family, FieldDataType::ExactAggregate(ExactKind::Count, _)) {
+        let merged = regrouped(coarse, fine)?;
+        let finalized =
+            OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                child: merged,
+            }))
+            .ok()?;
+        if finalized.schema.fields.len() != coarse_value.schema.fields.len()
+            || finalized
+                .schema
+                .fields
+                .iter()
+                .zip(&coarse_value.schema.fields)
+                .any(|(a, b)| a.dtype != b.dtype || a.nullable != b.nullable)
+            || finalized.schema.unique_keys != coarse_value.schema.unique_keys
+        {
+            return None;
+        }
+        // Finalization preserves the count's type; only the reader's SQL alias
+        // differs from the canonical state readout name.
+        return Some(Rc::new(OperatorNode::with_schema(
+            finalized.operator.clone(),
+            coarse_value.schema.clone(),
+        )));
+    }
     if finer.schema.fields.get(value).map(|f| &f.dtype)
         != Some(&FieldDataType::Plain(
             asap_types::ir::schema::DataType::Float64,
@@ -3415,8 +3474,8 @@ mod tests {
     }
 
     /// A 5-min window evaluated every 2 min, 90 s or 1 min is built in panes
-    /// of gcd(window, interval); a query evaluated once per window, or not
-    /// at a fixed interval, has no panes.
+    /// of gcd(window, interval). A once-per-window reader has one pane,
+    /// which can reuse the newest pane of a longer chain.
     #[test]
     fn pane_width_is_the_gcd_of_the_window_and_the_interval() {
         let roots = chose(
@@ -3426,7 +3485,7 @@ mod tests {
         assert_eq!(panes(&roots, &[Some(120_000)]), [(60_000, 5)]);
         assert_eq!(panes(&roots, &[Some(90_000)]), [(30_000, 10)]);
         assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)]);
-        assert!(panes(&roots, &[Some(300_000)]).is_empty());
+        assert_eq!(panes(&roots, &[Some(300_000)]), [(300_000, 1)]);
         assert!(panes(&roots, &[None]).is_empty());
     }
 
@@ -4070,11 +4129,43 @@ mod tests {
         }
     }
 
-    /// Minima roll up as minima, maxima as maxima. Integer counts do not
-    /// roll up: exact accumulators execute only Float64 updates.
+    /// Identical per-series averages retain their values under label projection;
+    /// different windows, functions, and source predicates must stay separate.
     #[test]
-    fn extrema_roll_up_and_integer_counts_do_not() {
-        assert!(rollup_candidates(&exact(&[
+    fn rollup_crosses_only_identical_per_series_reductions() {
+        let input = |query: &str| {
+            let root = lower_promql(query, asap_types::ir::properties::AccuracyTarget::exact());
+            OperatorNode::reachable(&root)
+                .into_iter()
+                .find(|node| {
+                    matches!(
+                        node.non_asap(),
+                        Some(NonASAPOp::Aggregate {
+                            reduction: Reduction::PerEntity,
+                            ..
+                        })
+                    )
+                })
+                .unwrap()
+        };
+        let fine = input("sum by (job, instance) (avg_over_time(m[1m]))");
+        assert!(same_rows(
+            &input("sum by (job) (avg_over_time(m[1m]))"),
+            &fine
+        ));
+        for coarse in [
+            "sum by (job) (avg_over_time(m[2m]))",
+            "sum by (job) (max_over_time(m[1m]))",
+            "sum by (job) (avg_over_time(m{zone=\"east\"}[1m]))",
+        ] {
+            assert!(!same_rows(&input(coarse), &fine), "{coarse}");
+        }
+    }
+
+    /// Minima and maxima roll up as extrema; counts merge their integer states.
+    #[test]
+    fn extrema_and_integer_counts_roll_up() {
+        assert!(!rollup_candidates(&exact(&[
             "count by (job) (m)",
             "count by (job, instance) (m)"
         ]))

@@ -404,10 +404,7 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
         candidates[0].choices.candidates,
         vec![ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])]
     );
-    assert_eq!(
-        algorithms(&candidates[1].choices.candidates),
-        vec![SketchAlgorithm::Cms, SketchAlgorithm::UnivMon]
-    );
+    assert_sql_count_choices(&candidates[1].choices);
 }
 
 /// An aggregate with no realization besides exact execution is not a target.
@@ -425,7 +422,7 @@ fn aggregate_without_realization_is_not_a_target() {
     );
 }
 
-/// A filtered measure keeps its accumulator and summaries and records its
+/// A filtered SQL count keeps its executable accumulator and records its
 /// filter, which composition applies to the state.
 #[test]
 fn filtered_measure_keeps_candidates_and_records_its_filter() {
@@ -443,17 +440,52 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
         .targets;
     assert_eq!(targets.len(), 2);
     for target in &targets {
-        assert_eq!(
-            target.choices.candidates,
-            candidates_for(count()),
-            "measure {}",
-            target.measure
-        );
-        assert!(target.choices.pruned.is_empty());
+        assert_sql_count_choices(&target.choices);
         assert!(target.having.is_empty());
     }
     assert_eq!(targets[0].filter, Some(always()));
     assert_eq!(targets[1].filter, None);
+}
+
+fn assert_sql_count_choices(
+    choices: &asap_logical_asap_optimization::per_computation_candidates::ComputationChoices,
+) {
+    assert_eq!(
+        choices.candidates,
+        vec![ComputationCandidate::ExactAccumulator(vec![
+            ExactKind::Count
+        ])]
+    );
+    assert_eq!(
+        choices.pruned,
+        [SketchAlgorithm::Cms, SketchAlgorithm::UnivMon]
+            .into_iter()
+            .map(|algorithm| (
+                ComputationCandidate::Summary(algorithm),
+                PruneReason::NoRelationalCountSketchRealization,
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+fn quantile() -> AggIntent {
+    AggIntent::Quantile {
+        col: Some(1),
+        q: 0.5,
+        accuracy: approximate(),
+    }
+}
+
+fn grouped_quantile(having: Option<Predicate>) -> Rc<OperatorNode> {
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
+        child: scan(false),
+        reduction: Reduction::by(vec![0]),
+        measures: vec![quantile()],
+        output_names: vec![],
+        filters: vec![],
+        having,
+    }))
+    .unwrap()
 }
 
 /// `count(*) by (src_ip)`, the form the SQL frontend gives `GROUP BY src_ip`.
@@ -485,7 +517,7 @@ fn equals(column: usize, value: ScalarValue) -> Predicate {
 }
 
 /// A `HAVING` over group keys only is pushed below the aggregate and keeps
-/// every candidate.
+/// every executable candidate.
 #[test]
 fn key_only_having_is_pushed_below_and_keeps_candidates() {
     let node = grouped_count(None);
@@ -503,17 +535,11 @@ fn key_only_having_is_pushed_below_and_keeps_candidates() {
             placement: HavingPlacement::BelowAggregate,
         }]
     );
-    assert_eq!(
-        targets[0].choices.candidates,
-        candidates_for(AggIntent::Count {
-            accuracy: approximate()
-        })
-    );
-    assert!(targets[0].choices.pruned.is_empty());
+    assert_sql_count_choices(&targets[0].choices);
 }
 
 /// A `HAVING` over an aggregate value, as a `Filter` above or as the
-/// aggregate's own `having`, stays above the output and keeps every candidate.
+/// aggregate's own `having`, stays above the output and keeps executable candidates.
 #[test]
 fn value_having_stays_above_output_and_keeps_candidates() {
     let value = || equals(1, ScalarValue::Int64(10));
@@ -530,13 +556,7 @@ fn value_having_stays_above_output_and_keeps_candidates() {
     for target in &targets {
         let placements: Vec<_> = target.having.iter().map(|entry| entry.placement).collect();
         assert_eq!(placements, vec![HavingPlacement::AboveOutput]);
-        assert_eq!(
-            target.choices.candidates,
-            candidates_for(AggIntent::Count {
-                accuracy: approximate()
-            })
-        );
-        assert!(target.choices.pruned.is_empty());
+        assert_sql_count_choices(&target.choices);
     }
 }
 
@@ -964,7 +984,20 @@ fn columns(node: &OperatorNode) -> Vec<(String, FieldDataType, bool)> {
         .map(|field| (field.name.clone(), field.dtype.clone(), field.nullable))
         .collect()
 }
+// Quantile readouts restore the aggregate's output names with an identity projection.
+fn without_output_aliases(node: &OperatorNode) -> &OperatorNode {
+    if let Some(NonASAPOp::Project { cols, child, .. }) = node.non_asap() {
+        assert!(cols
+            .iter()
+            .enumerate()
+            .all(|(index, item)| item.expr == ScalarExpr::Column(index)));
+        without_output_aliases(child)
+    } else {
+        node
+    }
+}
 fn summary_agg(node: &OperatorNode) -> &ASAPOp {
+    let node = without_output_aliases(node);
     match node.asap() {
         Some(ASAPOp::SummaryEstimate { summary_input, .. }) => summary_agg(summary_input),
         Some(ASAPOp::FinalizeExactAccumulator { child }) => summary_agg(child),
@@ -978,9 +1011,7 @@ fn summary_agg(node: &OperatorNode) -> &ASAPOp {
 #[test]
 fn composed_summary_is_sized_for_its_measure() {
     use asap_logical_asap_optimization::realization::default_size_params;
-    let intent = AggIntent::Count {
-        accuracy: approximate(),
-    };
+    let intent = quantile();
     let [root] = <[_; 1]>::try_from(composed(vec![aggregate(intent.clone())], &[1])).unwrap();
     let ASAPOp::SummaryAgg {
         family: FieldDataType::Sketch(kind, _),
@@ -989,10 +1020,10 @@ fn composed_summary_is_sized_for_its_measure() {
     else {
         panic!("sketch state expected")
     };
-    assert_eq!(*kind.algorithm(), SketchAlgorithm::Cms);
+    assert_eq!(*kind.algorithm(), SketchAlgorithm::Kll);
     assert_eq!(
         kind.params(),
-        &default_size_params(SketchAlgorithm::Cms, &intent, 0.05, 0.01)
+        &default_size_params(SketchAlgorithm::Kll, &intent, 0.05, 0.01)
     );
 }
 
@@ -1001,19 +1032,17 @@ fn composed_summary_is_sized_for_its_measure() {
 /// above the estimate.
 #[test]
 fn composed_filters_and_having() {
-    let cms = 1;
+    let kll = 1;
     let filtered = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
         child: scan(false),
         reduction: Reduction::by(vec![0]),
-        measures: vec![AggIntent::Count {
-            accuracy: approximate(),
-        }],
+        measures: vec![quantile()],
         output_names: vec![],
         filters: vec![Some(always())],
         having: None,
     }))
     .unwrap();
-    let [root] = <[_; 1]>::try_from(composed(vec![filtered.clone()], &[cms])).unwrap();
+    let [root] = <[_; 1]>::try_from(composed(vec![filtered.clone()], &[kll])).unwrap();
     assert!(
         matches!(summary_agg(&root), ASAPOp::SummaryAgg { filter: Some(f), child, .. }
             if *f == always() && child.non_asap().is_some_and(|op| matches!(op, NonASAPOp::Scan { .. })))
@@ -1022,8 +1051,8 @@ fn composed_filters_and_having() {
 
     let key = equals(0, ScalarValue::Utf8("a".into()));
     let [root] = <[_; 1]>::try_from(composed(
-        vec![having_filter(grouped_count(None), key.clone())],
-        &[cms],
+        vec![having_filter(grouped_quantile(None), key.clone())],
+        &[kll],
     ))
     .unwrap();
     let ASAPOp::SummaryAgg { child, filter, .. } = summary_agg(&root) else {
@@ -1035,16 +1064,19 @@ fn composed_filters_and_having() {
     let value = || equals(1, ScalarValue::Int64(10));
     for root in composed(
         vec![
-            having_filter(grouped_count(None), value()),
-            grouped_count(Some(value())),
+            having_filter(grouped_quantile(None), value()),
+            grouped_quantile(Some(value())),
         ],
-        &[cms, cms],
+        &[kll, kll],
     ) {
         let Some(NonASAPOp::Filter { pred, child }) = root.non_asap() else {
             panic!("value HAVING above the estimate expected, got {root:#?}")
         };
         assert_eq!(*pred, value());
-        assert!(matches!(child.asap(), Some(ASAPOp::SummaryEstimate { .. })));
+        assert!(matches!(
+            without_output_aliases(child).asap(),
+            Some(ASAPOp::SummaryEstimate { .. })
+        ));
     }
 }
 
@@ -1086,9 +1118,7 @@ fn composed_multi_measure_aggregate_joins_its_measures() {
             reduction,
             measures: vec![
                 AggIntent::Sum { col: Some(1) },
-                AggIntent::Count {
-                    accuracy: approximate(),
-                },
+                quantile(),
                 AggIntent::StdDev {
                     col: Some(1),
                     population: true,
@@ -1173,7 +1203,7 @@ fn composed_guarantees() {
                 accuracy: approximate(),
             }),
             aggregate(AggIntent::Sum { col: Some(1) }),
-            having_filter(grouped_count(None), value),
+            having_filter(grouped_quantile(None), value),
         ],
         &[1, 0, 1],
     );
@@ -1193,25 +1223,29 @@ fn composed_guarantees() {
 #[test]
 fn own_having_subquery_is_substituted() {
     use asap_logical_asap_optimization::per_computation_candidates::compose_logical_candidate;
-    let inner = aggregate(AggIntent::Count {
-        accuracy: approximate(),
-    });
-    let outer = grouped_count(Some(above_scalar(1, inner.clone())));
+    let inner = aggregate(quantile());
+    let outer = grouped_quantile(Some(above_scalar(1, inner.clone())));
     let inventory =
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(outer.clone()))]).unwrap();
     assert_eq!(inventory.targets.len(), 2);
-    let cms = 1;
-    let composed = compose_logical_candidate(&inventory, &[cms, cms]).unwrap();
+    let kll = 1;
+    let composed = compose_logical_candidate(&inventory, &[kll, kll]).unwrap();
     let QueryRoot::Operator(root) = &composed[0].1 else {
         panic!("operator root expected")
     };
     let Some(NonASAPOp::Filter { pred, child }) = root.non_asap() else {
         panic!("own HAVING above the estimate expected, got {root:#?}")
     };
-    assert!(matches!(child.asap(), Some(ASAPOp::SummaryEstimate { .. })));
+    assert!(matches!(
+        without_output_aliases(child).asap(),
+        Some(ASAPOp::SummaryEstimate { .. })
+    ));
     let [subquery] = <[_; 1]>::try_from(pred.0.operator_refs()).unwrap();
     assert!(
-        matches!(subquery.asap(), Some(ASAPOp::SummaryEstimate { .. })),
+        matches!(
+            without_output_aliases(subquery).asap(),
+            Some(ASAPOp::SummaryEstimate { .. })
+        ),
         "{subquery:#?}"
     );
     assert!(OperatorNode::reachable(root)
