@@ -310,6 +310,37 @@ selection picks one. [Example 1](#example-1-aggregation-over-dimensions--the-can
 | 3. Plan selection | Physical candidates; `requirements`; cost model, accuracy model, capabilities | Reject invalid candidates; pick the cheapest plan for the whole workload | One `PhysicalASAPDAG` |
 | 4. Execution (deployment) | The selected `PhysicalASAPDAG` | Run ingestion, storage and query-time computation | Query results |
 
+### Stage inputs and outputs: whole-workload candidates and memo
+
+The table above names each stage's output as a set of whole-workload
+candidate DAGs. `CandidateLogicalDAGs`, `CandidateLogicalASAPDAGs` and
+`CandidatePhysicalASAPDAGs` are names in this document, not code types. The
+memo search runs the same stages on memo groups instead. The table below
+gives each stage's input and output in both designs, with the code types and
+the memo path's entry points.
+
+| Stage | Whole-workload candidates: input → output | Memo: input → output | Entry point (memo path) |
+|---|---|---|---|
+| 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_workload`, `lower_sql_dialect` (`asap-frontend-*`); `asap_planner` lowers the user input |
+| 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`) | Logical roots → `LogicalMemo` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support → `CandidateMemo`: each group's `ImplementationCandidate`s | `LogicalMemo::from_roots`, `generate_per_computation_candidates_with_memo`, `try_populate_pass1` |
+| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (`Pass2Candidate`, `stage1_candidates_of_choice`) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`memo/rules/`), `memo::window_candidates` |
+| 1, concrete states | (part of Pass 2) | `CandidateMemo` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `expand_concrete_summary_state_groups_before` |
+| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | Each implementation candidate, on demand → its physical operators and its allowed materializations | `implement_candidate_operators`, `summary_materialization_eligibility` (called from Stage 3) |
+| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model, raw-data retention, executor compile check → one plan | The expanded memo's candidates and their configurations; the same inputs → one candidate per needed group, connected into one plan | `run_stage1_to_stage3_with`, `candidate_connection_search`; output `PlanOutput` (one `QueryPlan` per query) |
+| 4. Execution | The selected `PhysicalASAPDAG` → query results | Same | `plan_installable` → `InstallablePlan` |
+
+What changed with the memo:
+- Candidates are kept per distinct sub-expression, not per workload, so their
+  number is the sum of each group's choices instead of their product. Only
+  choices several groups depend on, such as a shared state's size, are made
+  jointly.
+- Stage 2 is no longer a pass over whole candidate DAGs. Stage 3 calls it per
+  implementation candidate while it builds the candidate graph, so
+  physicalization is lazy.
+- The concrete summary-state groups are expanded by Stage 3's search today,
+  through the Stage 1 functions above. A planned change moves this expansion
+  into Stage 1, so that Stage 3 receives a complete memo and only selects.
+
 The sections below describe each stage.
 
 ### 0. Language-specific frontends
