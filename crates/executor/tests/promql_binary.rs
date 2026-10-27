@@ -1,7 +1,7 @@
 //! Binary computation must be fully compiled before deployment binds values.
 use asap_executor::{
     operators::Operator,
-    physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
+    physical_planner::{compile_node, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, SchemaRef, Value},
 };
@@ -16,7 +16,10 @@ use planner_types::ir::scalar::ArithmeticOpKind;
 use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 fn schema() -> SchemaRef {
     Arc::new(planner_types::ir::schema::Schema {
@@ -82,17 +85,12 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhys
         guarantee: None,
     };
     let operator = compile_node(&node, &[schema.clone(), schema.clone()]).unwrap();
-    let physical_dag = CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([
-            (0, InputContract::bounded(schema.clone())),
-            (1, InputContract::bounded(schema)),
-        ]),
+    CompiledPhysicalDAG::from_operators(
+        BTreeMap::from([(0, schema.clone()), (1, schema)]),
         BTreeMap::from([(2, (vec![0, 1], operator))]),
         vec![2],
     )
-    .unwrap();
-    serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&physical_dag).unwrap())
-        .unwrap()
+    .unwrap()
 }
 fn evaluate(
     left: Vec<Vec<Value>>,
@@ -180,10 +178,6 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
             return_bool,
             true,
             false,
-        )
-        .unwrap();
-        let physical_dag = serde_json::from_slice::<CompiledPhysicalDAG>(
-            &serde_json::to_vec(&physical_dag).unwrap(),
         )
         .unwrap();
         let scalar = promql_values::scalar_schema();
@@ -433,17 +427,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                 roots: vec![4],
                 scalar_roots: vec![],
             };
-            let physical_dag = compile(
-                &dag,
-                BTreeMap::from([
-                    (0, InputContract::bounded(state_schema.clone())),
-                    (1, InputContract::bounded(state_schema.clone())),
-                ]),
-                &[4],
-            )
-            .unwrap();
-            let physical_dag: CompiledPhysicalDAG =
-                serde_json::from_slice(&serde_json::to_vec(&physical_dag).unwrap()).unwrap();
+            let physical_dag = compile(&dag, &BTreeSet::from([0, 1]), &[4]).unwrap();
             let sources = [(0, "a", 6.), (1, "b", 2.)]
                 .into_iter()
                 .map(|(id, name, value)| {

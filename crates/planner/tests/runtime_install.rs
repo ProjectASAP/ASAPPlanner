@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{compile, InputContract, Source};
+use asap_executor::physical_planner::{compile, Source};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_executor::{series_labels_of_output_row, RawDataSample, RawDataSampleSelector};
@@ -102,13 +102,10 @@ fn run(
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
-    // What each bound input holds: its rows' schema.
-    let contracts = inputs
-        .iter()
-        .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
-        .collect();
+    // Which nodes are bound inputs; each one's schema is its DAG node's.
+    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
     // The executor's plan for `ids`, cut at the bound inputs.
-    let compiled = compile(dag, contracts, ids).expect("the executor compiles the plan");
+    let compiled = compile(dag, &boundaries, ids).expect("the executor compiles the plan");
     // Each bound input as an in-memory source of its rows.
     let sources = inputs
         .into_iter()

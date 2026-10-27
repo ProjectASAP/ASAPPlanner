@@ -2,7 +2,7 @@
 //! planner and answers each group's item point counts from one shared grid.
 use asap_executor::{
     operators::{Operator, RowWeight},
-    physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
+    physical_planner::{compile_node, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, SchemaRef, Value},
 };
@@ -185,7 +185,7 @@ fn try_run(
     let mut states = vec![];
     for (i, batch) in batches.into_iter().enumerate() {
         let (source, built) = (i as u64, 100 + i as u64);
-        contracts.insert(source, InputContract::bounded(input.clone()));
+        contracts.insert(source, input.clone());
         sources.insert(
             source,
             Box::new(Operator::source(input.clone(), vec![batch]).unwrap()) as Source<'_>,

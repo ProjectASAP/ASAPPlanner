@@ -2,7 +2,7 @@
 mod common;
 use asap_executor::{
     operators::Operator,
-    physical_planner::{compile, InputContract, Source},
+    physical_planner::{compile, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -12,7 +12,11 @@ use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPa
 use planner_types::ir::properties::{AccuracyTarget, *};
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
-use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+    sync::Arc,
+};
 #[test]
 fn planner_weighted_topk_binds_at_either_deployment_phase() {
     assert_weighted_binding(SketchAlgorithm::CmsWithHeap);
@@ -143,7 +147,7 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
             as Source<'static>;
         let compiled = compile(
             &placed,
-            BTreeMap::from([(rate_id as u64, InputContract::bounded(rates.clone()))]),
+            &BTreeSet::from([rate_id as u64]),
             &[dag.roots[0] as u64],
         )
         .unwrap();
@@ -293,7 +297,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                 planner_types::ir::ASAPOp::FinalizeExactAccumulator { .. }
             )
         ));
-        assert_eq!(ranked.input_contracts().count(), 1);
+        assert_eq!(ranked.input_schemas().count(), 1);
         let encoded = String::from_utf8(serde_json::to_vec(&ranked).unwrap()).unwrap();
         assert!(encoded.contains("PerGroupKeyedSummaryBuild"));
         assert!(encoded.contains("KeyedEvaluation"));
@@ -335,14 +339,10 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
         let raw_schema = Arc::new(raw.output_schema.clone());
         let raw_compiled = compile(
             &dag,
-            BTreeMap::from([(raw.id as u64, InputContract::bounded(raw_schema.clone()))]),
+            &BTreeSet::from([raw.id as u64]),
             &[dag.roots[0] as u64],
         )
         .unwrap();
-        let bytes = serde_json::to_vec(&raw_compiled).unwrap();
-        let raw_compiled =
-            serde_json::from_slice::<asap_executor::physical_planner::CompiledPhysicalDAG>(&bytes)
-                .unwrap();
         // Each evaluation receives a complete raw window. A reset, a stopped
         // series and an expired leader must not retain last run's heap weights.
         for (end, series, expected) in [
@@ -448,7 +448,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
         }
         let compiled = compile(
             &dag,
-            BTreeMap::from([(input_id as u64, InputContract::bounded(schema.clone()))]),
+            &BTreeSet::from([input_id as u64]),
             &[dag.roots[0] as u64],
         )
         .unwrap();
@@ -623,10 +623,7 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
         assert_eq!(heap.output_state.timing, ExecutionTiming::IngestionTime);
         let physical = compile_candidate(
             &dag,
-            BTreeMap::from([(
-                state.id as u64,
-                InputContract::bounded(Arc::new(state.output_schema.clone())),
-            )]),
+            &BTreeSet::from([state.id as u64]),
             &[dag.roots[0] as u64],
             &[heap.id as u64],
         )
@@ -645,7 +642,7 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
         let execute = |plan: &asap_executor::physical_planner::CompiledPhysicalDAG,
                        input: Batch,
                        scope: Scope| {
-            let id = plan.input_contracts().next().unwrap().0;
+            let id = plan.input_schemas().next().unwrap().0;
             let source = Box::new(Operator::source(input.schema().clone(), vec![input]).unwrap())
                 as Source<'static>;
             let physical_dag = plan.instantiate(BTreeMap::from([(id, source)])).unwrap();

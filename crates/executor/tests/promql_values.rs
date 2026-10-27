@@ -32,8 +32,6 @@ fn run_inputs(
     dag: CompiledPhysicalDAG,
     batches: Vec<Batch>,
 ) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
-    let dag =
-        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap()).unwrap();
     let sources = batches
         .into_iter()
         .enumerate()
@@ -212,7 +210,6 @@ fn histogram_quantile_keeps_each_label_group() {
 #[test]
 fn composed_ensemble_shares_a_producer_across_roots() {
     use asap_executor::{
-        physical_planner::InputContract,
         plan::{PhysicalOperator, PlanProperties},
         runtime::{Input, OutputStream},
         values::SchemaRef,
@@ -265,7 +262,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
     )
     .unwrap();
     let dag = CompiledPhysicalDAG::compose(
-        BTreeMap::from([(0, InputContract::bounded(vector_schema()))]),
+        BTreeMap::from([(0, vector_schema())]),
         BTreeMap::from([
             (10, (vec![0], aggregate)),
             (20, (vec![10, 10], binary)),
@@ -274,9 +271,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         vec![20, 30],
     )
     .unwrap();
-    let dag =
-        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap()).unwrap();
-    assert_eq!(dag.input_contracts().count(), 1);
+    assert_eq!(dag.input_schemas().count(), 1);
     let starts = std::rc::Rc::new(std::cell::Cell::new(0));
     for _ in 0..2 {
         let input = Batch::try_new(vector_schema(), vec![row(&[("job", "api")], 3.)]).unwrap();
@@ -316,7 +311,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
 #[test]
 fn compiled_constant_needs_no_deployment_source() {
     let dag = compile_scalar(3.).unwrap();
-    assert_eq!(dag.input_contracts().count(), 0);
+    assert_eq!(dag.input_schemas().count(), 0);
     let result = run_inputs(dag, vec![]).unwrap();
     assert!(matches!(result[0][0], Value::Float64(3.)));
 }

@@ -178,10 +178,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         ));
         assert!(precompute::compile(&filtered, &[0], &[3]).is_err());
         let program = precompute::compile(&dag, &[0], &[3]).unwrap();
-        let program =
-            serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&program).unwrap())
-                .unwrap();
-        assert_eq!(program.input_contracts().count(), 1);
+        assert_eq!(program.input_schemas().count(), 1);
         for revision in [1, 2] {
             let rows = [
                 ("a", 1000, 2.),
@@ -365,9 +362,6 @@ fn native_run(
     states: Vec<Arc<dyn asap_executor::AggregateCore>>,
     context: RunContext,
 ) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
-    let program =
-        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&program).unwrap())
-            .unwrap();
     let rows = states
         .into_iter()
         .enumerate()

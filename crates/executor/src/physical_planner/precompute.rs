@@ -244,7 +244,7 @@ pub fn compile(
         let node = nodes[&id];
         if frontier.contains(&id) {
             let schema = boundary_schema(node, &nodes)?;
-            sources.insert(id, InputContract::bounded(schema.clone()));
+            sources.insert(id, schema.clone());
             outputs.insert(id, schema);
             continue;
         }
@@ -266,12 +266,7 @@ pub fn compile(
             &schemas,
             &inputs.iter().map(|id| nodes[id]).collect::<Vec<_>>(),
         )?;
-        outputs.insert(
-            id,
-            physical_dag
-                .output_contract(physical_dag.roots()[0])?
-                .schema,
-        );
+        outputs.insert(id, physical_dag.output_schema(physical_dag.roots()[0])?);
         fragments.insert(id, (inputs, physical_dag));
     }
     CompiledPhysicalDAG::compose(sources, fragments, roots.to_vec())
@@ -324,7 +319,7 @@ fn fragment(
     let sources = schemas
         .iter()
         .enumerate()
-        .map(|(id, schema)| (id as u64, InputContract::bounded(schema.clone())))
+        .map(|(id, schema)| (id as u64, schema.clone()))
         .collect();
     let mut operators = BTreeMap::new();
     let mut next = schemas.len() as u64;

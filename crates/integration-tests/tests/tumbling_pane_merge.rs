@@ -4,11 +4,11 @@
 //! `PaneChain`, expanded into the panes the executor runs.
 mod physical_common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_executor::physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract};
+use asap_executor::physical_planner::{compile, promql_rows, CompiledPhysicalDAG};
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
@@ -268,11 +268,8 @@ fn query_scope() -> Scope {
     }
 }
 
-fn contracts(inputs: &BTreeMap<u64, Batch>) -> BTreeMap<u64, InputContract> {
-    inputs
-        .iter()
-        .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
-        .collect()
+fn boundaries(inputs: &BTreeMap<u64, Batch>) -> BTreeSet<u64> {
+    inputs.keys().copied().collect()
 }
 
 /// Compile `root` with everything at query time (Pattern B2: panes rebuilt
@@ -285,7 +282,7 @@ fn compile_at_query_time(
     let inputs = raw_inputs(&exported, samples);
     compile(
         &exported.dag,
-        contracts(&inputs),
+        &boundaries(&inputs),
         &[exported.dag.roots[0] as u64],
     )
     .map_err(|e| e.to_string())?;
@@ -297,7 +294,7 @@ fn execute(root: &Rc<OperatorNode>, samples: &[RawDataSample]) -> Vec<Vec<Value>
     let inputs = raw_inputs(&exported, samples);
     let plan = compile(
         &exported.dag,
-        contracts(&inputs),
+        &boundaries(&inputs),
         &[exported.dag.roots[0] as u64],
     )
     .unwrap();
@@ -354,16 +351,10 @@ fn execute_retained_as(
 ) -> Vec<Vec<Value>> {
     let exported = export(root, assignment);
     let inputs = raw_inputs(&exported, samples);
-    let contracts = contracts(&inputs);
     let mut retained = BTreeMap::new();
     for &(build, pane) in &exported.builds {
         let range = exported.ranges.iter().find(|r| r.1 == pane).unwrap().0;
-        let plan = compile(
-            &exported.dag,
-            BTreeMap::from([(range, contracts[&range].clone())]),
-            &[build],
-        )
-        .unwrap();
+        let plan = compile(&exported.dag, &BTreeSet::from([range]), &[build]).unwrap();
         let end = EVALUATION_MS - pane * PANE_MS;
         let rows = run(
             &plan,
@@ -382,10 +373,7 @@ fn execute_retained_as(
     }
     let plan = compile(
         &exported.dag,
-        retained
-            .iter()
-            .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
-            .collect(),
+        &retained.keys().copied().collect(),
         &[exported.dag.roots[0] as u64],
     )
     .unwrap();
@@ -528,7 +516,7 @@ fn whole_build_values_at(query: &str, evaluation_ms: i64, samples: &[RawDataSamp
         .collect();
     let plan = compile(
         &exported.dag,
-        contracts(&inputs),
+        &boundaries(&inputs),
         &[exported.dag.roots[0] as u64],
     )
     .unwrap();
@@ -833,7 +821,7 @@ fn execute_ranges_at_their_windows(
     }
     let plan = compile(
         &compiled.dag,
-        contracts(&inputs),
+        &boundaries(&inputs),
         &[compiled.dag.roots[0] as u64],
     )
     .unwrap();

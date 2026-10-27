@@ -5,7 +5,7 @@ use common::compile_physical_asap_dag;
 use planner_types::ir::scalar::ScalarValue;
 use planner_types::ir::schema::{DataType, Field, Schema};
 use planner_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// A deserialized DAG may carry any ID; one above u32 is an error, not a
 /// collision with helper IDs or a panic.
@@ -23,7 +23,7 @@ fn node_ids_above_u32_are_rejected() {
     .unwrap();
     let mut dag = compile_physical_asap_dag(&filter).unwrap();
     let root = dag.roots[0] as u64;
-    assert!(compile(&dag, BTreeMap::new(), &[root]).is_ok());
+    assert!(compile(&dag, &BTreeSet::new(), &[root]).is_ok());
 
     let shift = 1usize << 32;
     for node in &mut dag.nodes {
@@ -38,7 +38,7 @@ fn node_ids_above_u32_are_rejected() {
         *root += shift;
     }
     dag.validate().unwrap();
-    let Err(error) = compile(&dag, BTreeMap::new(), &[root + shift as u64]) else {
+    let Err(error) = compile(&dag, &BTreeSet::new(), &[root + shift as u64]) else {
         panic!("an ID above u32 compiled");
     };
     assert!(error.to_string().contains("exceeds u32"), "{error}");

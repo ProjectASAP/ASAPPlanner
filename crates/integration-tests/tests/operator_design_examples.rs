@@ -140,13 +140,16 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
 #[tokio::test]
 async fn sql_sum_example_executes_with_sql_null_semantics() {
     use asap_executor::{
-        physical_planner::{compile, InputContract, Source},
+        physical_planner::{compile, Source},
         runtime::{Limits, RunContext, Scope},
         sources::{DataSources, MemorySource},
         values::{Batch, Value},
     };
     use futures::StreamExt;
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
     let root = lower_sql(
         "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
         &catalog(),
@@ -177,7 +180,7 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
     let schema = Arc::new(scan.output_schema.clone());
     let plan = compile(
         &wire,
-        BTreeMap::from([(scan.id as u64, InputContract::bounded(schema.clone()))]),
+        &BTreeSet::from([scan.id as u64]),
         &[wire.roots[0] as u64],
     )
     .unwrap();
@@ -263,14 +266,17 @@ async fn sql_window_and_filtered_aggregate_types() {
 #[tokio::test]
 async fn batch_planning_replaces_summary_operators() {
     use asap_executor::{
-        physical_planner::{compile, InputContract},
+        physical_planner::compile,
         runtime::Scope,
         values::{Batch, Value},
     };
     use asap_plan_selection::pass::PlanningModels;
     use asap_planner::{e2e_plan, FrontendInput, UserInput};
     use asap_types::workload::*;
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
     let queries = [
         "SELECT SUM(bytes) + 1 AS result FROM requests",
         "SELECT SUM(bytes) * 2 AS result FROM requests",
@@ -360,7 +366,7 @@ async fn batch_planning_replaces_summary_operators() {
         let schema = Arc::new(scan.output_schema.clone());
         let program = compile(
             &wire,
-            BTreeMap::from([(scan.id as u64, InputContract::bounded(schema.clone()))]),
+            &BTreeSet::from([scan.id as u64]),
             &[wire.roots[0] as u64],
         )
         .unwrap();

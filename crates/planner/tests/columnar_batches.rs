@@ -3,12 +3,12 @@
 //! `RawDataSampleSelector` and built by the executor, read through the public
 //! batch API only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use arrow::array::{AsArray, Float64Array};
 use arrow::datatypes::UInt32Type;
 use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{compile, InputContract, Source};
+use asap_executor::physical_planner::{compile, Source};
 use asap_executor::planner::ir::schema::PROMQL_SERIES_IDENTITY;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::Batch;
@@ -116,7 +116,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     let window = output.inputs.raw_data_sample_windows[0].time_range_node_id as u64;
     let compiled = compile(
         &plan.dag.dag,
-        BTreeMap::from([(window, InputContract::bounded(input.schema().clone()))]),
+        &BTreeSet::from([window]),
         &[output.node_id as u64],
     )
     .unwrap();

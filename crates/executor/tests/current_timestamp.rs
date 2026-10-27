@@ -3,7 +3,7 @@
 //! five minutes up to the evaluation. Without an evaluation time (an
 //! ingestion run) `now()` has no value and the run fails.
 use asap_executor::{
-    physical_planner::{bind_with_data_sources, compile, scan_contract},
+    physical_planner::{bind_with_data_sources, compile},
     runtime::{Limits, RunContext, Scope},
     sources::{DataSources, MemorySource},
     values::{Batch, Value},
@@ -15,7 +15,7 @@ use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ExprSemantics, ScalarValue};
 use planner_types::ir::schema::{DataType, Field, Schema};
 use planner_types::ir::{NonASAPOp, Predicate, ScalarExpr};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 const MINUTE_MS: i64 = 60_000;
@@ -147,15 +147,14 @@ fn now_has_no_value_in_an_ingestion_run() {
     assert!(error.contains("now()"), "{error}");
 }
 
-/// A compile check cuts a plan at its table scans with their contracts:
-/// the plan compiles without a reader, and a scan predicate the executor
-/// cannot evaluate fails there, not at run time.
+/// A compile check cuts a plan at its table scans: the plan compiles
+/// without a reader, and a scan predicate the executor cannot evaluate
+/// fails there, not at run time.
 #[test]
-fn a_scan_contract_checks_the_scan_predicates() {
+fn compiling_a_scan_slot_checks_the_scan_predicates() {
     let dag = scan_plan(vec![last_five_minutes()]);
-    let contract = scan_contract(&dag.nodes[0]).expect("now() - INTERVAL compiles");
-    compile(&dag, BTreeMap::from([(0, contract)]), &[0]).expect("the plan compiles");
+    compile(&dag, &BTreeSet::from([0]), &[0]).expect("now() - INTERVAL compiles");
 
     let not_boolean = scan_plan(vec![Predicate(ScalarExpr::Column(1))]);
-    assert!(scan_contract(&not_boolean.nodes[0]).is_err());
+    assert!(compile(&not_boolean, &BTreeSet::from([0]), &[0]).is_err());
 }

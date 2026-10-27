@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use asap_executor::physical_planner::{
-    compile_candidate, frontier_from_timing, promql_rows, CompiledPhysicalDAG, InputContract,
+    compile_candidate, frontier_from_timing, promql_rows, CompiledPhysicalDAG,
 };
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, SchemaRef, Value};
@@ -157,15 +157,13 @@ fn execute(
     let frontier = frontier_from_timing(dag).unwrap();
     let candidate = compile_candidate(
         dag,
-        raw.iter()
-            .map(|(id, (schema, _))| (*id, InputContract::bounded(schema.clone())))
-            .collect(),
+        &raw.keys().copied().collect(),
         &[dag.roots[0] as u64],
         &frontier,
     )
     .unwrap();
     let raw_sources = |plan: &CompiledPhysicalDAG| {
-        plan.input_contracts()
+        plan.input_schemas()
             .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
             .collect::<BTreeMap<_, _>>()
     };

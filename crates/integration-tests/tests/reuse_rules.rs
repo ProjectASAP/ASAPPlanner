@@ -4,13 +4,13 @@
 //! they read is materialized for all its readers.
 mod physical_common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use asap_devtools::candidate_labels::pass2_label;
 use asap_devtools::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
-use asap_executor::physical_planner::{compile, promql_rows, InputContract};
+use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
@@ -210,11 +210,8 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
             (node.id as u64, Batch::try_new(schema, rows).unwrap())
         })
         .collect();
-    let contracts = inputs
-        .iter()
-        .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
-        .collect();
-    let plan = compile(&dag, contracts, &[dag.roots[0] as u64]).unwrap();
+    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
+    let plan = compile(&dag, &boundaries, &[dag.roots[0] as u64]).unwrap();
     let mut rows: Vec<String> = physical_common::execute(
         &plan,
         inputs,

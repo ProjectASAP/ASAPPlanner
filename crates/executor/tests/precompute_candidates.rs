@@ -5,8 +5,7 @@ use asap_executor::{
     operators::Operator,
     physical_planner::{
         compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-        select_candidate, CandidateCost, CompiledPhysicalDAG, CompiledPhysicalPlan, InputContract,
-        Source,
+        select_candidate, CandidateCost, CompiledPhysicalDAG, CompiledPhysicalPlan, Source,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
@@ -18,7 +17,10 @@ use planner_types::ir::properties::AccuracyTarget;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
 use planner_types::workload::*;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// `sum by(job)(rate(m[1m]))` with its rows carrying the series identity.
 fn grouped_rate_root() -> std::rc::Rc<planner_types::ir::OperatorNode> {
@@ -168,7 +170,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let rate_id = evaluation.id as u64;
     let frontiers = asap_executor::physical_planner::enumerate_frontiers(
         &dag,
-        &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
+        &BTreeSet::from([state_id]),
         &[root],
         128,
     )
@@ -179,14 +181,14 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     assert!(!frontiers.contains(&vec![root, rate_id]));
     assert!(asap_executor::physical_planner::enumerate_frontiers(
         &dag,
-        &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
+        &BTreeSet::from([state_id]),
         &[root],
         1,
     )
     .is_err());
     let candidates = compile_candidates(
         &dag,
-        BTreeMap::from([(state_id, InputContract::bounded(input_schema))]),
+        &BTreeSet::from([state_id]),
         &[root],
         &[vec![], vec![rate_id], vec![root]],
     );
@@ -195,10 +197,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     for prefer_grouped in [false, true] {
         let inventory = compile_candidates(
             &dag,
-            BTreeMap::from([(
-                state_id,
-                InputContract::bounded(Arc::new(state.output_schema.clone())),
-            )]),
+            &BTreeSet::from([state_id]),
             &[root],
             &[vec![999], vec![rate_id], vec![root]],
         );
@@ -243,25 +242,17 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             matches!(output[0].to_rows()[0][1], Value::Float64(value) if value == expected_rate_sum)
         );
     }
-    let contracts = BTreeMap::from([(
-        state_id,
-        InputContract::bounded(Arc::new(state.output_schema.clone())),
-    )]);
+    let contracts = BTreeSet::from([state_id]);
     for frontier in [vec![rate_id, rate_id], vec![root, rate_id], vec![999]] {
         assert!(asap_executor::physical_planner::compile_candidate(
             &dag,
-            contracts.clone(),
+            &contracts,
             &[root],
             &frontier
         )
         .is_err());
     }
-    let inventory = compile_candidates(
-        &dag,
-        contracts.clone(),
-        &[root],
-        &[vec![rate_id], vec![root]],
-    );
+    let inventory = compile_candidates(&dag, &contracts, &[root], &[vec![rate_id], vec![root]]);
     let selected = select_candidate(inventory, |candidate| {
         if candidate.materialized_outputs.contains_key(&root) {
             return Ok(None);
@@ -277,7 +268,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .candidate
         .materialized_outputs
         .contains_key(&rate_id));
-    let inventory = compile_candidates(&dag, contracts, &[root], &[vec![rate_id], vec![root]]);
+    let inventory = compile_candidates(&dag, &contracts, &[root], &[vec![rate_id], vec![root]]);
     assert!(
         select_candidate(inventory, |candidate| Ok(Some(CandidateCost {
             workload_scope: "same-workload".into(),
@@ -325,7 +316,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             assert_eq!(stored.len(), 1);
             let boundary = precompute.roots()[0];
             assert_eq!(
-                candidate.materialized_outputs[&boundary].schema,
+                candidate.materialized_outputs[&boundary],
                 *stored[0].schema()
             );
             BTreeMap::from([(boundary, stored[0].clone())])
@@ -385,13 +376,10 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
             )
         })
         .unwrap();
-    let inputs = BTreeMap::from([(
-        state.id as u64,
-        InputContract::bounded(Arc::new(state.output_schema.clone())),
-    )]);
+    let inputs = BTreeSet::from([state.id as u64]);
     let roots = [dag.roots[0] as u64];
     let frontiers = enumerate_frontiers(&dag, &inputs, &roots, 4096).unwrap();
-    let candidates = compile_candidates(&dag, inputs.clone(), &roots, &frontiers)
+    let candidates = compile_candidates(&dag, &inputs, &roots, &frontiers)
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -438,10 +426,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             .unwrap_or(dag.roots[0] as u64);
         let physical_asap_dags = compile_candidates(
             &dag,
-            BTreeMap::from([(
-                state.id as u64,
-                InputContract::bounded(Arc::new(state.output_schema.clone())),
-            )]),
+            &BTreeSet::from([state.id as u64]),
             &[dag.roots[0] as u64],
             &[vec![], vec![boundary]],
         );
@@ -494,7 +479,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
         for physical in physical_asap_dags {
             let physical = physical.unwrap();
             let inputs = if let Some(precompute) = &physical.precompute {
-                let source_id = precompute.input_contracts().next().unwrap().0;
+                let source_id = precompute.input_schemas().next().unwrap().0;
                 let stored = run(
                     precompute,
                     BTreeMap::from([(source_id, batch.clone())]),
@@ -508,7 +493,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                 BTreeMap::from([(precompute.roots()[0], stored[0].clone())])
             } else {
                 BTreeMap::from([(
-                    physical.query.input_contracts().next().unwrap().0,
+                    physical.query.input_schemas().next().unwrap().0,
                     batch.clone(),
                 )])
             };
@@ -547,41 +532,38 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
 /// choice lowers the precompute and query DAGs from the logical DAG again.
 fn recompiled_candidate(
     dag: &PhysicalASAPDAG,
-    inputs: &BTreeMap<u64, InputContract>,
+    inputs: &BTreeSet<u64>,
     roots: &[u64],
     frontier: &[u64],
 ) -> Result<CompiledPhysicalPlan, asap_executor::Error> {
-    use asap_executor::plan::Emission;
     if frontier.is_empty() {
         return Ok(CompiledPhysicalPlan {
             precompute: None,
-            query: compile(dag, inputs.clone(), roots)?,
+            query: compile(dag, inputs, roots)?,
             materialized_outputs: BTreeMap::new(),
         });
     }
-    let precompute = compile(dag, inputs.clone(), frontier)?;
+    let precompute = compile(dag, inputs, frontier)?;
     let mut materialized_outputs = BTreeMap::new();
     for &id in frontier {
-        let mut output = precompute.output_contract(id)?;
-        output.properties.emission = Emission::Unknown;
-        materialized_outputs.insert(id, output);
+        materialized_outputs.insert(id, precompute.output_schema(id)?);
     }
     let mut query_inputs = inputs.clone();
-    query_inputs.extend(materialized_outputs.clone());
+    query_inputs.extend(frontier);
     Ok(CompiledPhysicalPlan {
         precompute: Some(precompute),
-        query: compile(dag, query_inputs, roots)?,
+        query: compile(dag, &query_inputs, roots)?,
         materialized_outputs,
     })
 }
 
 fn assert_cuts_match_recompilation(
     dag: &PhysicalASAPDAG,
-    inputs: BTreeMap<u64, InputContract>,
+    inputs: BTreeSet<u64>,
     roots: &[u64],
     min_frontiers: usize,
 ) {
-    let compiled = compile(dag, inputs.clone(), roots).unwrap();
+    let compiled = compile(dag, &inputs, roots).unwrap();
     let frontiers = enumerate_frontiers(dag, &inputs, roots, 4096).unwrap();
     assert!(frontiers.len() >= min_frontiers, "{frontiers:?}");
     for frontier in &frontiers {
@@ -610,10 +592,7 @@ fn grouped_rate_cuts_equal_per_frontier_compilation() {
             )
         })
         .unwrap();
-    let inputs = BTreeMap::from([(
-        state.id as u64,
-        InputContract::bounded(Arc::new(state.output_schema.clone())),
-    )]);
+    let inputs = BTreeSet::from([state.id as u64]);
     assert_cuts_match_recompilation(&dag, inputs, &[dag.roots[0] as u64], 3);
 }
 
@@ -665,12 +644,9 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
             )
         })
         .unwrap();
-    let inputs = BTreeMap::from([(
-        raw.id as u64,
-        InputContract::bounded(Arc::new(raw.output_schema.clone())),
-    )]);
+    let inputs = BTreeSet::from([raw.id as u64]);
     let roots = [dag.roots[0] as u64];
-    let compiled = compile(&dag, inputs.clone(), &roots).unwrap();
+    let compiled = compile(&dag, &inputs, &roots).unwrap();
     // The root reads its population through a Sort helper numbered by the root.
     let helper = u64::MAX - (roots[0] << 16);
     assert_eq!(compiled.operator_name(helper), Some("Sort"));
@@ -707,11 +683,8 @@ fn cut_candidate_rejects_invalid_frontiers() {
         })
         .unwrap();
     let (state_id, rate_id, root) = (state.id as u64, evaluation.id as u64, dag.roots[0] as u64);
-    let inputs = BTreeMap::from([(
-        state_id,
-        InputContract::bounded(Arc::new(state.output_schema.clone())),
-    )]);
-    let compiled = compile(&dag, inputs.clone(), &[root]).unwrap();
+    let inputs = BTreeSet::from([state_id]);
+    let compiled = compile(&dag, &inputs, &[root]).unwrap();
     for frontier in [
         vec![rate_id, rate_id],
         vec![state_id],
@@ -719,7 +692,7 @@ fn cut_candidate_rejects_invalid_frontiers() {
         vec![root, rate_id],
     ] {
         assert!(cut_candidate(&compiled, &frontier).is_err(), "{frontier:?}");
-        assert!(compile_candidate(&dag, inputs.clone(), &[root], &frontier).is_err());
+        assert!(compile_candidate(&dag, &inputs, &[root], &frontier).is_err());
     }
 }
 

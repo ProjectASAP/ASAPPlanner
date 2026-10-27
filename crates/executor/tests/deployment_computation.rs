@@ -3,7 +3,7 @@
 mod common;
 use asap_executor::{
     operators::Operator,
-    physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract, Source},
+    physical_planner::{compile, promql_rows, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -15,7 +15,11 @@ use planner_types::ir::properties::AccuracyTarget;
 use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
 use planner_types::workload::*;
-use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+    sync::Arc,
+};
 
 fn lower(query: &str) -> Rc<planner_types::ir::OperatorNode> {
     lower_with(query, AccuracyTarget::exact())
@@ -124,15 +128,10 @@ fn execute_relabeled(
     let inputs = raw_inputs(dag);
     let program = compile(
         dag,
-        inputs
-            .iter()
-            .map(|(id, schema, _)| (*id, InputContract::bounded(schema.clone())))
-            .collect(),
+        &inputs.iter().map(|(id, _, _)| *id).collect(),
         &[dag.roots[0] as u64],
     )
     .map_err(|e| e.to_string())?;
-    let program: CompiledPhysicalDAG =
-        serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap();
     let sources = inputs
         .iter()
         .map(|(id, schema, metric)| {
@@ -801,12 +800,10 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let schema = Arc::new(state.output_schema.clone());
     let program = compile(
         &dag,
-        BTreeMap::from([(state.id as u64, InputContract::bounded(schema.clone()))]),
+        &BTreeSet::from([state.id as u64]),
         &[dag.roots[0] as u64],
     )
     .unwrap();
-    let program: CompiledPhysicalDAG =
-        serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap();
     let mut sketch = CountMinSketchAccumulator::new(*depth as usize, *width as usize).unwrap();
     sketch.update("a", 3.0);
     sketch.update("b", 7.0);
