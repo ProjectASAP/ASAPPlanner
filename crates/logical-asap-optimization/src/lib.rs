@@ -42,8 +42,6 @@
 //!   (Stage 3) checks each candidate's guarantee against its query's
 //!   `AccuracyTarget` with the deployment's `AccuracyModel` before pricing it.
 //! - [`deployment_capabilities`] — the deployment's supported summaries.
-//! - [`maintained_population`] — builds a maintained-population sub-DAG for
-//!   an instant top-k/quantile/sum query; Pass 1 does not offer it yet (#681).
 
 pub mod accuracy;
 /// The deployment's capabilities: supported summaries and what it retains.
@@ -58,8 +56,6 @@ pub use deployment_capabilities::{
     DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
 };
 pub use realization::summary_candidates;
-
-pub mod maintained_population;
 
 /// Stage 1, Pass 1: per-computation candidate generation. No execution timing is
 /// assigned: that is a Stage 2 materialization decision.

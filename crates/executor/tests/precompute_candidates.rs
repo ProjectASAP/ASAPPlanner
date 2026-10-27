@@ -648,11 +648,7 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
     let root =
         asap_executor::physical_planner::promql_rows::with_series_identity(&original).unwrap();
     let selected =
-        asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy::new(
-            std::slice::from_ref(&root),
-        )
-        .candidate(&root)
-        .unwrap();
+        asap_logical_asap_optimization::test_support::current_series_population(&root).unwrap();
     let dag = compile_physical_asap_dag(&selected).unwrap();
     let raw = dag
         .nodes

@@ -7,7 +7,7 @@ edition = "2021"
 asap-types = { path = "../types" }
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 asap-plan-selection = { path = "../plan-selection" }
 

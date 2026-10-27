@@ -76,7 +76,7 @@ traverse the whole-workload Cartesian product described by the historical rule
 APIs below. See [joint planning](../design_docs/proposals/joint-planning-search.md)
 for the current workflow. The unused standalone pane-sharing selector has been
 removed; pane sharing is selected by the same joint MILP as other computation.
-`maintained_population.rs` remains an unwired Stage 1 extension.
+The unwired maintained-population rule has been removed as well; no Stage 1 pass offers a population candidate.
 
 ## Algorithm in one pass
 

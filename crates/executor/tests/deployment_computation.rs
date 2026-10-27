@@ -57,11 +57,7 @@ fn exact_dag(query: &str) -> PhysicalASAPDAG {
 fn population_dag(query: &str) -> PhysicalASAPDAG {
     let root = promql_rows::with_series_identity(&lower(query)).unwrap();
     let selected =
-        asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy::new(
-            std::slice::from_ref(&root),
-        )
-        .candidate(&root)
-        .unwrap();
+        asap_logical_asap_optimization::test_support::current_series_population(&root).unwrap();
     compile_physical_asap_dag(&selected).unwrap()
 }
 

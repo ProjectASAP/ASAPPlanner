@@ -332,11 +332,8 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .remove(0);
     let open_root = Rc::new(original.clone());
     let open_selected =
-        asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy::new(
-            std::slice::from_ref(&open_root),
-        )
-        .candidate(&open_root)
-        .unwrap();
+        asap_logical_asap_optimization::test_support::current_series_population(&open_root)
+            .unwrap();
     let snapshot_program =
         asap_executor::physical_planner::promql_rows::compile_current_series_evaluation(
             &open_selected,
@@ -351,11 +348,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     assert_eq!(snapshot_program.input_contracts().count(), 1);
     let root = Rc::new(with_series_identity(&original).unwrap());
     let selected =
-        asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy::new(
-            std::slice::from_ref(&root),
-        )
-        .candidate(&root)
-        .unwrap();
+        asap_logical_asap_optimization::test_support::current_series_population(&root).unwrap();
     let logical = compile_physical_asap_dag(&selected).unwrap();
     let raw = logical
         .nodes

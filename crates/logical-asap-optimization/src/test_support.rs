@@ -293,3 +293,306 @@ pub fn entry_with(
         range_evaluation: None,
     }
 }
+
+/// The maintained-population sub-DAG of a PromQL instant aggregation or
+/// top-k over current series: `EvaluatePopulation ▸ MaintainPopulation`
+/// over the selector, under `root`'s own projections. No planner pass offers
+/// it yet (#681); executor tests use it to run the population operators.
+/// `None` when `root` is not such a query.
+pub fn current_series_population(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+    use asap_types::ir::operator::maintained_population::*;
+    use asap_types::ir::properties::AccuracyGuarantee;
+    use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
+    use asap_types::ir::{ASAPOp, Operator};
+    if let Some(NonASAPOp::Project {
+        cols,
+        qualifier,
+        child,
+    }) = root.non_asap()
+    {
+        let child = current_series_population(child)?;
+        let guarantee = child.guarantee.clone();
+        return Some(Rc::new(
+            OperatorNode::with_schema(
+                Operator::NonASAP(NonASAPOp::Project {
+                    cols: cols.clone(),
+                    qualifier: qualifier.clone(),
+                    child,
+                }),
+                root.schema.clone(),
+            )
+            .with_guarantee(guarantee),
+        ));
+    }
+    let (source, grouping, evaluation, value_column) = match root.non_asap()? {
+        NonASAPOp::Aggregate {
+            child,
+            reduction: Reduction::Reduce(grouping),
+            measures,
+            filters,
+            having: None,
+            ..
+        } if filters.iter().all(Option::is_none) => {
+            let (col, evaluation) = match measures.as_slice() {
+                [AggIntent::Quantile { q, col, .. }] => {
+                    (*col, PopulationStatistic::Quantile { q: *q })
+                }
+                [AggIntent::TopK { k, .. }] => (None, PopulationStatistic::TopK { k: *k }),
+                [AggIntent::Sum { col }] => (*col, PopulationStatistic::Sum),
+                [AggIntent::Count { .. }] => (None, PopulationStatistic::Count),
+                [AggIntent::Avg { col }] => (*col, PopulationStatistic::Average),
+                _ => return None,
+            };
+            (child, grouping, evaluation, col)
+        }
+        NonASAPOp::Limit {
+            n: Some(n),
+            offset: 0,
+            partition_by,
+            child,
+        } => {
+            let Some(NonASAPOp::Sort {
+                child,
+                keys,
+                partition_by: sorted_by,
+            }) = child.non_asap()
+            else {
+                return None;
+            };
+            let [key] = keys.as_slice() else {
+                return None;
+            };
+            if sorted_by != partition_by || key.ascending {
+                return None;
+            }
+            let ScalarExpr::Column(col) = &key.expr else {
+                return None;
+            };
+            // `topk` sorts the selector's rows through a projection that keeps
+            // every column in place.
+            let child = match child.non_asap() {
+                Some(NonASAPOp::Project {
+                    cols,
+                    qualifier: None,
+                    child: rows,
+                }) if cols.len() == rows.schema.fields.len()
+                    && cols.iter().enumerate().all(|(i, item)| {
+                        item.alias.is_none() && matches!(item.expr, ScalarExpr::Column(c) if c == i)
+                    }) =>
+                {
+                    rows
+                }
+                _ => child,
+            };
+            (
+                child,
+                partition_by,
+                PopulationStatistic::TopK { k: *n },
+                Some(*col),
+            )
+        }
+        _ => return None,
+    };
+    // A bare selector carries its metric's sample interval as the horizon
+    // after which a series that stops reporting leaves the population.
+    let (selector, lookback_ms) = match source.non_asap() {
+        Some(NonASAPOp::TimeRange { range, child, .. }) => {
+            (child.as_ref(), u64::try_from(range.as_millis()).ok()?)
+        }
+        _ => (source.as_ref(), 300_000),
+    };
+    let Some(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric },
+        predicates,
+        schema,
+    }) = selector.non_asap()
+    else {
+        return None;
+    };
+    if value_column.is_some_and(|c| schema.fields.get(c).is_none_or(|f| f.name != "value")) {
+        return None;
+    }
+    let label = |col: usize| -> Option<String> {
+        let field = schema.fields.get(col)?;
+        (field.dtype == DataType::Utf8).then(|| field.name.clone())
+    };
+    let mut matchers = Vec::new();
+    for predicate in predicates {
+        let ScalarExpr::Compare {
+            left, op, right, ..
+        } = &predicate.0
+        else {
+            return None;
+        };
+        let (ScalarExpr::Column(col), ScalarExpr::Literal(ScalarValue::Utf8(value))) =
+            (left.as_ref(), right.as_ref())
+        else {
+            return None;
+        };
+        let operation = match op {
+            CompareOpKind::Eq => CurrentSeriesMatch::Equal,
+            CompareOpKind::Ne => CurrentSeriesMatch::NotEqual,
+            CompareOpKind::Regex => CurrentSeriesMatch::Regex,
+            CompareOpKind::NotRegex => CurrentSeriesMatch::NotRegex,
+            _ => return None,
+        };
+        matchers.push(CurrentSeriesMatcher {
+            label: label(*col)?,
+            value: value.clone(),
+            operation,
+        });
+    }
+    matchers.sort();
+    matchers.dedup();
+    let mut labels = grouping
+        .keys()
+        .iter()
+        .map(|c| label(*c))
+        .collect::<Option<Vec<_>>>()?;
+    labels.sort();
+    labels.dedup();
+    let population = MaintainedPopulation {
+        input: PopulationInput::CurrentSeries(CurrentSeriesInput {
+            metric: metric.clone(),
+            matchers,
+            grouping: labels,
+            without: grouping.is_without(),
+            lookback_ms,
+        }),
+        max_k: match evaluation {
+            PopulationStatistic::TopK { k } => k,
+            _ => 0,
+        },
+        quantiles: matches!(evaluation, PopulationStatistic::Quantile { .. }),
+    };
+    let input = Rc::new(
+        (**source)
+            .clone()
+            .with_guarantee(Some(AccuracyGuarantee::exact("source samples"))),
+    );
+    let maintained = Rc::new(
+        OperatorNode::with_schema(
+            Operator::ASAP(ASAPOp::MaintainPopulation {
+                child: input,
+                population,
+            }),
+            source.schema.clone(),
+        )
+        .with_guarantee(Some(AccuracyGuarantee::exact(
+            "exact members under the declared population semantics",
+        ))),
+    );
+    Some(Rc::new(
+        OperatorNode::with_schema(
+            Operator::ASAP(ASAPOp::EvaluatePopulation {
+                child: maintained,
+                evaluation,
+            }),
+            root.schema.clone(),
+        )
+        .with_guarantee(Some(AccuracyGuarantee::exact(
+            "exact current-population evaluation",
+        ))),
+    ))
+}
+
+#[cfg(test)]
+mod population_tests {
+    use super::{current_series_population, lower_promql};
+    use asap_types::ir::operator::maintained_population::{PopulationInput, PopulationStatistic};
+    use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
+    use asap_types::ir::properties::timing::{
+        apply_materialization_timings, MaterializationAssignment, TimingMemo,
+    };
+    use asap_types::ir::{ASAPOp, Operator, OperatorNode};
+    use std::rc::Rc;
+
+    /// Time `root` under the default materialization assignment (which runs
+    /// the data-state / population-contract validation) and export it.
+    fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
+        root.validate_structure().map_err(|e| e.to_string())?;
+        let timed = apply_materialization_timings(
+            root,
+            &MaterializationAssignment::default(),
+            &mut TimingMemo::new(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        export_timed(&timed).map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    fn lower(q: &str) -> Rc<OperatorNode> {
+        lower_promql(q, asap_types::ir::properties::AccuracyTarget::exact())
+    }
+
+    // Population timing is a materialization choice: the population follows
+    // its assignment (`NotMaterialized` by default), while its evaluation
+    // always runs at query time.
+    #[test]
+    fn population_timing_follows_its_materialization() {
+        use asap_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
+        use asap_types::physical::{Materialization, Medium};
+        let candidate = current_series_population(&lower("topk(5,a)")).unwrap();
+        let Some(ASAPOp::EvaluatePopulation {
+            child: population, ..
+        }) = candidate.asap()
+        else {
+            unreachable!()
+        };
+        let on_disk = Materialization::MatAtIngestion(Medium::Disk);
+        let mut at_ingestion = MaterializationAssignment::default();
+        at_ingestion.set(population, on_disk);
+        for (assignment, timing, materialization) in [
+            (
+                MaterializationAssignment::default(),
+                QueryTime,
+                Materialization::NotMaterialized,
+            ),
+            (at_ingestion, IngestionTime, on_disk),
+        ] {
+            let timed =
+                apply_materialization_timings(&candidate, &assignment, &mut TimingMemo::new())
+                    .unwrap();
+            let dag = export_timed(&timed).unwrap();
+            let [population, evaluation] = &dag.nodes[dag.nodes.len() - 2..] else {
+                unreachable!()
+            };
+            assert_eq!(population.output_state.timing, timing);
+            assert_eq!(population.materialization, materialization);
+            assert_eq!(evaluation.output_state.timing, QueryTime);
+        }
+        let mut evaluation_at_ingestion = (*candidate).clone();
+        evaluation_at_ingestion.timing = Some(IngestionTime);
+        assert!(compile_physical_asap_dag(&Rc::new(evaluation_at_ingestion)).is_err());
+    }
+
+    // An evaluation cannot reinterpret arbitrary rows as maintained state or
+    // exceed its producer's contract.
+    #[test]
+    fn malformed_population_dags_fail_closed() {
+        let candidate = current_series_population(&lower("topk(5,a)")).unwrap();
+        compile_physical_asap_dag(&candidate).expect("the unmodified candidate is legal");
+        let mut bad = (*candidate).clone();
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { evaluation, .. }) = &mut bad.operator
+        else {
+            unreachable!()
+        };
+        *evaluation = PopulationStatistic::TopK { k: 6 };
+        assert!(compile_physical_asap_dag(&Rc::new(bad.clone())).is_err());
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { child, evaluation }) = &mut bad.operator
+        else {
+            unreachable!()
+        };
+        *evaluation = PopulationStatistic::TopK { k: 5 };
+        let producer = Rc::make_mut(child);
+        let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &mut producer.operator
+        else {
+            unreachable!()
+        };
+        let PopulationInput::CurrentSeries(spec) = &mut population.input else {
+            unreachable!()
+        };
+        spec.metric = "b".into();
+        assert!(compile_physical_asap_dag(&Rc::new(bad)).is_err());
+    }
+}

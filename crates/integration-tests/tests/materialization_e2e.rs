@@ -15,7 +15,7 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     explicit_local_candidates, explicit_summary_candidate, selected_dag,
 };
-use asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy;
+use asap_logical_asap_optimization::test_support::current_series_population;
 use asap_types::ir::operator::maintained_population::PopulationInput;
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{
@@ -317,9 +317,7 @@ fn population_materialization_decides_precompute_contents() {
         &lower_promql("topk by(job)(1, m)", AccuracyTarget::max_error(0.01)).unwrap(),
     )
     .unwrap();
-    let root = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
-        .candidate(&root)
-        .unwrap();
+    let root = current_series_population(&root).unwrap();
     let population = OperatorNode::reachable(&root)
         .into_iter()
         .find(|node| matches!(node.asap(), Some(ASAPOp::MaintainPopulation { .. })))

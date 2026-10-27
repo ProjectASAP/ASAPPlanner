@@ -25,6 +25,6 @@ test-support = []
 [dev-dependencies]
 asap-executor = { path = ".", features = ["test-support"] }
 rmp-serde = "1"
-asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 asap-plan-selection = { path = "../plan-selection" }
 asap-frontend-promql = { path = "../frontend-promql" }

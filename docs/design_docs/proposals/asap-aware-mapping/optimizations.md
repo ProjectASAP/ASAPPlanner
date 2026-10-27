@@ -23,7 +23,7 @@ by state retained across query evaluations. Membership updates and aggregate
 readouts are separate operations. This lets different quantiles, TopK limits and
 scalar aggregates share one producer when their input semantics agree.
 
-`MaintainedPopulationStrategy` recognizes supported Aggregate or Sort/Limit
+The maintained-population rule (designed; not implemented in the planner) recognizes supported Aggregate or Sort/Limit
 sub-DAGs and emits `MaintainPopulation -> ReadPopulation` candidates. For example,
 `quantile(0.5, a)`, `quantile(0.99, a)`, `topk(1, a)` and `topk(5, a)` can share one
 current-series population and a maximum-k cache of five. SQL table-row consumers
