@@ -299,10 +299,10 @@ fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
     }
 }
 
-// The actual Planner population candidate lowers to native operators; this
-// test does not manually assemble the computation or its dependency edges.
+// A hand-built population fixture over the lowered `topk` (no planner pass
+// offers one yet) compiles to native operators with dynamic series identity.
 #[test]
-fn planner_current_series_candidate_compiles_with_dynamic_identity() {
+fn population_fixture_compiles_with_dynamic_identity() {
     use asap_executor::physical_planner::{compile, promql_rows::with_series_identity};
     use planner_types::workload::*;
     use std::rc::Rc;
@@ -331,12 +331,13 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .unwrap()
         .remove(0);
     let open_root = Rc::new(original.clone());
-    let open_selected =
-        asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy::new(
-            std::slice::from_ref(&open_root),
-        )
-        .candidate(&open_root)
-        .unwrap();
+    let topk =
+        planner_types::ir::operator::maintained_population::PopulationStatistic::TopK { k: 1 };
+    let open_selected = asap_logical_asap_optimization::test_support::population_over_selector(
+        &open_root,
+        topk.clone(),
+        &["job"],
+    );
     let snapshot_program =
         asap_executor::physical_planner::promql_rows::compile_current_series_evaluation(
             &open_selected,
@@ -350,12 +351,11 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     assert!(encoded.contains("Sort") && encoded.contains("Limit"));
     assert_eq!(snapshot_program.input_contracts().count(), 1);
     let root = Rc::new(with_series_identity(&original).unwrap());
-    let selected =
-        asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy::new(
-            std::slice::from_ref(&root),
-        )
-        .candidate(&root)
-        .unwrap();
+    let selected = asap_logical_asap_optimization::test_support::population_over_selector(
+        &root,
+        topk,
+        &["job"],
+    );
     let logical = compile_physical_asap_dag(&selected).unwrap();
     let raw = logical
         .nodes

@@ -1,7 +1,7 @@
 # Shared maintained population rule
 
-> Status: planner rule implemented; deployment support is conditional. See
-> [MaintainedPopulationStrategy](../../../../crates/logical-asap-optimization/src/maintained_population.rs).
+> Status: designed; no planner pass offers it. The IR operators
+> `MaintainPopulation` and `EvaluatePopulation` and their executor exist.
 > A deployment must provide the membership, freshness, state and operation
 > capabilities described below. Planner representation alone does not implement
 > population maintenance in a runtime.
@@ -50,8 +50,7 @@ column and grouping determine whether consumers refer to the same population.
 
 ## Rule: share one population across compatible readouts
 
-**Realization:** `MaintainedPopulationStrategy::candidate` builds the sub-DAG;
-Pass 1 does not offer it yet. Code: [maintained_population.rs](../../../../crates/logical-asap-optimization/src/maintained_population.rs).
+**Realization:** not implemented in the planner; Pass 1 does not offer it.
 
 **Target sub-DAGs:**
 
@@ -176,9 +175,11 @@ average; the outer sketch candidate remains available.
 
 ## Acceptance evidence
 
-- PromQL quantiles, TopK limits and scalar readouts share only compatible populations.
-- SQL frontend tests cover shared quantiles/scalar readouts/maximum k, separation
-  by grouping and filters, preservation of projections, and invalid value-column rejection.
+- The planner rule and its tests were removed while no pass offers the rule.
+  Sharing only compatible populations across PromQL quantiles, TopK limits and
+  scalar readouts, and the SQL table-row cases, are acceptance tests for its
+  reimplementation. IR tests cover invalid value-column rejection and
+  lookback agreement.
 - Backend admission rejects a table-row producer when only a current-series executor
   is available.
 - Process tests compare current-series replacements and expiry with Prometheus 3.5.

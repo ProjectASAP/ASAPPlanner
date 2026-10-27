@@ -293,3 +293,75 @@ pub fn entry_with(
         range_evaluation: None,
     }
 }
+
+/// The maintained-population sub-DAG for executor tests: `root` (below its
+/// projections, which are kept) replaced by `EvaluatePopulation(statistic)`
+/// over a current-series population of the single selector under it,
+/// grouped by `grouping`, with no matchers. The caller states the statistic
+/// and grouping; nothing is recognized. No planner pass offers this sub-DAG
+/// yet (#681).
+pub fn population_over_selector(
+    root: &Rc<OperatorNode>,
+    statistic: asap_types::ir::operator::maintained_population::PopulationStatistic,
+    grouping: &[&str],
+) -> Rc<OperatorNode> {
+    use asap_types::ir::operator::maintained_population::*;
+    use asap_types::ir::{ASAPOp, Operator};
+    if let Some(NonASAPOp::Project {
+        cols,
+        qualifier,
+        child,
+    }) = root.non_asap()
+    {
+        let child = population_over_selector(child, statistic.clone(), grouping);
+        let project = Operator::NonASAP(NonASAPOp::Project {
+            cols: cols.clone(),
+            qualifier: qualifier.clone(),
+            child,
+        });
+        return Rc::new(OperatorNode::with_schema(project, root.schema.clone()));
+    }
+    let selectors: Vec<_> = OperatorNode::reachable(root)
+        .into_iter()
+        .filter(|node| matches!(node.non_asap(), Some(NonASAPOp::TimeRange { .. })))
+        .collect();
+    let [selector] = selectors.as_slice() else {
+        panic!("one selector under {root:?}");
+    };
+    let Some(NonASAPOp::TimeRange { range, child, .. }) = selector.non_asap() else {
+        unreachable!()
+    };
+    let Some(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric },
+        ..
+    }) = child.non_asap()
+    else {
+        panic!("a time-series selector, got {child:?}");
+    };
+    let population = MaintainedPopulation {
+        input: PopulationInput::CurrentSeries(CurrentSeriesInput {
+            metric: metric.clone(),
+            matchers: Vec::new(),
+            grouping: grouping.iter().map(|label| label.to_string()).collect(),
+            without: false,
+            lookback_ms: range.as_millis() as u64,
+        }),
+        max_k: match statistic {
+            PopulationStatistic::TopK { k } => k,
+            _ => 0,
+        },
+        quantiles: matches!(statistic, PopulationStatistic::Quantile { .. }),
+    };
+    let maintained = OperatorNode::with_schema(
+        Operator::ASAP(ASAPOp::MaintainPopulation {
+            child: selector.clone(),
+            population,
+        }),
+        selector.schema.clone(),
+    );
+    let evaluation = Operator::ASAP(ASAPOp::EvaluatePopulation {
+        child: Rc::new(maintained),
+        evaluation: statistic,
+    });
+    Rc::new(OperatorNode::with_schema(evaluation, root.schema.clone()))
+}

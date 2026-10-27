@@ -199,3 +199,201 @@ fn summary_transitions_preserve_structural_metadata() {
     assert!(finalized.schema.is_all_plain());
     finalized.validate_structure().unwrap();
 }
+
+/// The selector `a` as PromQL lowers it: a 1-second instant window over an
+/// open series scan with a `job` label.
+fn series_selector() -> Rc<OperatorNode> {
+    use asap_types::ir::TimeRangeKind;
+    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric: "a".into() },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("time", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+                Field::plain("job", DataType::Utf8, false),
+            ],
+            0,
+            vec![],
+        ),
+    }))
+    .unwrap();
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: std::time::Duration::from_secs(1),
+        kind: TimeRangeKind::Instant,
+        child: scan,
+    }))
+    .unwrap()
+}
+
+/// `topk(5, a)` read from a current-series population of `a`, built by hand.
+fn current_series_topk() -> Rc<OperatorNode> {
+    use asap_types::ir::operator::maintained_population::*;
+    let selector = series_selector();
+    let population = OperatorNode::new_shared(Operator::ASAP(ASAPOp::MaintainPopulation {
+        child: selector,
+        population: MaintainedPopulation {
+            input: PopulationInput::CurrentSeries(CurrentSeriesInput {
+                metric: "a".into(),
+                matchers: vec![],
+                grouping: vec![],
+                without: false,
+                lookback_ms: 1_000,
+            }),
+            max_k: 5,
+            quantiles: false,
+        },
+    }))
+    .unwrap();
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::EvaluatePopulation {
+        child: population,
+        evaluation: PopulationStatistic::TopK { k: 5 },
+    }))
+    .unwrap()
+}
+
+/// Time `root` under the default materialization assignment, which runs the
+/// data-state and population-contract validation, and export it.
+fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
+    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    root.validate_structure().map_err(|e| e.to_string())?;
+    let timed = apply_materialization_timings(
+        root,
+        &MaterializationAssignment::default(),
+        &mut TimingMemo::new(),
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(())
+}
+
+/// A table-row population maintains a numeric value column: one that names
+/// a label column fails validation.
+#[test]
+fn a_row_population_over_a_label_column_is_invalid() {
+    use asap_types::ir::operator::maintained_population::{MaintainedPopulation, PopulationInput};
+    use asap_types::ir::operator::GroupKeys;
+    let mut schema = scan(DataType::Utf8, "job").schema.clone();
+    schema.closed = true;
+    let source = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
+        predicates: vec![],
+        schema,
+    }))
+    .unwrap();
+    let population = |value_column| {
+        Rc::new(OperatorNode::with_schema(
+            Operator::ASAP(ASAPOp::MaintainPopulation {
+                child: source.clone(),
+                population: MaintainedPopulation {
+                    input: PopulationInput::Rows {
+                        input: source.clone(),
+                        value_column,
+                        grouping: GroupKeys::by(vec![0]),
+                    },
+                    max_k: 0,
+                    quantiles: false,
+                },
+            }),
+            source.schema.clone(),
+        ))
+    };
+    population(1).validate_structure().unwrap();
+    assert!(population(0).validate_structure().is_err());
+}
+
+/// A current-series population matches its selector only with the
+/// selector's own lookback, so members expire when the selector stops
+/// seeing them.
+#[test]
+fn a_current_series_population_matches_only_its_selectors_lookback() {
+    use asap_types::ir::operator::maintained_population::CurrentSeriesInput;
+    let spec = CurrentSeriesInput {
+        metric: "a".into(),
+        matchers: vec![],
+        grouping: vec![],
+        without: false,
+        lookback_ms: 1_000,
+    };
+    let selector = series_selector();
+    assert!(spec.matches_node(&selector));
+    let wrong = CurrentSeriesInput {
+        lookback_ms: 300_000,
+        ..spec
+    };
+    assert!(!wrong.matches_node(&selector));
+}
+
+/// Population timing is a materialization choice: the population follows its
+/// assignment (`NotMaterialized` by default), while its evaluation always
+/// runs at query time.
+#[test]
+fn population_timing_follows_its_materialization() {
+    use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
+    use asap_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
+    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    use asap_types::physical::{Materialization, Medium};
+    let candidate = current_series_topk();
+    let Some(ASAPOp::EvaluatePopulation {
+        child: population, ..
+    }) = candidate.asap()
+    else {
+        unreachable!()
+    };
+    let on_disk = Materialization::MatAtIngestion(Medium::Disk);
+    let mut at_ingestion = MaterializationAssignment::default();
+    at_ingestion.set(population, on_disk);
+    for (assignment, timing, materialization) in [
+        (
+            MaterializationAssignment::default(),
+            QueryTime,
+            Materialization::NotMaterialized,
+        ),
+        (at_ingestion, IngestionTime, on_disk),
+    ] {
+        let timed =
+            apply_materialization_timings(&candidate, &assignment, &mut TimingMemo::new()).unwrap();
+        let dag = export_timed(&timed).unwrap();
+        let [population, evaluation] = &dag.nodes[dag.nodes.len() - 2..] else {
+            unreachable!()
+        };
+        assert_eq!(population.output_state.timing, timing);
+        assert_eq!(population.materialization, materialization);
+        assert_eq!(evaluation.output_state.timing, QueryTime);
+    }
+    let mut evaluation_at_ingestion = (*candidate).clone();
+    evaluation_at_ingestion.timing = Some(IngestionTime);
+    assert!(compile_physical_asap_dag(&Rc::new(evaluation_at_ingestion)).is_err());
+}
+
+/// An evaluation cannot exceed its population's contract (`max_k`), and a
+/// population cannot claim a source it does not read.
+#[test]
+fn malformed_population_dags_fail_closed() {
+    use asap_types::ir::operator::maintained_population::{PopulationInput, PopulationStatistic};
+    let candidate = current_series_topk();
+    compile_physical_asap_dag(&candidate).expect("the unmodified candidate is legal");
+    let mut bad = (*candidate).clone();
+    let Operator::ASAP(ASAPOp::EvaluatePopulation { evaluation, .. }) = &mut bad.operator else {
+        unreachable!()
+    };
+    *evaluation = PopulationStatistic::TopK { k: 6 };
+    assert!(compile_physical_asap_dag(&Rc::new(bad.clone())).is_err());
+    let Operator::ASAP(ASAPOp::EvaluatePopulation { child, evaluation }) = &mut bad.operator else {
+        unreachable!()
+    };
+    *evaluation = PopulationStatistic::TopK { k: 5 };
+    let producer = Rc::make_mut(child);
+    let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &mut producer.operator
+    else {
+        unreachable!()
+    };
+    let PopulationInput::CurrentSeries(spec) = &mut population.input else {
+        unreachable!()
+    };
+    spec.metric = "b".into();
+    assert!(compile_physical_asap_dag(&Rc::new(bad)).is_err());
+}

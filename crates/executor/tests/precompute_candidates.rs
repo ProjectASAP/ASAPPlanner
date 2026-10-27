@@ -647,12 +647,11 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
         .remove(0);
     let root =
         asap_executor::physical_planner::promql_rows::with_series_identity(&original).unwrap();
-    let selected =
-        asap_logical_asap_optimization::maintained_population::MaintainedPopulationStrategy::new(
-            std::slice::from_ref(&root),
-        )
-        .candidate(&root)
-        .unwrap();
+    let selected = asap_logical_asap_optimization::test_support::population_over_selector(
+        &root,
+        planner_types::ir::operator::maintained_population::PopulationStatistic::TopK { k: 1 },
+        &["job"],
+    );
     let dag = compile_physical_asap_dag(&selected).unwrap();
     let raw = dag
         .nodes
