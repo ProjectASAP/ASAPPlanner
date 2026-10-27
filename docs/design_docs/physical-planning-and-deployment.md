@@ -9,11 +9,11 @@ flowchart LR
     L["Logical Post-ASAP DAG<br/><b>What computation?</b>"]
     M["Materialization<br/><b>How is state maintained?</b>"]
     P["Physical DAG(s)<br/><b>How is it executed?</b>"]
-    D["Deployment Plan / DAG<br/><b>How is it instantiated?</b>"]
+    D["Deployment<br/><b>How is it instantiated?</b>"]
 
     L -->|"Stage 2<br/>Materialization (#509)"| M
     M -->|"Physical Plan<br/>Compiler"| P
-    P -->|"Deployment Plan<br/>Compiler"| D
+    P -->|"Deployment<br/>interface"| D
 ```
 
 | Layer | Defines |
@@ -21,7 +21,7 @@ flowchart LR
 | **Logical Post-ASAP DAG** | Computation semantics |
 | **Materialization** | Build, retention, reuse, and window strategy |
 | **Physical DAG(s)** | Supported physical candidates, executable operators and typed input boundaries |
-| **Deployment Plan / DAG** | Selected candidate, concrete data/state bindings and operational lifecycle |
+| **Deployment** | Selected candidate, concrete data/state bindings and operational lifecycle |
 
 ASAPPlanner owns the first three layers and the shared physical operator
 implementation library. Deployment systems such as ASAPQuery and asap-fusion
@@ -188,14 +188,14 @@ KLLBuild(k=200)
 3. Physical DAGs
 
 Precompute DAG:
-RawInput<Latency, 1m>
+TableSlot<latency> → TimeRange(1m)
         ↓
 NativeKllBuild(k=200)
         ↓
 KllStateOutput
 
 Query DAG:
-InputSlot<KllState>[5 panes]
+ViewSlot<KllState>[5 panes]
         ↓
 NativeKllMerge(k=200)
       ┌─┴────────┐
@@ -203,10 +203,10 @@ NativeKllMerge(k=200)
  NativeP50   NativeP99
 
           │
-          │ Deployment Plan Compiler
+          │ Deployment interface
           ▼
 
-4. Deployment Plan / DAG
+4. Deployment
 
 Precompute:
 OTLP latency source
@@ -308,24 +308,26 @@ collapses two layers: Stage 2 materialization (#509) owns maintenance, and
 ### Precompute Physical DAG
 
 ```text
-RawInputSlot<Latency>(
-    window = 1m,
+TableSlot<latency>(
     bounded = true
 )
+        ↓
+TimeRange(1m)
         ↓
 NativeKllBuild(k=200)
         ↓
 KllStateOutput(k=200)
 ```
 
-This DAG computes the state of one maintained one-minute pane. Its input
-contract requires all input samples matching the source, filters and group within that pane; the deployment supplies that
-bounded input from its source integration.
+This DAG refreshes one one-minute pane of the materialized view. Its table
+slot reads the samples matching the source, filters and group, and its
+`TimeRange` keeps those within the pane. The deployment supplies the samples
+through a `TableProvider` (§4).
 
 ### Query Physical DAG
 
 ```text
-InputSlot<KllState>(
+ViewSlot<KllState>(
     k = 200,
     coverage = requested aligned 5m
 )
@@ -347,7 +349,7 @@ do not know where those states are stored.
 For example:
 
 ```text
-InputSlot<KllState>
+ViewSlot<KllState>
 ```
 
 is physical, while:
@@ -418,33 +420,20 @@ query inputs. Their source, filters, grouping, build window, evaluation time, re
 revision contracts must accompany the selected materialization and be checked during
 deployment binding. Type compatibility alone does not establish reuse legality.
 
-A table `Scan` the query run reads outside a raw-data-sample window (a SQL
-table) is bound at run time to the deployment's data source for that table
-(`bind_with_data_sources`). Without a reader, `scan_contract` gives its input
-contract once its predicates compile, so a compile check (the one
-`plan_installable` runs) cuts the plan there. That check compiles each
-stored output's build as well as the query run: a plan the executor cannot
-build a stored output of fails it whether that output is built at ingestion
-or at query time, so no materialization of an uncompilable computation is
-selected. SQL `now()` is the query's
-evaluation time (`Scope::Query`); it has no value in an ingestion run.
+Every `Scan` leaf is a table slot, which the deployment binds at run time
+(§4). A compile check (the one `plan_installable` runs) therefore compiles the
+plan without a reader. That check compiles each materialized view's refresh
+as well as the query run. A plan the executor cannot refresh a view of fails
+the check, whether the view is refreshed at ingestion or on first read, so no
+materialization of an uncompilable computation is selected. SQL `now()` is the
+query's evaluation time (`Scope::Query`); it has no value in an ingestion run.
 
-A SQL trailing window is a range `TimeRange(w)` over the table `Scan`, below
-any `TimeShift`s a tumbling pane adds (offsets summing to `s`). When the
-executor runs it from the bound table (rather than from window rows a
-runtime feeds at the `TimeRange`), it keeps the rows whose time column lies
-in `(T - s - w, T - s]` at evaluation time `T`, a filter against `now()`,
-and passes the rows through each `TimeShift`. That is the window a PromQL
-range selector reads.
-
-A runtime that maintains a SQL window or pane at ingestion time feeds it
-table rows as it feeds a PromQL window samples. A raw-data-sample window over a
-table `Scan` is read with the executor's `TableRowSelector`, the table
-counterpart of `RawDataSampleSelector`. For each window end, `window_batch`
-keeps the table rows whose time column lies in `(end - w, end]` and that the
-`Scan`'s predicates keep, in the `TimeRange`'s schema. The runtime binds that
-batch at the `TimeRange`. Each call reads all the rows it is given, so a
-runtime passes the rows of that window or pane, not the whole retained table.
+A trailing window is a range `TimeRange(w)` over a `Scan`, below any
+`TimeShift`s a tumbling pane adds (offsets summing to `s`). At evaluation time
+`T` it keeps the rows whose time lies in `(T - s - w, T - s]`, which is the
+window a PromQL range selector reads and a SQL filter against `now()`. Each
+`TimeShift` passes the rows through. The same operator serves a SQL table and
+a time series. §4 describes the instant window and stale markers.
 
 The Planner integration test executes both candidates through the shared runtime
 and reverses the selected frontier with two controlled cost fixtures. It also
@@ -452,64 +441,177 @@ rejects shadowed/duplicate boundaries and incomparable planning horizons. This
 establishes Planner capability; it does not establish that ASAPQuery currently
 supports persisting every scalar/result-output frontier.
 
-## 4. Physical DAG → Deployment Plan / DAG
+## 4. Physical DAG → Deployment
 
-The **Deployment Plan Compiler** binds the Physical DAGs to the concrete deployment:
+This section defines the interface between the Planner's output, the
+executor, and a deployment runtime.
 
-```text
-Physical DAGs
-+ Materialization
-+ deployment catalog/state
-+ sources/materializations
-+ operational policy
-        ↓
-Deployment Plan Compiler
-        ↓
-Deployment Plan / DAG
+> **Status:** this is the target interface. The code on `main` differs in
+> four places:
+> - raw data is bound through `RawSource` (here `TableProvider`) without a
+>   scan request, or through `RawDataSampleSelector` / `TableRowSelector`
+>   at the `TimeRange` node;
+> - a boundary carries an `InputContract` instead of the node's schema;
+> - a materialized view is bound as an arbitrary source operator;
+> - `InstallablePlan` also carries fields derived from its DAG
+>   (`stored_outputs`, `query_time_raw_windows`) and a `selection` report.
+
+### Layers and ownership
+
+| Layer | Holds | Owner | Analogue |
+| --- | --- | --- | --- |
+| **Planner** | `InstallablePlan`: the selected physical ASAP DAG (each node's materialization and, for a materialized view, its retention) and the query texts | ASAPPlanner (deployment-agnostic) | Flink's JobGraph |
+| **Executor: operator library** | `PhysicalOperator` and the native operators | `asap-executor` | DataFusion's `ExecutionPlan` nodes |
+| **Executor: compiled plan** | `compile` → `CompiledPhysicalDAG` with input slots; `frontier_from_timing`, `cut_candidate` | `asap-executor` | DataFusion's physical planner, which resolves tables while planning; ours leaves them as slots |
+| **Executor: deployment interface** | `TableProvider`, `Bindings`, `instantiate` | `asap-executor` defines it; the deployment implements it | DataFusion's `TableProvider` and catalog |
+| **Deployment** | raw-data storage, the summary store (what a stored state is, where it lives, readiness, revisions), run scheduling, retention, transport | ASAPQuery, asap-fusion | catalog and runtime |
+
+### The plan file
+
+```rust
+pub struct InstallablePlan {
+    pub dag: PhysicalASAPDAGDocument, // a materialized-view node carries its retention_ms
+    pub query_texts: Vec<String>,     // query i is answered by dag.roots[i]
+}
+impl InstallablePlan {
+    /// Every materialized view, in dependency order: its node, refresh mode
+    /// (at ingestion, or on first read and kept), coverage, inputs and retention.
+    pub fn materialized_views(&self) -> Vec<MaterializedView>;
+}
 ```
 
-For the precompute DAG, it may produce:
+A **materialized view** is a node whose output is kept across evaluations
+(`MatAtIngestion` or `MatAtQueryKeptAcrossEvaluations`). A `MatAtQuery` node is
+not a view: its output is discarded after one evaluation. Everything a runtime
+needs that the DAG determines is derived from the DAG, so the plan file has no
+second copy to keep consistent. Stage 3's selection report is returned beside
+the plan, not inside it.
 
-```text
-Source:
-    RawInputSlot<Latency>
-        → complete bounded panes from the OTLP latency source
+### Input slots and compilation
 
-Schedule:
-    each 1-minute pane, once its completion requirements are met
+An **input slot** is a position in a compiled DAG where data is bound at run
+time, together with that position's schema, which is the DAG node's
+`output_schema`. There are two kinds:
 
-Execution:
-    RawInput → NativeKllBuild(k=200)
+| Slot | Where | Holds | Bound by |
+| --- | --- | --- | --- |
+| **Table slot** | every `Scan` leaf | the `Scan`'s `Source`, schema, compiled predicates, and window (the widths and offsets of the `TimeRange`/`TimeShift`s above it) | `Source` |
+| **View slot** | a materialized view cut out of a query DAG | the view's schema | node id |
 
-Output:
-    KllStateOutput
-        → latency-kll-1m/<window>
+```rust
+pub fn compile(dag: &PhysicalASAPDAG, views: &BTreeSet<NodeId>, roots: &[NodeId])
+    -> Result<CompiledPhysicalDAG, Error>;
 ```
 
-For a query over `(12:00, 12:05]`, its input-binding rule resolves:
+`compile` opens no readers. The DAG that refreshes a view has the view as a
+root; a DAG that reads it has the view in `views`. A runtime compiles each
+cut once, at install time. `CompiledPhysicalDAG` is derived inside the
+executor and is not persisted: the plan file is the only handoff.
 
-```text
-InputSlot<KllState>[5 panes]
-    ├── latency-kll-1m/(12:00,12:01]
-    ├── latency-kll-1m/(12:01,12:02]
-    ├── latency-kll-1m/(12:02,12:03]
-    ├── latency-kll-1m/(12:03,12:04]
-    └── latency-kll-1m/(12:04,12:05]
-              ↓
-        Query Physical DAG
-              ↓
-           p50, p99
+### TableProvider
+
+`TableProvider` is the only data interface between the executor and a deployment:
+
+```rust
+pub trait TableProvider {
+    fn schema(&self) -> SchemaRef; // contains the slot's columns; may have more
+    fn boundedness(&self) -> Boundedness;
+    fn scan(&self, request: &ScanRequest, context: RunContext)
+        -> Result<OutputStream<'_, Batch>, Error>;
+}
+pub struct ScanRequest<'a> {
+    pub time_range_ms: Option<(i64, i64)>, // (start, end], from the slot's window and the run's time
+    pub projection: Option<&'a [usize]>,  // indices into the provider's schema
+    pub predicates: &'a [ScalarExpr],     // a hint: the executor re-applies every predicate
+}
 ```
 
-The Deployment Plan Compiler establishes bindings and checks that their contracts
-satisfy the physical inputs and selected materialization, including KLL parameters,
-source, filters, grouping, window coverage and revision scope. The deployment engine
-resolves request-specific states and checks their actual coverage, revisions and
-readiness at execution time. A compiled plan cannot establish future readiness.
+- A **time series** is a table `(ts, value, *labels)`, as `Source::TimeSeries` declares.
+- A **SQL table** is a table with a time index.
+- A **materialized view** is a table in its state schema. The deployment's summary store implements `TableProvider` for each view, and `time_range_ms` selects the panes a run reads.
 
-The compiler does not replace `NativeKllMerge`, choose another sketch, or decide
-to maintain different windows. Such changes require replanning. A Deployment
-Plan / DAG is an operational instantiation, not another computation IR.
+`ScanRequest` lets a provider skip rows and columns. A provider that ignores it
+is still correct.
+
+### Bindings and instantiation
+
+```rust
+pub struct Bindings {
+    pub tables: DataSources,                             // Source → provider
+    pub views: BTreeMap<NodeId, Arc<dyn TableProvider>>, // view slot → provider
+}
+impl CompiledPhysicalDAG {
+    pub fn instantiate<'a>(&self, bindings: &'a Bindings)
+        -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error>;
+}
+```
+
+`instantiate` checks that every slot has exactly one binding. It also checks
+that each provider's schema contains the slot's columns and that each
+provider is bounded. It then constructs the runnable DAG without lowering
+again. Each run executes with independent per-run state, and its `RunContext`
+carries the run's scope: an ingestion window, or a query evaluation time `T`.
+
+### Operators own semantics; providers only read
+
+- A table slot becomes a `Scan` over its provider. At run time the `Scan` computes `time_range_ms` from its window and `T`, and passes the request. It then projects to the slot's schema and re-applies the time range and the predicates.
+- A `Scan` read by several windows requests the union of their ranges, and each `TimeRange` filters its own.
+- `TimeRange` is a native operator for both sources:
+  - a range window `TimeRange(w)` over shifts summing to `s` keeps rows with time in `(T - s - w, T - s]`;
+  - an instant window keeps each series' latest row in its lookback, and a series whose latest sample is a Prometheus stale marker has no row;
+  - an ordinary `NaN` sample is kept.
+- A provider never implements PromQL or SQL semantics. The compile check compiles these operators, so a plan whose window the executor cannot run is rejected before it is installed.
+
+### Running example
+
+For the KLL p50/p99 example, with one-minute panes materialized at ingestion
+over `Source::TimeSeries { metric: "latency" }`:
+
+```text
+Install (once):
+    views     = plan.materialized_views()        // [pane node, refresh = at ingestion]
+    refresh   = compile(dag, {}, [pane])          // Scan → TimeRange(1m) → NativeKllBuild(k=200)
+    query     = compile(dag, {pane}, [p50, p99])  // view slot → NativeKllMerge → NativeP50, NativeP99
+
+Each complete pane (12:04, 12:05]:
+    refresh.instantiate(&Bindings { tables: { latency → time-series provider } })
+        Scan asks the provider for time_range_ms = (12:04, 12:05]
+    store the KllState in the summary store under the view's coverage
+
+Query at T = 12:05 over (12:00, 12:05]:
+    query.instantiate(&Bindings { views: { pane → summary-store provider } })
+        the view slot asks for time_range_ms = (12:00, 12:05]
+        ├── latency-kll-1m/(12:00,12:01]
+        ├── latency-kll-1m/(12:01,12:02]
+        ├── latency-kll-1m/(12:02,12:03]
+        ├── latency-kll-1m/(12:03,12:04]
+        └── latency-kll-1m/(12:04,12:05]
+    NativeKllMerge executes once for both readouts → p50, p99
+```
+
+The deployment matches a view to stored states by its coverage
+(`definition_id` and selection). At execution time it checks their actual
+coverage, revisions and readiness. A compiled plan cannot establish future
+readiness. The deployment does not replace `NativeKllMerge`, choose another
+sketch, or maintain different windows: such changes require replanning.
+
+### Design decisions
+
+| Question | Decision | DataFusion, for comparison |
+| --- | --- | --- |
+| When is a provider resolved? | At `instantiate`, per run; `compile` sees only slots | `scan` is called while planning and returns an `ExecutionPlan` |
+| Is a materialized view bound through `TableProvider`? | Yes: one data interface | The materialized-views extension (`datafusion-contrib/datafusion-materialized-views`) makes a view a `TableProvider` that also implements `Materialized { query(), rewrite_readiness() }` |
+| How are table slots bound? | By `Source`, as a catalog: one provider per metric or table, however many `Scan`s read it | By table reference in the catalog |
+| How is time passed? | `time_range_ms`, a field of `ScanRequest`, because the evaluation time changes every run and every source has a time index | As an ordinary filter, with `now()` folded to a constant per query |
+| Projection? | Yes; a provider's schema contains the slot's columns | Yes |
+| Filter pushdown? | A hint only; the executor always re-filters | `supports_filters_pushdown` returns `Unsupported`, `Inexact` or `Exact`, and only `Exact` filters are not re-applied |
+| Limit, statistics, constraints, writes? | Not part of the interface | `limit`, `statistics()`, `constraints()`, `insert_into` |
+| Where does retention live? | On the materialized-view node of the exported DAG | — |
+
+Mapping the materialized-views extension's terms: its `query()` is the sub-DAG
+under the view's node, and `coverage.definition_id` identifies that sub-DAG.
+Its readiness is the summary store's status, which the deployment owns. Its
+`mv_dependencies` build graph is `MaterializedView.inputs`.
 
 ## 5. Responsibility Boundary
 
@@ -522,8 +624,8 @@ The complete example makes the ownership boundary explicit:
 | **Materialization** | Record pane/window/freshness/reuse requirements and each node's execution timing |
 | **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
 | **Physical DAG** | Define precompute and query DAGs with typed input/output boundaries |
-| **Deployment Plan Compiler** | Bind raw input and KLL state slots to concrete sources/materializations |
-| **Deployment Plan / DAG** | Specify maintenance schedules, stored-pane resolution and query execution |
+| **Deployment interface** | Bind the `latency` table slot to a time-series `TableProvider`, and the pane view slot to the summary store's `TableProvider` |
+| **Deployment** | Schedule pane refreshes, store and resolve panes, run queries |
 
 ```text
 Logical:
@@ -546,12 +648,13 @@ shared physical operator implementation library, `asap-executor`, and
 its DAG runtime. The merge executes once per run for both consumers. Execution
 does not introduce additional planning decisions.
 
-The physical layer does not own raw ingestion, pane construction or geometry,
-storage formats, or decoding persisted bytes into typed state. It compiles
-computation over typed input contracts: summary build, merge (for example KLL
-merge), sketch estimates and exact finalization. The deployment constructs panes,
-reads and decodes stored state, and binds the typed values to input slots.
-Compiled physical plans are Planner outputs and keep their own serialized form.
+The physical layer does not own raw ingestion, storage formats, or decoding
+persisted bytes into typed state. It compiles computation over input slots:
+windows, summary build, merge (for example KLL merge), sketch estimates and
+exact finalization. The deployment schedules each pane's refresh, stores and
+reads stored state, and binds raw data and views to slots through
+`TableProvider`. The plan file is the only persisted handoff; a compiled
+physical DAG is derived from it by the executor and is not persisted.
 
 Each maintained pane contributes its input samples once. A replacement snapshot
 replaces that pane's state; query merging must not count both the old and new
