@@ -57,6 +57,15 @@ pub(in crate::memo) fn add_rollup_candidates(
             {
                 continue;
             }
+            let state_rollup = OperatorNode::reachable(&rule.rollup).iter().any(|node| {
+                matches!(
+                    node.asap(),
+                    Some(ASAPOp::SummaryMerge {
+                        group_by: Some(_),
+                        ..
+                    })
+                )
+            });
             let is_sketch = matches!(
                 rule.finer.asap(),
                 Some(ASAPOp::SummaryAgg {
@@ -82,7 +91,7 @@ pub(in crate::memo) fn add_rollup_candidates(
             let inputs = combined_inputs(coarse, fine);
             let coarse_node = restore_inputs(coarse_node, memo, &inputs);
             let fine_node = restore_inputs(fine_node, memo, &inputs);
-            if is_sketch {
+            if is_sketch || state_rollup {
                 // Concrete resized states become ordinary state groups after all
                 // producer-level configurations have been expanded.
                 added += usize::from(append_reader(
